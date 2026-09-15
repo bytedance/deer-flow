@@ -17,6 +17,49 @@ export const enUS: Translations = {
     localName: "English",
   },
 
+  capabilities: {
+    integrationSkills: "From plugins",
+    sharedSkills: "Shared skills",
+    title: "Capability Center",
+    description: "Add tools and skills that help DeerFlow work your way.",
+    plugins: "Plugins",
+    skills: "Skills",
+    searchPlugins: "Search plugins by name or purpose",
+    searchSkills: "Search skills by name or purpose",
+    allPlugins: "All plugins",
+    installed: "Installed",
+    enabled: "Enabled",
+    disabled: "Disabled",
+    configure: "Configure",
+    details: "View details",
+    addPlugin: "Add MCP plugin",
+    builtin: "Built-in",
+    community: "Community",
+    custom: "My skills",
+    allSkills: "All skills",
+    availablePlugins: "Available plugins",
+    availableSkills: "Available skills",
+    pluginHint:
+      "Connect your everyday apps so your agent can access information and get work done.",
+    skillHint:
+      "Turn useful methods into skills, ready to use in any conversation.",
+    noResults: "No matches found",
+    larkName: "Lark / Feishu",
+    larkDescription:
+      "Work with documents, messages, calendars, and multidimensional tables in your conversations.",
+    larkTag: "Collaboration",
+    connect: "Connect",
+    notInstalled: "Not installed",
+    mcpDescription: "Let your agent use the tools provided by this plugin.",
+    mcpLabel: "MCP plugin",
+    pluginSettings: "Plugin settings",
+    communityTitle: "Bring a skill from the community",
+    communityDescription:
+      "Import a .skill file to manage and use it under My skills.",
+    skillEnabled: "Enable skill",
+    manage: "Manage",
+  },
+
   // Common
   common: {
     home: "Home",
@@ -965,11 +1008,8 @@ export const enUS: Translations = {
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
-      integrations: "Integrations",
       memory: "Memory",
-      tools: "Tools",
       subagents: "Subagents",
-      skills: "Skills",
       notification: "Notification",
       about: "About",
     },
@@ -1066,8 +1106,6 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     tools: {
-      title: "Tools",
-      description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
       addServer: "Add server",
@@ -1425,9 +1463,6 @@ export const enUS: Translations = {
       exportLimit: "The package exceeds an export limit.",
       exportNotFound:
         "This custom skill no longer exists. Refresh the skill list.",
-      title: "Agent Skills",
-      description:
-        "Manage the configuration and enabled status of the agent skills.",
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:

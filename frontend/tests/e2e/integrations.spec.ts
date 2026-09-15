@@ -36,14 +36,14 @@ function configuredLarkStatus() {
 }
 
 test.describe("Integrations settings", () => {
-  test("opens integrations settings from a query-string deep link", async ({
+  test("opens the Lark plugin from a capability deep link", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
 
-    await page.goto("/workspace/chats/new?settings=integrations");
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
 
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
   });
@@ -109,8 +109,8 @@ test.describe("Integrations settings", () => {
       },
     );
 
-    await page.goto("/workspace/chats/new?settings=integrations");
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     const popupPromise = page.waitForEvent("popup");
     await dialog.getByRole("button", { name: "Connect Lark" }).click();
     const popup = await popupPromise;
@@ -141,23 +141,27 @@ test.describe("Integrations settings", () => {
     await expect(page.getByText("Copied to clipboard")).toBeVisible();
   });
 
-  test("keeps a single settings dialog across deep link and nav menu openings", async ({
+  test("closes the plugin dialog before opening general settings", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
 
     // Deep link opens the shared dialog on Integrations.
-    await page.goto("/workspace/chats/new?settings=integrations");
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
-    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(1);
+    await expect(
+      page.getByRole("dialog", { name: "Plugin settings" }),
+    ).toHaveCount(1);
 
     // Close the modal before using the sidebar. While the modal is open, the
     // background is intentionally inert and Playwright should not be able to
     // click sidebar controls there.
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
+    await expect(
+      page.getByRole("dialog", { name: "Plugin settings" }),
+    ).toHaveCount(0);
 
     // Opening again from the nav menu must still use the same shared host, not
     // mount a second SettingsDialog instance.
@@ -165,11 +169,15 @@ test.describe("Integrations settings", () => {
     await sidebar.getByRole("button", { name: /Settings and more/ }).click();
     await page.getByRole("menuitem", { name: "Settings" }).click();
 
-    // Exactly one Settings dialog is mounted/visible at any time.
-    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(1);
+    await expect(
+      page.getByRole("dialog", { name: "Settings", exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole("dialog", { name: "Plugin settings", exact: true }),
+    ).toHaveCount(0);
   });
 
-  test("can install the Lark integration skill pack from settings", async ({
+  test("can install the Lark integration skill pack from the capability center", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
@@ -224,15 +232,9 @@ test.describe("Integrations settings", () => {
       });
     });
 
-    await page.goto("/workspace/chats/new");
-
-    const sidebar = page.locator("[data-sidebar='sidebar']");
-    await sidebar.getByRole("button", { name: /Settings and more/ }).click();
-    await page.getByRole("menuitem", { name: "Settings" }).click();
-
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     await expect(dialog).toBeVisible();
-    await dialog.getByRole("button", { name: "Integrations" }).click();
 
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
     await expect(
@@ -361,9 +363,9 @@ test.describe("Integrations settings", () => {
       });
     });
 
-    await page.goto("/workspace/chats/new?settings=integrations");
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
 
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
 
@@ -426,8 +428,8 @@ test.describe("Integrations settings", () => {
       await route.fallback();
     });
 
-    await page.goto("/workspace/chats/new?settings=integrations");
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
+    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
     await dialog.getByRole("button", { name: "Calendar" }).click();
     await dialog
       .getByLabel("Exact OAuth scope")
