@@ -10,6 +10,10 @@ from pydantic_core import PydanticCustomError
 from deerflow.runtime.stream_modes import RunStreamMode, UnsupportedStreamModeError, normalize_stream_modes
 from deerflow.utils.thread_id import validate_thread_id
 
+# Upper bound on explicit conversation references per run; ``/api/features``
+# reports it so a UI can cap its selection to the same number.
+MAX_CONVERSATION_REFERENCES = 3
+
 
 class RunCreateRequest(BaseModel):
     """Validated run request used by both HTTP and internal launch paths."""
@@ -23,7 +27,9 @@ class RunCreateRequest(BaseModel):
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
     context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
     conversation_references: list[Annotated[str, Field(strict=True, min_length=1, max_length=2048)]] = Field(
-        default_factory=list, max_length=3, description="Explicit thread IDs or same-origin chat URLs readable only during this run (opt-in read_conversation tool)"
+        default_factory=list,
+        max_length=MAX_CONVERSATION_REFERENCES,
+        description="Explicit thread IDs or same-origin chat URLs readable only during this run (opt-in read_conversation tool); SDK clients may send the same list as context.conversation_references",
     )
     webhook: None = Field(default=None, description="Compatibility placeholder; completion callbacks are not supported")
     checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
@@ -39,6 +45,32 @@ class RunCreateRequest(BaseModel):
     after_seconds: None = Field(default=None, description="Compatibility placeholder; delayed execution is not supported")
     if_not_exists: Literal["create"] = Field(default="create", description="Compatibility default; missing threads are created")
     feedback_keys: None = Field(default=None, description="Compatibility placeholder; feedback key collection is not supported")
+
+    @model_validator(mode="before")
+    @classmethod
+    def lift_context_conversation_references(cls, data: Any) -> Any:
+        """Accept ``context.conversation_references`` as the same explicit grant.
+
+        LangGraph SDK clients build a fixed run body and drop unknown top-level
+        fields, so the web UI can only reach ``conversation_references`` through
+        ``context``. The key is moved to the top level before field validation,
+        so it keeps the same bounds and error locations, and it is removed from
+        ``context`` so run-context merging never sees it. Sending both is an
+        error rather than a silent merge.
+        """
+        if not isinstance(data, dict):
+            return data
+        context = data.get("context")
+        if not isinstance(context, dict) or "conversation_references" not in context:
+            return data
+        references = context["conversation_references"]
+        lifted = {**data, "context": {key: value for key, value in context.items() if key != "conversation_references"}}
+        if references is None:
+            return lifted
+        if data.get("conversation_references"):
+            raise PydanticCustomError("conversation_references_conflict", "Pass conversation_references at the top level or in context, not both")
+        lifted["conversation_references"] = references
+        return lifted
 
     @model_validator(mode="after")
     def validate_configurable_thread_id(self) -> RunCreateRequest:

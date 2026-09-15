@@ -114,6 +114,15 @@ def _fit_text(item: dict, room: int) -> str:
     return text[:low]
 
 
+def conversation_references_enabled(app_config: AppConfig) -> bool:
+    """Whether runs may carry references: the opt-in tool is in the configured tool list.
+
+    Shared by run admission and ``/api/features`` so the UI gate and the
+    server check cannot drift.
+    """
+    return any(getattr(tool, "use", None) == CONVERSATION_TOOL_USE for tool in app_config.tools)
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -143,7 +152,7 @@ def prepare_conversation_reader(
     """
     if not references:
         return None
-    if not any(tool.use == CONVERSATION_TOOL_USE for tool in app_config.tools):
+    if not conversation_references_enabled(app_config):
         raise HTTPException(status_code=400, detail="read_conversation is not enabled")
     auth = getattr(request.state, "auth", None)
     if auth is None or not auth.is_authenticated or not auth.has_permission("runs", "read") or not user_id:
