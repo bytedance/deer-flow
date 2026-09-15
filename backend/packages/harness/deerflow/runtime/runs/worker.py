@@ -79,6 +79,7 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -166,16 +167,6 @@ def _schedule_terminal_cycle_collection() -> None:
     # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
     # short-lived embedded-client event loop alive.
     loop.call_later(delay, _start_collection, context=Context())
-
-
-async def _close_agent_stream(stream: Any) -> None:
-    """Close a LangGraph stream deterministically after completion or early exit."""
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
 
 
 def _remove_callback(config: dict[str, Any], handler: Any) -> None:
@@ -1258,7 +1249,7 @@ async def run_agent(
                         finally:
                             close_error = sys.exception()
                             try:
-                                await _close_agent_stream(stream)
+                                await close_agent_stream(stream)
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1307,7 +1298,7 @@ async def run_agent(
                     finally:
                         close_error = sys.exception()
                         try:
-                            await _close_agent_stream(stream)
+                            await close_agent_stream(stream)
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
