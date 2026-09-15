@@ -1,5 +1,3 @@
-import { defaultFilter } from "cmdk";
-
 import { type Model } from "./types";
 
 const FAVORITES_KEY_PREFIX = "deerflow.model-favorites.v1:";
@@ -10,7 +8,6 @@ interface FavoriteNamesPayload {
 }
 
 export interface ModelChoiceProjection {
-  matches: readonly Model[];
   favorites: readonly Model[];
   others: readonly Model[];
 }
@@ -78,20 +75,11 @@ export function updateFavoriteNames(
 export function projectModelChoices(
   models: readonly Model[],
   favoriteNames: readonly string[],
-  query: string,
 ): ModelChoiceProjection {
-  const matches = query
-    ? models.filter(
-        (model) =>
-          defaultFilter(model.name, query, [model.display_name, model.model]) >
-          0,
-      )
-    : [...models];
   const favoriteNameSet = new Set(favoriteNames);
 
   return {
-    matches,
-    favorites: matches.filter((model) => favoriteNameSet.has(model.name)),
-    others: matches.filter((model) => !favoriteNameSet.has(model.name)),
+    favorites: models.filter((model) => favoriteNameSet.has(model.name)),
+    others: models.filter((model) => !favoriteNameSet.has(model.name)),
   };
 }

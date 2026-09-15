@@ -123,19 +123,13 @@ describe("updating favorite model names", () => {
 
 describe("projecting model choices", () => {
   test("keeps API order for empty, partial, and complete favorite sets", () => {
-    expect(projectModelChoices(models, [], "")).toEqual({
-      matches: models,
+    expect(projectModelChoices(models, [])).toEqual({
       favorites: [],
       others: models,
     });
     expect(
-      projectModelChoices(
-        models,
-        ["anthropic/claude-sonnet", "openai/gpt-5"],
-        "",
-      ),
+      projectModelChoices(models, ["anthropic/claude-sonnet", "openai/gpt-5"]),
     ).toEqual({
-      matches: models,
       favorites: [models[0], models[2]],
       others: [models[1]],
     });
@@ -143,62 +137,30 @@ describe("projecting model choices", () => {
       projectModelChoices(
         models,
         models.map((model) => model.name),
-        "",
       ),
     ).toEqual({
-      matches: models,
       favorites: models,
       others: [],
     });
   });
 
-  test("matches name, display name, and model without score reordering", () => {
-    expect(projectModelChoices(models, [], "openai").matches).toEqual([
-      models[0],
-    ]);
-    expect(projectModelChoices(models, [], "sonnet").matches).toEqual([
-      models[2],
-    ]);
-    expect(projectModelChoices(models, [], "2025-08").matches).toEqual([
-      models[0],
-    ]);
-
-    const closeMatches: Model[] = [
-      {
-        id: "first",
-        name: "provider/alpha-gpt",
-        model: "alpha-gpt",
-        display_name: "Alpha GPT",
-      },
-      {
-        id: "second",
-        name: "provider/gpt",
-        model: "gpt",
-        display_name: "GPT",
-      },
-    ];
-    expect(projectModelChoices(closeMatches, [], "gpt").matches).toEqual(
-      closeMatches,
-    );
-  });
-
   test("uses model name rather than a shared display name as favorite identity", () => {
-    const result = projectModelChoices(models, ["azure/gpt-5"], "GPT 5");
+    const result = projectModelChoices(models, ["azure/gpt-5"]);
 
     expect(result.favorites).toEqual([models[1]]);
-    expect(result.others).toEqual([models[0]]);
+    expect(result.others).toEqual([models[0], models[2]]);
   });
 
-  test("shows only matching visible models without modifying any input", () => {
+  test("restores temporarily unavailable favorites without modifying inputs", () => {
     const modelSnapshot = structuredClone(models);
     const favoriteNames = ["missing/model", "anthropic/claude-sonnet"];
     const favoriteSnapshot = [...favoriteNames];
 
-    const hidden = projectModelChoices(models.slice(0, 2), favoriteNames, "");
-    const visibleAgain = projectModelChoices(models, favoriteNames, "");
+    const hidden = projectModelChoices(models.slice(0, 2), favoriteNames);
+    const visibleAgain = projectModelChoices(models, favoriteNames);
 
     expect(hidden.favorites).toEqual([]);
-    expect(hidden.matches).toEqual(models.slice(0, 2));
+    expect(hidden.others).toEqual(models.slice(0, 2));
     expect(visibleAgain.favorites).toEqual([models[2]]);
     expect(models).toEqual(modelSnapshot);
     expect(favoriteNames).toEqual(favoriteSnapshot);
@@ -209,7 +171,7 @@ describe("projecting model choices", () => {
     const readonlyFavorites = ["azure/gpt-5"] as const;
 
     expect(
-      projectModelChoices(readonlyModels, readonlyFavorites, "").favorites,
+      projectModelChoices(readonlyModels, readonlyFavorites).favorites,
     ).toEqual([models[1]]);
   });
 });

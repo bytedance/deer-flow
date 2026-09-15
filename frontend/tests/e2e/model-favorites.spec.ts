@@ -195,7 +195,16 @@ test("favorites a model without selecting it and persists the choice after refre
   await page.reload();
   await expect(sharedTrigger).toBeVisible();
   await sharedTrigger.click();
-  await expect(modelButton(page, "beta-api")).toBeVisible();
+  await expect(favoriteButton(page, "beta-api")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    favoriteGroup(page).getByRole("button", {
+      name: "Shared (beta-api)",
+      exact: true,
+    }),
+  ).toBeVisible();
 });
 
 test("synchronizes favorite additions and removals across real tabs", async ({
@@ -327,5 +336,14 @@ test("restores a temporarily unavailable favorite and keeps the narrow picker us
   modelAPI.setModels(MODELS);
   await page.reload();
   await openMainModelPicker(page);
-  await expect(modelButton(page, "very-long-model-name")).toBeVisible();
+  await expect(favoriteButton(page, "very-long-model-name")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    favoriteGroup(page).getByRole("button", {
+      name: `${MODELS[3]!.display_name} (very-long-model-name)`,
+      exact: true,
+    }),
+  ).toBeVisible();
 });

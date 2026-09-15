@@ -36,7 +36,7 @@ type FocusedControl = {
   kind: "model" | "favorite";
 };
 
-function orderedMatches(projection: ModelChoiceProjection): readonly Model[] {
+function orderedModels(projection: ModelChoiceProjection): readonly Model[] {
   return [...projection.favorites, ...projection.others];
 }
 
@@ -67,10 +67,10 @@ export function ModelPickerContent({
   const wasOpenRef = useRef(false);
 
   const projection = useMemo(
-    () => projectModelChoices(models, favorites.names, ""),
+    () => projectModelChoices(models, favorites.names),
     [favorites.names, models],
   );
-  const visibleModels = useMemo(() => orderedMatches(projection), [projection]);
+  const visibleModels = useMemo(() => orderedModels(projection), [projection]);
 
   const focusInitialModel = useCallback(() => {
     const preferredModel =
