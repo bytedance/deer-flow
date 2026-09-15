@@ -196,6 +196,16 @@ class DiscordChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
 
+        # Best-effort durability: flush in-memory thread mappings so the most
+        # recent channel->thread mapping survives a hard shutdown (process
+        # killed between a thread creation and its background persistence
+        # write). The create path already persists off the event loop after
+        # each new thread, so this is a safety net, not the primary write path.
+        try:
+            await asyncio.to_thread(self._persist_thread_mappings)
+        except Exception:
+            logger.warning("[Discord] failed to flush thread mappings during shutdown")
+
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()
         if discord_loop is None or discord_loop is current_loop:
