@@ -28,7 +28,7 @@ class RequestAdmission(BaseRateLimiter):
         self._lock = threading.Lock()
         self._waiters: deque[object] = deque()
 
-    def _try(self, ticket: object | None) -> bool:
+    def _try(self, ticket: object) -> bool:
         with self._lock:
             now = monotonic()
             if self._waiters and self._waiters[0] is not ticket:
@@ -40,7 +40,6 @@ class RequestAdmission(BaseRateLimiter):
 
     def _try_or_enqueue(self, *, blocking: bool) -> tuple[bool, object | None]:
         """Atomically admit immediately or join the FIFO before newcomers can pass."""
-        ticket = object()
         with self._lock:
             now = monotonic()
             if not self._waiters and now >= self._next:
@@ -50,6 +49,7 @@ class RequestAdmission(BaseRateLimiter):
                 return False, None
             if len(self._waiters) >= self.config.max_queue_size:
                 raise AdmissionError("LLM admission queue is full; reduce workload or increase queue capacity.")
+            ticket = object()
             self._waiters.append(ticket)
             return False, ticket
 
