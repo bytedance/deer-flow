@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+import deerflow.community.browser_automation.session as session_module
 from deerflow.community.browser_automation.session import BrowserSession, BrowserSessionManager
 
 
@@ -36,6 +37,16 @@ class _ControllablePrivateLoop:
         return cleanup_future
 
 
+class _FailingPrivateLoop(_ControllablePrivateLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self.submitted_coro: Any | None = None
+
+    def submit(self, coro: Any) -> Future[None]:
+        self.submitted_coro = coro
+        raise RuntimeError("private loop closed")
+
+
 def _session(loop: _ControllablePrivateLoop) -> BrowserSession:
     return BrowserSession(
         cast(Any, loop),
@@ -63,6 +74,17 @@ async def test_browser_close_caller_cancellation_does_not_cancel_private_cleanup
 
     loop.cleanup_futures[0].set_result(None)
     await asyncio.sleep(0)
+
+
+def test_submit_close_closes_coroutine_when_submission_fails() -> None:
+    loop = _FailingPrivateLoop()
+    session = _session(loop)
+
+    with pytest.raises(RuntimeError, match="private loop closed"):
+        session._submit_close()
+
+    assert loop.submitted_coro is not None
+    assert loop.submitted_coro.cr_frame is None
 
 
 @pytest.mark.asyncio
@@ -109,3 +131,62 @@ async def test_manager_close_all_submits_every_cleanup_before_cancellable_wait()
     for future in loop.cleanup_futures:
         future.set_result(None)
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_manager_close_all_continues_after_sync_submission_failure() -> None:
+    failing_loop = _FailingPrivateLoop()
+    healthy_loop = _ControllablePrivateLoop()
+    manager = BrowserSessionManager()
+    manager._sessions.update({"broken": _session(failing_loop), "healthy": _session(healthy_loop)})
+    manager._last_used.update({"broken": 0.0, "healthy": 0.0})
+
+    close_task = asyncio.create_task(manager.close_all_sessions())
+    await asyncio.sleep(0)
+
+    assert manager._sessions == {}
+    assert len(healthy_loop.cleanup_futures) == 1
+    assert failing_loop.submitted_coro is not None
+    assert failing_loop.submitted_coro.cr_frame is None
+
+    healthy_loop.cleanup_futures[0].set_result(None)
+    assert await close_task == 2
+
+
+@pytest.mark.asyncio
+async def test_manager_close_all_consumes_group_failure_after_caller_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _ControllablePrivateLoop()
+    manager = BrowserSessionManager()
+    manager._sessions["thread-a"] = _session(loop)
+    manager._last_used["thread-a"] = 0.0
+
+    original_gather = asyncio.gather
+    original_consume = session_module._consume_future_exception
+    group_future: asyncio.Future[Any] | None = None
+    consumed: list[asyncio.Future[Any]] = []
+
+    def tracking_gather(*aws: Any, **kwargs: Any) -> asyncio.Future[Any]:
+        nonlocal group_future
+        group_future = cast(asyncio.Future[Any], original_gather(*aws, **kwargs))
+        return group_future
+
+    def recording_consume(future: asyncio.Future[Any]) -> None:
+        consumed.append(future)
+        original_consume(future)
+
+    monkeypatch.setattr(asyncio, "gather", tracking_gather)
+    monkeypatch.setattr(session_module, "_consume_future_exception", recording_consume)
+
+    close_task = asyncio.create_task(manager.close_all_sessions())
+    await asyncio.sleep(0)
+    assert group_future is not None
+
+    close_task.cancel("shutdown interrupted")
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    loop.cleanup_futures[0].set_exception(RuntimeError("teardown failed"))
+    await asyncio.sleep(0)
+
+    assert group_future.done()
+    assert group_future in consumed
