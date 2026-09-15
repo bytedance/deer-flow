@@ -1624,17 +1624,38 @@ class E2BSandboxProvider(SandboxProvider):
                 if time.monotonic() >= deadline:
                     stats.budget_exhausted = True
                     break
-                # If this sandbox is already tracked locally (active or warm pool),
-                # skip the reconnect/probe. The probe runs a `true` command which
-                # resets e2b's idle timeout and keeps warm-pool sandboxes alive
-                # forever; we want them to expire naturally after idle_timeout.
+                # For warm-pool sandboxes: skip the probe while they are still
+                # within idle_timeout (a command probe would reset e2b's idle
+                # timer and keep them alive forever). After idle_timeout has
+                # elapsed, we *must* probe — the VM may have been reaped by e2b
+                # and we need to detect that to free the capacity slot.
                 with self._lock:
-                    already_owned = sandbox_id in self._warm_pool
-                if already_owned:
-                    # Still count it as "live" so duplicate-killing logic works,
-                    # but pass None for client since we don't need to reconnect.
-                    # Duplicates after the first will still be killed normally.
-                    live.append((sandbox_id, metadata, None))  # type: ignore[arg-type]
+                    warm_entry = self._warm_pool.get(sandbox_id)
+                if warm_entry is not None:
+                    _seed, parked_at = warm_entry
+                    idle_timeout = float(self._config["idle_timeout"])
+                    age = time.time() - parked_at
+                    if age < idle_timeout:
+                        # Still within idle window; don't probe (any command
+                        # would reset e2b's idle timer and keep the sandbox
+                        # alive forever). Count it as live so duplicate
+                        # cleanup still runs.
+                        live.append((sandbox_id, metadata, None))  # type: ignore[arg-type]
+                        continue
+                    # Past idle_timeout — this sandbox should have expired.
+                    # Do NOT reconnect/probe: connecting and running `true`
+                    # would itself reset the idle timer, creating an infinite
+                    # loop where we "probe" at expiry, the probe keeps the
+                    # sandbox alive, we refresh parked_at, and the VM never
+                    # dies. Instead, treat it as a stale orphan: kill it
+                    # directly after the orphan grace period and free the slot.
+                    stale_entries.append(
+                        (
+                            sandbox_id,
+                            metadata,
+                            float(self._config["reconciliation_grace_seconds"]),
+                        )
+                    )
                     continue
                 try:
                     client = self._reconnect_live_client(self._get_sandbox_cls(), sandbox_id)
@@ -2614,7 +2635,11 @@ class E2BSandboxProvider(SandboxProvider):
         """Evict the oldest warm entry, holding a transitioning slot.
 
         The warm entry is popped and a transitioning slot is taken.  The slot
-        stays occupied until the control plane confirms the VM is gone.
+        stays occupied until the control plane confirms the VM is gone, which
+        prevents concurrent acquirers from over-committing capacity during the
+        kill window. Every exit path (success, already-gone, connect error,
+        kill error, peer-owned) MUST release the transitioning slot via
+        ``_end_transition_locked()`` or it will leak forever.
         """
         with self._lock:
             retryable = self._eviction_tombstones - self._evictions_in_progress
@@ -2651,6 +2676,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+                    self._end_transition_locked()
             self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
@@ -2674,6 +2700,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+                    self._end_transition_locked()
             self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
