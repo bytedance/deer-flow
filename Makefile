@@ -94,6 +94,8 @@ check-agent-guidance:
 install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync --locked
+	@echo "Installing Readability.js dependencies (needs npm; web fetch falls back to pure-Python without them)..."
+	@cd backend && uv run python scripts/setup_readability_js.py || echo "warning: Readability.js dependencies not installed; web fetch falls back to pure-Python extraction (run backend/scripts/setup_readability_js.py; needs npm)" >&2
 	@echo "Installing frontend dependencies..."
 	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."

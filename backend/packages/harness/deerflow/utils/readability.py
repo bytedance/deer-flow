@@ -1,10 +1,14 @@
 import logging
 import re
+import shutil
 import subprocess
+import threading
 from html import escape, unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urljoin, urlparse, uses_relative
 
+import readabilipy
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
@@ -149,12 +153,91 @@ class _DestinationRewriter(HTMLParser):
         return "".join(parts)
 
 
+_READABILITY_JS_DIR = Path(readabilipy.__file__).resolve().parent / "javascript"
+_readability_js_state: bool | None = None  # None = not verified yet
+_readability_js_bootstrap_lock = threading.Lock()
+
+
+def _readability_js_packages_present() -> bool:
+    """True when node_modules holds the packages ExtractArticle.js imports.
+
+    readabilipy's own gate is bare ``node_modules`` existence, but an npm run
+    killed mid-install can leave a partial tree behind; requiring its two
+    runtime dependencies keeps a partial install from being trusted.
+    """
+    node_modules = _READABILITY_JS_DIR / "node_modules"
+    return (node_modules / "jsdom").is_dir() and (node_modules / "@mozilla" / "readability").is_dir()
+
+
+def _node_dependencies_loadable() -> bool:
+    """Node can require the packages ExtractArticle.js imports.
+
+    npm creates package directories before extracting their contents, so
+    directory presence alone cannot distinguish a complete install from one
+    interrupted mid-extraction; loading them is the real test.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [node, "-e", "require('jsdom'); require('@mozilla/readability');"],
+            cwd=_READABILITY_JS_DIR,
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+def _readability_js_ready() -> bool:
+    """Report whether readabilipy's Readability.js dependencies are usable.
+
+    readabilipy probes npm with a bare ``npm`` name, which Windows
+    CreateProcess never resolves to ``npm.cmd``, and its wheel ships only
+    ``package.json`` with open-ended ranges — so without a setup step every
+    Windows host silently degrades to pure-Python extraction (link hrefs
+    dropped from fetched pages).
+
+    This probe deliberately checks only readiness: packages present and
+    loadable by Node. Installing them happens in the explicit
+    ``scripts/setup_readability_js.py`` step (wired into ``make install``
+    in ``backend/Makefile``) with a reviewed lockfile and
+    ``--ignore-scripts`` — an ordinary web fetch must never run npm against
+    unpinned ranges with lifecycle scripts under Gateway privileges.
+
+    The outcome is cached for the process lifetime, and the verification
+    lock is never waited on: while another caller verifies, late callers
+    degrade for that call instead of parking a shared-executor worker.
+    """
+    global _readability_js_state
+    if _readability_js_state is not None:
+        return _readability_js_state
+    if not _readability_js_bootstrap_lock.acquire(blocking=False):
+        # A verification is already in flight; degrade this call instead of
+        # parking the worker thread behind it.
+        return False
+    try:
+        if _readability_js_state is not None:
+            return _readability_js_state
+        if _readability_js_packages_present() and _node_dependencies_loadable():
+            _readability_js_state = True
+        else:
+            _readability_js_state = False
+            logger.warning("Readability.js dependencies are not installed; web fetch uses pure-Python extraction. Run scripts/setup_readability_js.py to install them, then restart the Gateway.")
+        return _readability_js_state
+    finally:
+        _readability_js_bootstrap_lock.release()
+
+
 class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         if url:
             html = _resolve_html_urls(html, url)
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
+            article = simple_json_from_html_string(html, use_readability=_readability_js_ready())
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             stderr = getattr(exc, "stderr", None)
             if isinstance(stderr, bytes):
