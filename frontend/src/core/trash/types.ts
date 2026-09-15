@@ -27,7 +27,10 @@ export type RestoreDocumentResult = {
   document: ProjectDocument;
 };
 
-/** Result of ``POST /api/trash/purge`` (empty trash). */
+/**
+ * Result of ``POST /api/trash/purge`` (empty trash): how many trashed
+ * documents were permanently deleted.
+ */
 export type EmptyTrashResult = {
   purged: number;
 };

@@ -18,7 +18,7 @@ import pytest
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
 from deerflow.projects.documents import add_staged_document, converted_markdown_path, stage_document_bytes
-from deerflow.projects.trash import make_purge_file_remover, restore_document, run_trash_retention_sweep
+from deerflow.projects.trash import make_purge_file_remover, purge_all_trashed, restore_document, run_trash_retention_sweep
 from deerflow.utils.file_io import run_file_io as _real_run_file_io
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.allow_blocking_io]
@@ -79,6 +79,25 @@ async def test_purge_unlink_dispatches_off_the_loop(tmp_path, monkeypatch) -> No
         assert purged is True
         assert "_unlink_document_files" in calls
         assert not derived.exists()
+    finally:
+        await close_engine()
+
+
+async def test_empty_trash_unlink_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
+    """Empty trash (``purge_all_trashed``) removes every row's files through the
+    same offload as the single purge — one dispatch per trashed row."""
+    calls = _spy_offload(monkeypatch)
+    env = await _make_env(tmp_path, monkeypatch)
+    try:
+        rows = [await _add(env, name=f"{name}.txt", data=name.encode()) for name in ("one", "two")]
+        for row in rows:
+            assert await env.docs.trash(row["id"], user_id=_USER) is True
+        calls.clear()
+
+        purged = await purge_all_trashed(env.docs, env.paths, user_id=_USER)
+
+        assert purged == len(rows)
+        assert calls.count("_unlink_document_files") == len(rows)
     finally:
         await close_engine()
 

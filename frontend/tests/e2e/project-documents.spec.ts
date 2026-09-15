@@ -100,6 +100,45 @@ test("project document lifecycle: upload → shelf → attach → trash → rest
   await expect(page.getByText("Trash is empty.")).toBeVisible();
 });
 
+test("Empty trash permanently deletes every freshly trashed row", async ({
+  page,
+}) => {
+  const trashedAt = new Date(Date.now() - 60_000).toISOString();
+  mockLangGraphAPI(page, {
+    ...seedProject(),
+    trashDocuments: ["one.txt", "two.txt"].map((name, index) => ({
+      id: `trash-${index}`,
+      project_id: PROJECT_ID,
+      name,
+      size_bytes: 32,
+      // Trashed a minute ago: far inside the 30-day retention window, so the
+      // action cannot lean on the retention sweep to delete them.
+      trashed_at: trashedAt,
+      trash_origin: { project_id: PROJECT_ID, project_name: "Alpha" },
+    })),
+  });
+
+  await page.goto("/workspace/trash", { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("one.txt", { exact: true })).toBeVisible();
+  await expect(page.getByText("two.txt", { exact: true })).toBeVisible();
+
+  await page.getByTestId("trash-empty-button").click();
+  await expect(
+    page.getByText(
+      "2 documents will be permanently deleted. This cannot be undone.",
+    ),
+  ).toBeVisible();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Empty trash", exact: true })
+    .click();
+
+  // The confirmation promised both rows; both are gone.
+  await expect(page.getByText("Trash is empty.")).toBeVisible();
+  await expect(page.getByText("one.txt", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("two.txt", { exact: true })).toHaveCount(0);
+});
+
 test("the shelf paginates past the first page and the trash confirmation names the configured retention", async ({
   page,
 }) => {

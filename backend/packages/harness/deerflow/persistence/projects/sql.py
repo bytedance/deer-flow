@@ -535,6 +535,21 @@ class ProjectDocumentRepository:
         async with self._sf() as session:
             return int((await session.execute(stmt)).scalar_one())
 
+    async def list_all_trashed(self, *, user_id: str | None | _AutoSentinel = AUTO) -> list[dict]:
+        """Every trashed row of the caller, oldest first — the Empty-trash pool (§8.3).
+
+        Empty trash removes exactly what the user confirmed, so it selects on
+        trashed state alone; ``purge_candidates`` stays the only age-gated
+        selection (the retention sweep's).
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.list_all_trashed")
+        stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.trashed_at.is_not(None)).order_by(ProjectDocumentRow.trashed_at.asc(), ProjectDocumentRow.id.asc())
+        if resolved_user_id is not None:
+            stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
     async def list_all_for_sweep(self, *, user_id: str | None | _AutoSentinel = AUTO) -> list[dict]:
         """Every row — active and trashed — for retention-sweep reconciliation.
 

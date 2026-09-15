@@ -2,10 +2,11 @@
 
 Routes under ``/api/trash``: list trashed documents (lazily triggering the
 retention sweep first, §8.3), restore one into an active project, purge one
-permanently, and purge every retention-eligible row. Fail closed everywhere:
-a missing or foreign document/project is a 404 (never a 403 that leaks
-existence), restoring into an archived or foreign target is the same 404
-(§8.4), and a memory-backend deployment answers 503 ``"Projects"`` through
+permanently, and empty the trash (purge every trashed row of the caller,
+regardless of age — retention expiry is the sweep's job alone). Fail closed
+everywhere: a missing or foreign document/project is a 404 (never a 403 that
+leaks existence), restoring into an archived or foreign target is the same
+404 (§8.4), and a memory-backend deployment answers 503 ``"Projects"`` through
 the shared ``_require`` accessor convention (§11). Purge carries no
 confirmation parameter — the "this cannot be undone" step is a UI contract,
 not a server-enforced handshake (§11).
@@ -25,7 +26,7 @@ from app.gateway.deps import get_project_document_repo, get_project_repo
 from app.gateway.routers.project_documents import ProjectDocumentResponse, _to_response
 from deerflow.config.paths import get_paths
 from deerflow.config.projects_config import ProjectsConfig
-from deerflow.projects.trash import make_purge_file_remover, restore_document, run_trash_retention_sweep
+from deerflow.projects.trash import make_purge_file_remover, purge_all_trashed, restore_document, run_trash_retention_sweep
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,10 @@ router = APIRouter(prefix="/api/trash", tags=["trash"])
 # file of the caller (``list_all_for_sweep`` + a stat per row + a walk of
 # ``projects/**``), while the expiry purge is an indexed candidate scan. Since
 # reconciliation only bounds external interference and orphaned staging — both
-# already behind the 24-hour guard — the lazy triggers throttle it to one run
-# per user per interval. The retention guarantee is unaffected: expiry purging
-# still runs on every trigger, and the startup sweep reconciles unconditionally.
+# already behind the 24-hour guard — the lazy listing trigger throttles it to
+# one run per user per interval. The retention guarantee is unaffected: expiry
+# purging still runs on every trigger, and the startup sweep reconciles
+# unconditionally.
 _RECONCILIATION_MIN_INTERVAL_SECONDS = 900
 _LAST_RECONCILIATION: dict[str, float] = {}
 
@@ -223,20 +225,20 @@ async def purge_trash_document(document_id: str, request: Request) -> None:
 
 @router.post("/purge", response_model=PurgeResponse)
 @require_permission("projects", "delete")
-async def purge_expired_trash(request: Request) -> PurgeResponse:
-    """Purge every retention-eligible trashed row of the caller (§8.3).
+async def empty_trash(request: Request) -> PurgeResponse:
+    """Empty the trash: purge every trashed document of the caller (§8.3).
 
-    Runs the same guarded sweep the retention triggers use; only rows at or
-    past ``projects.trash_retention_days`` are eligible. Per-row failures are
-    logged and keep their rows trashed and retryable.
+    Age-independent by design — the confirmation covers the whole listing, so
+    the retention cutoff plays no part here; the retention sweep (the lazy one
+    on ``GET /api/trash/documents`` and the startup one) stays the only
+    age-gated purge. Removals go through the same guarded per-row transaction
+    as a single delete: bytes first, then the row. A filesystem failure other
+    than already-absent content answers 500 with a retryable message; that row
+    and every row not yet visited stay trashed.
     """
     repo = get_project_document_repo(request)
-    user_id = get_effective_user_id()
-    report = await run_trash_retention_sweep(
-        repo,
-        get_paths(),
-        retention_days=_projects_config().trash_retention_days,
-        user_id=user_id,
-        include_reconciliation=_reconciliation_due(user_id),
-    )
-    return PurgeResponse(purged=report.purged)
+    try:
+        purged = await purge_all_trashed(repo, get_paths(), user_id=get_effective_user_id())
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Purge failed during file cleanup; the remaining documents stay in trash and the purge can be retried") from exc
+    return PurgeResponse(purged=purged)

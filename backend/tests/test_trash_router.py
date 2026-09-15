@@ -419,21 +419,66 @@ class TestPurge:
         assert "retried" in response.json()["detail"].lower()
         assert client.get("/api/trash/documents").json()["total"] == 1
 
-    def test_empty_trash_purges_only_retention_eligible_rows(self, tmp_path):
-        """§6.5: POST /api/trash/purge reports how many retention-eligible
-        rows it purged; fresh trash is untouched."""
+    def test_empty_trash_purges_every_trashed_row_regardless_of_age(self, tmp_path):
+        """§8.3: Empty trash deletes everything its confirmation listed, so a
+        freshly trashed row is purged too — the retention cutoff never gates
+        this action (the sweep is the only age-gated purge)."""
         app = _build_app(tmp_path)
         client = TestClient(app)
         project = _create_project(client)
         fresh = _upload(client, project["id"], "fresh.txt", b"f")
         old = _upload(client, project["id"], "old.txt", b"o")
+        kept = _upload(client, project["id"], "kept.txt", b"k")
         _trash(client, project["id"], fresh["id"])
         _trash(client, project["id"], old["id"])
-
-        assert client.post("/api/trash/purge").json() == {"purged": 0}
-        assert client.get("/api/trash/documents").json()["total"] == 2
-
         _set_trashed_at(old["id"], datetime.now(UTC) - timedelta(days=31))
+        fresh_path = _original_path(app, _get_row(app, fresh["id"]))
+
+        assert client.post("/api/trash/purge").json() == {"purged": 2}
+
+        assert client.get("/api/trash/documents").json()["total"] == 0
+        assert _get_row(app, fresh["id"]) is None
+        assert _get_row(app, old["id"]) is None
+        assert not fresh_path.exists()
+        # Only the trash emptied: the shelf keeps its active row and bytes.
+        shelf = client.get(f"/api/projects/{project['id']}/documents").json()
+        assert [entry["id"] for entry in shelf["documents"]] == [kept["id"]]
+
+    def test_empty_trash_only_purges_the_callers_rows(self, tmp_path):
+        """§11: the empty is owner-scoped — a foreign user's trash survives it."""
+        app = _build_app(tmp_path)
+        client = TestClient(app)
+        mine = _create_project(client)
+        theirs = client.post("/api/projects", json={"name": "Theirs"}, headers=_as_user("user-b")).json()
+        mine_doc = _upload(client, mine["id"], "mine.txt", b"m")
+        their_doc = _upload(client, theirs["id"], "theirs.txt", b"t", headers=_as_user("user-b"))
+        _trash(client, mine["id"], mine_doc["id"])
+        _trash(client, theirs["id"], their_doc["id"], headers=_as_user("user-b"))
+
         assert client.post("/api/trash/purge").json() == {"purged": 1}
-        remaining = client.get("/api/trash/documents").json()
-        assert [entry["id"] for entry in remaining["documents"]] == [fresh["id"]]
+
+        assert _get_row(app, mine_doc["id"]) is None
+        assert _get_row(app, their_doc["id"], user_id="user-b") is not None
+
+    def test_empty_trash_file_failure_is_500_and_keeps_the_row(self, tmp_path, monkeypatch):
+        """§11: a non-FileNotFoundError unlink failure rolls that row back and
+        answers 500 with a retryable message instead of reporting success."""
+        app = _build_app(tmp_path)
+        client = TestClient(app)
+        project = _create_project(client)
+        doc = _upload(client, project["id"], "a.txt", b"hello")
+        _trash(client, project["id"], doc["id"])
+
+        real_unlink = Path.unlink
+
+        def flaky_unlink(self: Path, *args, **kwargs):
+            if self.name == "a.txt":
+                raise OSError("disk full")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", flaky_unlink)
+        response = client.post("/api/trash/purge")
+
+        assert response.status_code == 500
+        assert "retried" in response.json()["detail"].lower()
+        assert client.get("/api/trash/documents").json()["total"] == 1

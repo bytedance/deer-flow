@@ -1152,13 +1152,13 @@ POST /api/trash/documents/{document_id}/purge
 
 **Response:** `204`. Permanently unlinks the original and `derived/converted.md`, then deletes the row, in one row-locked transaction. Already-absent content counts as removed; any other file-cleanup failure rolls back, keeps the trashed row, and answers `500` with a retryable message.
 
-#### Empty Trash (retention-eligible)
+#### Empty Trash
 
 ```http
 POST /api/trash/purge
 ```
 
-**Response:** `{"purged": <int>}` — runs the same guarded sweep the retention triggers use; only rows at or past `projects.trash_retention_days` are purged.
+**Response:** `{"purged": <int>}` — permanently deletes every trashed document of the caller, regardless of age: the confirmation covers the whole listing, so the retention cutoff never gates this route. Each row goes through the same guarded row-locked transaction as the single-document purge — bytes first, then the row. A file-cleanup failure other than already-absent content answers `500` with a retryable message, leaving that row and every row not yet visited trashed. Retention expiry is enforced only by the sweep (lazily before `GET /api/trash/documents` and once at gateway startup).
 
 ### Artifacts
 

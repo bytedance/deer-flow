@@ -148,7 +148,12 @@ export async function purgeTrashDocument(documentId: string): Promise<void> {
   }
 }
 
-/** Empty the trash: purge every trashed document past its confirmation. */
+/**
+ * Empty the trash: permanently delete every trashed document, regardless of
+ * the retention window — the confirmation covers the whole listing, and
+ * expired rows are a server-side sweep concern, never a gate on this action
+ * (spec §8.3).
+ */
 export async function emptyTrash(): Promise<EmptyTrashResult> {
   const response = await fetchWithAuth(trashUrl("/purge"), {
     method: "POST",

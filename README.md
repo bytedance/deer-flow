@@ -1699,8 +1699,10 @@ keeps its bytes and a snapshot of its origin project for
 purge it permanently. The `/workspace/trash` page — reachable from the project
 page's Documents section and the sidebar Projects header — lists trashed
 documents with their origin project and remaining retention, with per-entry
-Restore and Delete permanently actions plus an Empty trash action that purges
-everything past the retention window. Restore returns the document to its
+Restore and Delete permanently actions plus an Empty trash action that
+permanently deletes every document in the trash — immediately, not after the
+retention window; the window only bounds how long an entry may sit there
+before the retention sweep reclaims it. Restore returns the document to its
 origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.

@@ -132,6 +132,32 @@ async def restore_document(
     return outcome, row
 
 
+async def purge_all_trashed(
+    repo: ProjectDocumentRepository,
+    paths: Paths,
+    *,
+    user_id: str,
+) -> int:
+    """Empty the caller's trash (§8.3): purge every trashed row regardless of age.
+
+    Empty trash deletes exactly what the user confirmed, so the retention
+    cutoff plays no part here — ``run_trash_retention_sweep`` stays the only
+    age-gated purge. Each row goes through the same guarded row-locked
+    ``purge`` as a single-document delete: bytes first, then the row, in one
+    transaction, so a restore that wins the race leaves the row alone
+    (``purge`` answers ``False`` for a no-longer-trashed row and it is
+    skipped). Rows are not deleted atomically: an unlink error rolls that row
+    back and propagates, leaving it — and every row not yet visited —
+    trashed and retryable. Returns the number of rows actually purged.
+    """
+    remove_files = make_purge_file_remover(paths, user_id=user_id)
+    purged = 0
+    for row in await repo.list_all_trashed(user_id=user_id):
+        if await repo.purge(row["id"], remove_files=remove_files, user_id=user_id):
+            purged += 1
+    return purged
+
+
 @dataclass(slots=True)
 class SweepReport:
     """Observable outcome of one retention sweep run."""

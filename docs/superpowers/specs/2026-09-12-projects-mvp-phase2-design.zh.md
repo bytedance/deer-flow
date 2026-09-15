@@ -115,6 +115,7 @@ repository 表面（所有方法都按 ContextVar 所有者过滤，`AUTO` 哨�
 - `trash(document_id) -> bool` —— 先锁自有 active 项目，再锁自有文档；执行带守卫的 `UPDATE … SET trashed_at=:now, trash_origin=:json WHERE id=:id AND user_id=:uid AND project_id=:pid AND trashed_at IS NULL`；`False` ⇒ 404。已归档文档架拒绝此写入。
 - `trash_all_for_project(project_id, *, project_name)` → 在 `ProjectRepository.delete` 的事务内执行（§8.1）。
 - `list_trashed(*, limit, offset) -> list[dict]`。
+- `list_all_trashed() -> list[dict]` —— 调用者的全部 trashed 行，最旧在前；这是清空回收站使用的、与年龄无关的选择，逐行交由 `purge` 处理（§8.3），并在 purge 锁内复核 trashed 状态，因此并发恢复的行会被跳过。
 - `restore(document_id, *, target_project_id) -> tuple[str, dict | None]` —— 结果枚举为 `Literal["restored", "merged", "not_found", "no_target", "content_missing"]`；数据库重指，以及文档锁内的只读原件检查（§10.6）。
 - `purge_candidates(retention_days) -> list[dict]` —— 早于保留窗口的 trashed 行。
 - `purge(document_id, *, retention_cutoff=None, expected_trashed_at=None) -> bool` —— 在同一事务及文档行锁内完成 trashed 状态校验、文件删除、行删除与提交（§6.3/§8.3）；`False` ⇒ 404。保留期调用者传入候选记录的 trash 时间戳和截止时间，并在锁内复核两者，防止已恢复又重新入回收站的文档按旧过期时间被清除。手动 purge 校验当前 trashed 状态，不要求达到保留期。不暴露无守卫的 `delete_row` 变更接口。
@@ -351,7 +352,7 @@ content={"content_sha256": <hex | None>, "project_context_revision": <str | None
 
 ### 8.3 永久 purge 与保留期
 
-- purge 只存在于 `POST /api/trash/documents/{id}/purge` 和 `POST /api/trash/purge` 两条路径，各自在 UI 上有一道明确的"此操作不可撤销"确认，外加保留期清扫。
+- purge 只存在于 `POST /api/trash/documents/{id}/purge` 和 `POST /api/trash/purge` 两条路径，各自在 UI 上有一道明确的"此操作不可撤销"确认，外加保留期清扫。清空回收站会清除调用者的**全部** trashed 行，与年龄无关——它的确认覆盖整个列表——因此保留期截止时间只约束清扫：`purge_candidates` 仍是唯一带年龄过滤的选择。
 - 顺序：在持续持有文档行锁的数据库事务内（§6.3），先 unlink 原件及 `derived/converted.md`，再删行并提交。`FileNotFoundError` 是幂等成功，包括可选转换文件不存在的情形。其他文件系统错误保留 trashed 行并返回可重试错误。unlink 后发生崩溃、部分 unlink 或数据库提交失败，可能留下内容缺失的 trashed 行；下一次 purge 完成清理。恢复在同一组文档行锁内检查原件存在性和大小（归并时还检查将保留的目标内容），缺失时返回 409 `content_missing`，不把损坏行激活。数据库回滚不能恢复字节。归并清理是另一种情况：它发生在行删除已提交之后，失败只能留下无人引用的文件。
 - 保留期：`projects.trash_retention_days`（默认 30）。清扫先通过同一受守卫的 purge 服务处理过期 trash，再做非破坏性的行侧对账。在 `GET /api/trash/documents` 上懒执行，并在网关启动时于 `lifespan` handler 中执行一次（`app.py:196`，与 `:253-320` 的其他启动工作并列）。不新增守护进程，不依赖调度器。
 - 清扫还会以年龄为界做存储对账；任何 active 或 trashed 行都会保护其原件/派生文件的整个命名空间，即使它已经恢复到另一个项目：删除 `.staging/*` 条目，以及用户 `projects/*/documents/` 下超过 24 小时且无人引用的文件。任何不足 24 小时的内容都不回收，因此进行中的上传不会被扫掉。
