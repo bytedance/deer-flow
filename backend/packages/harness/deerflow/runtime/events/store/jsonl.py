@@ -34,6 +34,7 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore, match_ai_message_run_id, normalize_message_ids
@@ -49,11 +50,16 @@ class JsonlRunEventStore(RunEventStore):
     def __init__(self, base_dir: str | Path | None = None):
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
-        # Per-thread asyncio.Lock — serialises concurrent writes within one process.
-        self._write_locks: dict[str, asyncio.Lock] = {}
+        # Weak ownership avoids leaking one lock per historical thread without
+        # splitting a live lock generation while a holder/waiter still owns it.
+        self._write_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
-        return self._write_locks.setdefault(thread_id, asyncio.Lock())
+        lock = self._write_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._write_locks[thread_id] = lock
+        return lock
 
     async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Drain an admitted mutation before propagating caller cancellation.
@@ -418,11 +424,6 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
-            # Pop the lock inside the held mutation to minimise the window where a new caller
-            # could obtain a fresh lock while a waiting coroutine still holds the old one.
-            # Note: coroutines that already acquired a reference to this lock before the
-            # delete will still proceed after we release — this is an accepted narrow race.
-            self._write_locks.pop(thread_id, None)
             return count
 
         return await self._run_mutation(thread_id, mutate)
