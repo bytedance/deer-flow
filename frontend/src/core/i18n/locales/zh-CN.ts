@@ -192,6 +192,13 @@ export const zhCN: Translations = {
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    referenceConversations: "引用会话",
+    referenceConversationsSearch: "搜索会话",
+    referenceConversationsEmpty: "没有找到会话",
+    referenceConversationsLimit: (max: number) =>
+      `每条消息最多引用 ${max} 个会话`,
+    referenceConversationsRemove: (title: string) => `移除对「${title}」的引用`,
+    referencedConversations: "引用的会话",
     inputPolish: "优化输入",
     inputPolishing: "正在优化输入...",
     inputPolishNoChanges: "当前输入已经足够清晰。",
