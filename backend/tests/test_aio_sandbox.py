@@ -294,6 +294,37 @@ class TestErrorObservationRetry:
         assert result == "all good"
         assert call_count == 1
 
+    def test_missing_recovery_session_is_recreated_once_and_reused(self, sandbox):
+        """An evicted lead recovery session must not poison every later call."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str | None] = []
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = "evicted-lead-session"
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            session_id = kwargs.get("id")
+            exec_ids.append(session_id)
+            if session_id == "evicted-lead-session":
+                raise ApiError(
+                    status_code=404,
+                    body={"message": f"Shell session not found: {session_id}"},
+                )
+            return SimpleNamespace(data=SimpleNamespace(output="healthy", exit_code=0))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        assert sandbox.execute_command("first") == "healthy"
+        assert sandbox.execute_command("second") == "healthy"
+        assert len(created_ids) == 1
+        assert exec_ids == ["evicted-lead-session", created_ids[0], created_ids[0]]
+
 
 class TestScopedShellSessions:
     """Concurrent subagents use independent persistent shell sessions (#5128)."""
@@ -410,6 +441,98 @@ class TestScopedShellSessions:
         sandbox.release_command_scope("subagent-a")
         assert cleaned_ids == created_ids
 
+    def test_missing_scoped_session_is_recreated_and_reused(self, sandbox):
+        """A server-side session loss must not pin the scope to a stale id."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            if len(exec_ids) == 1:
+                raise ApiError(
+                    headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                    status_code=404,
+                    body={"success": False, "message": "Session not found", "data": None, "hint": None},
+                )
+            return SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        assert sandbox.execute_command_in_scope("first", scope_id="subagent-a") == "ok"
+        assert len(created_ids) == 2
+        assert exec_ids == created_ids
+
+        assert sandbox.execute_command_in_scope("second", scope_id="subagent-a") == "ok"
+        assert exec_ids[-1] == created_ids[1]
+
+    def test_missing_scoped_session_recovery_is_bounded(self, sandbox):
+        """A missing replacement session is reported after one recovery attempt."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+        cleaned_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            raise ApiError(
+                headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                status_code=404,
+                body={"success": False, "message": "Session not found", "data": None},
+            )
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+        sandbox._client.shell.cleanup_session = lambda session_id, **kwargs: cleaned_ids.append(session_id)
+
+        result = sandbox.execute_command_in_scope("first", scope_id="subagent-a")
+
+        assert result.startswith("Error:")
+        assert len(created_ids) == 2
+        assert exec_ids == created_ids
+        assert cleaned_ids == [created_ids[1]]
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id is None
+
+    def test_other_scoped_404_does_not_rotate_session(self, sandbox):
+        """Only the structured missing-session response is recoverable."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            raise ApiError(
+                headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                status_code=404,
+                body={"success": False, "message": "Not Found", "data": None},
+            )
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        result = sandbox.execute_command_in_scope("first", scope_id="subagent-a")
+
+        assert result.startswith("Error:")
+        assert len(created_ids) == 1
+        assert exec_ids == created_ids
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id == created_ids[0]
+
     def test_queued_command_cannot_restart_session_after_scope_release(self, sandbox):
         created_ids: list[str] = []
         executed_commands: list[str] = []
@@ -498,8 +621,46 @@ class TestScopedShellSessions:
             == "ok"
         )
         sandbox._client.bash.exec.assert_called_once()
+        session_id = sandbox._client.bash.create_session.call_args.kwargs["session_id"]
+        assert sandbox._client.bash.exec.call_args.kwargs["session_id"] == session_id
+        sandbox._client.bash.close_session.assert_called_once_with(session_id)
         sandbox._client.shell.create_session.assert_not_called()
         assert sandbox._scoped_shell_sessions == {}
+
+    def test_env_session_cleanup_failure_does_not_mask_command_output(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr="", exit_code=0)))
+        sandbox._client.bash.close_session = MagicMock(side_effect=RuntimeError("cleanup failed"))
+
+        assert sandbox.execute_command("echo $TOKEN", env={"TOKEN": "secret"}) == "ok"
+
+    def test_missing_session_with_failed_replacement_does_not_execute_third_time(self, sandbox):
+        from agent_sandbox.core.api_error import ApiError
+
+        executions = 0
+
+        def exec_command(command, **kwargs):
+            nonlocal executions
+            executions += 1
+            if executions == 1:
+                raise ApiError(
+                    status_code=404,
+                    body={"message": "session not found while executing command"},
+                )
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="'ErrorObservation' object has no attribute 'exit_code'",
+                    exit_code=None,
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+        sandbox._client.shell.create_session = lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        result = sandbox.execute_command_in_scope("unsafe-to-repeat", scope_id="subagent-a")
+
+        assert "ErrorObservation" in result
+        assert executions == 2
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id is None
 
     def test_closed_sandbox_rejects_new_scope_without_leaking_session(self, sandbox):
         client = sandbox._client
@@ -592,6 +753,31 @@ class TestBashExecUnsupportedFailFast:
 
         assert first == "ok"
         assert second == "ok"
+        assert sandbox._client.bash.exec.call_count == 2
+
+    def test_bash_exec_missing_session_retries_without_latching_unsupported(self, sandbox):
+        """A transient loss after explicit creation must retry once and keep the
+        capability enabled for subsequent env-bearing commands."""
+        from agent_sandbox.core.api_error import ApiError
+
+        missing = ApiError(status_code=404, body={"message": "Session not found: transient"})
+        sandbox._client.bash.exec = MagicMock(side_effect=[missing, SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))])
+
+        assert sandbox.execute_command("cmd", env={"TOK": "v"}) == "ok"
+        assert sandbox._bash_exec_unsupported is False
+        assert sandbox._client.bash.exec.call_count == 2
+        assert sandbox._client.bash.create_session.call_count == 2
+
+    def test_bash_exec_repeated_missing_session_does_not_latch_capability_gap(self, sandbox):
+        from agent_sandbox.core.api_error import ApiError
+
+        missing = ApiError(status_code=404, body={"message": "Session not found"})
+        sandbox._client.bash.exec = MagicMock(side_effect=missing)
+
+        out = sandbox.execute_command("cmd", env={"TOK": "v"})
+
+        assert out == "Error: bash.exec session disappeared after retry"
+        assert sandbox._bash_exec_unsupported is False
         assert sandbox._client.bash.exec.call_count == 2
 
 
