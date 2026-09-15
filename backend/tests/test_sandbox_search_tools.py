@@ -287,12 +287,11 @@ def test_aio_sandbox_glob_include_dirs_filters_nested_ignored(monkeypatch) -> No
 def test_aio_sandbox_glob_include_dirs_exactly_full_is_not_truncated(monkeypatch) -> None:
     """A listing whose matches exactly fill max_results is complete.
 
-    The include_dirs branch returns as soon as it has collected
-    ``max_results`` matches, without looking at the remaining entries — so a
-    listing that happens to hold exactly that many is reported as cut off
-    even though every entry was seen. ``glob``'s other branch (and the shared
-    ``parse_remote_search_output`` path the other providers use) decides from
-    one entry past the cap instead, which is exact.
+    The branch used to return as soon as it had collected ``max_results``
+    matches, without looking at the remaining entries, so a listing that held
+    exactly that many was reported as cut off even though every entry was
+    seen. It now scans one eligible match past the cap, the same rule the
+    sibling ``include_dirs=False`` branch has always applied to the full list.
     """
     with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
         sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
@@ -336,6 +335,61 @@ def test_aio_sandbox_glob_include_dirs_reports_a_dropped_match_as_truncated(monk
     matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True, max_results=2)
 
     assert matches == ["/mnt/workspace/a", "/mnt/workspace/b"]
+    assert truncated is True
+
+
+def _filtered_tail_entries(*, second_eligible: bool):
+    """Two eligible matches, then entries only the ignore rules, the pattern or
+    the root scope reject — a tail that must not count toward the cap."""
+    entries = [
+        SimpleNamespace(name="a.py", path="/mnt/workspace/a.py"),
+        SimpleNamespace(name="b.py", path="/mnt/workspace/b.py"),
+        # ignored directory
+        SimpleNamespace(name="lib.py", path="/mnt/workspace/node_modules/lib.py"),
+        # outside the search root
+        SimpleNamespace(name="c.py", path="/mnt/elsewhere/c.py"),
+        # inside the root but not matched by the pattern
+        SimpleNamespace(name="notes.txt", path="/mnt/workspace/notes.txt"),
+    ]
+    if second_eligible:
+        entries.append(SimpleNamespace(name="c.py", path="/mnt/workspace/c.py"))
+    return entries
+
+
+def _patched_sandbox(monkeypatch, entries):
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "list_path",
+        lambda **kwargs: SimpleNamespace(data=SimpleNamespace(files=entries)),
+    )
+    return sandbox
+
+
+def test_aio_sandbox_glob_include_dirs_looks_past_a_filtered_tail(monkeypatch) -> None:
+    """Trailing entries the filters reject do not make a full result truncated.
+
+    The cap counts *eligible* matches, so the branch has to keep scanning
+    rather than assume the max-th match was the last one: here two matches fill
+    ``max_results`` and everything after them is ignored, out of root, or a
+    pattern miss, which leaves the result complete.
+    """
+    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=False))
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_reports_a_match_after_a_filtered_tail(monkeypatch) -> None:
+    """An eligible match beyond that filtered tail still reports truncation."""
+    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=True))
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
     assert truncated is True
 
 
