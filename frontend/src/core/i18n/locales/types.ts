@@ -137,15 +137,12 @@ export interface Translations {
   modelPicker: {
     title: string;
     description: string;
-    manageFavorites: string;
-    done: string;
     favorites: string;
     otherModels: string;
     search: string;
     noResults: string;
     noModels: string;
     favoriteModel: (displayName: string, name: string) => string;
-    localOnly: string;
     sessionOnly: string;
   };
 

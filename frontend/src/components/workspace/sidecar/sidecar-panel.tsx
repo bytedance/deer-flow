@@ -80,15 +80,15 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../../ai-elements/model-selector";
+import { ModelSelectorName } from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
-import { ModelPickerContent } from "../model-picker-content";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
 import { type SidecarReference, useSidecar } from "./context";
@@ -932,8 +932,8 @@ function SidecarModelSelector({
   }
 
   return (
-    <ModelSelector open={open} onOpenChange={onOpenChange}>
-      <ModelSelectorTrigger asChild>
+    <ModelPicker open={open} onOpenChange={onOpenChange}>
+      <ModelPickerTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
           <div className="flex min-w-0 flex-col text-left">
             <ModelSelectorName className="truncate text-xs font-normal">
@@ -941,13 +941,13 @@ function SidecarModelSelector({
             </ModelSelectorName>
           </div>
         </PromptInputButton>
-      </ModelSelectorTrigger>
+      </ModelPickerTrigger>
       <ModelPickerContent
         open={open}
         models={models}
         selectedModelName={selectedModel.name}
         onModelSelect={onModelSelect}
       />
-    </ModelSelector>
+    </ModelPicker>
   );
 }

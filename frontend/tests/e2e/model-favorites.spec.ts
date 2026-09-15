@@ -90,26 +90,23 @@ function favoriteGroup(page: Page) {
   return picker(page).getByRole("group", { name: "Favorites" });
 }
 
+function modelButton(page: Page, modelName: string) {
+  const model = MODELS.find((candidate) => candidate.name === modelName);
+  if (!model) {
+    throw new Error(`Unknown model fixture: ${modelName}`);
+  }
+  return picker(page).getByRole("button", {
+    name: `${model.display_name} (${model.name})`,
+    exact: true,
+  });
+}
+
 async function openMainModelPicker(page: Page, name = "Alpha") {
   const trigger = page.getByRole("button", { name, exact: true }).first();
   await expect(trigger).toBeVisible();
   await trigger.click();
   await expect(picker(page)).toBeVisible();
-  // Radix makes the background inert while the dialog is open. Include the
-  // hidden trigger so callers can still verify that managing favorites did not
-  // silently change its selected model.
-  return page
-    .getByRole("button", { name, exact: true, includeHidden: true })
-    .first();
-}
-
-async function enterManageMode(page: Page) {
-  const manage = picker(page).getByRole("button", {
-    name: "Manage favorites",
-  });
-  await manage.focus();
-  await manage.press("Enter");
-  await expect(favoriteButton(page, "alpha-api")).toBeVisible();
+  return trigger;
 }
 
 async function selectAssistantText(page: Page, text: string) {
@@ -157,7 +154,24 @@ test("favorites a model without selecting it and persists the choice after refre
 
   await page.goto("/workspace/chats/new");
   const alphaTrigger = await openMainModelPicker(page);
-  await enterManageMode(page);
+
+  await expect(page.locator('[data-slot="dialog-overlay"]')).toHaveCount(0);
+  const pickerBox = await picker(page).boundingBox();
+  const triggerBox = await alphaTrigger.boundingBox();
+  expect(pickerBox).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  const pickerSide = await picker(page).getAttribute("data-side");
+  expect(["top", "bottom"]).toContain(pickerSide);
+  const anchorGap =
+    pickerSide === "top"
+      ? triggerBox!.y - (pickerBox!.y + pickerBox!.height)
+      : pickerBox!.y - (triggerBox!.y + triggerBox!.height);
+  expect(anchorGap).toBeGreaterThanOrEqual(0);
+  expect(anchorGap).toBeLessThanOrEqual(12);
+  expect(pickerBox!.x).toBeGreaterThanOrEqual(0);
+  expect(pickerBox!.x + pickerBox!.width).toBeLessThanOrEqual(
+    await page.evaluate(() => document.documentElement.clientWidth),
+  );
 
   const betaFavorite = favoriteButton(page, "beta-api");
   await betaFavorite.click();
@@ -165,13 +179,10 @@ test("favorites a model without selecting it and persists the choice after refre
   await expect(alphaTrigger).toContainText("Alpha");
   expect(runRequests).toEqual([]);
 
-  await picker(page).getByRole("button", { name: "Done" }).click();
   const favorites = favoriteGroup(page);
   await expect(favorites).toBeVisible();
-  await expect(
-    favorites.getByRole("option").filter({ hasText: "beta-api" }),
-  ).toHaveCount(1);
-  await favorites.getByRole("option").filter({ hasText: "beta-api" }).click();
+  await expect(modelButton(page, "beta-api")).toBeVisible();
+  await modelButton(page, "beta-api").click();
 
   await expect(picker(page)).toBeHidden();
   const sharedTrigger = page.getByRole("button", {
@@ -184,9 +195,7 @@ test("favorites a model without selecting it and persists the choice after refre
   await page.reload();
   await expect(sharedTrigger).toBeVisible();
   await sharedTrigger.click();
-  await expect(
-    favoriteGroup(page).getByRole("option").filter({ hasText: "beta-api" }),
-  ).toHaveCount(1);
+  await expect(modelButton(page, "beta-api")).toBeVisible();
 });
 
 test("synchronizes favorite additions and removals across real tabs", async ({
@@ -196,13 +205,11 @@ test("synchronizes favorite additions and removals across real tabs", async ({
   await installPageMocks(page);
   await page.goto("/workspace/chats/new");
   await openMainModelPicker(page);
-  await enterManageMode(page);
 
   const secondPage = await context.newPage();
   await installPageMocks(secondPage);
   await secondPage.goto("/workspace/chats/new");
   await openMainModelPicker(secondPage);
-  await enterManageMode(secondPage);
 
   const firstTabFavorite = favoriteButton(page, "beta-api");
   const secondTabFavorite = favoriteButton(secondPage, "beta-api");
@@ -238,9 +245,7 @@ test("shows main-chat favorites in the side chat without changing its current mo
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
   await expect(page.getByText(assistantText)).toBeVisible();
   await openMainModelPicker(page);
-  await enterManageMode(page);
   await favoriteButton(page, "beta-api").click();
-  await picker(page).getByRole("button", { name: "Done" }).click();
   await page.keyboard.press("Escape");
 
   await selectAssistantText(page, assistantText);
@@ -258,9 +263,7 @@ test("shows main-chat favorites in the side chat without changing its current mo
   });
   await expect(sidecarTrigger).toBeVisible();
   await sidecarTrigger.click();
-  await expect(
-    favoriteGroup(page).getByRole("option").filter({ hasText: "beta-api" }),
-  ).toHaveCount(1);
+  await expect(modelButton(page, "beta-api")).toBeVisible();
 
   await page.keyboard.press("Escape");
   await expect(picker(page)).toBeHidden();
@@ -275,7 +278,6 @@ test("restores a temporarily unavailable favorite and keeps the narrow picker us
   const modelAPI = await installPageMocks(page);
   await page.goto("/workspace/chats/new");
   const trigger = await openMainModelPicker(page);
-  await enterManageMode(page);
 
   const longNameFavorite = favoriteButton(page, "very-long-model-name");
   await expect(longNameFavorite).toBeVisible();
@@ -325,9 +327,5 @@ test("restores a temporarily unavailable favorite and keeps the narrow picker us
   modelAPI.setModels(MODELS);
   await page.reload();
   await openMainModelPicker(page);
-  await expect(
-    favoriteGroup(page)
-      .getByRole("option")
-      .filter({ hasText: "very-long-model-name" }),
-  ).toHaveCount(1);
+  await expect(modelButton(page, "very-long-model-name")).toBeVisible();
 });

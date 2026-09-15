@@ -158,15 +158,12 @@ export const zhCN: Translations = {
   modelPicker: {
     title: "选择模型",
     description: "搜索并选择一个模型。",
-    manageFavorites: "管理收藏",
-    done: "完成",
     favorites: "收藏",
     otherModels: "其他模型",
     search: "搜索模型",
     noResults: "没有匹配的模型",
     noModels: "暂无可用模型",
     favoriteModel: (displayName, name) => `收藏 ${displayName}（${name}）`,
-    localOnly: "收藏仅存储在当前浏览器中。",
     sessionOnly: "收藏仅在本次会话中保留。",
   },
 

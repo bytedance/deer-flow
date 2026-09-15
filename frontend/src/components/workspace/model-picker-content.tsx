@@ -1,21 +1,17 @@
 "use client";
 
-import { CheckIcon, StarIcon } from "lucide-react";
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import * as PopoverPrimitive from "@radix-ui/react-popover";
+import { CheckIcon, SearchIcon, StarIcon } from "lucide-react";
+import {
+  type KeyboardEvent,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Command,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
-import {
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
@@ -27,6 +23,9 @@ import { type Model } from "@/core/models/types";
 import { useModelFavorites } from "@/core/models/use-model-favorites";
 import { cn } from "@/lib/utils";
 
+export const ModelPicker = PopoverPrimitive.Root;
+export const ModelPickerTrigger = PopoverPrimitive.Trigger;
+
 export interface ModelPickerContentProps {
   open: boolean;
   models: readonly Model[];
@@ -34,29 +33,13 @@ export interface ModelPickerContentProps {
   onModelSelect: (name: string) => void;
 }
 
-type PickerMode = "select" | "manage";
-
-function commandValue(name: string): string {
-  return JSON.stringify(name);
-}
-
 function orderedMatches(projection: ModelChoiceProjection): readonly Model[] {
   return [...projection.favorites, ...projection.others];
 }
 
-function preferredCommandValue(
-  projection: ModelChoiceProjection,
-  selectedModelName: string | undefined,
-): string {
-  const ordered = orderedMatches(projection);
-  const current = ordered.find((model) => model.name === selectedModelName);
-  const preferred = current ?? ordered[0];
-  return preferred ? commandValue(preferred.name) : "";
-}
-
 function ModelDetails({ model }: { model: Model }) {
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <span className="flex min-w-0 flex-1 flex-col text-left">
       <span className="truncate font-medium">{model.display_name}</span>
       <span className="text-muted-foreground truncate text-xs">
         {model.model}
@@ -66,7 +49,7 @@ function ModelDetails({ model }: { model: Model }) {
           {model.description}
         </span>
       ) : null}
-    </div>
+    </span>
   );
 }
 
@@ -79,91 +62,44 @@ export function ModelPickerContent({
   const { t } = useI18n();
   const { user, isLoading } = useAuth();
   const favorites = useModelFavorites(user?.id ?? null);
-  const [mode, setMode] = useState<PickerMode>("select");
   const [query, setQuery] = useState("");
-  const initialProjection = projectModelChoices(models, favorites.names, "");
-  const [highlightedValue, setHighlightedValue] = useState(() =>
-    preferredCommandValue(initialProjection, selectedModelName),
-  );
-  const selectInputRef = useRef<HTMLInputElement>(null);
-  const manageInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const modelButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const favoriteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingFavoriteFocusRef = useRef<string | null>(null);
   const wasOpenRef = useRef(false);
 
   const projection = useMemo(
     () => projectModelChoices(models, favorites.names, query),
     [favorites.names, models, query],
   );
-  const selectModels = useMemo(() => orderedMatches(projection), [projection]);
-  const selectValuesKey = JSON.stringify(
-    selectModels.map((model) => commandValue(model.name)),
-  );
+  const visibleModels = useMemo(() => orderedMatches(projection), [projection]);
 
   useLayoutEffect(() => {
     const opening = open && !wasOpenRef.current;
     wasOpenRef.current = open;
-    if (!opening) {
-      return;
+    if (opening) {
+      setQuery("");
     }
-
-    const resetProjection = projectModelChoices(models, favorites.names, "");
-    setMode("select");
-    setQuery("");
-    setHighlightedValue(
-      preferredCommandValue(resetProjection, selectedModelName),
-    );
-  }, [favorites.names, models, open, selectedModelName]);
+  }, [open]);
 
   useLayoutEffect(() => {
-    if (!open || mode !== "select") {
-      return;
+    if (open) {
+      searchInputRef.current?.focus();
     }
-
-    const visibleValues = selectModels.map((model) => commandValue(model.name));
-    setHighlightedValue((current) =>
-      visibleValues.includes(current) ? current : (visibleValues[0] ?? ""),
-    );
-  }, [mode, open, selectModels, selectValuesKey]);
+  }, [open]);
 
   useLayoutEffect(() => {
-    if (!open) {
+    const modelName = pendingFavoriteFocusRef.current;
+    if (!open || modelName === null) {
       return;
     }
-    const input =
-      mode === "select" ? selectInputRef.current : manageInputRef.current;
-    input?.focus();
-  }, [mode, open]);
-
-  const handleQueryChange = useCallback(
-    (nextQuery: string) => {
-      const nextProjection = projectModelChoices(
-        models,
-        favorites.names,
-        nextQuery,
-      );
-      setQuery(nextQuery);
-      setHighlightedValue(preferredCommandValue(nextProjection, undefined));
-    },
-    [favorites.names, models],
-  );
-
-  const handleManage = useCallback(() => {
-    if (user === null || isLoading) {
-      return;
+    const button = favoriteButtonRefs.current.get(modelName);
+    if (button) {
+      button.focus();
+      pendingFavoriteFocusRef.current = null;
     }
-    setMode("manage");
-  }, [isLoading, user]);
-
-  const handleDone = useCallback(() => {
-    const currentProjection = projectModelChoices(
-      models,
-      favorites.names,
-      query,
-    );
-    setHighlightedValue(
-      preferredCommandValue(currentProjection, selectedModelName),
-    );
-    setMode("select");
-  }, [favorites.names, models, query, selectedModelName]);
+  }, [favorites.names, open]);
 
   const handleFavorite = useCallback(
     (modelName: string) => {
@@ -178,183 +114,185 @@ export function ModelPickerContent({
       if (!stillVisible) {
         return;
       }
+      pendingFavoriteFocusRef.current = modelName;
       favorites.setFavorite(modelName, !favorites.names.includes(modelName));
     },
     [favorites, isLoading, models, query, user],
   );
 
+  const focusModel = useCallback(
+    (currentName: string | null, direction: 1 | -1) => {
+      if (visibleModels.length === 0) {
+        return;
+      }
+      const currentIndex = currentName
+        ? visibleModels.findIndex((model) => model.name === currentName)
+        : direction === 1
+          ? -1
+          : 0;
+      const nextIndex =
+        (currentIndex + direction + visibleModels.length) %
+        visibleModels.length;
+      modelButtonRefs.current.get(visibleModels[nextIndex]!.name)?.focus();
+    },
+    [visibleModels],
+  );
+
+  const handleSearchKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+        return;
+      }
+      event.preventDefault();
+      focusModel(null, event.key === "ArrowDown" ? 1 : -1);
+    },
+    [focusModel],
+  );
+
+  const handleModelKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>, modelName: string) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+        return;
+      }
+      event.preventDefault();
+      focusModel(modelName, event.key === "ArrowDown" ? 1 : -1);
+    },
+    [focusModel],
+  );
+
   const emptyMessage =
     models.length === 0 ? t.modelPicker.noModels : t.modelPicker.noResults;
 
-  return (
-    <DialogContent
-      className="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-xl"
-      onOpenAutoFocus={(event) => {
-        event.preventDefault();
-        const input =
-          mode === "select" ? selectInputRef.current : manageInputRef.current;
-        input?.focus();
-      }}
-    >
-      <div className="flex min-h-14 items-center gap-3 border-b px-4 pr-12">
-        <DialogTitle className="min-w-0 flex-1 truncate text-base">
-          {t.modelPicker.title}
-        </DialogTitle>
-        <DialogDescription className="sr-only">
-          {t.modelPicker.description}
-        </DialogDescription>
-        {mode === "manage" ? (
-          <Button type="button" size="sm" variant="ghost" onClick={handleDone}>
-            {t.modelPicker.done}
-          </Button>
-        ) : user !== null ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={isLoading}
-            onClick={handleManage}
-          >
-            {t.modelPicker.manageFavorites}
-          </Button>
-        ) : null}
-      </div>
+  const renderGroup = (heading: string, groupModels: readonly Model[]) => {
+    if (groupModels.length === 0) {
+      return null;
+    }
+    return (
+      <section role="group" aria-label={heading}>
+        <h3 className="text-muted-foreground px-3 pt-2 pb-1 text-xs font-medium">
+          {heading}
+        </h3>
+        <ul className="px-1 pb-1">
+          {groupModels.map((model) => {
+            const isFavorite = favorites.names.includes(model.name);
+            const isCurrent = model.name === selectedModelName;
+            return (
+              <li
+                key={model.name}
+                className="hover:bg-accent focus-within:bg-accent flex min-h-11 min-w-0 items-stretch rounded-md"
+              >
+                <button
+                  ref={(node) => {
+                    if (node) {
+                      modelButtonRefs.current.set(model.name, node);
+                    } else {
+                      modelButtonRefs.current.delete(model.name);
+                    }
+                  }}
+                  type="button"
+                  className="focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-2 rounded-l-md px-3 py-2 outline-none focus-visible:ring-2"
+                  aria-label={`${model.display_name} (${model.name})`}
+                  aria-current={isCurrent ? "true" : undefined}
+                  data-model-picker-option="true"
+                  data-current-model={isCurrent ? "true" : undefined}
+                  onClick={() => onModelSelect(model.name)}
+                  onKeyDown={(event) => handleModelKeyDown(event, model.name)}
+                >
+                  <ModelDetails model={model} />
+                  {isCurrent ? (
+                    <CheckIcon aria-hidden="true" className="size-4 shrink-0" />
+                  ) : null}
+                </button>
+                {user !== null ? (
+                  <Button
+                    ref={(node) => {
+                      if (node) {
+                        favoriteButtonRefs.current.set(model.name, node);
+                      } else {
+                        favoriteButtonRefs.current.delete(model.name);
+                      }
+                    }}
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      "size-11 shrink-0 rounded-l-none",
+                      isFavorite && "text-amber-500",
+                    )}
+                    aria-label={t.modelPicker.favoriteModel(
+                      model.display_name,
+                      model.name,
+                    )}
+                    aria-pressed={isFavorite}
+                    disabled={isLoading || !favorites.canEdit}
+                    onClick={() => handleFavorite(model.name)}
+                  >
+                    <StarIcon
+                      aria-hidden="true"
+                      className={cn("size-5", isFavorite && "fill-current")}
+                    />
+                  </Button>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+    );
+  };
 
-      {mode === "select" ? (
-        <Command
-          label={t.modelPicker.title}
-          shouldFilter={false}
-          value={highlightedValue}
-          onValueChange={setHighlightedValue}
-        >
-          <CommandInput
-            ref={selectInputRef}
+  return (
+    <PopoverPrimitive.Portal>
+      <PopoverPrimitive.Content
+        role="dialog"
+        aria-label={t.modelPicker.title}
+        side="top"
+        align="end"
+        sideOffset={8}
+        collisionPadding={8}
+        className="bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 z-50 flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-1rem)] origin-(--radix-popover-content-transform-origin) flex-col overflow-hidden rounded-xl border shadow-lg outline-none"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          searchInputRef.current?.focus();
+        }}
+      >
+        <div className="flex shrink-0 items-center gap-2 border-b px-3">
+          <SearchIcon
+            aria-hidden="true"
+            className="text-muted-foreground size-4 shrink-0"
+          />
+          <Input
+            ref={searchInputRef}
+            type="search"
             aria-label={t.modelPicker.search}
             placeholder={t.modelPicker.search}
             value={query}
-            onValueChange={handleQueryChange}
+            className="h-11 border-0 px-0 shadow-none focus-visible:ring-0"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleSearchKeyDown}
           />
-          <CommandList className="max-h-96">
-            {selectModels.length === 0 ? (
-              <div className="text-muted-foreground py-8 text-center text-sm">
-                {emptyMessage}
-              </div>
-            ) : (
-              <>
-                {projection.favorites.length > 0 ? (
-                  <CommandGroup heading={t.modelPicker.favorites}>
-                    {projection.favorites.map((model) => (
-                      <CommandItem
-                        key={model.name}
-                        value={commandValue(model.name)}
-                        onSelect={() => onModelSelect(model.name)}
-                      >
-                        <ModelDetails model={model} />
-                        <StarIcon
-                          aria-hidden="true"
-                          className="size-4 fill-current"
-                        />
-                        {model.name === selectedModelName ? (
-                          <CheckIcon
-                            aria-hidden="true"
-                            className="size-4"
-                            data-current-model="true"
-                          />
-                        ) : (
-                          <span aria-hidden="true" className="size-4" />
-                        )}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                ) : null}
-                {projection.others.length > 0 ? (
-                  <CommandGroup heading={t.modelPicker.otherModels}>
-                    {projection.others.map((model) => (
-                      <CommandItem
-                        key={model.name}
-                        value={commandValue(model.name)}
-                        onSelect={() => onModelSelect(model.name)}
-                      >
-                        <ModelDetails model={model} />
-                        {model.name === selectedModelName ? (
-                          <CheckIcon
-                            aria-hidden="true"
-                            className="size-4"
-                            data-current-model="true"
-                          />
-                        ) : (
-                          <span aria-hidden="true" className="size-4" />
-                        )}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                ) : null}
-              </>
-            )}
-          </CommandList>
-        </Command>
-      ) : (
-        <div className="flex min-h-0 min-w-0 flex-col overflow-x-hidden">
-          <div className="border-b p-3">
-            <Input
-              ref={manageInputRef}
-              type="search"
-              aria-label={t.modelPicker.search}
-              placeholder={t.modelPicker.search}
-              value={query}
-              onChange={(event) => handleQueryChange(event.target.value)}
-            />
-          </div>
-          {projection.matches.length === 0 ? (
+        </div>
+        <div className="min-h-0 overflow-x-hidden overflow-y-auto py-1">
+          {visibleModels.length === 0 ? (
             <div className="text-muted-foreground py-8 text-center text-sm">
               {emptyMessage}
             </div>
           ) : (
-            <ul className="max-h-96 max-w-full min-w-0 overflow-x-hidden overflow-y-auto p-1">
-              {projection.matches.map((model) => {
-                const isFavorite = favorites.names.includes(model.name);
-                return (
-                  <li
-                    key={model.name}
-                    className="flex min-h-12 max-w-full min-w-0 items-center gap-2 overflow-hidden rounded-sm px-2"
-                  >
-                    <ModelDetails model={model} />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className={cn("size-11", isFavorite && "text-amber-500")}
-                      aria-label={t.modelPicker.favoriteModel(
-                        model.display_name,
-                        model.name,
-                      )}
-                      aria-pressed={isFavorite}
-                      disabled={
-                        user === null || isLoading || !favorites.canEdit
-                      }
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => handleFavorite(model.name)}
-                    >
-                      <StarIcon
-                        aria-hidden="true"
-                        className={cn("size-5", isFavorite && "fill-current")}
-                      />
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
+            <>
+              {renderGroup(t.modelPicker.favorites, projection.favorites)}
+              {renderGroup(t.modelPicker.otherModels, projection.others)}
+            </>
           )}
+        </div>
+        {favorites.persistence === "memory" && user !== null ? (
           <p
             role="status"
-            className="text-muted-foreground border-t px-4 py-3 text-xs"
+            className="text-muted-foreground shrink-0 border-t px-3 py-2 text-xs"
           >
-            {favorites.persistence === "memory"
-              ? t.modelPicker.sessionOnly
-              : t.modelPicker.localOnly}
+            {t.modelPicker.sessionOnly}
           </p>
-        </div>
-      )}
-    </DialogContent>
+        ) : null}
+      </PopoverPrimitive.Content>
+    </PopoverPrimitive.Portal>
   );
 }

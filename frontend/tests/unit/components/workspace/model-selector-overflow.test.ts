@@ -5,7 +5,7 @@ import { describe, expect, it } from "@rstest/core";
 
 const FRONTEND_ROOT = path.resolve(__dirname, "../../../..");
 const SELECTED_MODEL_WRAPPER_PATTERN =
-  /<ModelSelectorTrigger asChild>[\s\S]*?<div className="([^"]*)">\s*<ModelSelectorName/;
+  /<ModelPickerTrigger asChild>[\s\S]*?<div className="([^"]*)">\s*<ModelSelectorName/;
 
 function source(relativePath: string) {
   return readFileSync(path.join(FRONTEND_ROOT, relativePath), "utf8");
@@ -46,13 +46,13 @@ describe("model picker integration", () => {
       onModelSelect: "onModelSelect",
     },
   ])(
-    "uses ModelPickerContent inside the existing selector in $relativePath",
+    "uses ModelPickerContent inside the anchored picker in $relativePath",
     ({ relativePath, open, selectedModelName, onModelSelect }) => {
       const contents = source(relativePath);
       const picker = /<ModelPickerContent[\s\S]*?\/>/.exec(contents)?.[0];
 
-      expect(contents).toMatch(/<ModelSelector\s/);
-      expect(contents).toContain("<ModelSelectorTrigger asChild>");
+      expect(contents).toMatch(/<ModelPicker\s/);
+      expect(contents).toContain("<ModelPickerTrigger asChild>");
       expect(picker).toBeDefined();
       expect(picker).toMatch(
         new RegExp(`open=\\{${open.replace("?", "\\?")}\\}`),

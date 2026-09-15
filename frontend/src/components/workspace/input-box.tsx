@@ -116,11 +116,7 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
+import { ModelSelectorName } from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -150,7 +146,11 @@ import {
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
-import { ModelPickerContent } from "./model-picker-content";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
@@ -2723,11 +2723,11 @@ export function InputBox({
                 {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
               </span>
             )}
-            <ModelSelector
+            <ModelPicker
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
-              <ModelSelectorTrigger asChild>
+              <ModelPickerTrigger asChild>
                 <PromptInputButton
                   className="max-w-40 min-w-0 sm:max-w-56"
                   disabled={composerLocked}
@@ -2738,14 +2738,14 @@ export function InputBox({
                     </ModelSelectorName>
                   </div>
                 </PromptInputButton>
-              </ModelSelectorTrigger>
+              </ModelPickerTrigger>
               <ModelPickerContent
                 open={modelDialogOpen}
                 models={models}
                 selectedModelName={selectedModel?.name}
                 onModelSelect={handleModelSelect}
               />
-            </ModelSelector>
+            </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
               disabled={composerLocked || stopDenied}
