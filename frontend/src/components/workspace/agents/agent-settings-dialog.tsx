@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronRightIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -62,6 +62,7 @@ export function AgentSettingsDialog({
   const { t } = useI18n();
   const { models } = useModels();
   const { subagents } = useSubagents();
+  const subagentDescriptionId = useId();
   const updateAgent = useUpdateAgent();
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
@@ -355,13 +356,26 @@ export function AgentSettingsDialog({
                       </span>
                     </label>
                     {item.description && (
-                      <details className="group text-muted-foreground ml-6 text-xs">
+                      <details
+                        className="group text-muted-foreground ml-6 text-xs"
+                        onToggle={(event) => {
+                          if (event.currentTarget.open) {
+                            event.currentTarget
+                              .querySelector("p")
+                              ?.scrollIntoView({ block: "nearest" });
+                          }
+                        }}
+                      >
                         <summary
                           className="focus-visible:ring-ring flex cursor-pointer list-none items-start gap-1 rounded-sm focus-visible:ring-2 [&::-webkit-details-marker]:hidden"
                           aria-label={`${item.display_name ?? item.name}: ${t.settings.subagents.descriptionLabel}`}
+                          aria-describedby={`${subagentDescriptionId}-${item.name}`}
                         >
                           <ChevronRightIcon className="size-3 shrink-0 transition-transform group-open:rotate-90" />
-                          <span className="line-clamp-2 [overflow-wrap:anywhere] group-open:hidden">
+                          <span
+                            id={`${subagentDescriptionId}-${item.name}`}
+                            className="line-clamp-2 [overflow-wrap:anywhere] group-open:hidden"
+                          >
                             {item.description}
                           </span>
                           <span className="hidden group-open:inline">
