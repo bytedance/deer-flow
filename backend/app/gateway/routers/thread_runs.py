@@ -1360,9 +1360,10 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
-    # Resolve the caller once; it is needed both to scope the feedback query
-    # below and to list the thread's runs for turn-duration injection.
-    user_id = await get_current_user(request)
+    # Resolve the data-filter id once (None for internal callers — same
+    # rationale as the runs endpoints above); it scopes the feedback query,
+    # the hidden-run lookup, the event-store scan and turn-duration injection.
+    user_id = await _run_scope_user_id(request)
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     messages, _ = await _scan_visible_thread_messages(
@@ -1500,7 +1501,7 @@ async def list_thread_messages_page(
     if "after_seq" in request.query_params:
         raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
 
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     rows, has_more = await _scan_thread_message_page(
         thread_id,
         limit=limit,
