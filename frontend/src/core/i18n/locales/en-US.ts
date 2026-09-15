@@ -31,6 +31,7 @@ export const enUS: Translations = {
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    showingOf: (loaded, total) => `Showing ${loaded} of ${total}`,
     download: "Download",
     thinking: "Thinking",
     artifacts: "Artifacts",
@@ -201,6 +202,7 @@ export const enUS: Translations = {
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    removeProjectAttachment: "Remove attached document",
     inputPolish: "Polish input",
     inputPolishing: "Polishing input...",
     inputPolishNoChanges: "This input is already clear.",
@@ -355,7 +357,7 @@ export const enUS: Translations = {
     restore: "Restore",
     deleteProject: "Delete project",
     deleteProjectConfirm:
-      "Deleting this project unlinks its chats. Chats, their history, and their files are not deleted.",
+      "Deleting this project unlinks its chats; chats, their history, and their files are not deleted. Shelf documents move to trash and stay recoverable for the retention window.",
     archived: "Archived",
     empty: "No chats in this project yet.",
     newChat: "New chat",
@@ -374,6 +376,93 @@ export const enUS: Translations = {
     notFound: "Project not found or deleted.",
     projectUnavailable:
       "Couldn't link the chat to the project. Your message was not sent — try again.",
+    documents: "Documents",
+    documentsEmptyTitle: "No documents yet",
+    documentsEmptyHint:
+      "Upload files or save conversation files to build this project's shelf.",
+    instructions: "Instructions",
+    instructionsPlaceholder:
+      "Background, goals, and conventions the agent should always know for this project…",
+    instructionsByteCount: (used, max) => `${used} / ${max} bytes`,
+    instructionsTooLong: (max) =>
+      `Instructions are over the ${max}-byte limit. Shorten them to save.`,
+    instructionsSaved: "Saved",
+    instructionsSaveFailed: "Failed to save instructions",
+    documentsShelf: "Shelf",
+    documentsShelfHint: "Drop files here to add them to the shelf",
+    uploadDocuments: "Upload",
+    uploadingDocuments: "Uploading…",
+    uploadDocumentFailed: "Failed to upload document",
+    documentFromThread: (threadName, kind) => `from ${threadName} · ${kind}`,
+    documentKindUpload: "upload",
+    documentKindOutput: "output",
+    attachToThread: "Attach to chat",
+    attachDialogTitle: "Attach to chat",
+    attachDialogHint: "Choose a chat to attach this document to.",
+    attachNoThreads: "No chats available.",
+    attachFailed: "Failed to attach document",
+    attachedToThread: (name) => `Attached "${name}"`,
+    moveDocumentToTrash: "Move to trash",
+    moveDocumentToTrashTitle: "Move to trash?",
+    moveDocumentToTrashConfirm: (name, days) =>
+      `"${name}" will move to the trash and stay recoverable for ${days} days.`,
+    deleteDocumentFailed: "Failed to move document to trash",
+    contentMissing: "Content missing",
+    previewUnsupported:
+      "This file type can't be previewed in the browser. Download it to view it.",
+    archivedDocumentsBanner:
+      "This project is archived. Documents are read-only — upload, save to project, and trash are unavailable.",
+    conversationFiles: "Conversation files",
+    conversationFilesEmpty: "No files in this project's chats yet.",
+    threadFilesTruncated: (count) =>
+      `Only the first ${count} files of this chat are shown.`,
+    threadFilesBrowseInThread: "Browse all files in the chat",
+    saveToProject: "Save to project",
+    saveToProjectFailed: "Failed to save file to project",
+    savedToProject: (name) => `Saved "${name}" to the shelf`,
+    shelfNameLabel: "Shelf name",
+    viewTrash: "Trash",
+    documentsLoadFailed: "Couldn't load project documents",
+    threadFilesLoadFailed: "Couldn't load conversation files",
+    interimMemoryNotice:
+      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+  },
+
+  trash: {
+    title: "Trash",
+    empty: "Trash is empty.",
+    loadFailed: "Couldn't load trash",
+    retry: "Try again",
+    originProject: (projectName) => `from ${projectName}`,
+    unknownProject: "Unknown project",
+    retentionLeft: (days) =>
+      days <= 0
+        ? "Less than a day left"
+        : days === 1
+          ? "1 day left"
+          : `${days} days left`,
+    restore: "Restore",
+    restoreFailed: "Failed to restore document",
+    restoredToast: (name) => `Restored "${name}"`,
+    restoreMergedToast: (name) =>
+      `"${name}" matched existing shelf content — merged.`,
+    restoreConflict:
+      "This document's content is missing or damaged, so it stays in the trash.",
+    restorePickProjectTitle: "Choose a project",
+    restorePickProjectHint:
+      "The original project is gone or archived. Pick an active project to restore into.",
+    deletePermanently: "Delete permanently",
+    deletePermanentlyTitle: "Delete permanently?",
+    deletePermanentlyConfirm: (name) =>
+      `"${name}" will be permanently deleted. This cannot be undone.`,
+    purgeFailed: "Failed to delete document",
+    emptyTrash: "Empty trash",
+    emptyTrashTitle: "Empty trash?",
+    emptyTrashConfirm: (count) =>
+      count === 1
+        ? "1 document will be permanently deleted. This cannot be undone."
+        : `${count} documents will be permanently deleted. This cannot be undone.`,
+    emptyTrashFailed: "Failed to empty trash",
   },
 
   backgroundTasks: {

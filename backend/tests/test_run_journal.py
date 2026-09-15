@@ -1108,7 +1108,7 @@ class TestContextEvents:
         events = await store.list_events("t1", "r1", event_types=["context:memory"])
         assert len(events) == 1
         assert events[0]["category"] == "context"
-        assert events[0]["content"] == {"content_sha256": "a" * 64}
+        assert events[0]["content"] == {"content_sha256": "a" * 64, "project_context_revision": None, "project_shelf_revision": None}
 
     @pytest.mark.anyio
     async def test_record_memory_context_can_retry_after_buffer_failure(self, journal_setup, monkeypatch):
@@ -1132,7 +1132,7 @@ class TestContextEvents:
 
         events = await store.list_events("t1", "r1", event_types=["context:memory"])
         assert len(events) == 1
-        assert events[0]["content"] == {"content_sha256": "a" * 64}
+        assert events[0]["content"] == {"content_sha256": "a" * 64, "project_context_revision": None, "project_shelf_revision": None}
 
 
 class TestCallerBucketing:

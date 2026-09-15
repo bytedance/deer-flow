@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 44
+config_version: 45
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -1344,6 +1344,32 @@ read_before_write:
   # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
+
+# ============================================================================
+# Projects
+# ============================================================================
+# User projects group threads under a name plus free-form instructions. Member
+# threads receive the project's current instructions as a bounded, request-
+# scoped <project> block rendered from the snapshot pinned at run admission;
+# the block never enters the system prompt or persisted history. The shelf
+# index bounds below cap the request-scoped <documents> listing rendered from
+# the same pinned snapshot. Oversized instructions are rejected at write time
+# (422) and never truncated.
+
+projects:
+  # Hard UTF-8 byte cap for project instructions (range: 256-262144). Multi-
+  # byte characters count as their UTF-8 byte length, not as characters.
+  instructions_max_bytes: 8192
+  # Maximum shelf entries rendered into the <documents> index per run
+  # (range: 1-500).
+  shelf_index_max_entries: 50
+  # UTF-8 byte cap for the rendered <documents> index, counting IDs, escaped
+  # names, wrappers, separators and the overflow note (range: 512-65536).
+  # Usually binds before the entry cap for CJK document names.
+  shelf_index_max_bytes: 4096
+  # Days a trashed project document stays recoverable before the retention
+  # sweep may purge it permanently (range: 1-3650).
+  trash_retention_days: 30
 
 # ============================================================================
 # Provider Safety Termination Configuration
