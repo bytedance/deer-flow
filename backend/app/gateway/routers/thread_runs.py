@@ -1063,16 +1063,24 @@ def _parse_run_page_created_at(value: str) -> str:
 
 
 async def _run_scope_user_id(request: Request) -> str | None:
-    """Resolve the user id used to *filter* run rows, not to authorize access.
+    """Resolve the data-filter id for run and message reads, not for authorization.
 
     Thread visibility on these endpoints is already authorized by
     ``@require_permission(..., owner_check=True)``. Trusted internal callers
     are authorized as a synthetic internal user instead — ``id="default"``
     without an owner header, or the ``make_safe_user_id``-normalized owner
-    otherwise — while ``start_run`` stamps run rows with the raw trusted-owner
-    value. Filtering by the authorization identity therefore never matches the
-    persisted rows (#5437), so internal callers list the authorized thread's
-    runs unfiltered; browser/API sessions keep the per-user filter.
+    otherwise — while ``start_run`` stamps run rows and run-event rows with
+    the raw trusted-owner value. Filtering by the authorization identity
+    therefore never matches the persisted rows (#5437), so internal callers
+    read the authorized thread's runs, event-store messages, hidden-run
+    lookups, turn durations and feedback unfiltered; browser/API sessions
+    keep the per-user filter.
+
+    Feedback note: an explicit ``None`` also skips the ``user_id`` WHERE in
+    ``FeedbackRepository``, so on shared/NULL-owner threads several users'
+    feedback rows collapse per run — ``FeedbackRepository.list_by_thread_grouped``
+    / ``list_by_run_ids`` order deterministically (latest wins, ``feedback_id``
+    breaks ties) to keep that well-defined.
     """
     user = getattr(request.state, "user", None)
     if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
