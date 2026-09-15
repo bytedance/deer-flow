@@ -127,7 +127,13 @@ def test_required_prefix_no_match(catalog: SkillCatalog):
     assert result == []
 
 
-# ── Free-text regex search ────────────────────────────────────────────────────
+def test_required_prefix_keeps_single_letter_semantics():
+    catalog = SkillCatalog((_make_skill("r-analysis"), _make_skill("python-analysis")))
+
+    assert [skill.name for skill in catalog.search("+r")] == ["r-analysis"]
+
+
+# ── Free-text intent search ───────────────────────────────────────────────────
 
 
 def test_keyword_matches_name(catalog: SkillCatalog):
@@ -150,17 +156,90 @@ def test_name_match_scores_higher_than_description(catalog: SkillCatalog):
     assert result[0].name == "chart-visualization"
 
 
-def test_regex_case_insensitive(catalog: SkillCatalog):
+def test_search_is_case_insensitive(catalog: SkillCatalog):
     result_lower = catalog.search("data")
     result_upper = catalog.search("DATA")
     assert {s.name for s in result_lower} == {s.name for s in result_upper}
 
 
-def test_invalid_regex_falls_back_to_literal(catalog: SkillCatalog):
-    """Unbalanced paren should degrade to literal match, not raise."""
+def test_regex_punctuation_is_treated_as_literal_input(catalog: SkillCatalog):
+    """Model-generated punctuation must not be compiled or raise."""
     result = catalog.search("(invalid")
-    # Should not raise; may or may not match anything
     assert isinstance(result, list)
+
+
+def test_multi_term_query_matches_across_name_separators(catalog: SkillCatalog):
+    result = catalog.search("chart visualization")
+
+    assert result[0].name == "chart-visualization"
+
+
+def test_multi_term_query_matches_noncontiguous_description(catalog: SkillCatalog):
+    result = catalog.search("analyze Python")
+
+    assert result[0].name == "data-analysis"
+
+
+def test_more_intent_terms_outrank_incidental_match():
+    catalog = SkillCatalog(
+        (
+            _make_skill("python-style", "Format Python source code"),
+            _make_skill("spreadsheet-analysis", "Analyze spreadsheet data with Python"),
+        )
+    )
+
+    result = catalog.search("analyze spreadsheet python")
+
+    assert [skill.name for skill in result] == ["spreadsheet-analysis", "python-style"]
+
+
+def test_name_match_outranks_description_only_at_equal_coverage():
+    catalog = SkillCatalog(
+        (
+            _make_skill("scripting", "Automate work with Python"),
+            _make_skill("python-workflow", "Automate developer work"),
+        )
+    )
+
+    result = catalog.search("python")
+
+    assert [skill.name for skill in result] == ["python-workflow", "scripting"]
+
+
+def test_score_ties_preserve_catalog_order():
+    catalog = SkillCatalog(
+        (
+            _make_skill("first", "Generate reports"),
+            _make_skill("second", "Generate reports"),
+        )
+    )
+
+    assert [skill.name for skill in catalog.search("reports")] == ["first", "second"]
+
+
+def test_unicode_compatibility_normalization(catalog: SkillCatalog):
+    result = catalog.search("ＤＡＴＡ")
+
+    assert result[0].name == "data-analysis"
+
+
+def test_single_letter_language_term_remains_searchable():
+    catalog = SkillCatalog((_make_skill("cpp-analysis", "Analyze C++ code"),))
+
+    assert catalog.search("C++")[0].name == "cpp-analysis"
+
+
+def test_cjk_terms_rank_by_coverage():
+    catalog = SkillCatalog(
+        (
+            _make_skill("generic-chart", "生成可视化图表"),
+            _make_skill("data-visualization", "执行数据分析和可视化"),
+        )
+    )
+
+    result = catalog.search("数据 可视化")
+
+    assert [skill.name for skill in result] == ["data-visualization", "generic-chart"]
 
 
 def test_empty_query(catalog: SkillCatalog):
@@ -171,6 +250,16 @@ def test_empty_query(catalog: SkillCatalog):
 def test_whitespace_only_query(catalog: SkillCatalog):
     result = catalog.search("   ")
     assert result == []
+
+
+def test_punctuation_only_query(catalog: SkillCatalog):
+    assert catalog.search("((...---___") == []
+
+
+def test_long_query_is_bounded_and_does_not_raise(catalog: SkillCatalog):
+    result = catalog.search("data " * 100_000)
+
+    assert result[0].name == "data-analysis"
 
 
 def test_max_results_cap(catalog: SkillCatalog):
