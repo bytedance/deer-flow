@@ -136,11 +136,8 @@ export interface Translations {
 
   modelPicker: {
     title: string;
-    description: string;
     favorites: string;
     otherModels: string;
-    search: string;
-    noResults: string;
     noModels: string;
     favoriteModel: (displayName: string, name: string) => string;
     sessionOnly: string;
@@ -217,7 +214,6 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
-    searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;

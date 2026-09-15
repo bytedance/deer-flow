@@ -33,11 +33,8 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       modelPicker: {
         title: "Choose a model",
-        description: "Search for and select a model.",
         favorites: "Favorites",
         otherModels: "Other models",
-        search: "Search models",
-        noResults: "No matching models",
         noModels: "No models available",
         favoriteModel: (displayName: string, name: string) =>
           `Favorite ${displayName} (${name})`,
@@ -182,8 +179,13 @@ describe("ModelPickerContent anchored selection", () => {
   it("opens without a modal overlay and exposes inline favorite actions", async () => {
     render(<StatefulPicker />);
 
-    await screen.findByRole("dialog", { name: "Choose a model" });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Choose a model",
+    });
     expect(document.querySelector('[data-slot="dialog-overlay"]')).toBeNull();
+    expect(dialog.className).toContain("w-72");
+    expect(screen.queryByRole("searchbox")).toBeNull();
+    expect(screen.queryByText("Fast general model")).toBeNull();
     expect(favoriteButton(MODELS[0]!)).not.toBeNull();
     expect(
       screen.queryByRole("button", { name: "Manage favorites" }),
@@ -209,35 +211,19 @@ describe("ModelPickerContent anchored selection", () => {
     ]);
   });
 
-  it("omits empty group headings and searches all model identity fields", async () => {
+  it("omits the empty favorites heading without filtering the model list", async () => {
     favoriteNames = [];
     render(<StatefulPicker />);
-    const search = await screen.findByRole("searchbox", {
-      name: "Search models",
-    });
 
+    await screen.findByRole("dialog");
     expect(screen.queryByText("Favorites")).toBeNull();
-    fireEvent.change(search, { target: { value: "provider/gamma" } });
-    expect(modelButtons()).toHaveLength(1);
-    expect(modelButtons()[0]?.textContent).toContain("Gamma");
-
-    fireEvent.change(search, { target: { value: "Shared label" } });
-    expect(modelButtons()).toHaveLength(2);
-
-    fireEvent.change(search, { target: { value: "beta-api" } });
-    expect(modelButtons()).toHaveLength(1);
-    expect(modelButtons()[0]?.textContent).toContain("beta-api");
+    expect(screen.getByText("Other models")).not.toBeNull();
+    expect(modelButtons()).toHaveLength(MODELS.length);
   });
 
-  it("shows distinct no-model and no-result states", async () => {
-    const { rerender } = render(<ControlledPicker open models={[]} />);
+  it("shows the no-model state", async () => {
+    render(<ControlledPicker open models={[]} />);
     expect(await screen.findByText("No models available")).not.toBeNull();
-
-    rerender(<ControlledPicker open models={MODELS} />);
-    fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: "not-present" },
-    });
-    expect(screen.getByText("No matching models")).not.toBeNull();
   });
 
   it("selects duplicate-label models by their untouched names", async () => {
@@ -270,16 +256,20 @@ describe("ModelPickerContent anchored selection", () => {
     );
   });
 
-  it("moves between model buttons with arrows from search and rows", async () => {
+  it("focuses the current model and moves between rows with arrows", async () => {
     render(<StatefulPicker />);
-    const search = await screen.findByRole("searchbox");
+    const current = await screen.findByRole("button", {
+      name: `Shared label (${MODELS[0]!.name})`,
+    });
+    const gamma = screen.getByRole("button", {
+      name: `Gamma (${MODELS[2]!.name})`,
+    });
 
-    fireEvent.keyDown(search, { key: "ArrowDown" });
-    expect(document.activeElement).toBe(modelButtons()[0]);
-    fireEvent.keyDown(modelButtons()[0]!, { key: "ArrowDown" });
-    expect(document.activeElement).toBe(modelButtons()[1]);
-    fireEvent.keyDown(modelButtons()[1]!, { key: "ArrowUp" });
-    expect(document.activeElement).toBe(modelButtons()[0]);
+    await waitFor(() => expect(document.activeElement).toBe(current));
+    fireEvent.keyDown(current, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(gamma);
+    fireEvent.keyDown(gamma, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(current);
   });
 });
 
@@ -292,7 +282,7 @@ describe("ModelPickerContent favorite actions", () => {
     });
 
     expect(betaStar.getAttribute("aria-pressed")).toBe("true");
-    expect(betaStar.className).toContain("size-11");
+    expect(betaStar.className).toContain("size-8");
     fireEvent.click(betaStar);
 
     expect(setFavorite).toHaveBeenCalledWith(MODELS[1]!.name, false);
@@ -316,10 +306,41 @@ describe("ModelPickerContent favorite actions", () => {
     );
   });
 
+  it("preserves the user's focus during an external favorite regroup", async () => {
+    favoriteNames = [];
+    const { rerender } = render(
+      <ControlledPicker open selectedModelName={MODELS[0]!.name} />,
+    );
+    const beta = await screen.findByRole("button", {
+      name: `Shared label (${MODELS[1]!.name})`,
+    });
+    beta.focus();
+    expect(document.activeElement).toBe(beta);
+
+    favoriteNames = [MODELS[1]!.name];
+    rerender(<ControlledPicker open selectedModelName={MODELS[0]!.name} />);
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", {
+          name: `Shared label (${MODELS[1]!.name})`,
+        }),
+      ),
+    );
+
+    favoriteButton(MODELS[1]!).focus();
+    favoriteNames = [];
+    rerender(<ControlledPicker open selectedModelName={MODELS[0]!.name} />);
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(favoriteButton(MODELS[1]!)),
+    );
+  });
+
   it("hides stars when signed out and disables them during auth refresh", async () => {
     authUser = null;
     const { rerender } = render(<ControlledPicker open />);
-    await screen.findByRole("searchbox");
+    await screen.findByRole("dialog");
     expect(
       screen.queryByRole("button", { name: /Favorite Shared label/ }),
     ).toBeNull();
@@ -367,17 +388,27 @@ describe("ModelPickerContent favorite actions", () => {
 });
 
 describe("ModelPickerContent popover lifecycle", () => {
-  it("resets the query on every closed-to-open edge", async () => {
-    const { rerender } = render(<ControlledPicker open />);
-    fireEvent.change(await screen.findByRole("searchbox"), {
-      target: { value: "Shared label" },
+  it("focuses the current model on every closed-to-open edge", async () => {
+    const { rerender } = render(
+      <ControlledPicker open selectedModelName={MODELS[2]!.name} />,
+    );
+    const current = await screen.findByRole("button", {
+      name: `Gamma (${MODELS[2]!.name})`,
     });
+    await waitFor(() => expect(document.activeElement).toBe(current));
 
-    rerender(<ControlledPicker open={false} />);
-    rerender(<ControlledPicker open />);
+    rerender(
+      <ControlledPicker open={false} selectedModelName={MODELS[2]!.name} />,
+    );
+    screen.getByRole("button", { name: "Current model" }).focus();
+    rerender(<ControlledPicker open selectedModelName={MODELS[2]!.name} />);
 
-    expect((await screen.findByRole<HTMLInputElement>("searchbox")).value).toBe(
-      "",
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", {
+          name: `Gamma (${MODELS[2]!.name})`,
+        }),
+      ),
     );
   });
 

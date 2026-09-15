@@ -145,10 +145,12 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Interaction Ownership
 
-- `src/components/workspace/model-picker-content.tsx` owns model search,
-  favorite grouping, and the anchored non-modal picker shared by the main
+- `src/components/workspace/model-picker-content.tsx` owns the compact model
+  list, favorite grouping, and the anchored non-modal picker shared by the main
   composer and Side Chat. Each row keeps model selection and its inline
-  favorite star as sibling buttons. Favorites are stored by
+  favorite star as sibling buttons. The picker deliberately follows the
+  pre-favorites two-line row density and does not add a search field. Favorites
+  are stored by
   `core/models/favorites-store.ts` under a user-scoped browser key and only
   reorder derived display arrays: never sort `useModels().models`, promote a
   favorite to the default model, prune a temporarily unavailable favorite, or
