@@ -965,8 +965,8 @@ def test_no_hint_when_inject_assessment_disabled():
     assert hints == []
 
 
-def test_augment_request_deduplicates_identical_hints():
-    """L2: _augment_request must deduplicate identical hint strings via dict.fromkeys.
+def test_inject_hints_deduplicates_identical_hints():
+    """L2: _inject_hints must deduplicate identical hint strings via dict.fromkeys.
 
     If the same hint text appears multiple times in the queue (e.g. two successive
     no_results errors produce identical hint strings), only one copy should be
@@ -1343,6 +1343,56 @@ async def test_awrap_tool_call_malformed_meta_passthrough():
     assert result is bad_msg
     # No state was tracked — malformed meta is silently skipped
     assert mw._phase_states.get("t1", {}).get("web_search") is None
+
+
+def test_hint_survives_a_failed_sync_model_call():
+    mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
+    rt = _make_runtime()
+    req = _make_tool_request(runtime=rt)
+    error_msg = _make_error_message()
+    mw.wrap_tool_call(req, lambda r: error_msg)
+    mw.wrap_tool_call(req, lambda r: error_msg)
+
+    model_req = _make_model_request([], rt)
+    sent: list = []
+
+    def flaky_handler(r):
+        sent.append(r.messages)
+        if len(sent) == 1:
+            raise RuntimeError("503 Service Unavailable")
+        return MagicMock()
+
+    with pytest.raises(RuntimeError):
+        mw.wrap_model_call(model_req, flaky_handler)
+    mw.wrap_model_call(model_req, flaky_handler)
+
+    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True]
+
+
+@pytest.mark.anyio
+async def test_hint_survives_a_failed_model_call():
+    """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the hint must still be sent."""
+    mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
+    rt = _make_runtime()
+    req = _make_tool_request(runtime=rt)
+    error_msg = _make_error_message()
+    mw.wrap_tool_call(req, lambda r: error_msg)
+    mw.wrap_tool_call(req, lambda r: error_msg)
+
+    model_req = _make_model_request([], rt)
+    sent: list = []
+
+    async def flaky_handler(r):
+        sent.append(r.messages)
+        if len(sent) == 1:
+            raise RuntimeError("503 Service Unavailable")
+        return MagicMock()
+
+    with pytest.raises(RuntimeError):
+        await mw.awrap_model_call(model_req, flaky_handler)
+    await mw.awrap_model_call(model_req, flaky_handler)
+
+    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True]
 
 
 @pytest.mark.anyio

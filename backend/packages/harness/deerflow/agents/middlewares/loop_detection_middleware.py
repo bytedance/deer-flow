@@ -847,8 +847,26 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._pending_warning_touch_order.pop(pending_key, None)
         return warnings
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        """Append queued loop warnings (if any) to the outgoing message list.
+    def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
+        """Requeue warnings taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the warning. It would not be queued again: it is already marked warned.
+        """
+        if not warnings:
+            return
+        pending_key = self._pending_key(runtime)
+        with self._lock:
+            queued = self._pending_warnings[pending_key]
+            queued[:0] = [warning for warning in warnings if warning not in queued]
+            # Keep the restored warnings at the front; trim what came after them.
+            del queued[_MAX_PENDING_WARNINGS_PER_RUN:]
+            self._touch_pending_warning_key_locked(pending_key)
+            self._prune_pending_warning_state_locked(protected_key=pending_key)
+
+    def _inject_warnings(self, request: ModelRequest, warnings: list[str]) -> ModelRequest:
+        """Append *warnings* to the outgoing message list.
 
         The warning is placed *after* every existing message, including the
         ToolMessage responses to the previous AIMessage(tool_calls). This
@@ -857,7 +875,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         restriction (we use HumanMessage), and never mutates an existing
         AIMessage.
         """
-        warnings = self._drain_pending_warnings(request.runtime)
         if not warnings:
             return request
         new_messages = [
@@ -872,7 +889,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        warnings = self._drain_pending_warnings(request.runtime)
+        try:
+            return handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
 
     @override
     async def awrap_model_call(
@@ -880,7 +902,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        warnings = self._drain_pending_warnings(request.runtime)
+        try:
+            return await handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""

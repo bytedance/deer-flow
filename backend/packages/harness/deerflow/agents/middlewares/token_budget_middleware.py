@@ -344,6 +344,20 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             warnings = self._pending_warnings.pop(run_id, None)
         return warnings or []
 
+    def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
+        """Requeue warnings taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the warning. It is not queued twice: ``_warned`` is already set.
+        """
+        if not warnings:
+            return
+        run_id = self._get_run_id(runtime)
+        with self._lock:
+            queued = self._pending_warnings.setdefault(run_id, [])
+            queued[:0] = [warning for warning in warnings if warning not in queued]
+
     def _inject_warnings(self, request: ModelRequest, warnings: list[str]) -> ModelRequest:
         if not warnings:
             return request
@@ -357,14 +371,18 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:
-
         warnings = self._drain_pending_warnings(request.runtime)
-        request = self._inject_warnings(request, warnings)
-
-        return handler(request)
+        try:
+            return handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
 
     @override
     async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
-        request = self._inject_warnings(request, warnings)
-        return await handler(request)
+        try:
+            return await handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
