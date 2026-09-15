@@ -16,6 +16,7 @@ def _app_with_config(
     mcp_tasks_available: bool = False,
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
+    conversation_references_enabled: bool = False,
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -24,13 +25,11 @@ def _app_with_config(
         subagent_batch_repo_available = subagent_batches_available
     app.state.subagent_batch_repo = object() if subagent_batch_repo_available else None
     app.include_router(features.router)
-    tools = (
-        [
-            SimpleNamespace(name="browser_navigate", model_extra=browser_extra or {}),
-        ]
-        if browser_enabled
-        else []
-    )
+    tools = []
+    if browser_enabled:
+        tools.append(SimpleNamespace(name="browser_navigate", use="deerflow.community.browser:browser_navigate_tool", model_extra=browser_extra or {}))
+    if conversation_references_enabled:
+        tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
     fake_config = SimpleNamespace(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
         tools=tools,
@@ -54,6 +53,7 @@ def test_features_reports_agents_api_enabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
+        "conversation_references": {"enabled": False, "max_references": 3},
     }
 
 
@@ -71,7 +71,15 @@ def test_features_reports_agents_api_disabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
+        "conversation_references": {"enabled": False, "max_references": 3},
     }
+
+
+def test_features_reports_conversation_references_when_the_tool_is_configured() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, conversation_references_enabled=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["conversation_references"] == {"enabled": True, "max_references": 3}
 
 
 def test_features_reports_mcp_tasks_startup_capability() -> None:

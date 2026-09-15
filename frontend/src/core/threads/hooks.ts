@@ -92,6 +92,14 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
+   * Thread IDs of conversations the user attached for this run. They ride in
+   * `context.conversation_references`, which the Gateway consumes at admission;
+   * the LangGraph SDK drops unknown top-level body fields, so the top-level
+   * request field is not reachable from here. Display metadata for the
+   * transcript travels separately in `additionalKwargs`.
+   */
+  conversationReferences?: string[];
+  /**
    * Invoked exactly once when the send passes the in-flight guard and is
    * genuinely dispatched. It never fires on the early-return path, so callers
    * can safely perform one-time cleanup (e.g. clearing quoted references)
@@ -192,6 +200,52 @@ export function buildThreadSubmitMessages({
       },
     } as Message,
   ];
+}
+
+/**
+ * Run context sent with `thread.submit`. Both submit paths (send, and the
+ * regenerate/edit replay) build it here so the client half of the Gateway
+ * contract stays in one place: conversation references travel only as a plain
+ * `string[]` under `context.conversation_references`, only when the caller
+ * attached them, and never from local settings. A stray key in settings is
+ * dropped rather than forwarded, so a stale value can never grant access.
+ */
+export function buildRunContext({
+  settings,
+  threadId,
+  extraContext,
+  conversationReferences,
+}: {
+  settings: LocalSettings["context"];
+  threadId: string;
+  extraContext?: Record<string, unknown>;
+  conversationReferences?: string[];
+}): Record<string, unknown> {
+  const ownedSettings = Object.fromEntries(
+    Object.entries(settings).filter(
+      ([key]) => key !== "conversation_references",
+    ),
+  );
+  return {
+    ...extraContext,
+    ...ownedSettings,
+    ...(conversationReferences?.length
+      ? { conversation_references: [...conversationReferences] }
+      : {}),
+    thinking_enabled: settings.mode !== "flash",
+    is_plan_mode: settings.mode === "pro" || settings.mode === "ultra",
+    subagent_enabled: settings.mode === "ultra",
+    reasoning_effort:
+      settings.reasoning_effort ??
+      (settings.mode === "ultra"
+        ? "high"
+        : settings.mode === "pro"
+          ? "medium"
+          : settings.mode === "thinking"
+            ? "low"
+            : undefined),
+    thread_id: threadId,
+  };
 }
 
 // Stable identity for "no optimistic messages" so the merged-messages memo
@@ -2357,23 +2411,12 @@ export function useThreadStream({
             config: {
               recursion_limit: 1000,
             },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            context: buildRunContext({
+              settings: context,
+              threadId,
+              extraContext,
+              conversationReferences: options?.conversationReferences,
+            }),
           },
         );
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
@@ -2507,22 +2550,10 @@ export function useThreadStream({
           config: {
             recursion_limit: 1000,
           },
-          context: {
-            ...context,
-            thinking_enabled: context.mode !== "flash",
-            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
-            reasoning_effort:
-              context.reasoning_effort ??
-              (context.mode === "ultra"
-                ? "high"
-                : context.mode === "pro"
-                  ? "medium"
-                  : context.mode === "thinking"
-                    ? "low"
-                    : undefined),
-            thread_id: threadId,
-          },
+          // Replaying a turn never carries conversation references: the grant
+          // is per send, so a regenerate or edit runs without them unless the
+          // user attaches them again.
+          context: buildRunContext({ settings: context, threadId }),
         });
         void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
