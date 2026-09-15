@@ -12,7 +12,6 @@ import {
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   getSelectableSkills,
-  shouldReseedPickDraft,
   GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
@@ -21,6 +20,7 @@ import {
   parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
+  shouldReseedPickDraft,
   type SlashSuggestion,
 } from "@/components/workspace/input-box-helpers";
 import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
