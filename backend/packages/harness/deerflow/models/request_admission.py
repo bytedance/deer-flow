@@ -28,7 +28,7 @@ class RequestAdmission(BaseRateLimiter):
         self._lock = threading.Lock()
         self._waiters: deque[object] = deque()
 
-    def _try(self, ticket: object | None) -> bool:
+    def _try(self, ticket: object) -> bool:
         with self._lock:
             now = monotonic()
             if self._waiters and self._waiters[0] is not ticket:
@@ -38,13 +38,20 @@ class RequestAdmission(BaseRateLimiter):
             self._next = now + self._interval
             return True
 
-    def _enqueue(self) -> object:
-        ticket = object()
+    def _try_or_enqueue(self, *, blocking: bool) -> tuple[bool, object | None]:
+        """Atomically admit immediately or join the FIFO before newcomers can pass."""
         with self._lock:
+            now = monotonic()
+            if not self._waiters and now >= self._next:
+                self._next = now + self._interval
+                return True, None
+            if not blocking:
+                return False, None
             if len(self._waiters) >= self.config.max_queue_size:
                 raise AdmissionError("LLM admission queue is full; reduce workload or increase queue capacity.")
+            ticket = object()
             self._waiters.append(ticket)
-        return ticket
+            return False, ticket
 
     def _remove(self, ticket: object) -> None:
         with self._lock:
@@ -62,12 +69,12 @@ class RequestAdmission(BaseRateLimiter):
         return min(0.05, self._interval, until_next if until_next > 0 else self._interval, remaining)
 
     def acquire(self, *, blocking: bool = True) -> bool:
-        if self._try(None):
+        acquired, ticket = self._try_or_enqueue(blocking=blocking)
+        if acquired:
             return True
-        if not blocking:
+        if ticket is None:
             return False
         deadline = monotonic() + self.config.max_wait_seconds
-        ticket = self._enqueue()
         try:
             while True:
                 delay = self._delay(deadline)
@@ -78,12 +85,12 @@ class RequestAdmission(BaseRateLimiter):
             self._remove(ticket)
 
     async def aacquire(self, *, blocking: bool = True) -> bool:
-        if self._try(None):
+        acquired, ticket = self._try_or_enqueue(blocking=blocking)
+        if acquired:
             return True
-        if not blocking:
+        if ticket is None:
             return False
         deadline = monotonic() + self.config.max_wait_seconds
-        ticket = self._enqueue()
         try:
             while True:
                 delay = self._delay(deadline)
