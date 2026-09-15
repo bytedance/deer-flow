@@ -1744,7 +1744,8 @@ async def start_run(
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
-        candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
+        scope_messages = scope_graph_input.get("messages")
+        candidate_has_scope = isinstance(scope_messages, list) and any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_messages)
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
         replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
@@ -1973,11 +1974,7 @@ async def start_run(
                     # record. Accept the raw request as well for records written
                     # by older Gateway versions, while comparing canonical
                     # retries to the same representation as the stored record.
-                    if (
-                        (stored_input != body.input and stored_input != run_record_input)
-                        or record.assistant_id != body.assistant_id
-                        or stored.get("conversation_references", []) != conversation_references
-                    ):
+                    if (stored_input != body.input and stored_input != run_record_input) or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",

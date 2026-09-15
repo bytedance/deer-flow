@@ -94,7 +94,9 @@ owner-scoped assistant version selection remains enabled.
 
 Edit-replay and messages-input clarification may replace checkpoint knowledge
 scope with a validated client snapshot; regenerate and `Command` resume always
-recover checkpoint scope and ignore client values.
+recover checkpoint scope and ignore client values. Scope admission treats
+`input.messages: null` as an empty message collection so conversation-reference
+runs without a prompt remain valid.
 
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs
