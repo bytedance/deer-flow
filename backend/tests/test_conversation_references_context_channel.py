@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import UserList, deque
 from types import SimpleNamespace
 
 import pytest
@@ -58,13 +59,33 @@ def test_a_malformed_top_level_value_reports_its_type_error_not_the_conflict():
     assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [("list_type", ("conversation_references",))]
 
 
-@pytest.mark.parametrize("top_level", [("source",), {"source"}, frozenset({"source"})])
-def test_sequence_likes_the_field_accepts_also_report_the_conflict(top_level):
-    # Pydantic's lax mode coerces tuples and sets into the list field, so a
+@pytest.mark.parametrize(
+    "top_level",
+    [
+        ("source",),
+        {"source"},
+        frozenset({"source"}),
+        deque(["source"]),
+        UserList(["source"]),
+        dict.fromkeys(["source"]).keys(),
+        (item for item in ("source",)),
+    ],
+    ids=["tuple", "set", "frozenset", "deque", "UserList", "dict_keys", "generator"],
+)
+def test_everything_the_field_would_coerce_also_reports_the_conflict(top_level):
+    # Pydantic's lax mode coerces many iterables into the list field, so a
     # direct Python caller must not slip both grants past the conflict check.
+    # The guard asks pydantic itself instead of enumerating types.
     with pytest.raises(ValidationError) as exc:
         RunCreateRequest(conversation_references=top_level, context={"conversation_references": ["source"]})
     assert [error["type"] for error in exc.value.errors()] == ["conversation_references_conflict"]
+
+
+@pytest.mark.parametrize("top_level", [0, False, 1.5, {"thread": "source"}, b"source"], ids=["zero", "false", "float", "dict", "bytes"])
+def test_values_the_field_rejects_still_report_their_own_type_error(top_level):
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=top_level, context={"conversation_references": ["source"]})
+    assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [("list_type", ("conversation_references",))]
 
 
 def test_an_empty_top_level_list_does_not_conflict_with_context():

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections import deque
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from deerflow.runtime.stream_modes import RunStreamMode, UnsupportedStreamModeError, normalize_stream_modes
@@ -15,10 +14,11 @@ from deerflow.utils.thread_id import validate_thread_id
 # reports it so a UI can cap its selection to the same number.
 MAX_CONVERSATION_REFERENCES = 3
 
-# Inputs pydantic's lax mode coerces into the ``list[str]`` field. A top-level
-# value of one of these types alongside ``context.conversation_references`` is
-# a conflict; anything else is left to the field's own type error.
-_LIST_LIKE = (list, tuple, set, frozenset, deque)
+# Decides whether a top-level ``conversation_references`` value is something
+# the ``list[str]`` field would coerce (lax mode also accepts tuples, sets,
+# deques, generators, key views, ...). Asking pydantic keeps the conflict check
+# aligned with the field's acceptance set instead of enumerating types.
+_LIST_ADAPTER = TypeAdapter(list[Any])
 
 
 class RunCreateRequest(BaseModel):
@@ -74,9 +74,12 @@ class RunCreateRequest(BaseModel):
         if references is None:
             return lifted
         top_level = data.get("conversation_references")
-        if top_level is not None and not isinstance(top_level, _LIST_LIKE):
-            # Let the field report its own type error instead of a misleading conflict.
-            return data
+        if top_level is not None:
+            try:
+                top_level = _LIST_ADAPTER.validate_python(top_level)
+            except ValidationError:
+                # Let the field report its own type error instead of a misleading conflict.
+                return data
         if top_level:
             raise PydanticCustomError("conversation_references_conflict", "Pass conversation_references at the top level or in context, not both")
         lifted["conversation_references"] = references
