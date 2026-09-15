@@ -87,12 +87,51 @@ export interface LocalSettings {
   };
 }
 
+function migrateLegacyLocalSettings(
+  settings: Partial<LocalSettings> & Record<string, unknown>,
+): Partial<LocalSettings> {
+  const rawContext = {
+    ...(typeof settings.context === "object" && settings.context !== null
+      ? (settings.context as Record<string, unknown>)
+      : {}),
+  };
+  const legacy = settings as Record<string, unknown>;
+
+  const legacyThinkingEnabled =
+    rawContext.thinking_enabled ?? legacy.thinking_enabled;
+  const legacyIsPlanMode = rawContext.is_plan_mode ?? legacy.is_plan_mode;
+
+  if (legacyThinkingEnabled === undefined && legacyIsPlanMode === undefined) {
+    return settings;
+  }
+
+  const derivedMode: LocalSettings["context"]["mode"] =
+    legacyIsPlanMode === true
+      ? "pro"
+      : legacyThinkingEnabled === true
+        ? "thinking"
+        : "flash";
+
+  const migratedContext: Record<string, unknown> = { ...rawContext };
+  migratedContext.mode ??= derivedMode;
+
+  delete migratedContext.thinking_enabled;
+  delete migratedContext.is_plan_mode;
+
+  const migrated: Record<string, unknown> = { ...settings };
+  delete migrated.thinking_enabled;
+  delete migrated.is_plan_mode;
+  migrated.context = migratedContext;
+
+  return migrated as Partial<LocalSettings>;
+}
+
 function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
   return {
     ...DEFAULT_LOCAL_SETTINGS,
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
-      ...settings?.context,
+      ...migrateLegacyLocalSettings(settings ?? {})?.context,
     },
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
