@@ -74,7 +74,7 @@ export default function AgentChatPage() {
     agent_name: string;
   }>();
 
-  const { agent } = useAgent(agent_name);
+  const { agent, isLoading: agentSkillsLoading } = useAgent(agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -436,7 +436,8 @@ export default function AgentChatPage() {
                     threadId={threadId}
                     draftThreadId={isNewThread ? "new" : threadId}
                     draftAgentName={agent_name}
-                    agentSkillNames={agent ? agent.skills : []}
+                    agentSkillNames={agent?.skills}
+                    agentSkillsLoading={agentSkillsLoading}
                     defaultModelName={agent?.model}
                     autoFocus={isWelcomeMode}
                     status={

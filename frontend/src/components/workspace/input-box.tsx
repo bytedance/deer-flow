@@ -303,6 +303,7 @@ export function InputBox({
   onStop,
   canStopStreaming = true,
   agentSkillNames,
+  agentSkillsLoading = false,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -326,6 +327,7 @@ export function InputBox({
   draftThreadId?: string;
   draftAgentName?: string | null;
   agentSkillNames?: string[] | null;
+  agentSkillsLoading?: boolean;
   /**
    * The active custom agent's configured default model, if any. Used as the
    * auto-selection fallback so an agent chat honors the agent's own default
@@ -642,8 +644,9 @@ export function InputBox({
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
   const agentScopedSkills = useMemo(
-    () => filterSkillsForAgent(skills, agentSkillNames),
-    [agentSkillNames, skills],
+    () =>
+      agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
+    [agentSkillNames, agentSkillsLoading, skills],
   );
   const enabledSkillNames = useMemo(
     () =>
@@ -758,7 +761,7 @@ export function InputBox({
   }, [flushLatestDraft]);
 
   useEffect(() => {
-    if (skillsLoading || hydratedDraftKey === draftKey) {
+    if (skillsLoading || agentSkillsLoading || hydratedDraftKey === draftKey) {
       return;
     }
 
@@ -798,6 +801,7 @@ export function InputBox({
     initialValue,
     setTextInput,
     agentScopedSkills,
+    agentSkillsLoading,
     skillsLoading,
     textInput.value,
   ]);
