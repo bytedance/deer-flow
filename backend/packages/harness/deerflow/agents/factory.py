@@ -211,6 +211,7 @@ def _assemble_from_features(
       4.   GuardrailMiddleware (guardrail feature)
       5.   ToolErrorHandlingMiddleware (always)
       5a.  DurableContextMiddleware (always)
+      5b.  SystemMessageCoalescingMiddleware (always)
       6.   SummarizationMiddleware (summarization feature)
       7.   TodoMiddleware (plan_mode parameter)
       8.   TitleMiddleware (auto_title feature)
@@ -266,8 +267,12 @@ def _assemble_from_features(
     # both into model requests. It sits ahead of summarization, as in
     # make_lead_agent, so delegations are captured before they are compacted.
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     chain.append(DurableContextMiddleware())
+    # DurableContext adds its authority contract as a second SystemMessage; strict backends
+    # (vLLM, SGLang, Qwen, Anthropic) reject that, so merge them into one leading message.
+    chain.append(SystemMessageCoalescingMiddleware())
 
     # --- [6] Summarization ---
     if feat.summarization is not False:

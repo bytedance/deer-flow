@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain.agents import AgentState
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
@@ -935,6 +935,7 @@ def test_full_chain_order(mock_create_agent):
         "MyGuardrail",
         "ToolErrorHandlingMiddleware",
         "DurableContextMiddleware",
+        "SystemMessageCoalescingMiddleware",
         "MySummarization",
         "TodoMiddleware",
         "TitleMiddleware",
@@ -1122,6 +1123,7 @@ def test_summarization_feature_keeps_the_summary_in_model_requests():
     model = _RecordingFakeModel(responses=[AIMessage(content="one"), AIMessage(content="two"), AIMessage(content="three")])
     graph = create_deerflow_agent(
         model,
+        system_prompt="You are a test agent.",
         features=RuntimeFeatures(summarization=summarizer, sandbox=False),
         checkpointer=InMemorySaver(),
     )
@@ -1132,7 +1134,11 @@ def test_summarization_feature_keeps_the_summary_in_model_requests():
 
     assert result["summary_text"] == "compressed summary"
     assert "first" not in [message.content for message in result["messages"]]
-    assert any("compressed summary" in str(message.content) for message in model.received[-1])
+    request = model.received[-1]
+    assert any("compressed summary" in str(message.content) for message in request)
+    # The durable-context authority contract must not reach the provider as a second SystemMessage.
+    assert [index for index, message in enumerate(request) if isinstance(message, SystemMessage)] == [0]
+    assert "You are a test agent." in request[0].content
 
 
 # ---------------------------------------------------------------------------
