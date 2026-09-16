@@ -109,7 +109,10 @@ for (const viewport of [
       exact: true,
     });
     await general.check();
-    const details = dialog.locator("details").first();
+    const details = dialog
+      .locator("details")
+      .filter({ hasText: description })
+      .first();
     const summary = details.locator("summary");
     await summary.scrollIntoViewIfNeeded();
     const preview = summary.locator("span").first();
@@ -152,7 +155,9 @@ for (const viewport of [
   }) => {
     await page.setViewportSize(viewport);
     const { dialog } = await openSettings(page);
-    const summary = dialog.locator("summary").first();
+    const summary = dialog.locator(
+      'summary[aria-label="general-purpose: Delegation description"]',
+    );
     await summary.focus();
     await expect(summary).toHaveAccessibleName(
       "general-purpose: Delegation description",
@@ -166,7 +171,10 @@ for (const viewport of [
   }) => {
     await page.setViewportSize(viewport);
     const { dialog } = await openSettings(page);
-    const details = dialog.locator("details").first();
+    const details = dialog
+      .locator("details")
+      .filter({ hasText: description })
+      .first();
     const summary = details.locator("summary");
     await summary.focus();
     // Reproduce scrolling a focused disclosure to the last eight visible

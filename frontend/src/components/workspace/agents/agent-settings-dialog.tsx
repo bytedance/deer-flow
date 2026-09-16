@@ -27,6 +27,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useSubagents } from "@/core/subagents";
 
+import { AgentCapabilitySelection } from "./agent-capability-selection";
 import {
   allowedSubagentsToSelection,
   DEFAULT_MODEL_VALUE,
@@ -64,6 +65,10 @@ export function AgentSettingsDialog({
   const { subagents } = useSubagents();
   const subagentDescriptionId = useId();
   const updateAgent = useUpdateAgent();
+  const [plugins, setPlugins] = useState<string[] | null>(
+    agent.mcp_plugins ?? null,
+  );
+  const [skills, setSkills] = useState<string[] | null>(agent.skills ?? null);
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
@@ -142,6 +147,8 @@ export function AgentSettingsDialog({
         name: agent.name,
         request: {
           display_name: displayName.trim() || null,
+          mcp_plugins: plugins,
+          skills,
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -173,6 +180,12 @@ export function AgentSettingsDialog({
         </DialogHeader>
 
         <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto overscroll-contain px-1 py-1">
+          <AgentCapabilitySelection
+            plugins={plugins}
+            skills={skills}
+            onPluginsChange={setPlugins}
+            onSkillsChange={setSkills}
+          />
           <div className="space-y-1.5">
             <label htmlFor="agent-display-name" className="text-sm font-medium">
               {t.agents.settingsDisplayName}

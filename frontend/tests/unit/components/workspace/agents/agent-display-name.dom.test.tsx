@@ -23,6 +23,13 @@ rs.mock("@/core/models/hooks", () => ({ useModels: () => ({ models: [] }) }));
 rs.mock("@/core/subagents", () => ({
   useSubagents: () => ({ subagents: [] }),
 }));
+rs.mock("@/core/capabilities/hooks", () => ({
+  useCapabilityInstallations: () => ({
+    data: { items: [], can_manage: false },
+    isLoading: false,
+    isError: false,
+  }),
+}));
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
 

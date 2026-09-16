@@ -659,7 +659,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, include_conversation_reader=False, app_config=app_config)
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, mcp_plugins=None, include_conversation_reader=False, app_config=app_config)
     assert result["model"] is not None
 
 
@@ -1489,10 +1489,12 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
     assert captured["thinking_enabled"] is True  # request wins over agent's False
 
 
-def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
+@pytest.mark.parametrize("mcp_plugins", [None, [], ["installed-plugin"]])
+def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_plugins):
     """A request switch cannot widen an explicit Custom Agent hard deny."""
     app_config = _make_app_config([_make_model("agent-model", supports_thinking=False)])
     agent_config = _make_agent_config(model="agent-model", allowed_subagents=[])
+    agent_config.mcp_plugins = mcp_plugins
 
     import deerflow.tools as tools_module
 
@@ -1514,6 +1516,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
     get_available_tools.assert_called_once_with(
         model_name="agent-model",
         groups=None,
+        mcp_plugins=mcp_plugins,
         subagent_enabled=False,
         include_conversation_reader=False,
         app_config=app_config,
@@ -1521,6 +1524,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
     assert config["context"]["subagent_enabled"] is False
     assert config["configurable"]["subagent_enabled"] is False
     assert config["metadata"]["allowed_subagents"] == []
+    assert config["metadata"]["mcp_plugins"] == mcp_plugins
 
 
 def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):

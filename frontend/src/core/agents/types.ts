@@ -12,6 +12,7 @@ export interface Agent {
   model: string | null;
   tool_groups: string[] | null;
   skills: string[] | null;
+  mcp_plugins?: string[] | null;
   allowed_subagents?: string[] | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;
@@ -26,6 +27,7 @@ export interface CreateAgentRequest {
   model?: string | null;
   tool_groups?: string[] | null;
   skills?: string[] | null;
+  mcp_plugins?: string[] | null;
   allowed_subagents?: string[] | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;
@@ -39,6 +41,7 @@ export interface UpdateAgentRequest {
   model?: string | null;
   tool_groups?: string[] | null;
   skills?: string[] | null;
+  mcp_plugins?: string[] | null;
   allowed_subagents?: string[] | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;

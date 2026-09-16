@@ -6,6 +6,9 @@
  * `handleRunStream` from here.
  */
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import type { Page, Route } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
@@ -1853,6 +1856,60 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   );
 
   // Skills list — capability center and slash autocomplete
+  void page.route("**/api/capabilities/catalog", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: readFileSync(
+        path.resolve(
+          process.cwd(),
+          "../backend/packages/harness/deerflow/capabilities/builtin.json",
+        ),
+        "utf8",
+      ),
+    }),
+  );
+  void page.route("**/api/capabilities/installations/*", (route) => {
+    const adapter = route.request().url().split("/").pop();
+    const items =
+      adapter === "lark"
+        ? [
+            {
+              id: "lark",
+              plugin_id: "lark",
+              adapter: "lark",
+              name: "Lark / Feishu",
+              reference: "lark",
+              installed: larkIntegrationStatus.installed,
+              enabled: null,
+              version: null,
+              auth_status: "required",
+              health: "unknown",
+              scope: "user",
+              category: null,
+              icon: null,
+            },
+          ]
+        : adapter === "skills"
+          ? skills.map((skill) => ({
+              id: `skill:${skill.category ?? "public"}:${skill.name}`,
+              plugin_id: null,
+              adapter: "skills",
+              name: skill.name,
+              reference: skill.name,
+              description: skill.description,
+              installed: true,
+              enabled: skill.enabled ?? true,
+              version: null,
+              auth_status: "not_required",
+              health: "unknown",
+              scope: "deployment",
+              category: skill.category,
+              icon: null,
+            }))
+          : [];
+    return route.fulfill({ json: { items, can_manage: true } });
+  });
+
   void page.route("**/api/skills", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
