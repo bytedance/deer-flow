@@ -23,10 +23,15 @@ def test_parse_marker_127_is_command_failure_not_missing_path() -> None:
         parse_remote_list_dir_output(stdout, "/dir", pipeline_exit_code=0)
 
 
-def test_parse_marker_1_empty_is_missing_path() -> None:
-    stdout = "\n__DF_FIND_STATUS__:1\n"
+def test_parse_missing_marker_is_missing_path() -> None:
+    stdout = "__DF_FIND_STATUS__:missing\n"
     with pytest.raises(FileNotFoundError):
         parse_remote_list_dir_output(stdout, "/dir", pipeline_exit_code=0)
+
+
+def test_parse_marker_1_empty_is_incomplete_failure() -> None:
+    with pytest.raises(OSError, match="results would be incomplete"):
+        parse_remote_list_dir_output("\n__DF_FIND_STATUS__:1\n", "/dir", pipeline_exit_code=1)
 
 
 def test_parse_marker_1_with_entries_is_incomplete_failure() -> None:
@@ -63,7 +68,7 @@ def test_parse_falls_back_to_pipeline_exit_without_marker() -> None:
 
 @_POSIX_SH
 def test_parse_without_marker_real_subprocess_status_is_not_always_ok() -> None:
-    """``rm -f`` exits 0/1, both in _FIND_OK. A real process status with no marker must not become FileNotFoundError."""
+    """``rm -f`` exits 0/1. A process status without a marker must not become FileNotFoundError."""
     for script in ("exit 0", "exit 1"):
         proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
         with pytest.raises(OSError, match="marker missing"):
@@ -82,7 +87,7 @@ def test_command_records_find_status_after_head() -> None:
     assert "head -n 500" in command
     assert "__DF_FIND_STATUS__:" in command
     assert command.index("find -H ") < command.index("head -n")
-    assert command.index("head -n") < command.index("__DF_FIND_STATUS__:")
+    assert command.index("head -n") < command.rindex("__DF_FIND_STATUS__:")
     assert 'exit "${st:-126}"' in command
 
 
@@ -132,7 +137,7 @@ def _write_fake_find(tmp_path, script: str):
 def test_list_dir_command_surfaces_find_127_not_head_0(tmp_path) -> None:
     fake_bin = _write_fake_find(tmp_path, "#!/bin/sh\nexit 127\n")
     proc = _run_list_dir_script(
-        remote_list_dir_command("/dir", 2),
+        remote_list_dir_command(str(tmp_path), 2),
         env=_env_with_bin(str(fake_bin)),
     )
     assert proc.returncode == 127
@@ -144,7 +149,7 @@ def test_list_dir_command_surfaces_find_127_not_head_0(tmp_path) -> None:
 def test_list_dir_command_surfaces_partial_find_failure(tmp_path) -> None:
     fake_bin = _write_fake_find(tmp_path, '#!/bin/sh\nprintf "/dir/visible.txt\\n"\nexit 1\n')
     proc = _run_list_dir_script(
-        remote_list_dir_command("/dir", 2),
+        remote_list_dir_command(str(tmp_path), 2),
         env=_env_with_bin(str(fake_bin)),
     )
     assert proc.returncode == 1
@@ -156,7 +161,7 @@ def test_list_dir_command_surfaces_partial_find_failure(tmp_path) -> None:
 def test_list_dir_command_records_find_127_under_set_e(tmp_path) -> None:
     fake_bin = _write_fake_find(tmp_path, "#!/bin/sh\nexit 127\n")
     proc = _run_list_dir_script(
-        "set -e; " + remote_list_dir_command("/dir", 2),
+        "set -e; " + remote_list_dir_command(str(tmp_path), 2),
         env=_env_with_bin(str(fake_bin)),
     )
     assert proc.returncode == 127
@@ -169,6 +174,7 @@ def test_list_dir_command_records_find_127_under_set_e(tmp_path) -> None:
 def test_list_dir_command_missing_path_is_file_not_found(tmp_path) -> None:
     missing = tmp_path / "no-such-dir"
     proc = _run_list_dir_script(remote_list_dir_command(str(missing), 2))
+    assert proc.stdout.strip() == "__DF_FIND_STATUS__:missing"
     with pytest.raises(FileNotFoundError):
         parse_remote_list_dir_output(proc.stdout, str(missing), pipeline_exit_code=proc.returncode)
 
@@ -195,10 +201,21 @@ def test_list_dir_command_head_truncation_is_not_an_error(tmp_path) -> None:
     fake_find.chmod(fake_find.stat().st_mode | stat.S_IEXEC)
 
     proc = _run_list_dir_script(
-        remote_list_dir_command("/dir", 2),
+        remote_list_dir_command(str(tmp_path), 2),
         env=_env_with_bin(str(fake_bin)),
     )
     entries = parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
     assert len(entries) == 500
     assert entries[0] == "/dir/f1"
     assert entries[-1] == "/dir/f500"
+
+
+@_POSIX_SH
+def test_list_dir_existing_root_with_no_output_is_incomplete_failure(tmp_path) -> None:
+    root = tmp_path / "unreadable 'directory"
+    root.mkdir()
+    fake_bin = _write_fake_find(tmp_path, "#!/bin/sh\nexit 1\n")
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2), env=_env_with_bin(str(fake_bin)))
+    assert proc.returncode == 1
+    with pytest.raises(OSError, match="results would be incomplete"):
+        parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)

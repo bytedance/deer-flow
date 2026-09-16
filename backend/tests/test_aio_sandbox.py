@@ -620,11 +620,13 @@ class TestListDirSerialization:
         with pytest.raises(OSError, match="Failed to list directory"):
             sandbox.list_dir("/test")
 
-    def test_list_dir_raises_when_find_returns_no_entries(self, sandbox):
-        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="\n__DF_FIND_STATUS__:1\n", exit_code=1)))
+    @pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+    def test_list_dir_classifies_empty_failure(self, sandbox, marker, error):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output=f"\n__DF_FIND_STATUS__:{marker}\n", exit_code=1)))
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(error) as exc:
             sandbox.list_dir("/missing")
+        assert type(exc.value) is error
 
     def test_list_dir_raises_oserror_when_result_data_is_none(self, sandbox):
         sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=None))
