@@ -303,9 +303,113 @@ class TestTruncateReadFileOutput:
         assert result.startswith("a\nb\nXXXX")
         assert result.count("X") > 49000  # the line boundary at char 4 is not used: it would drop the whole budget
         assert f"of {len(output)} chars" in result
-        assert "cut inside line 3 of 3" in result
-        assert "Continue with start_line=3" in result
+        assert "cut inside line 3 of 3 lines" in result
+        # Re-reading line 3 could only be truncated to the same head, so it is not offered as the continuation.
+        assert "Continue with start_line" not in result
+        assert "longer than a read can return" in result and "cut -c" in result
+        assert "start_line/end_line" in result
         assert len(result) <= 50000
+
+    def test_fallback_names_the_line_when_it_fits_a_fresh_read(self):
+        lines = [f"line {i}" for i in range(1, 2001)]
+        lines[1499] = "L" * 6000  # a long line at the cut, but one a fresh read can return whole
+        output = "\n".join(lines) + "\n"
+        # The cut lands about 5,000 chars into the long line: past the 4,096-char slack, so the
+        # boundary is not used, while the whole 6,000-char line still fits a fresh read.
+        max_chars = len("\n".join(lines[:1499])) + 1 + 5000 + 300
+        result = _truncate_read_file_output(output, max_chars)
+        assert "cut inside line 1500 of 2000 lines" in result
+        assert "Continue with start_line=1500" in result
+        assert len(result) <= max_chars
+
+    def test_ranged_read_marker_uses_file_line_numbers(self):
+        lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
+        # A ranged read from line 744 returns the file's lines 744.., renumbered from 1 by the provider.
+        output = "\n".join(lines[743:]) + "\n"
+        result = _truncate_read_file_output(output, 50000, line_offset=743)
+        kept_text = result[: result.index("... [truncated:")]
+        shown = kept_text.count("\n")
+        assert f"showing lines 744-{743 + shown} of 744-3000 lines" in result
+        assert f"Continue with start_line={743 + shown + 1}" in result
+        assert "showing first" not in result
+
+    def test_ranged_read_fallback_names_the_file_line(self):
+        output = "a\nb\n" + "X" * 60000
+        result = _truncate_read_file_output(output, 50000, line_offset=10)
+        assert "cut inside line 13 of 11-13 lines" in result
+
+    def test_a_line_exactly_as_long_as_the_budget_is_kept_as_a_complete_line(self):
+        # Sweep budgets around the marker size so that for some max_chars the
+        # first line's newline sits exactly at the char budget. A named
+        # continuation must always move past line 1; naming line 1 again would
+        # send the model in a circle.
+        output = "\n".join("x" * 40 for _ in range(100)) + "\n"
+        seen_boundary_at_40 = False
+        for max_chars in range(200, 420):
+            result = _truncate_read_file_output(output, max_chars)
+            if result == output:
+                continue
+            assert len(result) <= max_chars
+            marker = result.find("... [truncated:")
+            assert output.startswith(result[:marker].rstrip("\n"))
+            match = re.search(r"Continue with start_line=(\d+)", result)
+            if match and "Read that line whole" not in result:
+                assert int(match.group(1)) >= 2, (max_chars, result[marker:])
+            if result[:marker] == "x" * 40 + "\n":
+                seen_boundary_at_40 = True
+                assert "showing first 1 of 100 lines" in result
+                assert "Continue with start_line=2" in result
+        assert seen_boundary_at_40
+
+    def test_a_ranged_read_never_names_its_own_first_line_as_the_continuation(self):
+        output = "\n".join("x" * 40 for _ in range(100)) + "\n"  # the provider's slice for start_line=2
+        for max_chars in range(200, 420):
+            result = _truncate_read_file_output(output, max_chars, line_offset=1)
+            if result == output:
+                continue
+            match = re.search(r"Continue with start_line=(\d+)", result)
+            if match and "Read that line whole" not in result:
+                assert int(match.group(1)) >= 3, (max_chars, result[result.find("... [truncated:") :])
+
+    def test_fallback_offers_a_single_line_read_when_only_the_line_alone_fits(self):
+        tail = "".join(f"tail {i}\n" for i in range(200))
+        # Longer than what a read carrying a marker keeps, but not longer than max_chars:
+        # read_file(start_line=2, end_line=2) returns it whole.
+        output = "a\n" + "y" * 49900 + "\n" + tail
+        result = _truncate_read_file_output(output, 50000)
+        assert "cut inside line 2 of 202 lines" in result
+        assert "Read that line whole with start_line=2, end_line=2, then continue with start_line=3" in result
+        assert _truncate_read_file_output("y" * 49900, 50000) == "y" * 49900
+        # Longer than max_chars: no read_file call can return it, so bash is the only honest pointer.
+        output = "a\n" + "y" * 50001 + "\n" + tail
+        result = _truncate_read_file_output(output, 50000)
+        assert "Continue with start_line" not in result and "Read that line whole" not in result
+        assert "longer than a read can return" in result and "cut -c" in result
+
+    def test_a_budget_too_small_for_any_marker_still_says_the_output_was_cut(self):
+        output = "".join(f"{i:04d} " + "x" * 55 + "\n" for i in range(1, 1001))
+        for max_chars in (10, 60, 150, 238):
+            result = _truncate_read_file_output(output, max_chars)
+            assert len(result) <= max_chars
+            assert result.startswith("... [truncated:"[:max_chars])
+            assert not result.startswith("0001")
+
+    def test_a_joined_slice_counts_an_empty_last_line(self):
+        # Providers return a ranged read as lines joined with newlines, so a
+        # trailing newline there is an empty last line, not a terminator.
+        lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3000)] + [""]
+        output = "\n".join(lines)  # 3000 lines ending with a blank one
+        result = _truncate_read_file_output(output, 50000, line_offset=1, joined_lines=True)
+        assert "of 2-3001 lines" in result
+        result = _truncate_read_file_output(output + "\n", 50000)
+        assert "of 3000 lines" in result  # a whole-file read: the trailing newline terminates the last line
+
+    def test_single_line_read_form_names_no_continuation_after_the_last_line(self):
+        result = _truncate_read_file_output("a\n" + "y" * 50000, 50000)
+        assert "Read that line whole with start_line=2, end_line=2]" in result
+        assert "then continue" not in result
+        result = _truncate_read_file_output("a\n" + "y" * 50000 + "\nz\n", 50000)
+        assert "Read that line whole with start_line=2, end_line=2, then continue with start_line=3]" in result
 
     def test_file_without_trailing_newline_counts_its_last_line(self):
         lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
