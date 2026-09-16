@@ -25,6 +25,17 @@ implementation. A middleware that leaves a hook alone costs nothing, and an
 extension middleware wrapped by ``IsolatedMiddleware`` — which mirrors that
 identity precisely so LangChain sees the wrapper as the middleware it wraps —
 is counted exactly like its inner middleware.
+
+The per-turn cost is a flat multiplier, which models the straight
+``before_model -> model -> tools`` loop and nothing else. A hook that declares
+``can_jump_to`` and returns ``{"jump_to": ...}`` re-enters the loop without
+traversing ``tools``, spending another ``before_model + model + after_model``
+pass that buys no tool result — so a chain containing one makes the resolved
+limit a lower bound rather than an exact budget. How often a jump fires is
+data-dependent and unbounded, so it cannot be folded into the arithmetic;
+:func:`find_jumping_hooks` exposes the condition instead, and the subagent
+executor warns when a counted hook declares one. No middleware in today's
+subagent chain does.
 """
 
 from __future__ import annotations
@@ -45,6 +56,10 @@ _LOOP_NODES_PER_TURN = 2
 # pair, whichever side (or both) a middleware overrides.
 _LOOP_HOOK_PAIRS = (("before_model", "abefore_model"), ("after_model", "aafter_model"))
 _INVOCATION_HOOK_PAIRS = (("before_agent", "abefore_agent"), ("after_agent", "aafter_agent"))
+
+# Where LangChain's ``hook_config(can_jump_to=...)`` decorator leaves its
+# declaration; the factory reads the same attribute off the same hook methods.
+_JUMP_DECLARATION_ATTR = "__can_jump_to__"
 
 
 def _implements(middleware: Any, hook_pair: tuple[str, str]) -> bool:
@@ -77,11 +92,39 @@ def count_invocation_steps(middlewares: Sequence[Any]) -> int:
     return _count_nodes(middlewares, _INVOCATION_HOOK_PAIRS)
 
 
+def find_jumping_hooks(middlewares: Sequence[Any]) -> list[tuple[str, str]]:
+    """Counted hooks that declare a jump, as ``(middleware, hook)`` name pairs.
+
+    Such a hook can re-enter the agent loop without traversing ``tools``, which
+    costs super-steps the flat per-turn multiplier does not model, so a non-empty
+    result means :func:`resolve_recursion_limit` is a lower bound. Only the
+    per-turn hooks are inspected: ``before_agent`` / ``after_agent`` run once per
+    invocation, and a jump out of them lands in the loop the budget already pays
+    for. The declaration is read off the same attribute, on the same overridden
+    methods, that LangChain's factory reads it from.
+    """
+    jumping: list[tuple[str, str]] = []
+    for middleware in middlewares:
+        middleware_type = type(middleware)
+        for hook_pair in _LOOP_HOOK_PAIRS:
+            for hook in hook_pair:
+                # No identity check against the base method is needed here, unlike
+                # in the node counting above: only ``hook_config`` writes this
+                # attribute, and it is never on ``AgentMiddleware``'s own hooks, so
+                # a middleware that leaves the hook alone reads back as no jump.
+                if getattr(getattr(middleware_type, hook, None), _JUMP_DECLARATION_ATTR, None):
+                    jumping.append((middleware_type.__name__, hook))
+    return jumping
+
+
 def resolve_recursion_limit(max_turns: int, middlewares: Sequence[Any]) -> int:
     """The ``recursion_limit`` that buys *max_turns* turns through this chain.
 
     A non-positive ``max_turns`` is clamped to one turn: LangGraph rejects a
     ``recursion_limit`` below 1, and a misconfigured budget should still let the
     agent answer once rather than fail the run before it starts.
+
+    The result is exact for a chain of non-jumping hooks and a lower bound
+    otherwise; see :func:`find_jumping_hooks`.
     """
     return max(1, max_turns) * count_turn_steps(middlewares) + count_invocation_steps(middlewares)

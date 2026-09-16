@@ -52,7 +52,7 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
-from deerflow.subagents.turn_budget import resolve_recursion_limit
+from deerflow.subagents.turn_budget import find_jumping_hooks, resolve_recursion_limit
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
@@ -1041,6 +1041,21 @@ class SubagentExecutor:
             recursion_limit,
             len(middlewares),
         )
+        # A hook that declares ``can_jump_to`` re-enters the loop without
+        # traversing ``tools``, spending super-steps the flat per-turn cost does
+        # not model, so the budget silently becomes a lower bound. No middleware
+        # in the subagent chain declares one today; say so loudly if that
+        # changes, rather than letting runs quietly cap short again.
+        jumping_hooks = find_jumping_hooks(middlewares)
+        if jumping_hooks:
+            logger.warning(
+                "[trace=%s] Subagent %s has jump-declaring middleware hooks (%s); recursion_limit=%s is a lower bound for max_turns=%s, so the run may cap early",
+                self.trace_id,
+                self.config.name,
+                ", ".join(f"{name}.{hook}" for name, hook in jumping_hooks),
+                recursion_limit,
+                self.config.max_turns,
+            )
         return recursion_limit
 
     def _describe_assembly(

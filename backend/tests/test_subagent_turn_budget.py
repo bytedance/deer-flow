@@ -11,14 +11,14 @@ Covers:
 
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.errors import GraphRecursionError
 
-from deerflow.subagents.turn_budget import count_invocation_steps, count_turn_steps, resolve_recursion_limit
+from deerflow.subagents.turn_budget import count_invocation_steps, count_turn_steps, find_jumping_hooks, resolve_recursion_limit
 
 
 def _middleware(name: str, *hooks: str) -> AgentMiddleware:
@@ -96,6 +96,48 @@ class TestResolveRecursionLimit:
         assert resolve_recursion_limit(-5, []) == 2
 
 
+class TestFindJumpingHooks:
+    """A jump re-enters the loop without traversing ``tools``.
+
+    The flat per-turn multiplier does not model that, and how often a jump fires
+    is data-dependent, so the condition is reported rather than priced in.
+    """
+
+    def test_reports_the_middleware_and_hook_that_declares_a_jump(self):
+        class Jumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                return None
+
+        assert find_jumping_hooks([Jumper()]) == [("Jumper", "after_model")]
+
+    def test_reports_an_async_hook_declaration(self):
+        class AsyncJumper(AgentMiddleware):
+            @hook_config(can_jump_to=["end"])
+            async def abefore_model(self, state, runtime):
+                return None
+
+        assert find_jumping_hooks([AsyncJumper()]) == [("AsyncJumper", "abefore_model")]
+
+    def test_plain_hooks_declare_no_jump(self):
+        chain = [_middleware("Before", "before_model"), _middleware("After", "after_model")]
+
+        assert find_jumping_hooks(chain) == []
+
+    def test_agent_level_hooks_are_not_reported(self):
+        """They run once per invocation; a jump out of them lands in the paid-for loop."""
+
+        class LifecycleJumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def before_agent(self, state, runtime):
+                return None
+
+        assert find_jumping_hooks([LifecycleJumper()]) == []
+
+    def test_object_without_hooks_is_not_reported(self):
+        assert find_jumping_hooks([object()]) == []
+
+
 class _ScriptedModel(BaseChatModel):
     """Emits ``turns - 1`` tool calls, then a final text answer."""
 
@@ -161,3 +203,46 @@ class TestFormulaMatchesCompiledGraph:
         chain = [_middleware(*spec) for spec in hooks]
 
         assert resolve_recursion_limit(turns, chain) == _smallest_limit_completing(chain, turns)
+
+    def test_a_jumping_hook_makes_the_limit_a_lower_bound(self):
+        """Why ``find_jumping_hooks`` exists, pinned against a real graph.
+
+        The model here counts progress off the ToolMessages actually in state, so
+        a jump — which re-enters the model without traversing ``tools`` — buys no
+        progress and is pure overhead, the retry/repair shape.
+        """
+
+        class _ToolProgressModel(_ScriptedModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+                executed = sum(1 for message in messages if getattr(message, "type", None) == "tool")
+                if executed < self.turns:
+                    message = AIMessage(content="", tool_calls=[{"name": "ping", "args": {}, "id": f"call-{executed}"}])
+                else:
+                    message = AIMessage(content="done")
+                return ChatResult(generations=[ChatGeneration(message=message)])
+
+        class _JumpOnce(AgentMiddleware):
+            def __init__(self) -> None:
+                super().__init__()
+                self.jumped = False
+
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                if self.jumped:
+                    return None
+                self.jumped = True
+                return {"jump_to": "model"}
+
+        tool_turns = 3
+        budget_turns = tool_turns + 1  # the tool turns plus the turn that answers
+
+        def build(limit):
+            return create_agent(model=_ToolProgressModel(turns=tool_turns), tools=[ping], middleware=[_JumpOnce()], checkpointer=False).invoke({"messages": [("user", "go")]}, {"recursion_limit": limit})
+
+        resolved = resolve_recursion_limit(budget_turns, [_JumpOnce()])
+        with pytest.raises(GraphRecursionError):
+            build(resolved)
+        # One jump costs another before_model + model + after_model pass.
+        build(resolved + count_turn_steps([_JumpOnce()]) - 1)
+
+        assert find_jumping_hooks([_JumpOnce()]) == [("_JumpOnce", "after_model")]

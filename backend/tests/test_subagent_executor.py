@@ -437,6 +437,56 @@ class TestAgentConstruction:
         # model + tools + two after_model nodes, once per turn.
         assert executor._recursion_limit == base_config.max_turns * 4
 
+    def test_create_agent_warns_when_a_counted_hook_can_jump(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """A jump re-enters the loop without traversing ``tools``.
+
+        The flat per-turn cost does not model that, so the resolved limit becomes
+        a lower bound. Nothing in today's subagent chain declares a jump; if one
+        ever does, the run must not quietly cap short the way it did before this
+        translation existed.
+        """
+        import logging
+
+        from langchain.agents.middleware import AgentMiddleware, hook_config
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _Jumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                return None
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [_Jumper()],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        with caplog.at_level(logging.WARNING, logger=executor_module.logger.name):
+            executor._create_agent()
+
+        assert "_Jumper.after_model" in caplog.text
+        assert "lower bound" in caplog.text
+
     @pytest.mark.anyio
     async def test_load_skills_uses_explicit_app_config_for_skill_storage(
         self,
