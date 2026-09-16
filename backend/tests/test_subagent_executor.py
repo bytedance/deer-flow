@@ -3067,73 +3067,102 @@ class TestCooperativeCancellation:
         assert result.error is None
         assert result.is_execution_teardown_complete()
 
-    def test_execute_async_teardown_event_is_set_after_run_with_timeout_returns(self, executor_module, classes, base_config):
+    def test_execute_async_teardown_event_is_set_after_run_with_timeout_returns(self, executor_module, base_config, monkeypatch):
         """Teardown event fires only after ``_aexecute``'s lease/holder release.
 
-        Terminal status is published earlier and is not confirmation. The
-        patched ``delayed_aexecute`` models production ``_aexecute``'s
-        ``finally`` (sandbox lease / holder release) so the test pins
-        ``["release", "teardown_event"]`` rather than only "event unset
-        while the coroutine body is sleeping".
+        Terminal status is published earlier and is not confirmation. This
+        drives production ``_aexecute_admitted`` ``finally`` (the sandbox
+        lease release) and ``run_with_timeout``'s mark, so moving
+        ``mark_execution_teardown_complete()`` to the top of that
+        ``finally`` — before release — inverts ``["release", "teardown_event"]``.
         """
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
+        SubagentExecutor = executor_module.SubagentExecutor
+        SubagentStatus = executor_module.SubagentStatus
 
-        terminal_published = threading.Event()
-        release_teardown = threading.Event()
+        in_release = threading.Event()
+        finish_release = threading.Event()
         order: list[str] = []
         lease_held = True
 
-        async def delayed_aexecute(_task, result_holder=None):
-            nonlocal lease_held
-            try:
-                result_holder.try_set_terminal(SubagentStatus.FAILED, error="synthetic")
-                terminal_published.set()
-                deadline = asyncio.get_running_loop().time() + 5
-                while not release_teardown.is_set():
-                    if asyncio.get_running_loop().time() >= deadline:
+        class ImmediateSlot:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class ImmediateCapacity:
+            def slot(self):
+                return ImmediateSlot()
+
+        class DelayedLeaseManager:
+            async def release_async(self, _owner_id):
+                nonlocal lease_held
+                in_release.set()
+                deadline = time.monotonic() + 5
+                while not finish_release.is_set():
+                    if time.monotonic() >= deadline:
                         break
                     await asyncio.sleep(0.01)
-                return result_holder
-            finally:
-                # Stand-in for production ``_aexecute``'s sandbox lease/holder
-                # release. Append only after that work so a mark moved to the
-                # top of this ``finally`` would invert the order.
                 lease_held = False
                 order.append("release")
+
+        async def failing_stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "shared"
+            raise RuntimeError("synthetic")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent = MagicMock()
+        mock_agent.astream = failing_stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = MagicMock()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: DelayedLeaseManager())
 
         executor = SubagentExecutor(
             config=base_config,
             tools=[],
             thread_id="test-thread",
             trace_id="teardown-signal-trace",
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+            execution_capacity=ImmediateCapacity(),
         )
-        with patch.object(executor, "_aexecute", side_effect=delayed_aexecute):
-            task_id = executor.execute_async("Task")
-            assert terminal_published.wait(timeout=3), "terminal status was not published"
-            result = executor_module.get_background_task_result(task_id)
-            assert result is not None
-            assert result.status == SubagentStatus.FAILED
-            assert lease_held, "sandbox lease/holder was released before _aexecute returned"
-            assert not result.is_execution_teardown_complete()
-            # Hook this result's event so "teardown_event" is recorded at the
-            # moment it is set (this class reloads the executor module, so a
-            # patch on classes["SubagentResult"] would miss the live class).
-            original_set = result.execution_teardown_event.set
+        task_id = None
+        try:
+            with (
+                patch.object(executor_module, "build_tracing_callbacks", return_value=[]),
+                patch.object(executor_module, "inject_langfuse_metadata"),
+                patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+                patch.object(executor, "_create_agent", return_value=mock_agent),
+            ):
+                task_id = executor.execute_async("Task")
+                assert in_release.wait(timeout=3), "sandbox lease release did not start"
+                result = executor_module.get_background_task_result(task_id)
+                assert result is not None
+                assert result.status == SubagentStatus.FAILED
+                assert lease_held, "sandbox lease/holder was released before _aexecute's finally finished"
+                assert not result.is_execution_teardown_complete()
+                # Hook this result's event so "teardown_event" is recorded at
+                # the moment it is set (this class reloads the executor
+                # module, so a patch on classes["SubagentResult"] would miss
+                # the live class).
+                original_set = result.execution_teardown_event.set
 
-            def tracking_set():
-                first = not result.execution_teardown_event.is_set()
-                if first:
-                    order.append("teardown_event")
-                original_set()
+                def tracking_set():
+                    first = not result.execution_teardown_event.is_set()
+                    if first:
+                        order.append("teardown_event")
+                    original_set()
 
-            result.execution_teardown_event.set = tracking_set
-            release_teardown.set()
-            assert result.execution_teardown_event.wait(timeout=3), "teardown event was not set after run_with_timeout"
-            assert result.is_execution_teardown_complete()
-            assert not lease_held
-            assert order == ["release", "teardown_event"]
-        executor_module.cleanup_background_task(task_id)
+                result.execution_teardown_event.set = tracking_set
+                finish_release.set()
+                assert result.execution_teardown_event.wait(timeout=3), "teardown event was not set after run_with_timeout"
+                assert result.is_execution_teardown_complete()
+                assert not lease_held
+                assert order == ["release", "teardown_event"]
+            if task_id is not None:
+                executor_module.cleanup_background_task(task_id)
+        finally:
+            finish_release.set()
 
     def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
         """Concurrent runs must not share registry entries when provider IDs collide."""
