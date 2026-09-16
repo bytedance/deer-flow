@@ -582,6 +582,33 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **scheduler:** Enforce the global `max_concurrent_runs` budget on SQLite,
+  which previously only held on Postgres. Claiming a queued occurrence counts
+  the executing rows and then promotes one row to `launching`, and Postgres
+  serializes that pair with an advisory lock. SQLite's deferred transaction
+  reserved the writer only at the promoting UPDATE, so claimants racing on
+  distinct rows — a manual trigger overlapping the poller, or a second Gateway
+  process sharing the database file — all read the same stale count, all passed
+  the budget check, and the configured cap was exceeded. ([#5469])
+- **sandbox:** Stop AIO's `glob` from reporting an exactly-full result as
+  truncated. Its `include_dirs` branch returned as soon as it had collected
+  `max_results` matches, so a listing that held exactly that many — and no more
+  — came back flagged as cut off, and the tool told the model the result was
+  incomplete. That branch already holds the whole listing, so it now looks one
+  match past the cap before deciding, matching the sibling `include_dirs=False`
+  branch, which has always decided from the full list. This concerns the
+  filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
+  is a separate limit with its own one-line-past accounting, and the other
+  providers' filtered-match cap is unchanged.
+- **middleware:** Stop a guard that removes tool calls from breaking every later
+  turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
+  hard stops, subagent-limit truncation, and safety suppression cleared
+  `tool_calls` but left the provider's own tool-call blocks in the message
+  content. Anthropic and the Responses API resend those blocks, so the next
+  request carried a tool call with no result and the provider rejected it, and
+  a hard stop saved to the checkpoint kept failing on each new message. All
+  guards now remove the matching content blocks through one shared helper,
+  which also keeps a Responses call that clarification retains. ([#5447])
 - **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
   their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
   search's raw output and then filter it in Python (ignored directories such as
@@ -1495,6 +1522,21 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Security
 
+- **skills:** Close gaps that let files skip SkillScan in the public skill
+  review gate. The review analyzer passed SkillScan only files it had decoded
+  as text, so executable binaries and nested archives were never checked; it
+  exempted every file anywhere under an `evals/fixtures/` directory; and a
+  duplicate archive member or a case-folded name silently overwrote an earlier
+  file before scanning. SkillScan now receives every file byte for byte, only
+  eval fixture `SKILL.md` samples stay exempt, and path collisions mark the
+  review incomplete. SkillScan also skipped code files containing a NUL or
+  non-UTF-8 byte, so one byte in a comment hid a reverse shell from the review
+  gate, and a NUL byte skipped static analysis at install. Such files now raise
+  `package-undecodable-script` and are still analyzed, so `CRITICAL` matches
+  keep blocking. SkillScan's Mach-O detection missed 32-bit little-endian and
+  fat variants that the installer blocks; the installer, export guard, and
+  SkillScan now share one code-file and executable-magic definition. Review
+  snapshots gain a `content_base64` field for binary files. ([#5431])
 - **prompt-injection:** New input-sanitization middleware defends against
   prompt-injection, forged framework tags in the input guardrail are blocked,
   and system context is injected as a `SystemMessage` for role isolation. ([#3662],
@@ -2842,3 +2884,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469
+

@@ -45,6 +45,7 @@ from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -70,6 +71,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -132,6 +134,10 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # A replayed message carrying it back would write a thread-scoped seq
             # into the checkpoint, which a fork then re-seeds and reassigns (#4380).
             MESSAGE_SEQ_KEY,
+            # The transient project-context request message marker (spec §12):
+            # a client-supplied copy must never survive into a run, where the
+            # renderer would treat the message as its own.
+            PROJECT_CONTEXT_MESSAGE_MARKER,
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
@@ -533,8 +539,17 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "is_internal",
             "authz_attributes",
             "channel_user_id",
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            # Server-owned pinned project snapshot (spec §7.1): resolved once
+            # at admission from threads_meta; a client-supplied value must
+            # never survive in either run-config section.
+            PROJECT_CONTEXT_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -575,7 +590,7 @@ _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable
 # credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
 # smuggled through ``body.config['configurable']`` would be written to the
 # checkpoint store.
-_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -1619,6 +1634,19 @@ async def start_run(
                         ),
                     ],
                 }
+        # Resolve and pin the thread's project context once per run (spec
+        # §7.1): middlewares and tools read only this server-owned snapshot —
+        # nothing re-resolves membership mid-run, and admission never writes
+        # membership (§10.7). Resolution failure degrades to unassigned with a
+        # warning inside the resolver; it never fails the run.
+        project_context = await resolve_project_context(
+            run_ctx.thread_store,
+            getattr(request.app.state, "project_repo", None),
+            thread_id,
+            getattr(request.app.state, "project_document_repo", None),
+        )
+        if project_context is not None:
+            config["context"][PROJECT_CONTEXT_KEY] = project_context
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(

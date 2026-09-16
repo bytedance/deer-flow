@@ -180,17 +180,40 @@ def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
     return default
 
 
+def _append_named_tools_without_conflicts(tools: list, new_tools: list, *, kind: str) -> None:
+    """Append tools without dropping unrelated duplicate-named tools."""
+    existing_names = {getattr(tool, "name", None) for tool in tools}
+    for new_tool in new_tools:
+        if new_tool.name in existing_names:
+            logger.warning("%s tool name %r already exists and was skipped.", kind, new_tool.name)
+            continue
+        tools.append(new_tool)
+        existing_names.add(new_tool.name)
+
+
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
     """Append memory tools without dropping unrelated duplicate-named tools."""
     from deerflow.agents.memory.tools import get_memory_tools
 
-    existing_names = {getattr(tool, "name", None) for tool in tools}
-    for memory_tool in get_memory_tools():
-        if memory_tool.name in existing_names:
-            logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
-            continue
-        tools.append(memory_tool)
-        existing_names.add(memory_tool.name)
+    _append_named_tools_without_conflicts(tools, get_memory_tools(), kind="Memory")
+
+
+def _append_project_document_tools_if_pinned(tools: list, cfg: dict) -> None:
+    """Append the project shelf tools only for runs with a pinned project context.
+
+    Registration follows the admission-pinned ``PROJECT_CONTEXT_KEY`` and
+    nothing else (§10.11): a non-project run never pays the tools' schema
+    tokens and never sees them, while a project run keeps them even when
+    instructions and shelf are both empty. The tools themselves read the same
+    pinned key at call time and fail closed without it.
+    """
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    if PROJECT_CONTEXT_KEY not in cfg:
+        return
+    from deerflow.projects.tools import get_project_document_tools
+
+    _append_named_tools_without_conflicts(tools, get_project_document_tools(), kind="Project document")
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -316,6 +339,7 @@ def _create_summarization_middleware(
     *,
     app_config: AppConfig | None = None,
     run_model_name: str | None = None,
+    skip_memory_flush: bool = False,
     extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config.
@@ -327,6 +351,7 @@ def _create_summarization_middleware(
     return create_summarization_middleware(
         app_config=app_config,
         run_model_name=run_model_name,
+        skip_memory_flush=skip_memory_flush,
         extensions=extensions,
     )
 
@@ -463,6 +488,7 @@ def build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     available_skills: set[str] | None = None,
+    memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
     deferred_setup=None,
@@ -483,6 +509,8 @@ def build_middlewares(
         config: Runtime configuration containing configurable options like is_plan_mode.
         model_name: Resolved runtime model name; gates vision-only middleware.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
+        memory_enabled: Whether this agent may read or write memory. The date-only
+            dynamic context remains installed when memory is disabled.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
         owns_agent_skill_projection: Whether this lead middleware chain owns the
             thread's physical skill projection. Prompt-only bootstrap agents do
@@ -526,7 +554,13 @@ def build_middlewares(
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    middlewares.append(
+        DynamicContextMiddleware(
+            agent_name=agent_name,
+            app_config=resolved_app_config,
+            memory_enabled=memory_enabled,
+        )
+    )
 
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving
@@ -581,6 +615,7 @@ def build_middlewares(
     summarization_middleware = _create_summarization_middleware(
         app_config=resolved_app_config,
         run_model_name=model_name,
+        skip_memory_flush=not memory_enabled,
         extensions=resolved_extensions,
     )
     if summarization_middleware is not None:
@@ -607,15 +642,16 @@ def build_middlewares(
 
     # Add MemoryMiddleware after TitleMiddleware. Tool mode normally skips it;
     # conversation-extraction backends may explicitly retain passive writes.
-    if should_use_memory_tools(resolved_app_config.memory):
-        from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
+    if memory_enabled:
+        if should_use_memory_tools(resolved_app_config.memory):
+            from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
 
-        if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
+            if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
+                middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+        else:
+            if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
+                logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
             middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
-    else:
-        if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
-            logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
-        middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -913,6 +949,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
@@ -981,6 +1018,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             "tool_groups": agent_config.tool_groups if agent_config else None,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
             "allowed_subagents": list(allowed_subagents) if allowed_subagents is not None else None,
+            "memory_enabled": memory_enabled,
         }
     )
 
@@ -1023,8 +1061,9 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
             authorization_candidates.append(skill_setup.describe_skill_tool)
-        if should_use_memory_tools(resolved_app_config.memory):
+        if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
             _append_memory_tools_without_name_conflicts(authorization_candidates)
+        _append_project_document_tools_if_pinned(authorization_candidates, cfg)
         append_task_continuity_tools(authorization_candidates, resolved_app_config)
         configured_tool_ids = {id(tool) for tool in configured_tools}
         authorized_tools, _authz_provider = apply_tool_authorization(
@@ -1046,6 +1085,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             model_name=model_name,
             agent_name=agent_name,
             available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+            memory_enabled=memory_enabled,
             owns_agent_skill_projection=False,
             app_config=resolved_app_config,
             deferred_setup=setup,
@@ -1065,6 +1105,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             skill_names=skill_setup.skill_names or None,
             allowed_subagents=allowed_subagents,
             subagent_execution_capacity=subagent_execution_capacity,
+            memory_enabled=memory_enabled,
         )
         graph = create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
@@ -1147,8 +1188,9 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:
         authorization_candidates.append(skill_setup.describe_skill_tool)
-    if should_use_memory_tools(resolved_app_config.memory):
+    if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(authorization_candidates)
+    _append_project_document_tools_if_pinned(authorization_candidates, cfg)
     append_task_continuity_tools(authorization_candidates, resolved_app_config)
     configured_tool_ids = {id(tool) for tool in configured_tools}
     authorized_tools, _authz_provider = apply_tool_authorization(
@@ -1171,6 +1213,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         model_name=model_name,
         agent_name=agent_name,
         available_skills=available_skills,
+        memory_enabled=memory_enabled,
         app_config=resolved_app_config,
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
@@ -1191,6 +1234,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
         subagent_execution_capacity=subagent_execution_capacity,
+        memory_enabled=memory_enabled,
     )
     graph = create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),

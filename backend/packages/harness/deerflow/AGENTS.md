@@ -29,6 +29,10 @@ Tests: the `tests/test_trace_*` and `tests/test_worker_trace_binding.py` suites,
 
 ### Managed Lark CLI credentials (`integrations/lark_cli.py`)
 
+Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
+(`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
+version marker; reinstalling the managed skill pack refreshes the stored text.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed
