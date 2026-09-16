@@ -726,6 +726,25 @@ class TestStream:
 
         assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
 
+    def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
+        """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
+        sent = AIMessage(content="Let me look.", id="ai-1")
+        rewritten = AIMessage(content="The model returned no final response.", id="ai-1")
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), rewritten]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-rewritten"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Let me look."]
+
     def test_stream_emits_metadata_a_later_node_adds_to_a_sent_ai_message(self, client):
         attribution = {"version": 1, "kind": "final_answer", "shared_attribution": False, "actions": []}
         sent = AIMessage(content="Hello!", id="ai-1")
