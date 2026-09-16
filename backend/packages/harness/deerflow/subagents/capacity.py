@@ -115,8 +115,6 @@ class SubagentExecutionCapacity:
             except asyncio.CancelledError as exc:
                 if cancellation is None:
                     cancellation = exc
-            except Exception:
-                break
 
         if cancellation is not None:
             try:
