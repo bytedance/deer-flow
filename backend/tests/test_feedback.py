@@ -245,6 +245,31 @@ class TestFeedbackRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_unfiltered_reads_collapse_multi_user_feedback_deterministically(self, tmp_path):
+        """Explicit-None reads (internal callers) collapse same-run feedback rows.
+
+        Several browser users can hold feedback on one run of a shared
+        NULL-owner thread; the per-run collapse must be deterministic —
+        the most recently created feedback wins, ``feedback_id`` breaks ties.
+        """
+        import asyncio
+
+        repo = await _make_feedback_repo(tmp_path)
+        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+        # Guarantee a strictly later created_at than the first row.
+        await asyncio.sleep(0.01)
+        second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+
+        for _ in range(3):
+            grouped = await repo.list_by_thread_grouped("t1", user_id=None)
+            by_run_ids = await repo.list_by_run_ids("t1", {"r1"}, user_id=None)
+            assert grouped["r1"]["feedback_id"] == second["feedback_id"]
+            assert grouped["r1"]["rating"] == -1
+            assert grouped["r1"]["user_id"] == "u2"
+            assert by_run_ids["r1"]["feedback_id"] == second["feedback_id"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_list_by_run_ids_empty_skips_query(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
 

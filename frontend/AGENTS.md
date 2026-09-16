@@ -181,3 +181,12 @@ block dismissal while deletion is pending. Show the error message when available
 with a localized fallback, and log the rejection for debugging. The shared
 delete helper accepts remote 404 (not 403) before retrying local cleanup, and
 `onDeleted` runs only after both deletion steps succeed.
+
+## Capability Center
+
+`/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
+MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
+mutation permissions, and cache ownership remain in the existing hooks. Skill display names/summaries are presentation
+metadata; runtime names and full descriptions remain unchanged. Public, custom,
+integration, and legacy sources must stay distinct. Community currently offers
+archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.

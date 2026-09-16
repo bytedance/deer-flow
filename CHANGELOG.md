@@ -582,6 +582,16 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop AIO's `glob` from reporting an exactly-full result as
+  truncated. Its `include_dirs` branch returned as soon as it had collected
+  `max_results` matches, so a listing that held exactly that many — and no more
+  — came back flagged as cut off, and the tool told the model the result was
+  incomplete. That branch already holds the whole listing, so it now looks one
+  match past the cap before deciding, matching the sibling `include_dirs=False`
+  branch, which has always decided from the full list. This concerns the
+  filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
+  is a separate limit with its own one-line-past accounting, and the other
+  providers' filtered-match cap is unchanged.
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared

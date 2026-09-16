@@ -33,7 +33,8 @@ Thread→project membership is written by thread creation (`POST /api/threads` w
 a validated `project_id`), branch creation (the new row inherits the source
 thread's project; an archived/deleted project degrades the branch to unassigned
 instead of failing), and explicit moves (`POST /api/threads/{id}/move`); run
-admission never modifies membership. The server-reserved `deerflow_project_id`
+admission never modifies membership; it only pins the resolved project context
+read-only into the run context. The server-reserved `deerflow_project_id`
 metadata key is a read-only exposure of the `threads_meta.project_id` column and
 is stripped from client writes.
 

@@ -183,6 +183,13 @@ export function buildThreadSubmitMessages({
    */
   humanMessageId?: string;
 }): Message[] {
+  // Files staged out-of-band (e.g. a project document attached to this
+  // thread and carried in ``additionalKwargs.files``) ride alongside the
+  // freshly uploaded files instead of being overwritten by them.
+  const stagedFiles = Array.isArray(additionalKwargs?.files)
+    ? (additionalKwargs.files as FileInMessage[])
+    : [];
+  const allFiles = [...stagedFiles, ...filesForSubmit];
   return [
     ...additionalInputMessages,
     {
@@ -196,7 +203,7 @@ export function buildThreadSubmitMessages({
       ],
       additional_kwargs: {
         ...additionalKwargs,
-        ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
+        ...(allFiles.length > 0 ? { files: allFiles } : {}),
       },
     } as Message,
   ];

@@ -63,9 +63,32 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     # explicitly listed. Scope narrowing (projects:read|write|delete and
     # threads:write for move) stays enforced by ``@require_permission``.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/projects$")),
+    # ``/config`` is a literal collection route, not a project id — pinned
+    # explicitly so its admission never depends on the item regex below.
+    (frozenset({"GET"}), re.compile(r"^/api/projects/config$")),
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/projects/[^/]+$")),
     (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/(archive|restore)$")),
     (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/threads$")),
+    # Project document shelf (Phase 2 Slice B): enumerated per implemented
+    # route — list/upload on the collection, content and trash on the item.
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/projects/[^/]+/documents$")),
+    (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/documents/[^/]+/content$")),
+    (frozenset({"DELETE"}), re.compile(r"^/api/projects/[^/]+/documents/[^/]+$")),
+    # Promotion and the conversation-files view (Phase 2 Slice C): save a
+    # thread file to the shelf, attach a shelf document to a thread, and the
+    # read-only member-thread file aggregation. Scope narrowing
+    # (projects:write + threads:read/write as decorated) stays enforced by
+    # ``@require_permission``.
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/documents/from-thread$")),
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/documents/[^/]+/attach-to-thread/[^/]+$")),
+    (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/thread-files$")),
+    # Trash tier (Phase 2 Slice D): trash listing, restore, per-document
+    # purge, and empty-trash — enumerated per implemented route, same
+    # no-dead-methods precision; scope narrowing (projects:read|write|delete)
+    # stays enforced by ``@require_permission``.
+    (frozenset({"GET"}), re.compile(r"^/api/trash/documents$")),
+    (frozenset({"POST"}), re.compile(r"^/api/trash/documents/[^/]+/(restore|purge)$")),
+    (frozenset({"POST"}), re.compile(r"^/api/trash/purge$")),
     # Runs subtree: enumerated per implemented subroute instead of a
     # ``runs(/.*)?`` wildcard, so a route added under /runs is default-denied
     # until explicitly listed — the same no-dead-methods precision the
