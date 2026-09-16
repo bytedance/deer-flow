@@ -117,6 +117,46 @@ access. See the
 [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 for details.
 
+## Research Report Audit (optional)
+
+The disabled `research_audit` entry in `extensions_config.example.json` exposes
+the open-source `adversarial-research-audit` server through stdio. It checks
+report coverage arithmetic, cluster totals, selection provenance, unjudged
+items, per-claim sourcing, and optional live citation integrity. The example is
+pinned to an immutable reviewed Git commit rather than a moving branch.
+
+Copy that entry into the root `extensions_config.json` and set `enabled` to
+`true`. The Gateway launches it with `uvx`, so the Gateway host or container
+must have outbound access to GitHub on the first launch. Docker deployments do
+not use a Python checkout from the Docker host; `uvx` installs the pinned source
+inside the Gateway container.
+
+The default visible tool name is `research_audit_audit_report`. Enable the
+public `research-report-audit` skill and explicitly ask DeerFlow to audit a
+completed report, or invoke `/research-report-audit`. The skill constructs the
+structured `audit-input-v1` from the research record, calls the tool no more
+than twice, and writes the returned `audit-output-v1` beside the report as
+`<report-stem>.audit.json`.
+
+This integration is model-driven and opt-in. It is not a Gateway task-lifecycle
+hook and does not guarantee that every report is audited. A valid audit verdict
+of `FAIL` is returned as structured business output, not an MCP error. If the
+server is unavailable, the report is still delivered as `UNAUDITED`; network
+uncertainty during live citation checks is delivered as `DEGRADED`, not as a
+dead-link failure.
+
+Live source verification is disabled in the MCP call unless the skill sends
+`verify_sources: true`. When enabled, only public HTTP(S) targets are allowed by
+default, including after redirects. An operator may set
+`ADVERSARIAL_RESEARCH_AUDIT_ALLOW_PRIVATE_NETWORKS=1` in the server's `env`
+block for a trusted intranet deployment, but doing so permits model-supplied
+report URLs to reach private services and must not be used with untrusted
+inputs.
+
+The pinned commit is the review unit. When upgrading it, review the upstream
+diff, replace the full 40-character SHA, and rerun the MCP configuration and
+public-skill checks before deployment.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such
