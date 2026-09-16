@@ -1,8 +1,10 @@
 # AGENTS.md
 
-This is the source of truth for AI coding agents; `CLAUDE.md` imports it via
-`@AGENTS.md`. Use this monorepo map for orientation and read the relevant module
-guide for details:
+This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+
+It is the **monorepo orientation layer**: it maps the whole repo and points to the
+module guides that own the depth. For anything inside a module, read that module's
+guide rather than expecting full detail here:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
@@ -12,10 +14,11 @@ guide for details:
 
 ## What is DeerFlow
 
-DeerFlow combines a Next.js chat UI with a LangGraph agent backend: sandboxed
-execution, persistent memory, subagents, and built-in/MCP/community tools in
-isolated threads. Feishu, Slack, Telegram, Discord and DingTalk reach the same
-agent through the Gateway.
+DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
+backend runs a "super agent" with sandboxed execution, persistent memory, subagent
+delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
+frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
+DingTalk) bridge into the same agent through the Gateway.
 
 ## Service Topology
 
