@@ -6,7 +6,34 @@ These functions truncate long tool outputs to prevent context window overflow.
 - _truncate_ls_output: head-truncation, for ls tool
 """
 
+import re
+
 from deerflow.sandbox.tools import _truncate_bash_output, _truncate_ls_output, _truncate_read_file_output
+
+
+def _head_and_marker(result: str) -> tuple[str, str]:
+    """Split a truncated read_file result into shown head and trailing marker."""
+    idx = result.rfind("\n... [truncated:")
+    assert idx != -1, "truncation marker missing"
+    return result[:idx], result[idx:]
+
+
+def _line_containing(output: str, char_index: int) -> int:
+    """Return the 0-based line index holding ``output[char_index]``.
+
+    Computed from line spans independently of the truncation marker, so the
+    tests verify the marker's reported line rather than restating its formula.
+    """
+    assert 0 <= char_index < len(output)
+    starts = [0]
+    for line in output.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    candidate = 0
+    for i, start in enumerate(starts):
+        if start <= char_index:
+            candidate = i
+    return candidate
+
 
 # ---------------------------------------------------------------------------
 # _truncate_bash_output
@@ -185,6 +212,43 @@ class TestTruncateReadFileOutput:
         result = _truncate_read_file_output(output, 50000)
         assert "start_line" in result
         assert "end_line" in result
+
+    def test_marker_reports_the_line_the_cut_lands_in(self):
+        # Shape from #5475: a multi-line file cut mid-line, where the old
+        # marker gave only a character count so the model could not compute
+        # which line to resume from.
+        output = "".join(f"def fn_{i}():\n    return {i}\n" for i in range(3000))
+        result = _truncate_read_file_output(output, 50000)
+        head, marker = _head_and_marker(result)
+        cut_line = int(re.search(r"cut lands in line (\d+) of", marker).group(1))
+        total_lines = output.count("\n")
+        assert f"cut lands in line {cut_line} of {total_lines}" in marker
+        assert f"start_line={cut_line}" in marker
+        # The no-gap contract: the reported line is the one holding the first
+        # hidden character (computed independently from line spans).
+        assert _line_containing(output, len(head)) + 1 == cut_line
+
+    def test_first_hidden_character_always_belongs_to_reported_line(self):
+        # Whatever size the cut lands at — mid-line or exactly after a
+        # newline — the reported line is the one holding the first hidden
+        # character, so resuming at start_line=<reported> leaves no gap.
+        lines = [f"line-{i}-with-padding\n" for i in range(1, 3001)]
+        output = "".join(lines)
+        for max_chars in [1000, 5000, 20000, 50000]:
+            result = _truncate_read_file_output(output, max_chars)
+            head, marker = _head_and_marker(result)
+            cut_line = int(re.search(r"cut lands in line (\d+) of", marker).group(1))
+            assert 1 <= cut_line <= len(lines)
+            assert _line_containing(output, len(head)) + 1 == cut_line
+            assert f"start_line={cut_line}" in marker
+            assert len(result) <= max_chars
+
+    def test_marker_reports_total_lines(self):
+        lines = [f"line-{i}-with-padding\n" for i in range(1, 3001)]
+        output = "".join(lines)
+        result = _truncate_read_file_output(output, 50000)
+        _, marker = _head_and_marker(result)
+        assert f"of {output.count(chr(10))}" in marker
 
     def test_max_chars_zero_disables_truncation(self):
         output = "X" * 100000

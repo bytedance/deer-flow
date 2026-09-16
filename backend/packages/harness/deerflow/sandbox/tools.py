@@ -1849,19 +1849,28 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     The returned string (including the truncation marker) is guaranteed to be
     no longer than max_chars characters. Pass max_chars=0 to disable truncation
     and return the full output unchanged.
+
+    The marker reports the 1-indexed line the character cut lands in, so the
+    model can resume with ``start_line`` without re-reading or skipping
+    content (#5475).
     """
     if max_chars == 0:
         return output
     if len(output) <= max_chars:
         return output
     total = len(output)
-    # Compute the exact worst-case marker length: both numeric fields are at
-    # their maximum (total chars), so this is a tight upper bound.
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ...")
+    total_lines = output.count("\n") + (0 if output.endswith("\n") else 1)
+    # Compute the exact worst-case marker length: every numeric field is at
+    # its maximum (total), so this is a tight upper bound.
+    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars (cut lands in line {total} of {total}). Use start_line={total} — optionally with end_line — to continue without a gap] ...")
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
-    marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
+    # 1-indexed line holding the first hidden character: a cut mid-line lands
+    # in the partially shown line, a cut exactly after a newline lands in the
+    # next line — either way resuming at this line leaves no gap.
+    cut_line = output[:kept].count("\n") + 1
+    marker = f"\n... [truncated: showing first {kept} of {total} chars (cut lands in line {cut_line} of {total_lines}). Use start_line={cut_line} — optionally with end_line — to continue without a gap] ..."
     return f"{output[:kept]}{marker}"
 
 
