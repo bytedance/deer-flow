@@ -691,10 +691,20 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     assert _resolve_docker_bind_host() == "192.168.64.1"
 
 
-def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch):
+@pytest.mark.parametrize(
+    "sandbox_host",
+    [
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "Host.Docker.Internal.",
+        "docker.for.mac.host.internal",
+        "docker.for.win.localhost",
+    ],
+)
+def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch, sandbox_host):
     """Docker Desktop cannot bind to internal VM gateway IPs, so default to 127.0.0.1."""
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
         lambda: True,

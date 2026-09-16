@@ -370,7 +370,14 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
         return "127.0.0.1"
 
-    if _docker_server_is_desktop() and host.strip().rstrip(".").lower() in ("host.docker.internal", "gateway.docker.internal"):
+    if _docker_server_is_desktop() and host.strip().rstrip(".").lower() in (
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "docker.for.mac.host.internal",
+        "docker.for.mac.localhost",
+        "docker.for.win.host.internal",
+        "docker.for.win.localhost",
+    ):
         logger.debug("Docker sandbox bind: 127.0.0.1 (Docker Desktop host loopback)")
         return "127.0.0.1"
 
