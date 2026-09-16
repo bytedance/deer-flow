@@ -27,6 +27,20 @@ test("reading round-trips what build wrote", () => {
   ).toEqual(references);
 });
 
+test("metadata round-trips the source's custom agent when present", () => {
+  const withAgent: ConversationReference[] = [
+    { threadId: "thread-w", title: "Writer notes", agentName: "writer" },
+  ];
+  expect(buildConversationReferenceMetadata(withAgent)).toEqual({
+    [CONVERSATION_REFERENCES_KWARG]: [
+      { thread_id: "thread-w", title: "Writer notes", agent_name: "writer" },
+    ],
+  });
+  expect(
+    readConversationReferences(buildConversationReferenceMetadata(withAgent)),
+  ).toEqual(withAgent);
+});
+
 test("reading tolerates missing, malformed and duplicate entries", () => {
   expect(readConversationReferences(undefined)).toEqual([]);
   expect(readConversationReferences({})).toEqual([]);
@@ -42,6 +56,8 @@ test("reading tolerates missing, malformed and duplicate entries", () => {
         { thread_id: "", title: "Empty id" },
         { thread_id: "thread-c" },
         { thread_id: "thread-d", title: "" },
+        { thread_id: "thread-f", agent_name: 42 },
+        { thread_id: "thread-g", agent_name: "" },
         null,
         "thread-e",
       ],
@@ -50,5 +66,7 @@ test("reading tolerates missing, malformed and duplicate entries", () => {
     { threadId: "thread-a", title: "Kept" },
     { threadId: "thread-c", title: "" },
     { threadId: "thread-d", title: "" },
+    { threadId: "thread-f", title: "" },
+    { threadId: "thread-g", title: "" },
   ]);
 });

@@ -4,11 +4,14 @@ export const CONVERSATION_REFERENCES_KWARG = "conversation_references";
 export type ConversationReference = {
   threadId: string;
   title: string;
+  /** Custom agent owning the source conversation; omitted for the default agent. */
+  agentName?: string;
 };
 
 type ConversationReferenceMetadata = {
   thread_id: string;
   title: string;
+  agent_name?: string;
 };
 
 export type ConversationReferencesMetadata = {
@@ -32,6 +35,7 @@ export function buildConversationReferenceMetadata(
     [CONVERSATION_REFERENCES_KWARG]: references.map((reference) => ({
       thread_id: reference.threadId,
       title: reference.title,
+      ...(reference.agentName ? { agent_name: reference.agentName } : {}),
     })),
   };
 }
@@ -58,10 +62,14 @@ export function readConversationReferences(
       continue;
     }
     seen.add(entry.thread_id);
-    references.push({
+    const reference: ConversationReference = {
       threadId: entry.thread_id,
       title: typeof entry.title === "string" ? entry.title : "",
-    });
+    };
+    if (typeof entry.agent_name === "string" && entry.agent_name.length > 0) {
+      reference.agentName = entry.agent_name;
+    }
+    references.push(reference);
   }
   return references;
 }

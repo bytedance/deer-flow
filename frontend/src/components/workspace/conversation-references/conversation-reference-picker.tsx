@@ -19,7 +19,7 @@ import {
 import type { ConversationReference } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import { useThreads } from "@/core/threads/hooks";
-import { titleOfThread } from "@/core/threads/utils";
+import { agentNameOfThread, titleOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 type ConversationReferenceListProps = {
@@ -74,7 +74,15 @@ export function ConversationReferenceList({
                 className={cn("gap-2", isSelected && "text-accent-foreground")}
                 data-testid="conversation-reference-option"
                 disabled={atCap && !isSelected}
-                onSelect={() => onToggle({ threadId: thread.thread_id, title })}
+                onSelect={() =>
+                  onToggle({
+                    threadId: thread.thread_id,
+                    title,
+                    // Preserve the source's agent identity so transcript chips
+                    // link back to custom-agent conversations, not the default.
+                    agentName: agentNameOfThread(thread),
+                  })
+                }
                 value={`${title} ${thread.thread_id}`}
               >
                 <span className="min-w-0 flex-1 truncate">{title}</span>

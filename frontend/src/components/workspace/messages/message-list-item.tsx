@@ -531,7 +531,9 @@ function MessageContent_({
           >
             {conversationReferences.map((reference) => (
               <ConversationReferenceChip
-                href={pathOfThread(reference.threadId)}
+                href={pathOfThread(reference.threadId, {
+                  agent_name: reference.agentName,
+                })}
                 key={reference.threadId}
                 title={reference.title || "Untitled"}
               />

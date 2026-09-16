@@ -29,6 +29,19 @@ const threads = [
     values: {},
     metadata: {},
   },
+  {
+    thread_id: "t-writer",
+    updated_at: "2026-09-15T05:00:00Z",
+    values: { title: "Writer drafts" },
+    metadata: { agent_name: "writer" },
+  },
+  {
+    thread_id: "t-scribe",
+    updated_at: "2026-09-15T04:00:00Z",
+    values: { title: "Scribe notes" },
+    metadata: { agent_name: "stale-agent" },
+    context: { agent_name: "scribe" },
+  },
 ] as unknown as AgentThread[];
 
 let threadsQuery: {
@@ -130,6 +143,30 @@ describe("ConversationReferenceList", () => {
     expect(onToggle).toHaveBeenCalledWith({
       threadId: "t-a",
       title: "Alpha requirements",
+    });
+  });
+
+  it("carries the source's custom agent from metadata, with context winning", () => {
+    const onToggle = rs.fn();
+    render(
+      <ConversationReferenceList
+        currentThreadId="t-current"
+        maxReferences={3}
+        onToggle={onToggle}
+        selected={[]}
+      />,
+    );
+    fireEvent.click(screen.getByText("Writer drafts"));
+    expect(onToggle).toHaveBeenCalledWith({
+      threadId: "t-writer",
+      title: "Writer drafts",
+      agentName: "writer",
+    });
+    fireEvent.click(screen.getByText("Scribe notes"));
+    expect(onToggle).toHaveBeenCalledWith({
+      threadId: "t-scribe",
+      title: "Scribe notes",
+      agentName: "scribe",
     });
   });
 
