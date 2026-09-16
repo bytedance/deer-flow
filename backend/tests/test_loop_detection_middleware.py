@@ -941,7 +941,6 @@ class TestLoopDetectionRunEvents:
         recorder = MagicMock()
         runtime = _make_runtime()
         runtime.context["__run_loop_detection_recorder"] = recorder
-        runtime.context["is_subagent"] = True
         runtime.context["agent_id"] = "general-purpose"
         assert "__run_journal" not in runtime.context
         mw = LoopDetectionMiddleware(
@@ -959,6 +958,26 @@ class TestLoopDetectionRunEvents:
         assert recorder.record_middleware.call_args.kwargs["action"] == "warn"
         assert recorder.record_middleware.call_args.kwargs["changes"]["is_subagent"] is True
         assert recorder.record_middleware.call_args.kwargs["changes"]["agent_id"] == "general-purpose"
+
+    def test_lead_attribution_ignores_caller_supplied_subagent_fields(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "forged-agent"
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        changes = journal.record_middleware.call_args.kwargs["changes"]
+        assert changes["is_subagent"] is False
+        assert changes["agent_id"] is None
 
     def test_identical_call_hard_stop_records_event(self):
         journal = MagicMock()
@@ -1361,6 +1380,24 @@ class TestHardStopWithListContent:
         assert len(msg.content) == 3
         assert msg.content[2]["type"] == "text"
         assert _HARD_STOP_MSG in msg.content[2]["text"]
+
+    def test_hard_stop_drops_provider_tool_use_blocks(self):
+        """A stripped call's Anthropic tool_use block must not outlive it in content."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+        list_content = [
+            {"type": "text", "text": "I'll run ls"},
+            {"type": "tool_use", "id": "call_ls", "name": "bash", "input": {"command": "ls"}},
+        ]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+        result = mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+
+        msg = result["messages"][0]
+        assert [block["type"] for block in msg.content] == ["text", "text"]
+        assert _HARD_STOP_MSG in msg.content[-1]["text"]
 
     def test_hard_stop_with_none_content(self):
         """Hard stop on None content should produce a plain string."""

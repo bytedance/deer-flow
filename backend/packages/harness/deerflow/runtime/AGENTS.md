@@ -135,6 +135,24 @@ their per-execution parent-loop proxy, preserving separate events when two
 different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
+**Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
+The persisted projection accepts
+only framework-defined error/action values and strict booleans (using null for
+invalid values) from the producer-supplied tool stamp; tool content, args,
+prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
+recorder proxy, never the journal itself; durable batch runs have no parent
+journal and emit no such event. Recorder failures are fail-open.
+
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
@@ -289,3 +307,19 @@ rejects caller-supplied `__conversation_reader` values in both context carriers,
 installs only the host value, and releases it during terminal cleanup. The
 callback is not checkpoint state and must never be recovered from an earlier
 run or serialized into run kwargs.
+
+## JSONL mutation cancellation
+
+`JsonlRunEventStore._run_mutation` acquires the per-thread lock before admitting
+an operation, then drains the shielded operation through filesystem I/O, rollback,
+and sequence/lock bookkeeping before releasing the lock or re-raising caller
+cancellation. Repeated cancellation must not detach an active disk worker; a failed
+mutation remains the cause of the propagated cancellation. There is deliberately
+no drain timeout that would release ownership while a worker can still modify files.
+A queued caller can cancel before admission, and unrelated threads remain independent.
+Drain tasks are named `jsonl-mutation:{thread_id}` for asyncio task dumps. Multi-thread
+`put_batch` drains its current group on cancellation and never starts later groups;
+the admitted group keeps its records on success or completes rollback on failure.
+This is a store-local guarantee, not a change to RunJournal cancellation policy or
+JSONL's single-process deployment constraint. Regression coverage is in
+`tests/test_jsonl_event_store_cancellation.py`.

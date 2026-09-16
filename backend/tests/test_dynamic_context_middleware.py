@@ -720,7 +720,7 @@ def test_memory_message_carries_reminder_key_for_title_eligibility():
 
     Without it, title_middleware._is_user_message_for_title counts the memory
     block as a second user message and skips title generation entirely.
-    Similarly, summarization_middleware._preserve_dynamic_context_reminders
+    Similarly, summarization_middleware._preserve_required_context
     would not rescue the memory block from summary compression.
     """
     from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
