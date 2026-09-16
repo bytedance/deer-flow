@@ -88,6 +88,23 @@ def test_values_the_field_rejects_still_report_their_own_type_error(top_level):
     assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [("list_type", ("conversation_references",))]
 
 
+@pytest.mark.parametrize(
+    "top_level",
+    [[""], [1], range(3), dict.fromkeys(["source"]).values(), dict.fromkeys(["source"]).items()],
+    ids=["empty_item", "int_item", "range", "dict_values", "dict_items"],
+)
+def test_invalid_items_at_the_top_level_report_the_item_error_not_the_conflict(top_level):
+    # The guard probes with the field's own annotation, so whatever the field
+    # coerces as a container but rejects per item (a range, dict views, a bad
+    # string) is reported at the item's index rather than as a conflict.
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=top_level, context={"conversation_references": ["source"]})
+    errors = exc.value.errors()
+    assert errors
+    assert all(error["loc"][0] == "conversation_references" and isinstance(error["loc"][1], int) for error in errors)
+    assert not any(error["type"] == "conversation_references_conflict" for error in errors)
+
+
 def test_an_empty_top_level_list_does_not_conflict_with_context():
     body = RunCreateRequest(conversation_references=[], context={"conversation_references": ["source"]})
     assert body.conversation_references == ["source"]

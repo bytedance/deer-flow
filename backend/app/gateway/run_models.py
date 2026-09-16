@@ -14,11 +14,11 @@ from deerflow.utils.thread_id import validate_thread_id
 # reports it so a UI can cap its selection to the same number.
 MAX_CONVERSATION_REFERENCES = 3
 
-# Decides whether a top-level ``conversation_references`` value is something
-# the ``list[str]`` field would coerce (lax mode also accepts tuples, sets,
-# deques, generators, key views, ...). Asking pydantic keeps the conflict check
-# aligned with the field's acceptance set instead of enumerating types.
-_LIST_ADAPTER = TypeAdapter(list[Any])
+# One reference as the field accepts it; the conflict guard probes with the
+# same annotation so its acceptance set is exactly the field's, now and after
+# a pydantic upgrade (lax mode also coerces tuples, sets, generators, ...).
+ConversationReference = Annotated[str, Field(strict=True, min_length=1, max_length=2048)]
+_REFERENCES_ADAPTER = TypeAdapter(list[ConversationReference])
 
 
 class RunCreateRequest(BaseModel):
@@ -32,7 +32,7 @@ class RunCreateRequest(BaseModel):
     metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
     context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
-    conversation_references: list[Annotated[str, Field(strict=True, min_length=1, max_length=2048)]] = Field(
+    conversation_references: list[ConversationReference] = Field(
         default_factory=list,
         max_length=MAX_CONVERSATION_REFERENCES,
         description="Explicit thread IDs or same-origin chat URLs readable only during this run (opt-in read_conversation tool); SDK clients may send the same list as context.conversation_references",
@@ -76,9 +76,9 @@ class RunCreateRequest(BaseModel):
         top_level = data.get("conversation_references")
         if top_level is not None:
             try:
-                top_level = _LIST_ADAPTER.validate_python(top_level)
+                top_level = _REFERENCES_ADAPTER.validate_python(top_level)
             except ValidationError:
-                # Let the field report its own type error instead of a misleading conflict.
+                # Let the field report its own error instead of a misleading conflict.
                 return data
         if top_level:
             raise PydanticCustomError("conversation_references_conflict", "Pass conversation_references at the top level or in context, not both")
