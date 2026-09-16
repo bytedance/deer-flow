@@ -18,6 +18,7 @@ from uuid import UUID
 import pytest
 from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
+from langgraph.store.memory import InMemoryStore
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.gateway.auth.models import User
@@ -25,6 +26,7 @@ from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
+from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -61,10 +63,17 @@ class _ScopeAuthMiddleware(BaseHTTPMiddleware):
 
 
 class _PermissiveThreadStore:
-    """Stands in for the thread store behind ``owner_check=True``."""
+    """Stands in for the thread store behind ``owner_check=True``.
+
+    The existing scope tests exercise the established-ownership path, so
+    ``get`` reports an existing, owner-established meta row.
+    """
 
     async def check_access(self, _thread_id: str, _user_id: str, *, require_existing: bool = False) -> bool:
         return True
+
+    async def get(self, _thread_id: str, *, user_id: str | None | object = None) -> dict | None:
+        return {"thread_id": THREAD_ID, "user_id": "established-owner"}
 
 
 class _RecordingRunStore(MemoryRunStore):
@@ -116,8 +125,8 @@ def _internal_user(owner_raw: str | None):
     return get_internal_user(owner_user_id=owner_raw)
 
 
-def _seed_run(store: MemoryRunStore, run_id: str, *, user_id: str | None) -> None:
-    asyncio.run(store.put(run_id, thread_id=THREAD_ID, user_id=user_id, status="success"))
+def _seed_run(store: MemoryRunStore, run_id: str, *, user_id: str | None, status: str = "success") -> None:
+    asyncio.run(store.put(run_id, thread_id=THREAD_ID, user_id=user_id, status=status))
 
 
 def _seed_message(event_store: MemoryRunEventStore, run_id: str, message_id: str) -> None:
@@ -140,10 +149,11 @@ def _make_app(
     run_store: MemoryRunStore,
     event_store: MemoryRunEventStore | None = None,
     feedback_repo: _RecordingFeedbackRepo | None = None,
+    thread_store=None,
 ) -> TestClient:
     app = FastAPI()
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=auth_source)
-    app.state.thread_store = _PermissiveThreadStore()
+    app.state.thread_store = thread_store if thread_store is not None else _PermissiveThreadStore()
     app.state.run_manager = RunManager(store=run_store)
     if event_store is not None:
         app.state.run_event_store = event_store
@@ -315,3 +325,124 @@ def test_browser_session_messages_keep_per_user_filter(mixed_owner_store: Memory
     assert {row["content"]["id"] for row in response.json()} == {"msg-owner", "msg-browser"}
     assert run_store.list_by_thread_user_ids and all(uid == str(BROWSER_USER_ID) for uid in run_store.list_by_thread_user_ids)
     assert feedback_repo.list_by_thread_user_ids == [str(BROWSER_USER_ID)]
+
+
+# ---------------------------------------------------------------------------
+# owner isolation on threads without established metadata (#5448 review P1)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_thread_meta_keeps_owner_isolation_for_internal_callers() -> None:
+    """owner_check also authorizes missing-meta (legacy shared) threads.
+
+    There, unfiltered reads would expose other users' persisted runs to the
+    acting owner's internal caller, so the raw trusted owner stays the filter
+    — the exact value ``start_run`` stamps on run rows (#5448 review P1).
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no metadata row at all
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        listed = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        page = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        single = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-other-user",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json() == []
+    assert page.status_code == 200
+    assert page.json()["data"] == []
+    assert single.status_code == 404
+    # The acting owner's own raw-stamped runs remain visible: seed one and
+    # confirm it comes back through the same endpoints.
+    owned_store = _RecordingRunStore()
+    _seed_run(owned_store, "run-own-owner-stamp", user_id=OWNER_RAW, status="success")
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=owned_store,
+        thread_store=thread_store,
+    )
+    with client:
+        own = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-own-owner-stamp",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+    assert own.status_code == 200
+    assert own.json()["run_id"] == "run-own-owner-stamp"
+
+
+def test_null_owner_thread_meta_keeps_owner_isolation_for_internal_callers() -> None:
+    """NULL-owner meta rows (shared/pre-auth data) isolate by raw owner too."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(
+        thread_store.create(
+            THREAD_ID,
+            assistant_id=None,
+            user_id=None,  # shared / pre-auth: meta row exists with NULL owner
+        )
+    )
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        listed = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        single = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-other-user",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json() == []
+    assert single.status_code == 404
+
+
+def test_established_ownership_still_reads_thread_runs_unfiltered(mixed_owner_store: MemoryRunStore) -> None:
+    """Established meta ownership keeps the #5437 unfiltered-read behavior."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=OWNER_RAW))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, RUN_OWNER, user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-legacy-default", user_id="default", status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    assert {row["run_id"] for row in response.json()} == {RUN_OWNER, "run-legacy-default"}
