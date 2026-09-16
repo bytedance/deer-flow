@@ -446,3 +446,76 @@ def test_established_ownership_still_reads_thread_runs_unfiltered(mixed_owner_st
 
     assert response.status_code == 200
     assert {row["run_id"] for row in response.json()} == {RUN_OWNER, "run-legacy-default"}
+
+
+def test_ownerless_internal_caller_default_filter_on_missing_meta() -> None:
+    """Without an owner header the synthetic "default" identity is the filter.
+
+    Pins the owner-less fallback branch of ``_run_scope_user_id``: a run
+    stamped with another owner's raw id stays hidden on missing-meta threads.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+
+    client = _make_app(
+        user=_internal_user(None),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(f"/api/threads/{THREAD_ID}/runs")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_subresource_reads_stay_owner_isolated_without_meta() -> None:
+    """Run-scoped sub-resources must respect the acting owner's stamp.
+
+    These reads query by ``(thread_id, run_id)`` with no per-user filter of
+    their own; on missing-meta threads an internal caller acting for owner A
+    could otherwise read owner B's run content by id (#5448 review P1
+    follow-up).
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+    _seed_message(event_store, "run-owner-777", "msg-owner-run")
+
+    stranger_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: "feishu:owner-999"}
+    owner_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW}
+    base = f"/api/threads/{THREAD_ID}/runs/run-owner-777"
+
+    stranger = _make_app(
+        user=_internal_user("feishu:owner-999"),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+    owner_client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with stranger:
+        assert stranger.get(base + "/messages", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/events", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/workspace-changes", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/join", headers=stranger_headers).status_code == 404
+
+    with owner_client:
+        messages = owner_client.get(base + "/messages", headers=owner_headers)
+        events = owner_client.get(base + "/events", headers=owner_headers)
+
+    assert messages.status_code == 200
+    assert [row["content"]["id"] for row in messages.json()["data"]] == ["msg-owner-run"]
+    assert events.status_code == 200
+    assert any(event.get("run_id") == "run-owner-777" for event in events.json())

@@ -1062,6 +1062,21 @@ def _parse_run_page_created_at(value: str) -> str:
     return normalized
 
 
+async def _thread_ownership_established(request: Request, thread_id: str) -> bool:
+    """Whether an existing meta row with a concrete owner covers ``thread_id``.
+
+    Missing rows (legacy compatibility) and NULL-owner rows (shared/pre-auth
+    data) do **not** establish ownership, even though ``owner_check=True``
+    still authorizes access to them.
+    """
+    thread_store = getattr(request.app.state, "thread_store", None)
+    if thread_store is None:
+        return False
+    meta = await thread_store.get(thread_id, user_id=None)
+    meta_owner = meta.get("user_id") if isinstance(meta, dict) else getattr(meta, "user_id", None)
+    return meta is not None and bool(meta_owner)
+
+
 async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     """Resolve the data-filter id for run and message reads, not for authorization.
 
@@ -1091,16 +1106,8 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     user = getattr(request.state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
         return await get_current_user(request)
-    thread_store = getattr(request.app.state, "thread_store", None)
-    if thread_store is not None:
-        meta = await thread_store.get(thread_id, user_id=None)
-        meta_owner = meta.get("user_id") if isinstance(meta, dict) else getattr(meta, "user_id", None)
-        if meta is not None and meta_owner:
-            # Ownership established from an existing meta row: the caller was
-            # authorized for this thread, so read its runs unfiltered — this
-            # covers owner-header-less internal callers too (the merged
-            # #5448 semantics).
-            return None
+    if await _thread_ownership_established(request, thread_id):
+        return None
     # Missing or NULL-owner meta row: ownership was never established, so the
     # isolation boundary is the acting owner's raw stamp (the exact value
     # start_run writes) — or, without an owner header, the synthetic
@@ -1109,6 +1116,31 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     if owner is not None:
         return owner
     return await get_current_user(request)
+
+
+async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Request) -> None:
+    """Gate run-scoped sub-resource reads (events, messages, join, stream).
+
+    These sub-resources query by ``(thread_id, run_id)`` without a per-user
+    filter of their own. For trusted internal callers on threads without
+    established ownership, that let an internal caller acting for owner A
+    read owner B's run content by id (#5448 review P1 follow-up). The run's
+    own stamp must therefore match the acting owner's raw value (or the
+    legacy ``"default"`` stamp); every other caller and every
+    established-ownership thread keeps its existing semantics.
+    """
+    user = getattr(request.state, "user", None)
+    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        return
+    if await _thread_ownership_established(request, thread_id):
+        return
+    scope = get_trusted_internal_owner_user_id(request) or "default"
+    record = await get_run_manager(request).get(run_id)
+    if record is None:
+        return
+    record_owner = getattr(record, "user_id", None) or "default"
+    if record.thread_id != thread_id or record_owner != scope:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
@@ -1239,6 +1271,7 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1291,6 +1324,7 @@ async def _stream_existing_run(
     """
     require_cancel_permission_when_action(request, action)
 
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1391,9 +1425,10 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
-    # Resolve the data-filter id once (None for internal callers — same
-    # rationale as the runs endpoints above); it scopes the feedback query,
-    # the hidden-run lookup, the event-store scan and turn-duration injection.
+    # Resolve the data-filter id once (None for internal callers on threads
+    # with established ownership — see `_run_scope_user_id`); it scopes the
+    # feedback query, the hidden-run lookup, the event-store scan and
+    # turn-duration injection.
     user_id = await _run_scope_user_id(request, thread_id)
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
@@ -1562,6 +1597,7 @@ async def list_run_messages(
 
     Response: { data: [...], has_more: bool }
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1746,6 +1782,7 @@ async def list_run_events(
     ``task_id`` + ``after_seq`` let the subtask card page through one subagent
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     events = await event_store.list_events(
@@ -1777,6 +1814,7 @@ async def get_run_workspace_changes(
     include_diff: bool = Query(default=True),
 ) -> dict:
     """Return workspace/output file changes recorded for one run."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     return await get_workspace_changes_response(
         event_store,
