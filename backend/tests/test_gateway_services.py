@@ -2641,6 +2641,208 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert context.get("langgraph_auth_user_id") is None
 
 
+def test_start_run_strips_client_supplied_project_context_key(_stub_app_config):
+    """A client-supplied ``PROJECT_CONTEXT_KEY`` must never survive admission —
+    in either ``config['context']`` or ``config['configurable']`` (spec §12).
+    Here resolution also degrades (no project repository), so nothing is pinned.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, thread_store = _make_start_run_persistence_context()
+        await thread_store.create("thread-forged-project-ctx", user_id="u1", metadata={})
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        forged = {"project_id": "forged", "name": "Forged", "instructions": "forged"}
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {PROJECT_CONTEXT_KEY: forged},
+                "configurable": {PROJECT_CONTEXT_KEY: forged},
+            },
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-forged-project-ctx", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+    assert PROJECT_CONTEXT_KEY not in config.get("configurable", {})
+
+
+def test_start_run_pins_the_resolved_project_context(_stub_app_config):
+    """Admission resolves membership once and pins the snapshot under the
+    server-owned key for the run (spec §7.1)."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+
+        class _MemberThreadStore:
+            async def get(self, thread_id, **kwargs):
+                return {"thread_id": thread_id, "user_id": "u1", "metadata": {"deerflow_project_id": "p-1"}}
+
+            async def check_access(self, thread_id, user_id, **kwargs):
+                return True
+
+        class _ProjectRepo:
+            async def get(self, project_id, **kwargs):
+                return {"id": project_id, "name": "Roadmap", "instructions": "Prefer boring solutions.", "status": "active"}
+
+        request.app.state.thread_store = _MemberThreadStore()
+        request.app.state.project_repo = _ProjectRepo()
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-pinned-project-ctx", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert config["context"][PROJECT_CONTEXT_KEY] == {
+        "project_id": "p-1",
+        "name": "Roadmap",
+        "instructions": "Prefer boring solutions.",
+    }
+
+
+def test_start_run_project_resolution_failure_degrades_to_unassigned(_stub_app_config, caplog):
+    """A resolution error logs a warning and the run proceeds unassigned (§11)."""
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+
+        class _BoomThreadStore:
+            async def get(self, thread_id, **kwargs):
+                raise RuntimeError("database is down")
+
+            async def check_access(self, thread_id, user_id, **kwargs):
+                return True
+
+        request.app.state.thread_store = _BoomThreadStore()
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+            caplog.at_level(logging.WARNING),
+        ):
+            record = await start_run(body, "thread-resolution-failure", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+    assert "unassigned" in caplog.text
+
+
+def test_start_run_strips_project_context_message_marker_from_input(_stub_app_config):
+    """The transient project message marker is server-owned: a client copy in
+    message metadata is stripped at admission (spec §12), while ordinary keys
+    pass through."""
+    import asyncio
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "hi",
+                            "additional_kwargs": {PROJECT_CONTEXT_MESSAGE_MARKER: True, "custom": 1},
+                        }
+                    ]
+                },
+                command=None,
+            )
+        )
+    )
+
+    assert PROJECT_CONTEXT_MESSAGE_MARKER not in graph_input["messages"][0].additional_kwargs
+    assert graph_input["messages"][0].additional_kwargs["custom"] == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("run_store_backend", ["memory", "sql"])
 async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config, run_store_backend, tmp_path):

@@ -84,23 +84,17 @@ regression exercises the production extractor under a generous process deadline.
 ## Important Development Guidelines
 
 ### Documentation Update Policy
-**CRITICAL: Always update README.md and AGENTS.md after every code change**
-
-When making code changes, you MUST update the relevant documentation:
-- Update `README.md` for user-facing changes (features, setup, usage instructions)
-- Update `AGENTS.md` for development changes (architecture, commands, workflows, internal systems). `CLAUDE.md` imports it via `@AGENTS.md`, so editing `AGENTS.md` updates both.
-- Keep documentation synchronized with the codebase at all times
-- Ensure accuracy and timeliness of all documentation
+Every code change must keep docs accurate and current: update `README.md` for
+user-facing behavior and the relevant `AGENTS.md` for development changes.
+`CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
 ### Backend Benchmarks
 
 `scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
 vars; `summarize` and pytest are offline. See its README for the protocol.
 
-`scripts/benchmark/` contains standalone, reproducible measurements and
-evaluations of production backend behavior. A benchmark may import the
-production function it measures, but it must not duplicate or introduce an
-alternative runtime implementation.
+Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
+production functions; never duplicate them or introduce an alternative runtime.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -280,12 +274,7 @@ InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test
 
 ### Running the Full Application
 
-From the **project root** directory:
-```bash
-make dev
-```
-
-This starts all services and makes the application available at `http://localhost:2026`.
+Run `make dev` from the repo root to start all services at `http://localhost:2026`.
 
 **All startup modes:**
 

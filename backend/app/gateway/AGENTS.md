@@ -7,6 +7,12 @@ derive grants from message contents or checkpoints. The callback travels through
 terminal cleanup. `conversation_reader.py` shares the existing HTTP transcript
 visibility/pagination logic without a Request dependency; ownership remains a
 caller responsibility. The tool additionally excludes non-text/internal content.
+`RunCreateRequest` also accepts the list as `context.conversation_references`
+(LangGraph SDK clients cannot send top-level extras): a before-validator lifts
+it into the top-level field, so bounds and error locations are shared, and drops
+it from `context`, so `merge_run_context_overrides` never sees it; sending both
+is a 422. `conversation_references_enabled()` is the one "tool is configured"
+predicate, used by admission and by `/api/features`.
 
 FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; concurrently probes the ORM engine behind `database:` plus the effective LangGraph checkpointer/Store backend - the legacy `checkpointer:` section, otherwise derived from `database:`, resolved from the startup config snapshot recorded on `app.state` - beneath a single bounded deadline, with connection-opening probes serialized behind a strict per-process gate, 503 while either is unreachable or the startup backend cannot be resolved, `not_configured` for process-local backends such as `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
@@ -27,7 +33,8 @@ Thread→project membership is written by thread creation (`POST /api/threads` w
 a validated `project_id`), branch creation (the new row inherits the source
 thread's project; an archived/deleted project degrades the branch to unassigned
 instead of failing), and explicit moves (`POST /api/threads/{id}/move`); run
-admission never modifies membership. The server-reserved `deerflow_project_id`
+admission never modifies membership; it only pins the resolved project context
+read-only into the run context. The server-reserved `deerflow_project_id`
 metadata key is a read-only exposure of the `threads_meta.project_id` column and
 is stripped from client writes.
 
@@ -65,7 +72,7 @@ owner-scoped assistant version selection remains enabled.
 | Router | Endpoints |
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
-| **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, and separate batch repository/worker states so history stays readable without a worker |
+| **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, separate batch repository/worker states so history stays readable without a worker, and `conversation_references` (whether `read_conversation` is configured, plus the per-run reference cap) |
 | **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
 | **MCP** (`/api/mcp`) | GET /config - raw/masked; PUT /config - bulk; PATCH /config - toggle; POST /config/servers - add; PUT /config/server - replace; DELETE /config/servers/{server_name:path} - bodyless. Validate expanded, save raw; reload/reset; invalid -> 400. |
 | **MCP Tasks** (`/api/threads/{id}/mcp-tasks`) | `GET /` - current user's durable tasks for one owned thread; `GET /{task_id}` - bounded result/input/status-error/cancellation-error detail, including cancellation attempt count, without remote task IDs or driver configuration |
