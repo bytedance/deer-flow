@@ -68,7 +68,6 @@ import threading
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, override
 
@@ -79,7 +78,11 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    resolve_audit_recorder,
+)
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
@@ -705,39 +708,16 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Fallback: coerce unexpected types to str to avoid TypeError
         return str(content) + f"\n\n{text}"
 
-    @staticmethod
-    def _build_hard_stop_update(last_msg, content: str | list) -> dict:
-        """Clear tool-call metadata so forced-stop messages serialize as plain assistant text."""
-        update = {
-            "tool_calls": [],
-            "content": content,
-        }
-
-        additional_kwargs = dict(getattr(last_msg, "additional_kwargs", {}) or {})
-        for key in ("tool_calls", "function_call"):
-            additional_kwargs.pop(key, None)
-        update["additional_kwargs"] = additional_kwargs
-
-        response_metadata = deepcopy(getattr(last_msg, "response_metadata", {}) or {})
-        if response_metadata.get("finish_reason") == "tool_calls":
-            response_metadata["finish_reason"] = "stop"
-        update["response_metadata"] = response_metadata
-
-        return update
-
     def _record_audit_event(
         self,
         decision: _LoopDecision,
         runtime: Runtime,
     ) -> None:
         """Persist a loop-detection transition without sensitive tool data."""
-        context = getattr(runtime, "context", None)
-        is_subagent = isinstance(context, dict) and context.get("is_subagent") is True
-        recorder = context.get(LOOP_DETECTION_RECORDER_CONTEXT_KEY) if isinstance(context, dict) else None
-        if recorder is None and isinstance(context, dict):
-            # Lead-agent runs expose the ordinary RunJournal. Native task-tool
-            # subagents receive only the narrow, loop-safe recorder key above.
-            recorder = context.get("__run_journal")
+        recorder, is_subagent, agent_id = resolve_audit_recorder(
+            getattr(runtime, "context", None),
+            recorder_key=LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+        )
         if recorder is None:
             return
 
@@ -749,7 +729,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 action=decision.action,
                 changes={
                     "is_subagent": is_subagent,
-                    "agent_id": context.get("agent_id") if is_subagent else None,
+                    "agent_id": agent_id,
                     "detection_layer": decision.detection_layer,
                     "tool_names": list(decision.tool_names),
                     "count": decision.count,
@@ -791,14 +771,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             ctx = getattr(runtime, "context", None)
             if isinstance(ctx, dict):
                 ctx["stop_reason"] = "loop_capped"
-            # Strip tool_calls from the last AIMessage to force text output.
-            # Once tool_calls are stripped, the AIMessage no longer requires
-            # matching ToolMessage responses, so mutating it in place here
-            # is safe for OpenAI/Moonshot pairing validators.
+            # Strip tool calls from every provider surface of the last
+            # AIMessage (structured, raw, and content blocks) to force text
+            # output. With no call left on any surface, the AIMessage no
+            # longer requires matching ToolMessage responses, so replacing it
+            # here is safe for strict provider pairing validators.
             messages = state.get("messages", [])
             last_msg = messages[-1]
             content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
-            stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
+            stripped_msg = clone_ai_message_with_tool_calls(last_msg, [], content=content)
             return {"messages": [stripped_msg]}
 
         if decision.action == "warn":
@@ -866,8 +847,26 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._pending_warning_touch_order.pop(pending_key, None)
         return warnings
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        """Append queued loop warnings (if any) to the outgoing message list.
+    def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
+        """Requeue warnings taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the warning. It would not be queued again: it is already marked warned.
+        """
+        if not warnings:
+            return
+        pending_key = self._pending_key(runtime)
+        with self._lock:
+            queued = self._pending_warnings[pending_key]
+            queued[:0] = [warning for warning in warnings if warning not in queued]
+            # Keep the restored warnings at the front; trim what came after them.
+            del queued[_MAX_PENDING_WARNINGS_PER_RUN:]
+            self._touch_pending_warning_key_locked(pending_key)
+            self._prune_pending_warning_state_locked(protected_key=pending_key)
+
+    def _inject_warnings(self, request: ModelRequest, warnings: list[str]) -> ModelRequest:
+        """Append *warnings* to the outgoing message list.
 
         The warning is placed *after* every existing message, including the
         ToolMessage responses to the previous AIMessage(tool_calls). This
@@ -876,7 +875,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         restriction (we use HumanMessage), and never mutates an existing
         AIMessage.
         """
-        warnings = self._drain_pending_warnings(request.runtime)
         if not warnings:
             return request
         new_messages = [
@@ -891,7 +889,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        warnings = self._drain_pending_warnings(request.runtime)
+        try:
+            return handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
 
     @override
     async def awrap_model_call(
@@ -899,7 +902,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        warnings = self._drain_pending_warnings(request.runtime)
+        try:
+            return await handler(self._inject_warnings(request, warnings))
+        except Exception:
+            self._restore_pending_warnings(request.runtime, warnings)
+            raise
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""

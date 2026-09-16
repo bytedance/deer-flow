@@ -77,9 +77,9 @@ through run-event or specialized APIs:
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
 Current middleware tags are `guardrail`, `loop_detection`,
-`safety_termination`, `skill_activation`, `skill_secrets`, and
-`tool_promotion`. The pattern is intentionally open so new middleware tags are
-additive. Because the full event type is limited to 32 characters and
+`safety_termination`, `skill_activation`, `skill_secrets`, `tool_promotion`,
+and `tool_progress`. The pattern is intentionally open so new middleware tags
+are additive. Because the full event type is limited to 32 characters and
 `middleware:` uses 11, a tag must contain 1-21 characters.
 
 `middleware:loop_detection` records transitions into the warned state (first
@@ -95,6 +95,25 @@ subagent, and its agent id when applicable. Tool arguments, prompts, message
 content, tool results, and argument-derived hashes are not persisted in this
 event.
 
+`middleware:tool_progress` records effective result-quality state transitions
+from `ToolProgressMiddleware`: `warn` for ACTIVE → WARNED, `block` for a
+transition to BLOCKED, `recover` for WARNED → ACTIVE after a useful result,
+and `reset` when a later agent invocation (for example, goal continuation)
+deliberately clears a prior WARNED/BLOCKED phase.
+The bounded `changes` object contains the tool name, source and destination
+phases, consecutive-problem count, normalized result status, error
+classification and recovery advice, effective count threshold (null when no
+count threshold fired), and
+subagent attribution. Tool
+arguments, prompts, message content, tool results, and content-derived hashes
+are never copied into this event. Producer-supplied metadata is projected onto
+fixed error/action vocabularies and a strict boolean-or-null before persistence,
+so a custom tool cannot smuggle arbitrary values through its result stamp.
+Recorder calls happen after the state lock is released, so a slow custom
+recorder cannot stall unrelated tool-state updates. Recorder failures are
+fail-open and do not change guard behavior. These events are emitted only when
+`tool_progress.enabled` is true (the default is false).
+
 `middleware:tool_promotion` records deferred MCP schemas newly promoted for
 the active catalog. `changes.source` distinguishes automatic `routing_hint`
 promotion from an explicit `tool_search`; the remaining fields contain sorted
@@ -107,9 +126,10 @@ no names emit no event. Queries, routing keywords, catalog hashes, tool schemas
 and descriptions, arguments, and results are not copied into this middleware
 event. Other event types retain their existing payload contracts.
 
-Ordinary task-tool subagents forward both loop-detection and tool-promotion
-appends to the parent run loop through dedicated recorder context keys. The
-loop-bound `RunJournal` itself never enters the isolated subagent loop.
+Ordinary task-tool subagents forward loop-detection, tool-promotion, and
+tool-progress appends to the parent run loop through dedicated recorder context
+keys. The loop-bound `RunJournal` itself never enters the isolated subagent
+loop.
 
 ### Opaque Run Outputs
 
@@ -206,7 +226,8 @@ be used by new producers.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.
-- Durable batch subagent loop detection and deferred-tool promotion do not
-  emit middleware events because those runs have no parent run journal.
+- Durable batch subagent loop detection, deferred-tool promotion, and
+  tool-progress transitions do not emit middleware events because those runs
+  have no parent run journal.
 - Journal attribution, token accounting, and external tracing metadata still
   depend on manual instrumentation at several LLM call sites.

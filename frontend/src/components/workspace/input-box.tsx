@@ -71,10 +71,18 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
+import {
+  buildConversationReferenceMetadata,
+  type ConversationReference,
+} from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import {
+  isHiddenFromUIMessage,
+  type FileInMessage,
+} from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -116,15 +124,6 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -133,6 +132,8 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
+import { ReferenceConversationsButton } from "./conversation-references/reference-conversations-button";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -154,6 +155,11 @@ import {
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
@@ -226,6 +232,8 @@ function escapeXmlAttribute(value: string) {
 export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  /** Thread IDs attached through the conversation picker; sent as run context. */
+  conversationReferences?: string[];
   onSent?: () => void;
 };
 
@@ -381,7 +389,22 @@ export function InputBox({
   const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
+  // Conversations attached for the next message only. Not persisted with the
+  // draft; cleared once a send proceeds or the composer moves to another thread.
+  const [conversationReferences, setConversationReferences] = useState<
+    ConversationReference[]
+  >([]);
+  useEffect(() => {
+    setConversationReferences([]);
+  }, [threadId]);
   const removeAttachment = attachments.remove;
+  // Project documents attached from the shelf arrive already ingested
+  // thread-side (spec §9): the composer shows them as completed attachments
+  // and includes them in the next send without a re-upload. Staged only on
+  // attach success; the hook consumes the staged entry once per thread and
+  // keeps it across a Strict-Mode effect replay.
+  const [projectAttachments, setProjectAttachments] =
+    useStagedProjectAttachments(threadId);
   const { skills, isLoading: skillsLoading } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -1118,16 +1141,41 @@ export function InputBox({
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
+      const referenceIds = conversationReferences.map(
+        (reference) => reference.threadId,
+      );
+      // Project-shelf attachments are already ingested thread-side (§9):
+      // they join ``additional_kwargs.files`` as completed uploads without a
+      // re-upload, and merge with any files uploaded in this send
+      // (buildThreadSubmitMessages concatenates the two lists).
+      const stagedFiles: FileInMessage[] = projectAttachments.map(
+        (attachment) => ({
+          filename: attachment.filename,
+          size: attachment.size_bytes,
+          path: attachment.virtual_path,
+          status: "uploaded" as const,
+        }),
+      );
+      const additionalKwargs = {
+        ...(quotes.length ? buildReferenceMessageMetadata(quoteContexts) : {}),
+        ...(referenceIds.length
+          ? buildConversationReferenceMetadata(conversationReferences)
+          : {}),
+        ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
+      };
       const submitOptions: InputBoxSubmitOptions = {
+        ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
         ...(quotes.length
           ? {
-              additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
               additionalInputMessages: [
                 buildHiddenConversationQuoteMessage({
                   contexts: quoteContexts,
                 }),
               ],
             }
+          : {}),
+        ...(referenceIds.length
+          ? { conversationReferences: referenceIds }
           : {}),
         // Clear one-time state only once the send genuinely proceeds. If the
         // send is dropped by the in-flight guard, `onSent` never fires.
@@ -1139,6 +1187,8 @@ export function InputBox({
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
           sidecar?.clearConversationQuotes(quoteIds);
+          setConversationReferences([]);
+          setProjectAttachments([]);
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
@@ -1168,13 +1218,16 @@ export function InputBox({
     },
     [
       context,
+      conversationReferences,
       draftKey,
       invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
+      projectAttachments,
+      setProjectAttachments,
       reportUploadLimitViolations,
       resolvedModelName,
-      selectedModel?.supports_thinking,
+      selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
@@ -1214,7 +1267,13 @@ export function InputBox({
         : message;
       const submitAction = getInputSubmitAction({
         text: messageWithSlashSkill.text,
-        fileCount: messageWithSlashSkill.files.length,
+        // Staged project-shelf attachments count exactly like uploaded
+        // files: submitThreadMessage maps them into the outgoing message's
+        // ``additional_kwargs.files``, so an attachment-only submit must not
+        // read as empty, and /goal or /compact must not intercept while an
+        // attach chip is present.
+        fileCount:
+          messageWithSlashSkill.files.length + projectAttachments.length,
         status,
       });
       if (submitAction.kind === "goal") {
@@ -1297,6 +1356,7 @@ export function InputBox({
       handleGoalCommand,
       handleStopStreaming,
       onPrepareThread,
+      projectAttachments.length,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -2278,6 +2338,47 @@ export function InputBox({
               </div>
             )}
           </PromptInputAttachments>
+          {projectAttachments.map((attachment) => (
+            <div
+              key={attachment.virtual_path}
+              className="bg-muted text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+              data-testid="project-attachment-chip"
+            >
+              <PaperclipIcon className="size-3" />
+              <span className="max-w-40 truncate">{attachment.filename}</span>
+              <button
+                aria-label={t.inputBox.removeProjectAttachment}
+                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                type="button"
+                onClick={() =>
+                  setProjectAttachments((previous) =>
+                    previous.filter(
+                      (candidate) =>
+                        candidate.virtual_path !== attachment.virtual_path,
+                    ),
+                  )
+                }
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+          {conversationReferences.map((reference) => (
+            <ConversationReferenceChip
+              key={reference.threadId}
+              onRemove={() =>
+                setConversationReferences((current) =>
+                  current.filter(
+                    (item) => item.threadId !== reference.threadId,
+                  ),
+                )
+              }
+              removeLabel={t.inputBox.referenceConversationsRemove(
+                reference.title,
+              )}
+              title={reference.title}
+            />
+          ))}
           {polishingInput && (
             <div
               aria-live="polite"
@@ -2372,6 +2473,13 @@ export function InputBox({
               className="px-2!"
               disabled={composerLocked}
               uploadLimits={uploadLimits}
+            />
+            <ReferenceConversationsButton
+              className="px-2!"
+              currentThreadId={threadId}
+              disabled={composerLocked}
+              onChange={setConversationReferences}
+              references={conversationReferences}
             />
             <VoiceInputButton
               disabled={composerLocked}
@@ -2726,47 +2834,29 @@ export function InputBox({
                 {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
               </span>
             )}
-            <ModelSelector
+            <ModelPicker
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
-              <ModelSelectorTrigger asChild>
+              <ModelPickerTrigger asChild>
                 <PromptInputButton
                   className="max-w-40 min-w-0 sm:max-w-56"
                   disabled={composerLocked}
                 >
                   <div className="flex min-w-0 flex-col text-left">
-                    <ModelSelectorName className="text-xs font-normal">
+                    <span className="flex-1 truncate text-left text-xs font-normal">
                       {selectedModel?.display_name}
-                    </ModelSelectorName>
+                    </span>
                   </div>
                 </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
+              </ModelPickerTrigger>
+              <ModelPickerContent
+                open={modelDialogOpen}
+                models={models}
+                selectedModelName={selectedModel?.name}
+                onModelSelect={handleModelSelect}
+              />
+            </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
               disabled={composerLocked || stopDenied}

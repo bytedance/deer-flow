@@ -571,6 +571,10 @@ Custom agents must also permit the `conversation` tool group where they restrict
 groups. References are limited to owned threads and the current run; they do not
 enable history discovery, memory extraction or cross-user access. See the
 [request contract and limits](API.md#referencing-a-previous-conversation).
+Once the tool is listed, `GET /api/features` reports
+`conversation_references.enabled: true` and the per-run cap, so a client can
+show an entry point only where the tool exists; SDK clients that cannot add
+top-level request fields pass the list as `context.conversation_references`.
 
 Reader pages are sized to stay within the `tool_output` budget for
 `read_conversation` (12,000 serialized characters by default), so they are not

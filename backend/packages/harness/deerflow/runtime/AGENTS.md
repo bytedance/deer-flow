@@ -135,6 +135,24 @@ their per-execution parent-loop proxy, preserving separate events when two
 different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
+**Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
+The persisted projection accepts
+only framework-defined error/action values and strict booleans (using null for
+invalid values) from the producer-supplied tool stamp; tool content, args,
+prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
+recorder proxy, never the journal itself; durable batch runs have no parent
+journal and emit no such event. Recorder failures are fail-open.
+
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
@@ -157,6 +175,32 @@ an ordinary return, never after an exception. A caller that crosses a run or
 checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
+
+**Extension changed-run discovery** (`runtime/runs/store/` and
+`extensions/run_evidence.py`) orders public run-record changes by the
+backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
+event sequence numbers. The singleton SQL clock allocates positions in the same
+transaction as each public record mutation; memory uses a process-local counter.
+The clock row serializes position-bearing SQL mutations globally until their
+transactions commit, so every mutator must acquire it before any run-row lock.
+An atomic thread operation uses one position for its interrupted rows and new
+row, with `run_id` ordering ties. High-frequency progress snapshots and lease
+heartbeats do not advance this position: they are not lifecycle-discovery
+signals, progress evidence remains available from the event stream, and
+excluding them bounds clock contention. A later lifecycle change exposes the
+run row's latest `updated_at` and accumulated progress fields to internal readers.
+Rows from before the migration retain `change_seq=0` and page deterministically
+by run id. Because a later mutation only moves a row forward, concurrent paging
+may replay a run but cannot move an unseen run behind the committed cursor.
+Deletes produce no tombstone and therefore do not advance the cursor; consumers
+that require deletion reconciliation must poll authoritative status for known
+runs and treat a missing result as absent.
+The extension-facing cursor is versioned, opaque, and bound to the reader's
+fixed user scope. `RunEventStore.list_events()` accepts the same explicit
+`user_id` override as `list_messages()`; evidence readers must propagate their
+bound scope (including global `None`) rather than resolving an ambient request
+user. The adapter deep-copies event content and redacted metadata before
+exposing them, detaching nested mutable payloads from host storage.
 
 Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
 messages. An exhaustive miss preserves the human-boundary fallback; an

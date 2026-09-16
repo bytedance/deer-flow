@@ -10317,6 +10317,76 @@ class TestTelegramStreaming:
 
         _run(go())
 
+    def test_plain_command_reply_stays_plain_when_enabled(self):
+        """A plain command/error reply (no rich construct) must stay plain text
+        even when rich_messages is on, so newlines and <placeholder> tokens
+        survive. The text deliberately carries a bracketed-pipe token
+        ([condition|clear]) to prove the construct detector stays well-formed."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            help_text = "Available commands:\n/goal [condition|clear] — Set or clear a goal\n/agent use <name> — Start with an agent"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=help_text, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [help_text]
+
+        _run(go())
+
+    def test_plain_flag_list_stays_plain_when_enabled(self):
+        """A reply whose lines merely *start* with ``--`` (CLI flag lists,
+        signature separators) must stay plain: a table-separator row needs a
+        pipe, so a bare ``--verbose`` line is not a GFM delimiter row."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            flag_list = "Options:\n--verbose\n--help"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=flag_list, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [flag_list]
+
+        _run(go())
+
+    def test_plain_arithmetic_stays_plain_when_enabled(self):
+        """A reply with spaced asterisks used as multiplication (``2 * 3 * 4``)
+        must stay plain: italic emphasis needs tight, non-space delimiters, so
+        the spans between the asterisks are not handed to the rich parser."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            arithmetic = "Compute: 2 * 3 * 4 = 24"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=arithmetic, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [arithmetic]
+
+        _run(go())
+
+    def test_plain_command_reply_stays_plain_on_stream_edit(self, monkeypatch):
+        """A streamed-then-final plain reply (no rich construct) must not be
+        replaced by a rich edit of the in-flight placeholder."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Available commands:\n/new — new", is_final=True, thread_ts="42"))
+
+            assert bot.rich == []
+            # Final text is applied as a plain edit of the streamed placeholder.
+            assert [message["text"] for message in bot.edited] == ["Available commands:\n/new — new"]
+
+        _run(go())
+
     def test_final_replaces_plain_stream_with_rich_message(self, monkeypatch):
         async def go():
             ch, bot = self._make_channel_with_bot()

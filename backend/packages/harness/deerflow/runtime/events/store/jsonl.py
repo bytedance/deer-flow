@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,11 +50,16 @@ class JsonlRunEventStore(RunEventStore):
     def __init__(self, base_dir: str | Path | None = None):
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
-        # Per-thread asyncio.Lock — serialises concurrent writes within one process.
-        self._write_locks: dict[str, asyncio.Lock] = {}
+        # Weak ownership avoids leaking one lock per historical thread without
+        # splitting a live lock generation while a holder/waiter still owns it.
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
-        return self._write_locks.setdefault(thread_id, asyncio.Lock())
+        lock = self._write_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._write_locks[thread_id] = lock
+        return lock
 
     async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Drain an admitted mutation before propagating caller cancellation.
@@ -350,7 +356,17 @@ class JsonlRunEventStore(RunEventStore):
                 break
         return result
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+    async def list_events(
+        self,
+        thread_id,
+        run_id,
+        *,
+        event_types=None,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]
@@ -418,11 +434,8 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
-            # Pop the lock inside the held mutation to minimise the window where a new caller
-            # could obtain a fresh lock while a waiting coroutine still holds the old one.
-            # Note: coroutines that already acquired a reference to this lock before the
-            # delete will still proceed after we release — this is an accepted narrow race.
-            self._write_locks.pop(thread_id, None)
+            # Mutations already queued on this lock resume after deletion; with
+            # files and the counter cleared, they recreate the thread at seq 1.
             return count
 
         return await self._run_mutation(thread_id, mutate)

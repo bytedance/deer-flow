@@ -45,7 +45,7 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { SettingsSection } from "./settings-section";
+import { SettingsSection } from "../settings/settings-section";
 
 type PendingLarkFlow =
   | ({ kind: "config" } & LarkConfigStartResponse)
@@ -114,7 +114,7 @@ function uniqueScopes(scopes: string[]) {
   return Array.from(new Set(scopes));
 }
 
-export function IntegrationsSettingsPage() {
+export function LarkPluginSettings() {
   const { t } = useI18n();
   return (
     <SettingsSection

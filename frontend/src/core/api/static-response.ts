@@ -56,6 +56,7 @@ export async function staticApiResponse(
           worker_running: false,
           max_running: 0,
         },
+        conversation_references: { enabled: false, max_references: 0 },
       } satisfies FeaturesResponse;
       break;
     case "channels/providers":
