@@ -1,10 +1,11 @@
 """Tests for SkillCatalog — deferred skill discovery search engine."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from deerflow.skills.catalog import MAX_RESULTS, SkillCatalog
+from deerflow.skills.catalog import MAX_QUERY_CHARS, MAX_RESULTS, SkillCatalog, _normalize_search_text
 from deerflow.skills.types import Skill, SkillCategory
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -100,6 +101,45 @@ def test_select_returns_all_requested(catalog: SkillCatalog, sample_skills: list
     all_names = ",".join(sorted(catalog.names))
     result = catalog.search(f"select:{all_names}")
     assert len(result) == len(sample_skills)
+
+
+def test_long_select_preserves_exact_names_and_catalog_order():
+    skills = tuple(_make_skill(f"skill-number-{i:02d}-with-a-longish-name") for i in range(30))
+    catalog = SkillCatalog(skills)
+    requested = [s.name for s in reversed(skills)] + [skills[0].name, "missing", "SKILL-NUMBER-00-WITH-A-LONGISH-NAME"]
+    query = "  select:" + ", ".join(requested) + "  "
+    assert len(query) > MAX_QUERY_CHARS
+
+    assert catalog.search(query) == list(skills)
+
+
+def test_select_does_not_match_a_name_cut_at_search_limit():
+    skills = (_make_skill("data"), _make_skill("data-analysis"))
+    prefix = "select:" + "," * (MAX_QUERY_CHARS - len("select:data"))
+
+    assert SkillCatalog(skills).search(f"{prefix}data-analysis") == [skills[1]]
+
+
+@pytest.mark.parametrize("prefix", ["", "+report "])
+def test_ranked_search_still_ignores_terms_beyond_character_limit(prefix: str):
+    catalog = SkillCatalog((_make_skill("report", "needle"),))
+    query = prefix + "unknown " * MAX_QUERY_CHARS + "needle"
+
+    assert catalog.search(query) == catalog.search(query[:MAX_QUERY_CHARS])
+
+
+def test_search_normalizes_catalog_metadata_once(catalog: SkillCatalog):
+    with patch("deerflow.skills.catalog._normalize_search_text", wraps=_normalize_search_text) as normalize:
+        assert catalog.search("select:data-analysis")
+        normalize.assert_not_called()
+        assert catalog.search("data")
+        assert catalog.search("+data Python")
+        assert catalog.search("+data")
+        assert catalog.search("research")
+        normalized_inputs = [call.args[0] for call in normalize.call_args_list]
+        for skill in catalog.skills:
+            assert normalized_inputs.count(skill.name) == 1
+            assert normalized_inputs.count(skill.description) == 1
 
 
 # ── Required-prefix search (+) ────────────────────────────────────────────────

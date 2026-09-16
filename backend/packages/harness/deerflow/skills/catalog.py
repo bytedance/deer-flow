@@ -1,8 +1,9 @@
 """Skill catalog — deferred skill discovery at runtime.
 
-Mirrors ``DeferredToolCatalog`` from ``tool_search.py``: an immutable, searchable
-catalog that lets the LLM discover skill metadata on demand rather than having
-every skill's full description baked into the system prompt.
+Like ``DeferredToolCatalog`` from ``tool_search.py``, this immutable catalog
+exposes metadata on demand instead of embedding full descriptions in prompts.
+Query forms are shared, but skills intentionally use literal intent ranking
+rather than the tool catalog's free-text regex matching.
 
 The agent sees skill names in ``<skill_index>`` but cannot read their metadata
 until it calls ``describe_skill``.  This keeps the system prompt compact and
@@ -65,10 +66,17 @@ def _contains_term(text: str, term: str) -> bool:
     return term in text
 
 
-def _intent_score(skill: Skill, *, normalized_query: str, terms: tuple[str, ...]) -> tuple[int, int, int, int, int] | None:
+@dataclass(frozen=True)
+class _SearchEntry:
+    skill: Skill
+    normalized_name: str
+    normalized_description: str
+
+
+def _intent_score(entry: _SearchEntry, *, normalized_query: str, terms: tuple[str, ...]) -> tuple[int, int, int, int, int] | None:
     """Score one skill by intent coverage without external retrieval state."""
-    normalized_name = _normalize_search_text(skill.name)
-    normalized_description = _normalize_search_text(skill.description or "")
+    normalized_name = entry.normalized_name
+    normalized_description = entry.normalized_description
     name_matches = tuple(_contains_term(normalized_name, term) for term in terms)
     description_matches = tuple(_contains_term(normalized_description, term) for term in terms)
     name_hits = sum(name_matches)
@@ -85,20 +93,20 @@ def _intent_score(skill: Skill, *, normalized_query: str, terms: tuple[str, ...]
     )
 
 
-def _rank_by_intent(skills: list[Skill], query: str, *, include_unmatched: bool = False) -> list[Skill]:
+def _rank_by_intent(entries: tuple[_SearchEntry, ...], query: str, *, include_unmatched: bool = False) -> list[Skill]:
     normalized_query = _normalize_search_text(query)
     terms = _query_terms(query)
     if not normalized_query or not terms:
-        return skills[:MAX_RESULTS] if include_unmatched else []
+        return [entry.skill for entry in entries[:MAX_RESULTS]] if include_unmatched else []
 
     scored: list[tuple[tuple[int, int, int, int, int], Skill]] = []
     unmatched: list[Skill] = []
-    for skill in skills:
-        score = _intent_score(skill, normalized_query=normalized_query, terms=terms)
+    for entry in entries:
+        score = _intent_score(entry, normalized_query=normalized_query, terms=terms)
         if score is None:
-            unmatched.append(skill)
+            unmatched.append(entry.skill)
         else:
-            scored.append((score, skill))
+            scored.append((score, entry.skill))
 
     # Python's sort is stable, so equal-score skills retain catalog order.
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -115,7 +123,7 @@ def _rank_by_intent(skills: list[Skill], query: str, *, include_unmatched: bool 
 class SkillCatalog:
     """Immutable catalog of skills.  Pure search, no mutation.
 
-    Query forms (mirror ``DeferredToolCatalog.search``):
+    Query forms (shared with tool search; ranking semantics differ):
 
     - ``"select:data-analysis,deep-research"`` — exact match by name.
     - ``"+podcast gen"`` — require *podcast* in the name, rank by *gen*.
@@ -129,12 +137,19 @@ class SkillCatalog:
         """All skill names in insertion order."""
         return frozenset(s.name for s in self.skills)
 
+    @cached_property
+    def _search_index(self) -> tuple[_SearchEntry, ...]:
+        """Normalize immutable skill metadata once per catalog, in catalog order."""
+        return tuple(_SearchEntry(skill, _normalize_search_text(skill.name), _normalize_search_text(skill.description or "")) for skill in self.skills)
+
     def search(self, query: str) -> list[Skill]:
         """Match *query* against skill names and descriptions.
 
-        Returns at most ``MAX_RESULTS`` skills, ranked by relevance.
+        Exact ``select:`` queries have no query-length or result cap.
+        Other queries use at most ``MAX_QUERY_CHARS`` characters and return
+        at most ``MAX_RESULTS`` skills, ranked by relevance.
         """
-        query = query[:MAX_QUERY_CHARS].strip()
+        query = query.strip()
         if not query:
             return []
 
@@ -142,6 +157,8 @@ class SkillCatalog:
         if query.startswith("select:"):
             wanted = {n.strip() for n in query[7:].split(",")}
             return [s for s in self.skills if s.name in wanted]
+
+        query = query[:MAX_QUERY_CHARS]
 
         # ── Required-prefix search ─────────────────────────────────────
         if query.startswith("+"):
@@ -151,10 +168,10 @@ class SkillCatalog:
             required = _normalize_search_text(parts[0])
             if not _TOKEN_RE.search(required):
                 return []
-            candidates = [s for s in self.skills if required in _normalize_search_text(s.name)]
+            candidates = tuple(entry for entry in self._search_index if required in entry.normalized_name)
             if len(parts) > 1:
                 return _rank_by_intent(candidates, parts[1], include_unmatched=True)
-            return candidates[:MAX_RESULTS]
+            return [entry.skill for entry in candidates[:MAX_RESULTS]]
 
         # ── Free-text intent search ────────────────────────────────────
-        return _rank_by_intent(list(self.skills), query)
+        return _rank_by_intent(self._search_index, query)
