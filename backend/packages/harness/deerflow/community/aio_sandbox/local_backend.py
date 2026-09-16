@@ -329,8 +329,10 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     the published port and the advertised sandbox URL always match. On
     Docker Desktop, resolving ``host.docker.internal`` yields an internal VM
     gateway address that the host OS cannot bind, so Desktop daemons default
-    to host loopback (127.0.0.1); Desktop forwards ``host.docker.internal``
-    to host loopback automatically. Only when resolution fails does the
+    to host loopback (127.0.0.1) for ``host.docker.internal``; Desktop forwards
+    ``host.docker.internal`` to host loopback automatically. Custom non-loopback
+    sandbox hosts on Desktop daemons continue to bind their resolved address.
+    Only when resolution fails does the
     default bridge gateway serve as a best-effort fallback (with a warning).
     Operators that genuinely need the old broad bind (e.g. remote clients
     connecting to the sandbox API directly) can restore it with
@@ -368,7 +370,7 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
         return "127.0.0.1"
 
-    if _docker_server_is_desktop():
+    if _docker_server_is_desktop() and host.strip().rstrip(".").lower() in ("host.docker.internal", "gateway.docker.internal"):
         logger.debug("Docker sandbox bind: 127.0.0.1 (Docker Desktop host loopback)")
         return "127.0.0.1"
 

@@ -707,6 +707,22 @@ def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch):
     assert _resolve_docker_bind_host() == "127.0.0.1"
 
 
+def test_resolve_docker_bind_host_preserves_custom_host_on_docker_desktop(monkeypatch):
+    """Custom non-loopback sandbox host on Docker Desktop binds the resolved address."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "desktop-box")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.0.2.55",
+    )
+
+    assert _resolve_docker_bind_host() == "192.0.2.55"
+
+
 def test_resolve_docker_bind_host_explicit_override_precedes_desktop_detection(monkeypatch):
     """Explicit DEER_FLOW_SANDBOX_BIND_HOST takes precedence even on Docker Desktop."""
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
