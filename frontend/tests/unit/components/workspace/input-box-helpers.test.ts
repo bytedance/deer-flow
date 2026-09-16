@@ -296,6 +296,22 @@ describe("getLeadingSlashSkillQuery", () => {
 });
 
 describe("getMatchingSkillSuggestions", () => {
+  it("offers only builtin commands when the catalog is empty (denied role)", () => {
+    // A role whose `skills` policy allows nothing gets an empty catalog from
+    // GET /api/skills (resource-level listing filter); the composer must
+    // still offer the builtin commands rather than lose the whole dropdown.
+    const result = getMatchingSkillSuggestions([], "", builtins);
+
+    expect(result.map((s) => `${s.kind}:${s.name}`)).toEqual([
+      "builtin:goal",
+      "builtin:new",
+    ]);
+  });
+
+  it("returns an empty list when an empty catalog matches nothing", () => {
+    expect(getMatchingSkillSuggestions([], "deep", builtins)).toEqual([]);
+  });
+
   it("excludes disabled skills and ranks prefix matches first", () => {
     const skills = [
       makeSkill("deep-research"),
