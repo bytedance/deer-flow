@@ -98,6 +98,9 @@ _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU limit for tracked thread/run scopes
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
 _MAX_PENDING_WARNINGS_PER_RUN = 4
+# Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
+# runs to the last line, which is not the same window as any numbered bound.
+_OPEN_ENDED_READ = "end"
 
 type _RunScopeKey = tuple[str, str | None]
 
@@ -128,29 +131,50 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     return {}, json.dumps(raw_args, sort_keys=True, default=str)
 
 
+def _coerce_line_number(value: object) -> int | None:
+    """Parse one ``read_file`` line bound, or ``None`` when absent or unusable."""
+    try:
+        line = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return max(line, 1)
+
+
+def _normalized_read_range(args: dict) -> tuple[int, int | None]:
+    """Normalize ``read_file``'s line range into one comparable window.
+
+    Omitting ``end_line`` reads through the last line, so it normalizes to
+    ``None`` (open-ended) rather than collapsing onto ``start_line``: that keeps
+    ``read_file(path)`` and ``read_file(path, start_line=1)`` — the same read,
+    written two ways — on a single key. A reversed range is ordered, so one
+    window written either way also produces a single key.
+
+    The window is otherwise kept exact. Quantizing it into 200-line buckets (the
+    original heuristic) collapsed every read shorter than a bucket onto its
+    neighbours, so an agent paging a file in 40-line chunks tripped the hard
+    stop on its fifth *distinct* read — while ``read_file``'s own truncation
+    notice tells the model to page with ``start_line``/``end_line``. Bucketing
+    cannot separate progress from repetition in general: equality keys can only
+    approximate range overlap, and the approximation was erasing the offset that
+    distinguishes the two. An exact window still catches the loop this layer
+    exists for — the same read emitted over and over — and a loop that jitters
+    its bounds is what Layer 2's per-tool frequency window covers.
+    """
+    start_line = _coerce_line_number(args.get("start_line"))
+    end_line = _coerce_line_number(args.get("end_line"))
+    if start_line is None:
+        start_line = 1
+    if end_line is not None and end_line < start_line:
+        start_line, end_line = end_line, start_line
+    return start_line, end_line
+
+
 def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     """Derive a stable key from salient args without overfitting to noise."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
-        start_line = args.get("start_line")
-        end_line = args.get("end_line")
-
-        bucket_size = 200
-        try:
-            start_line = int(start_line) if start_line is not None else 1
-        except (TypeError, ValueError):
-            start_line = 1
-        try:
-            end_line = int(end_line) if end_line is not None else start_line
-        except (TypeError, ValueError):
-            end_line = start_line
-
-        start_line, end_line = sorted((start_line, end_line))
-        bucket_start = max(start_line, 1)
-        bucket_end = max(end_line, 1)
-        bucket_start = (bucket_start - 1) // bucket_size
-        bucket_end = (bucket_end - 1) // bucket_size
-        return f"{path}:{bucket_start}-{bucket_end}"
+        start_line, end_line = _normalized_read_range(args)
+        return f"{path}:{start_line}-{end_line if end_line is not None else _OPEN_ENDED_READ}"
 
     # write_file / str_replace are content-sensitive: same path may be updated
     # with different payloads during iteration. Using only salient fields (path)

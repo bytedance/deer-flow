@@ -582,6 +582,16 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **middleware:** Stop loop detection from cutting off an agent that pages
+  through a file. `read_file` calls were keyed by 200-line buckets, so every
+  read shorter than a bucket collapsed onto its neighbours: five sequential
+  40-line reads hashed identically and tripped the hard stop, ending the run
+  with a forced final answer and `stop_reason=loop_capped` — on exactly the
+  ranged reads `read_file`'s own truncation notice tells the model to make.
+  The key now uses the exact line window, with an omitted `end_line` kept
+  open-ended so a bare read and an explicit `start_line=1` still share one key.
+  Repeating a single range is still caught at the same threshold, and a read
+  loop that varies its bounds remains covered by the per-tool frequency layer.
 - **scheduler:** Enforce the global `max_concurrent_runs` budget on SQLite,
   which previously only held on Postgres. Claiming a queued occurrence counts
   the executing rows and then promotes one row to `launching`, and Postgres
