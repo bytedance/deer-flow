@@ -7,6 +7,8 @@ Covers:
 - A pin test that compiles real ``create_agent`` graphs and binary-searches the
   smallest ``recursion_limit`` that completes N turns, so the formula is checked
   against the installed LangChain rather than against its documentation
+- Jump detection across every hook LangChain wires a jump edge for, and the
+  shortfall each kind of jump causes against a compiled graph
 """
 
 import pytest
@@ -124,15 +126,24 @@ class TestFindJumpingHooks:
 
         assert find_jumping_hooks(chain) == []
 
-    def test_agent_level_hooks_are_not_reported(self):
-        """They run once per invocation; a jump out of them lands in the paid-for loop."""
+    @pytest.mark.parametrize("hook", ["before_agent", "abefore_agent", "after_agent", "aafter_agent"])
+    def test_agent_level_hooks_are_reported(self, hook):
+        """They run once per invocation, but a jump out of them is not free.
 
-        class LifecycleJumper(AgentMiddleware):
-            @hook_config(can_jump_to=["model"])
-            def before_agent(self, state, runtime):
-                return None
+        ``after_agent`` can re-enter the loop after it finished, and a
+        ``before_agent`` jump to ``tools`` runs a step no turn paid for.
+        """
 
-        assert find_jumping_hooks([LifecycleJumper()]) == []
+        async def async_hook(self, state, runtime):
+            return None
+
+        def sync_hook(self, state, runtime):
+            return None
+
+        implementation = async_hook if hook in {"abefore_agent", "aafter_agent"} else sync_hook
+        LifecycleJumper = type("LifecycleJumper", (AgentMiddleware,), {hook: hook_config(can_jump_to=["model"])(implementation)})
+
+        assert find_jumping_hooks([LifecycleJumper()]) == [("LifecycleJumper", hook)]
 
     def test_object_without_hooks_is_not_reported(self):
         assert find_jumping_hooks([object()]) == []
@@ -204,12 +215,31 @@ class TestFormulaMatchesCompiledGraph:
 
         assert resolve_recursion_limit(turns, chain) == _smallest_limit_completing(chain, turns)
 
-    def test_a_jumping_hook_makes_the_limit_a_lower_bound(self):
+    @pytest.mark.parametrize(
+        ("hook", "destination", "count_model_calls", "jump_cost"),
+        [
+            # Re-enters the model without traversing ``tools``: another
+            # before_model + model + after_model pass, here model + after_model.
+            pytest.param("after_model", "model", False, 2, id="after_model-to-model"),
+            # Re-enters the loop after it finished: a model pass, then the
+            # after_agent node again on the way out.
+            pytest.param("after_agent", "model", False, 2, id="after_agent-to-model"),
+            # ``end`` routes back to the head of the after_agent chain, so even
+            # the exit is not free — why detection ignores destinations.
+            pytest.param("after_agent", "end", False, 1, id="after_agent-to-end"),
+            # Once per invocation, but the staged tool call runs a ``tools``
+            # step outside any model turn.
+            pytest.param("before_agent", "tools", True, 1, id="before_agent-to-tools"),
+        ],
+    )
+    def test_a_jumping_hook_makes_the_limit_a_lower_bound(self, hook, destination, count_model_calls, jump_cost):
         """Why ``find_jumping_hooks`` exists, pinned against a real graph.
 
-        The model here counts progress off the ToolMessages actually in state, so
-        a jump — which re-enters the model without traversing ``tools`` — buys no
-        progress and is pure overhead, the retry/repair shape.
+        The loop cases count progress off the ToolMessages actually in state, so
+        a jump that re-enters the model buys no progress and is pure overhead,
+        the retry/repair shape. The ``before_agent`` case stages a tool call the
+        model never made, so there the model counts its own calls instead —
+        otherwise the staged tool result would pass for one of its turns.
         """
 
         class _ToolProgressModel(_ScriptedModel):
@@ -221,28 +251,31 @@ class TestFormulaMatchesCompiledGraph:
                     message = AIMessage(content="done")
                 return ChatResult(generations=[ChatGeneration(message=message)])
 
-        class _JumpOnce(AgentMiddleware):
-            def __init__(self) -> None:
-                super().__init__()
-                self.jumped = False
+        def jump_once(self, state, runtime):
+            if self.jumped:
+                return None
+            self.jumped = True
+            update = {"jump_to": destination}
+            if destination == "tools":
+                update["messages"] = [AIMessage(content="", tool_calls=[{"name": "ping", "args": {}, "id": "staged"}])]
+            return update
 
-            @hook_config(can_jump_to=["model"])
-            def after_model(self, state, runtime):
-                if self.jumped:
-                    return None
-                self.jumped = True
-                return {"jump_to": "model"}
+        _JumpOnce = type(
+            "_JumpOnce",
+            (AgentMiddleware,),
+            {"jumped": False, hook: hook_config(can_jump_to=[destination])(jump_once)},
+        )
 
         tool_turns = 3
         budget_turns = tool_turns + 1  # the tool turns plus the turn that answers
 
-        def build(limit):
-            return create_agent(model=_ToolProgressModel(turns=tool_turns), tools=[ping], middleware=[_JumpOnce()], checkpointer=False).invoke({"messages": [("user", "go")]}, {"recursion_limit": limit})
+        def run(limit):
+            model = _ScriptedModel(turns=budget_turns) if count_model_calls else _ToolProgressModel(turns=tool_turns)
+            create_agent(model=model, tools=[ping], middleware=[_JumpOnce()], checkpointer=False).invoke({"messages": [("user", "go")]}, {"recursion_limit": limit})
 
         resolved = resolve_recursion_limit(budget_turns, [_JumpOnce()])
         with pytest.raises(GraphRecursionError):
-            build(resolved)
-        # One jump costs another before_model + model + after_model pass.
-        build(resolved + count_turn_steps([_JumpOnce()]) - 1)
+            run(resolved)
+        run(resolved + jump_cost)
 
-        assert find_jumping_hooks([_JumpOnce()]) == [("_JumpOnce", "after_model")]
+        assert find_jumping_hooks([_JumpOnce()]) == [("_JumpOnce", hook)]

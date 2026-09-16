@@ -1041,11 +1041,12 @@ class SubagentExecutor:
             recursion_limit,
             len(middlewares),
         )
-        # A hook that declares ``can_jump_to`` re-enters the loop without
-        # traversing ``tools``, spending super-steps the flat per-turn cost does
-        # not model, so the budget silently becomes a lower bound. No middleware
-        # in the subagent chain declares one today; say so loudly if that
-        # changes, rather than letting runs quietly cap short again.
+        # A hook that declares ``can_jump_to`` — agent-level hooks included —
+        # can leave the straight path through the graph, spending super-steps
+        # the flat per-turn cost does not model, so the budget silently becomes
+        # a lower bound. No middleware in the subagent chain declares one today;
+        # say so loudly if that changes, rather than letting runs quietly cap
+        # short again.
         jumping_hooks = find_jumping_hooks(middlewares)
         if jumping_hooks:
             logger.warning(

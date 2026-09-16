@@ -27,15 +27,19 @@ identity precisely so LangChain sees the wrapper as the middleware it wraps —
 is counted exactly like its inner middleware.
 
 The per-turn cost is a flat multiplier, which models the straight
-``before_model -> model -> tools`` loop and nothing else. A hook that declares
-``can_jump_to`` and returns ``{"jump_to": ...}`` re-enters the loop without
-traversing ``tools``, spending another ``before_model + model + after_model``
-pass that buys no tool result — so a chain containing one makes the resolved
-limit a lower bound rather than an exact budget. How often a jump fires is
-data-dependent and unbounded, so it cannot be folded into the arithmetic;
+``before_agent -> (before_model -> model -> tools)* -> after_agent`` path and
+nothing else. A hook that declares ``can_jump_to`` and returns
+``{"jump_to": ...}`` leaves that path: out of a model hook it re-enters the loop
+without traversing ``tools``, spending another ``before_model + model +
+after_model`` pass that buys no tool result; out of ``after_agent`` it re-enters
+the loop after it has finished (or, for ``end``, reruns the ``after_agent``
+chain), and the hook runs again on the next exit; out of ``before_agent`` a
+``tools`` jump runs a ``tools`` step no turn paid for. Any of these makes the
+resolved limit a lower bound rather than an exact budget. How often a jump fires
+is data-dependent and unbounded, so it cannot be folded into the arithmetic;
 :func:`find_jumping_hooks` exposes the condition instead, and the subagent
-executor warns when a counted hook declares one. No middleware in today's
-subagent chain does.
+executor warns when a hook declares one. No middleware in today's subagent
+chain does.
 """
 
 from __future__ import annotations
@@ -93,20 +97,24 @@ def count_invocation_steps(middlewares: Sequence[Any]) -> int:
 
 
 def find_jumping_hooks(middlewares: Sequence[Any]) -> list[tuple[str, str]]:
-    """Counted hooks that declare a jump, as ``(middleware, hook)`` name pairs.
+    """Hooks that declare a jump, as ``(middleware, hook)`` name pairs.
 
-    Such a hook can re-enter the agent loop without traversing ``tools``, which
-    costs super-steps the flat per-turn multiplier does not model, so a non-empty
-    result means :func:`resolve_recursion_limit` is a lower bound. Only the
-    per-turn hooks are inspected: ``before_agent`` / ``after_agent`` run once per
-    invocation, and a jump out of them lands in the loop the budget already pays
-    for. The declaration is read off the same attribute, on the same overridden
-    methods, that LangChain's factory reads it from.
+    A jump spends super-steps the flat multiplier does not model, so a non-empty
+    result means :func:`resolve_recursion_limit` is a lower bound. Every
+    node-creating hook is inspected — the four LangChain's factory wires jump
+    edges for — because none is safe to exempt: ``after_agent`` can re-enter the
+    loop unboundedly, and even a once-per-invocation ``before_agent`` jump to
+    ``tools`` costs one unpriced step, which is enough to cap the last turn of an
+    exact budget. It is the declaration that is reported, not the destinations:
+    ``end`` is not a safe exit either, since out of ``after_agent`` LangChain
+    routes it back to the head of the ``after_agent`` chain. The declaration is
+    read off the same attribute, on the same overridden methods, that LangChain's
+    factory reads it from.
     """
     jumping: list[tuple[str, str]] = []
     for middleware in middlewares:
         middleware_type = type(middleware)
-        for hook_pair in _LOOP_HOOK_PAIRS:
+        for hook_pair in _LOOP_HOOK_PAIRS + _INVOCATION_HOOK_PAIRS:
             for hook in hook_pair:
                 # No identity check against the base method is needed here, unlike
                 # in the node counting above: only ``hook_config`` writes this
@@ -124,7 +132,7 @@ def resolve_recursion_limit(max_turns: int, middlewares: Sequence[Any]) -> int:
     ``recursion_limit`` below 1, and a misconfigured budget should still let the
     agent answer once rather than fail the run before it starts.
 
-    The result is exact for a chain of non-jumping hooks and a lower bound
+    The result is exact for a chain with no jump-declaring hooks and a lower bound
     otherwise; see :func:`find_jumping_hooks`.
     """
     return max(1, max_turns) * count_turn_steps(middlewares) + count_invocation_steps(middlewares)
