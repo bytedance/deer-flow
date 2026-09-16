@@ -13,9 +13,13 @@ from deerflow.sandbox.tools import _truncate_bash_output, _truncate_ls_output, _
 
 def _head_and_marker(result: str) -> tuple[str, str]:
     """Split a truncated read_file result into shown head and trailing marker."""
-    idx = result.rfind("\n... [truncated:")
+    idx = result.rfind("... [truncated:")
     assert idx != -1, "truncation marker missing"
-    return result[:idx], result[idx:]
+    marker = result[idx:]
+    # Complete-line cuts keep the source newline; character cuts insert one
+    # solely to separate the marker from the partial source line.
+    head_end = idx - 1 if "cut inside line" in marker else idx
+    return result[:head_end], marker
 
 
 def _line_containing(output: str, char_index: int) -> int:
@@ -214,15 +218,14 @@ class TestTruncateReadFileOutput:
         assert "end_line" in result
 
     def test_marker_reports_the_line_the_cut_lands_in(self):
-        # Shape from #5475: a multi-line file cut mid-line, where the old
-        # marker gave only a character count so the model could not compute
-        # which line to resume from.
+        # Shape from #5475: a multi-line file whose old marker gave only a
+        # character count, leaving the model to compute the resume line.
         output = "".join(f"def fn_{i}():\n    return {i}\n" for i in range(3000))
         result = _truncate_read_file_output(output, 50000)
         head, marker = _head_and_marker(result)
-        cut_line = int(re.search(r"cut lands in line (\d+) of", marker).group(1))
+        cut_line = int(re.search(r"Continue with start_line=(\d+)", marker).group(1))
         total_lines = output.count("\n")
-        assert f"cut lands in line {cut_line} of {total_lines}" in marker
+        assert f"of {total_lines} lines" in marker
         assert f"start_line={cut_line}" in marker
         # The no-gap contract: the reported line is the one holding the first
         # hidden character (computed independently from line spans).
@@ -237,7 +240,7 @@ class TestTruncateReadFileOutput:
         for max_chars in [1000, 5000, 20000, 50000]:
             result = _truncate_read_file_output(output, max_chars)
             head, marker = _head_and_marker(result)
-            cut_line = int(re.search(r"cut lands in line (\d+) of", marker).group(1))
+            cut_line = int(re.search(r"Continue with start_line=(\d+)", marker).group(1))
             assert 1 <= cut_line <= len(lines)
             assert _line_containing(output, len(head)) + 1 == cut_line
             assert f"start_line={cut_line}" in marker
@@ -260,9 +263,9 @@ class TestTruncateReadFileOutput:
         offset = 830  # slice starts at absolute line 831
         result = _truncate_read_file_output(slice_output, 50000, line_offset=offset)
         head, marker = _head_and_marker(result)
-        absolute_cut = offset + head.count("\n") + 1
+        absolute_cut = offset + _line_containing(slice_output, len(head)) + 1
         absolute_last = offset + len(slice_lines)
-        assert f"cut lands in line {absolute_cut} of {absolute_last}" in marker
+        assert f"of {offset + 1}-{absolute_last} lines" in marker
         assert f"start_line={absolute_cut}" in marker
         assert absolute_cut > offset + 1  # resume strictly advances
 
