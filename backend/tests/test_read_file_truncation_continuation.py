@@ -157,3 +157,45 @@ def test_a_last_line_read_whole_is_the_end_of_the_walk(tmp_path, monkeypatch) ->
     rebuilt, forms = _follow_markers(runtime, content)
     assert forms == ["whole_line"]
     assert rebuilt == content
+
+
+def test_a_bounded_read_cut_inside_its_last_line_still_names_the_line_after_it(tmp_path, monkeypatch) -> None:
+    runtime = _local_runtime(tmp_path)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    lines = [f"{i:05d} line" for i in range(1, 1002)] + ["y" * 49900] + [f"{i:05d} after" for i in range(1, 301)]
+    content = "\n".join(lines) + "\n"
+    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    result = _read(runtime, start_line=1, end_line=1002)
+    assert "cut inside line 1002 of 1002 lines" in result
+    assert "Read that line whole with start_line=1002, end_line=1002, then continue with start_line=1003]" in result
+    whole = _read(runtime, start_line=1002, end_line=1002)
+    assert whole == "y" * 49900
+    rest = _read(runtime, start_line=1003)
+    assert "... [truncated:" not in rest and rest.startswith("00001 after")
+
+
+def test_a_start_line_only_read_cut_inside_the_files_last_line_names_nothing_further(tmp_path, monkeypatch) -> None:
+    runtime = _local_runtime(tmp_path)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    content = "a\n" + "x" * 40000 + "\n" + "y" * 49900 + "\n"
+    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    result = _read(runtime, start_line=2)  # no end_line: the read runs to the end of the file
+    assert "cut inside line 3 of 2-3 lines" in result
+    assert "Read that line whole with start_line=3, end_line=3]" in result
+    assert "then continue" not in result
+
+
+def test_a_blank_line_named_by_a_marker_reads_as_empty_not_as_past_the_end(tmp_path, monkeypatch) -> None:
+    runtime = _local_runtime(tmp_path)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    lines = [f"{i:05d} line" for i in range(1, 1099)] + ["y" * 49800, ""] + [f"{i:05d} after" for i in range(1, 401)]
+    content = "\n".join(lines) + "\n"  # line 1100 is blank, 400 lines follow it
+    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    result = _read(runtime, start_line=958, end_line=1100)
+    assert "Read that line whole with start_line=1099, end_line=1099, then continue with start_line=1100]" in result
+    assert _read(runtime, start_line=1100, end_line=1100) == "(empty)"
+    assert _read(runtime, start_line=1100).startswith("\n00001 after")
+    assert _read(runtime, start_line=2000) == "(start_line exceeds file length)"

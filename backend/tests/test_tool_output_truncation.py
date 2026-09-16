@@ -411,6 +411,16 @@ class TestTruncateReadFileOutput:
         result = _truncate_read_file_output("a\n" + "y" * 50000 + "\nz\n", 50000)
         assert "Read that line whole with start_line=2, end_line=2, then continue with start_line=3]" in result
 
+    def test_single_line_read_form_keeps_naming_the_next_line_for_a_bounded_slice(self):
+        # A ranged read's slice may stop before the end of the file (an
+        # end_line below its length), so the line after its last line can
+        # still exist; naming it costs at most a harmless "exceeds file length".
+        result = _truncate_read_file_output("a\n" + "y" * 50000, 50000, line_offset=1000, joined_lines=True, ends_at_eof=False)
+        assert "Read that line whole with start_line=1002, end_line=1002, then continue with start_line=1003]" in result
+        # A start_line-only read runs to the end of the file, so its last line is the file's last line.
+        result = _truncate_read_file_output("a\n" + "y" * 50000, 50000, line_offset=1000, joined_lines=True, ends_at_eof=True)
+        assert "Read that line whole with start_line=1002, end_line=1002]" in result
+
     def test_file_without_trailing_newline_counts_its_last_line(self):
         lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
         output = "\n".join(lines)

@@ -1849,7 +1849,7 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
 _READ_FILE_LINE_CUT_SLACK = 4096
 
 
-def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_lines: int, kept: int, total: int, inside_line: int | None, continuation: str) -> str:
+def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_lines: int, kept: int, total: int, inside_line: int | None, continuation: str, ends_at_eof: bool = True) -> str:
     """Marker appended to a truncated read_file result.
 
     Line numbers are file line numbers: ``line_offset`` is the number of file
@@ -1858,7 +1858,9 @@ def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_li
     ``read_file``. ``inside_line`` is None when the kept text ends on a line
     boundary; otherwise it is the 1-based line of ``output`` the cut fell in
     and ``continuation`` says how to go on from there ("next", "whole_line" or
-    "bash"). The continuation is stated in lines because that is what
+    "bash"). ``ends_at_eof`` is False when ``output`` is a bounded slice that
+    may stop before the end of the file, so a line after its last line can
+    still be named. The continuation is stated in lines because that is what
     ``start_line`` and ``end_line`` take; character counts are kept for
     reference.
     """
@@ -1873,9 +1875,11 @@ def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_li
         return f"{head}. Continue with start_line={line}, or use start_line/end_line to read a specific range] ..."
     if continuation == "whole_line":
         # The line is longer than a read that also has to carry a marker, but
-        # a read of that line alone comes back whole. Nothing follows the
-        # last line of this read, so no further continuation is named then.
-        after = f", then continue with start_line={line + 1}" if inside_line < total_lines else ""
+        # a read of that line alone comes back whole. After the last line of a
+        # read that reached the end of the file there is nothing to name; a
+        # bounded slice may stop mid-file, and a read one past the end only
+        # answers that the line does not exist.
+        after = f", then continue with start_line={line + 1}" if inside_line < total_lines or not ends_at_eof else ""
         return f"{head}. Read that line whole with start_line={line}, end_line={line}{after}] ..."
     return f"{head}; that line is longer than a read can return. Use bash (for example cut -c) to read the rest of that line, or start_line/end_line for other lines] ..."
 
@@ -1903,7 +1907,7 @@ def _read_file_marker_reserve(*, line_offset: int, total_lines: int, total: int)
 _READ_FILE_TINY_BUDGET_MARKER = "... [truncated: {total} chars exceed the {max_chars}-char read limit; use start_line/end_line to read a smaller range] ..."
 
 
-def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int = 0, joined_lines: bool = False) -> str:
+def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int = 0, joined_lines: bool = False, ends_at_eof: bool = True) -> str:
     """Head-truncate read_file output, preserving the beginning of the file.
 
     Source code and documents are read top-to-bottom; the head contains the
@@ -1915,7 +1919,9 @@ def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int 
     lines before ``output``, i.e. ``start_line - 1`` of a ranged read;
     ``joined_lines`` says the output is a provider slice of lines joined with
     newlines, where a trailing newline is an empty last line rather than a
-    line terminator). Only when the line at the cut is longer than
+    line terminator; ``ends_at_eof`` is False for a slice bounded by an
+    ``end_line`` that may stop before the end of the file). Only when the
+    line at the cut is longer than
     ``_READ_FILE_LINE_CUT_SLACK`` does
     the cut stay at the character limit; the marker then names the line it
     fell inside and a continuation that is guaranteed to make progress: a
@@ -1958,7 +1964,7 @@ def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int 
         continuation = "whole_line"
     else:
         continuation = "bash"
-    marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=0, total_lines=total_lines, kept=kept, total=total, inside_line=inside_line, continuation=continuation)
+    marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=0, total_lines=total_lines, kept=kept, total=total, inside_line=inside_line, continuation=continuation, ends_at_eof=ends_at_eof)
     return f"{output[:kept]}{marker}"
 
 
@@ -2496,6 +2502,15 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     return _read_file_from_sandbox(runtime, path)
 
 
+def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> bool:
+    """Whether ``line`` exists, given that a ranged read of it came back empty.
+
+    Providers join selected lines with newlines, so reading the previous line
+    together with this one yields a newline only if this line exists.
+    """
+    return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -2533,6 +2548,11 @@ def read_file_tool(
             content = read_current_file_content(runtime, path)
         if not content:
             if start_line is not None and start_line > 1:
+                # A blank line and a line past the end both read back as "";
+                # tell them apart so a continuation named by a truncation
+                # marker is not reported as beyond the file.
+                if _ranged_read_hits_a_line(runtime, path, start_line):
+                    return "(empty)"
                 return "(start_line exceeds file length)"
             return "(empty)"
         try:
@@ -2543,7 +2563,7 @@ def read_file_tool(
         except Exception:
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
-        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range)
+        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
