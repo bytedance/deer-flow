@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 44
+config_version: 45
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -1346,6 +1346,32 @@ read_before_write:
   elide_min_chars: 2000
 
 # ============================================================================
+# Projects
+# ============================================================================
+# User projects group threads under a name plus free-form instructions. Member
+# threads receive the project's current instructions as a bounded, request-
+# scoped <project> block rendered from the snapshot pinned at run admission;
+# the block never enters the system prompt or persisted history. The shelf
+# index bounds below cap the request-scoped <documents> listing rendered from
+# the same pinned snapshot. Oversized instructions are rejected at write time
+# (422) and never truncated.
+
+projects:
+  # Hard UTF-8 byte cap for project instructions (range: 256-262144). Multi-
+  # byte characters count as their UTF-8 byte length, not as characters.
+  instructions_max_bytes: 8192
+  # Maximum shelf entries rendered into the <documents> index per run
+  # (range: 1-500).
+  shelf_index_max_entries: 50
+  # UTF-8 byte cap for the rendered <documents> index, counting IDs, escaped
+  # names, wrappers, separators and the overflow note (range: 512-65536).
+  # Usually binds before the entry cap for CJK document names.
+  shelf_index_max_bytes: 4096
+  # Days a trashed project document stays recoverable before the retention
+  # sweep may purge it permanently (range: 1-3650).
+  trash_retention_days: 30
+
+# ============================================================================
 # Provider Safety Termination Configuration
 # ============================================================================
 # Intercept AIMessages where the provider stopped generation for safety reasons
@@ -1427,6 +1453,8 @@ sandbox:
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
   # read_file and ls use head-truncation since their content is front-loaded.
+  # A read_file cut lands on a line boundary when the budget allows, and the marker names
+  # the next start_line to continue with, so the agent can page through a long file exactly.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
@@ -2636,6 +2664,10 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
+#     # Optional: extra host suffixes inbound media downloads may come from,
+#     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
+#     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
+#     allowed_media_hosts: []
 #     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
 #     polling_retry_delay: 5
@@ -2675,6 +2707,11 @@ run_ownership:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#     # Optional: extra host suffixes inbound media downloads may come from, in
+#     # addition to the built-in qq.com family and WeCom's official COS media
+#     # host (ww-aibot-img-1258476243.<region>.myqcloud.com). Add a suffix here
+#     # if WeCom rotates to a new COS account or media is routed through a proxy.
+#     allowed_media_hosts: []
 #
 #   dingtalk:
 #     enabled: false

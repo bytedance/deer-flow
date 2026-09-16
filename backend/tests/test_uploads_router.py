@@ -477,6 +477,102 @@ def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
     assert files[1].read_calls == []
 
 
+def test_upload_files_releases_partial_lease_when_acquired_sandbox_is_missing(tmp_path):
+    """open() acquires the sandbox request lease and THEN raises when the
+    lease yields no sandbox; setup runs inside the cleanup scope, so the
+    partially acquired holder is released."""
+    from app.gateway.authz import SandboxRequestLease
+
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    lost_lease = SandboxRequestLease(sandbox=None, sandbox_id="aio-1", denied=False, owner_id="gateway:upload:x", provider=provider)
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(SandboxRequestLease, "release", AsyncMock()) as release,
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "try_acquire_sandbox_for_request", AsyncMock(return_value=lost_lease)),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    release.assert_awaited_once()
+    assert list(thread_uploads_dir.iterdir()) == []
+    assert file.read_calls == []
+
+
+def test_upload_files_in_flight_upload_is_invisible_to_listings(tmp_path):
+    """Before the atomic link commit, only the hidden ``.upload-*.part``
+    staging file exists: listings expose no zero-byte or partial final name,
+    and no placeholder sits at the destination."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+    real_write = uploads._write_upload_chunk
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def gated_write(upload_temp, chunk) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=10)
+        real_write(upload_temp, chunk)
+
+    results = []
+
+    def run_upload() -> None:
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        results.append(asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace())))
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_write_upload_chunk", side_effect=gated_write),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert write_started.wait(timeout=10)
+        # Mid-upload: the final name is absent and listings expose nothing —
+        # only the hidden staging part is on disk.
+        assert not (thread_uploads_dir / "notes.txt").exists()
+        assert uploads.list_files_in_dir(thread_uploads_dir)["files"] == []
+        staged = [p.name for p in thread_uploads_dir.iterdir()]
+        assert len(staged) == 1 and staged[0].startswith(".upload-") and staged[0].endswith(".part")
+        release_write.set()
+        upload_thread.join(timeout=15)
+
+    assert not upload_thread.is_alive()
+    assert results[0].success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    # Commit consumed the staged part; nothing transient remains.
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
+
+
+def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
+    """A crashed upload leaves only a hidden ``.upload-*.part`` file: the
+    listing never exposes it and the startup cleanup removes it."""
+    from deerflow.uploads.manager import cleanup_stale_upload_staging_files
+
+    thread_uploads_dir = tmp_path / "threads" / "t1" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    orphan = thread_uploads_dir / ".upload-crashed.part"
+    orphan.write_bytes(b"partial")
+    visible = thread_uploads_dir / "kept.txt"
+    visible.write_bytes(b"kept")
+
+    listing = uploads.list_files_in_dir(thread_uploads_dir)
+    assert [f["filename"] for f in listing["files"]] == ["kept.txt"]
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+    assert not orphan.exists()
+    assert visible.read_bytes() == b"kept"
+
+
 def test_upload_files_rejects_oversized_single_file_and_removes_partial_file(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -746,7 +842,14 @@ def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
     assert (thread_uploads_dir / "victim.txt").is_symlink()
 
 
-def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path):
+def test_upload_files_never_writes_through_a_hardlinked_destination(tmp_path):
+    """A same-named upload against a hardlinked destination is DIVERTED, not
+    written through: the hardlink appears in the seeded listing like any
+    regular file, so the upload claims ``victim_1.txt`` and the hardlinked
+    victim (and its outside source) keep their bytes. Unlike a symlink — an
+    un-listed unsafe name the destination validator still rejects — a
+    hardlink is indistinguishable from a legitimate existing file, and the
+    unique-name mechanism makes writing through it structurally impossible."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     outside_file = tmp_path / "outside.txt"
@@ -764,14 +867,19 @@ def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path
         file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
-    assert result.success is False
-    assert result.files == []
-    assert result.skipped_files == ["victim.txt"]
+    assert result.success is True
+    assert [file_info.filename for file_info in result.files] == ["victim_1.txt"]
     assert outside_file.read_text(encoding="utf-8") == "protected"
     assert (thread_uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
+    assert (thread_uploads_dir / "victim_1.txt").read_bytes() == b"attacker upload"
 
 
-def test_upload_files_overwrites_existing_regular_file(tmp_path):
+def test_upload_files_unique_names_a_same_name_reupload(tmp_path):
+    """A same-name re-upload never replaces the existing file: the ingestion
+    service seeds claimed names from the thread's current uploads and
+    reserves destinations atomically, so the re-upload lands as
+    ``notes_1.txt`` with the original bytes intact. (In-place update is the
+    artifacts PUT endpoint's job, never the uploads endpoint's.)"""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     existing_file = thread_uploads_dir / "notes.txt"
@@ -790,9 +898,11 @@ def test_upload_files_overwrites_existing_regular_file(tmp_path):
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
     assert result.success is True
-    assert [file_info.filename for file_info in result.files] == ["notes.txt"]
-    assert existing_file.read_bytes() == b"new upload"
+    assert [file_info.filename for file_info in result.files] == ["notes_1.txt"]
+    assert result.files[0].original_filename == "notes.txt"
+    assert existing_file.read_bytes() == b"old upload"
     assert existing_file.stat().st_nlink == 1
+    assert (thread_uploads_dir / "notes_1.txt").read_bytes() == b"new upload"
 
 
 def test_upload_files_oversized_replacement_preserves_existing_regular_file(tmp_path):

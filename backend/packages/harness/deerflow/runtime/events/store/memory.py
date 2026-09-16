@@ -140,7 +140,17 @@ class MemoryRunEventStore(RunEventStore):
             # Return the latest `limit` records, ascending.
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+    async def list_events(
+        self,
+        thread_id,
+        run_id,
+        *,
+        event_types=None,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
         # ``_events_by_run`` is already scoped to this run and seq-ordered, so we
         # touch only this run's events instead of scanning the whole thread.
         run_events = self._events_by_run.get(thread_id, {}).get(run_id, [])

@@ -194,6 +194,7 @@ class RunEventStore(abc.ABC):
         task_id: str | None = None,
         limit: int = 500,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -201,7 +202,8 @@ class RunEventStore(abc.ABC):
         ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the
         first ``limit`` records with seq > after_seq, so callers can page through
         a single subagent task's events without the run-wide ``limit`` truncating
-        the tail (#3779).
+        the tail (#3779). ``user_id`` follows the same explicit-caller semantics
+        as :meth:`list_messages`.
         """
 
     @abc.abstractmethod
