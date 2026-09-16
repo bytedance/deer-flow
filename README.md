@@ -517,6 +517,10 @@ For Docker development, service startup follows `config.yaml` sandbox mode. In L
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
+Remote directory listings report traversal failures (for example, unreadable
+directories) as incomplete results, even when no entries were returned. A
+missing start path is reported separately as “Directory not found.”
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
@@ -615,6 +619,11 @@ channels:
     enabled: true
     bot_id: $WECOM_BOT_ID
     bot_secret: $WECOM_BOT_SECRET
+    # Optional: extra host suffixes inbound media downloads may come from, in
+    # addition to the built-in qq.com family and WeCom's official COS media
+    # host (ww-aibot-img-1258476243.<region>.myqcloud.com); add one here if
+    # WeCom rotates to a new COS account or media goes through a proxy
+    allowed_media_hosts: []
 
   slack:
     enabled: true
@@ -644,6 +653,9 @@ channels:
     max_outbound_image_bytes: 20971520
     max_inbound_file_bytes: 52428800
     max_outbound_file_bytes: 52428800
+    # Inbound media downloads stream with the caps above and are restricted to
+    # these host suffixes (plus *.qq.com and the cdn_base_url host by default)
+    allowed_media_hosts: []
 
     # Optional: per-channel / per-user session settings
     session:
@@ -1497,7 +1509,9 @@ agent has already read stays in the destination conversation after access
 expires or the source is deleted. A message too long for one read carries a
 continuation, so the agent can read the rest; it asks for the missing part only
 if that read is unavailable.
-This API-only feature adds no frontend selector or automatic history search. See
+SDK clients that cannot add top-level request fields may send the same list as
+`context.conversation_references`, and `GET /api/features` reports whether the
+tool is enabled. There is no frontend selector or automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 

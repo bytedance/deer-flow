@@ -1211,6 +1211,64 @@ class TestLoopDetectionAgentGraphIntegration:
             _scope_key("cached-thread", "run-2"),
         }
 
+    def test_loop_warning_survives_a_retried_model_call_in_real_agent_graph(self):
+        """LLMErrorHandlingMiddleware retries a failed call by running the inner wraps again; the retry must still carry the warning."""
+        from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+        from deerflow.config.app_config import AppConfig, LlmCallConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        class ProviderUnavailable(Exception):
+            def __init__(self) -> None:
+                super().__init__("503 Service Unavailable")
+                self.status_code = 503
+                self.response = SimpleNamespace(status_code=503, headers={})
+
+        class FailsOnceOnWarning(_CapturingFakeMessagesListChatModel):
+            _failed: bool = PrivateAttr(default=False)
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                if not self._failed and any(isinstance(message, HumanMessage) and message.name == "loop_warning" for message in messages):
+                    self._failed = True
+                    self._seen_messages.append(list(messages))
+                    raise ProviderUnavailable()
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        repeated_calls = [[{"name": "bash", "id": f"call_ls_{i}", "args": {"command": "ls"}}] for i in range(3)]
+        model = FailsOnceOnWarning(
+            responses=[
+                AIMessage(content="", tool_calls=repeated_calls[0]),
+                AIMessage(content="", tool_calls=repeated_calls[1]),
+                AIMessage(content="", tool_calls=repeated_calls[2]),
+                AIMessage(content="final answer"),
+            ],
+        )
+        app_config = AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            llm_call=LlmCallConfig(retry_max_attempts=3, retry_base_delay_ms=0, retry_cap_delay_ms=0),
+        )
+        graph = create_agent(
+            model=model,
+            tools=[bash],
+            middleware=[LLMErrorHandlingMiddleware(app_config=app_config), LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)],
+        )
+
+        result = graph.invoke(
+            {"messages": [("user", "inspect the directory")]},
+            context={"thread_id": "retry-thread", "run_id": "retry-run"},
+            config={"recursion_limit": 20},
+        )
+
+        # Three tool-calling requests, then the failed attempt and its retry.
+        assert len(model.seen_messages) == 5
+        has_warning = [any(isinstance(message, HumanMessage) and message.name == "loop_warning" for message in messages) for messages in model.seen_messages]
+        assert has_warning == [False, False, False, True, True]
+        assert result["messages"][-1].content == "final answer"
+
     def test_loop_warning_is_transient_in_real_agent_graph(self):
         """after_model queues the warning; wrap_model_call injects it request-only."""
 
