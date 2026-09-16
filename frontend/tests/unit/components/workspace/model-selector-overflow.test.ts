@@ -5,7 +5,7 @@ import { describe, expect, it } from "@rstest/core";
 
 const FRONTEND_ROOT = path.resolve(__dirname, "../../../..");
 const SELECTED_MODEL_WRAPPER_PATTERN =
-  /<ModelPickerTrigger asChild>[\s\S]*?<div className="([^"]*)">\s*<ModelSelectorName/;
+  /<ModelPickerTrigger asChild>[\s\S]*?<div className="([^"]*)">\s*<span className="flex-1 truncate text-left text-xs font-normal">/;
 
 function source(relativePath: string) {
   return readFileSync(path.join(FRONTEND_ROOT, relativePath), "utf8");
@@ -21,7 +21,7 @@ describe("selected model name truncation", () => {
   it.each([
     "src/components/workspace/input-box.tsx",
     "src/components/workspace/sidecar/sidecar-panel.tsx",
-  ])("lets ModelSelectorName stretch in %s", (relativePath) => {
+  ])("lets the selected model name stretch in %s", (relativePath) => {
     const classes = selectedModelWrapperClasses(relativePath);
 
     expect(classes).toEqual(
@@ -67,6 +67,7 @@ describe("model picker integration", () => {
         new RegExp(`onModelSelect=\\{${onModelSelect}\\}`),
       );
       for (const legacyComponent of [
+        "ModelSelectorName",
         "ModelSelectorContent",
         "ModelSelectorInput",
         "ModelSelectorList",

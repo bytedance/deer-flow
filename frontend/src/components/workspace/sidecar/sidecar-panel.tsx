@@ -80,7 +80,6 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import { ModelSelectorName } from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
@@ -936,9 +935,9 @@ function SidecarModelSelector({
       <ModelPickerTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
           <div className="flex min-w-0 flex-col text-left">
-            <ModelSelectorName className="truncate text-xs font-normal">
+            <span className="flex-1 truncate text-left text-xs font-normal">
               {selectedModel.display_name}
-            </ModelSelectorName>
+            </span>
           </div>
         </PromptInputButton>
       </ModelPickerTrigger>

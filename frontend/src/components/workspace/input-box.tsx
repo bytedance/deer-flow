@@ -116,7 +116,6 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import { ModelSelectorName } from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -2733,9 +2732,9 @@ export function InputBox({
                   disabled={composerLocked}
                 >
                   <div className="flex min-w-0 flex-col text-left">
-                    <ModelSelectorName className="text-xs font-normal">
+                    <span className="flex-1 truncate text-left text-xs font-normal">
                       {selectedModel?.display_name}
-                    </ModelSelectorName>
+                    </span>
                   </div>
                 </PromptInputButton>
               </ModelPickerTrigger>

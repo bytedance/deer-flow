@@ -271,6 +271,27 @@ describe("ModelPickerContent anchored selection", () => {
     fireEvent.keyDown(gamma, { key: "ArrowUp" });
     expect(document.activeElement).toBe(current);
   });
+
+  it("moves from favorite stars to adjacent model rows with arrows", async () => {
+    render(<StatefulPicker />);
+    const betaStar = await screen.findByRole("button", {
+      name: `Favorite ${MODELS[1]!.display_name} (${MODELS[1]!.name})`,
+    });
+    const alpha = screen.getByRole("button", {
+      name: `Shared label (${MODELS[0]!.name})`,
+    });
+    const gamma = screen.getByRole("button", {
+      name: `Gamma (${MODELS[2]!.name})`,
+    });
+
+    betaStar.focus();
+    fireEvent.keyDown(betaStar, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(alpha);
+
+    betaStar.focus();
+    fireEvent.keyDown(betaStar, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(gamma);
+  });
 });
 
 describe("ModelPickerContent favorite actions", () => {

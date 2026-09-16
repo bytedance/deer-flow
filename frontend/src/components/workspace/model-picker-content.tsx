@@ -149,7 +149,7 @@ export function ModelPickerContent({
     [visibleModels],
   );
 
-  const handleModelKeyDown = useCallback(
+  const handleRowKeyDown = useCallback(
     (event: KeyboardEvent<HTMLButtonElement>, modelName: string) => {
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
         return;
@@ -199,7 +199,7 @@ export function ModelPickerContent({
                     };
                   }}
                   onClick={() => onModelSelect(model.name)}
-                  onKeyDown={(event) => handleModelKeyDown(event, model.name)}
+                  onKeyDown={(event) => handleRowKeyDown(event, model.name)}
                 >
                   <ModelDetails model={model} />
                   {isCurrent ? (
@@ -235,6 +235,7 @@ export function ModelPickerContent({
                       };
                     }}
                     onClick={() => handleFavorite(model.name)}
+                    onKeyDown={(event) => handleRowKeyDown(event, model.name)}
                   >
                     <StarIcon
                       aria-hidden="true"
