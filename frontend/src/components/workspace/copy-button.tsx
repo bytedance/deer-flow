@@ -33,6 +33,9 @@ export function CopyButton({
   return (
     <Tooltip content={t.clipboard.copyToClipboard}>
       <Button
+        aria-label={
+          copied ? t.clipboard.copiedToClipboard : t.clipboard.copyToClipboard
+        }
         size="icon-sm"
         type="button"
         variant="ghost"

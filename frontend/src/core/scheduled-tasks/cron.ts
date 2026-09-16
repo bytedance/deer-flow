@@ -19,14 +19,104 @@ export type CronParts = {
   raw?: string;
 };
 
+export type ScheduleType = "once" | "cron" | "interval";
+
+export type IntervalUnit = "seconds" | "minutes" | "hours";
+
+export const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60;
+export const DEFAULT_INTERVAL_MIN_SECONDS = 60;
+
 export type ScheduleFormState = {
-  scheduleType: "once" | "cron";
+  scheduleType: ScheduleType;
   preset?: CronPreset;
   parts?: CronParts;
   /** datetime-local wall value "YYYY-MM-DDTHH:mm", interpreted in `timezone`. */
   runAtLocal?: string;
+  intervalAmount?: number;
+  intervalUnit?: IntervalUnit;
   timezone: string;
 };
+
+export function intervalToSeconds(amount: number, unit: IntervalUnit): number {
+  if (!Number.isInteger(amount) || amount < 1) {
+    throw new Error("interval amount must be a positive integer");
+  }
+  if (unit === "hours") {
+    return amount * 3600;
+  }
+  if (unit === "minutes") {
+    return amount * 60;
+  }
+  return amount;
+}
+
+export function secondsToInterval(everySeconds: number): {
+  amount: number;
+  unit: IntervalUnit;
+} {
+  if (
+    Number.isInteger(everySeconds) &&
+    everySeconds >= 3600 &&
+    everySeconds % 3600 === 0
+  ) {
+    return { amount: everySeconds / 3600, unit: "hours" };
+  }
+  if (
+    Number.isInteger(everySeconds) &&
+    everySeconds >= 60 &&
+    everySeconds % 60 === 0
+  ) {
+    return { amount: everySeconds / 60, unit: "minutes" };
+  }
+  return {
+    amount: Math.max(1, Math.trunc(everySeconds) || 1),
+    unit: "seconds",
+  };
+}
+
+export function maxIntervalAmount(unit: IntervalUnit): number {
+  if (unit === "hours") {
+    return MAX_INTERVAL_SECONDS / 3600;
+  }
+  if (unit === "minutes") {
+    return MAX_INTERVAL_SECONDS / 60;
+  }
+  return MAX_INTERVAL_SECONDS;
+}
+
+export function minIntervalAmount(unit: IntervalUnit): number {
+  // Matches scheduler.min_once_delay_seconds default. Minutes/hours already
+  // start at 60s; seconds must not go below that or create/edit 422s.
+  if (unit === "seconds") {
+    return DEFAULT_INTERVAL_MIN_SECONDS;
+  }
+  return 1;
+}
+
+export function clampIntervalAmount(
+  amount: number,
+  unit: IntervalUnit,
+): number {
+  const min = minIntervalAmount(unit);
+  if (!Number.isFinite(amount)) {
+    return min;
+  }
+  return Math.min(Math.max(min, Math.trunc(amount)), maxIntervalAmount(unit));
+}
+
+export function hasScheduleSpec(spec: {
+  cron?: unknown;
+  run_at?: unknown;
+  every_seconds?: unknown;
+}): boolean {
+  if (typeof spec.cron === "string" && spec.cron.trim()) {
+    return true;
+  }
+  if (typeof spec.run_at === "string" && spec.run_at.trim()) {
+    return true;
+  }
+  return typeof spec.every_seconds === "number" && spec.every_seconds > 0;
+}
 
 export type ScheduleLocale = "en" | "zh";
 
@@ -208,6 +298,27 @@ export function describeSchedule(
   if (state.scheduleType === "once") {
     const runAt = (state.runAtLocal ?? "").replace("T", " ");
     return zh ? `单次 ${runAt} (${tz})` : `Once at ${runAt} (${tz})`;
+  }
+
+  if (state.scheduleType === "interval") {
+    const amount = state.intervalAmount ?? 1;
+    const unit = state.intervalUnit ?? "minutes";
+    if (zh) {
+      if (unit === "hours") {
+        return `每 ${amount} 小时`;
+      }
+      if (unit === "seconds") {
+        return `每 ${amount} 秒`;
+      }
+      return `每 ${amount} 分钟`;
+    }
+    if (unit === "hours") {
+      return amount === 1 ? "Every hour" : `Every ${amount} hours`;
+    }
+    if (unit === "seconds") {
+      return amount === 1 ? "Every second" : `Every ${amount} seconds`;
+    }
+    return amount === 1 ? "Every minute" : `Every ${amount} minutes`;
   }
 
   const parts = state.parts ?? {};

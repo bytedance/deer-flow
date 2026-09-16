@@ -86,4 +86,53 @@ describe("documentation content links", () => {
 
     expect(brokenLinks).toEqual([]);
   });
+
+  it("documents the custom-agent create request naming contract", () => {
+    const customAgentApiDocs = DOC_LANGUAGES.map((lang) =>
+      readFileSync(
+        join(CONTENT_ROOT, lang, "application/agents-and-threads.mdx"),
+        "utf8",
+      ),
+    );
+    const customAgentDocs = [
+      ...customAgentApiDocs,
+      ...DOC_LANGUAGES.map((lang) =>
+        readFileSync(
+          join(CONTENT_ROOT, lang, "harness/lead-agent.mdx"),
+          "utf8",
+        ),
+      ),
+    ];
+
+    for (const source of customAgentDocs) {
+      expect(source).toContain("agents_api.enabled");
+      expect(source).toContain("agent_storage.backend: file");
+      expect(source).toContain("agent_storage.backend: db");
+      expect(source).toContain("database.backend: sqlite");
+      expect(source).toContain("database.backend: postgres");
+      expect(source).toContain("backend/scripts/migrate_agents_to_db.py");
+      expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
+      expect(source).not.toContain("display_name");
+    }
+
+    for (const source of customAgentApiDocs) {
+      expect(source).toContain("^[A-Za-z0-9-]+$");
+      expect(source).toContain("backend/scripts/migrate_user_isolation.py");
+    }
+
+    const chineseApiGuide = readFileSync(
+      join(CONTENT_ROOT, "zh/application/agents-and-threads.mdx"),
+      "utf8",
+    );
+    expect(chineseApiGuide).toContain('"name": "data-analyst"');
+    expect(chineseApiGuide).toContain("下一次 Agent 调用时自动加载，无需重启");
+
+    const englishApiGuide = readFileSync(
+      join(CONTENT_ROOT, "en/application/agents-and-threads.mdx"),
+      "utf8",
+    );
+    expect(englishApiGuide).toContain(
+      "changes are picked up on the agent's next invocation",
+    );
+  });
 });

@@ -145,6 +145,7 @@ export function MessageListItem({
   threadId,
   artifactPaths = [],
   showCopyButton = true,
+  showWorkspaceChanges = false,
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
@@ -157,16 +158,26 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  showWorkspaceChanges?: boolean;
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const editableText = useMemo(
-    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
-    [isHuman, message],
+  // One derivation serves both editing and the toolbar, and only runs when
+  // either consumer can use it: assistant rows never render this toolbar
+  // (the sole call site passes showCopyButton only for non-assistant rows)
+  // and the toolbar stays unrendered while loading — matching the guard the
+  // pre-memo call sat behind instead of deriving for every settled row.
+  const copyData = useMemo(
+    () =>
+      isHuman || (!isLoading && showCopyButton)
+        ? (getMessageCopyData(message) ?? "")
+        : "",
+    [isHuman, isLoading, showCopyButton, message],
   );
+  const editableText = isHuman ? copyData : "";
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
@@ -213,6 +224,7 @@ export function MessageListItem({
         threadId={threadId}
         artifactPaths={artifactPaths}
         runId={runId}
+        showWorkspaceChanges={showWorkspaceChanges}
         editState={
           isHuman && isEditing
             ? {
@@ -236,7 +248,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton clipboardData={getMessageCopyData(message)} />
+            <CopyButton clipboardData={copyData} />
             {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
               <Tooltip content={t.common.editAndRerun}>
                 <Button
@@ -362,6 +374,7 @@ function MessageContent_({
   threadId,
   artifactPaths,
   runId,
+  showWorkspaceChanges = false,
   editState,
 }: {
   className?: string;
@@ -370,6 +383,7 @@ function MessageContent_({
   threadId: string;
   artifactPaths: readonly string[];
   runId?: string;
+  showWorkspaceChanges?: boolean;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -416,6 +430,11 @@ function MessageContent_({
         rawContent.includes("<uploaded_files>")
       ) {
         // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
+        // <uploaded_files> is display-only compat for pre-#4174 history (#4212).
+        // Accepted tradeoff (review): a live user typing the legacy spelling can
+        // fabricate chips / hide their own message text — display-only and
+        // self-inflicted, no backend semantics. Age-gating the legacy spelling
+        // is a possible follow-up if this ever matters.
         return parseUploadedFiles(rawContent);
       }
       return null;
@@ -568,7 +587,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && (
+      {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}

@@ -17,6 +17,7 @@ def _make_app(monkeypatch: pytest.MonkeyPatch):
         run_id="run-1",
         thread_id="thread-1",
         store_only=False,
+        idempotency_reused=False,
         status=RunStatus.success,
     )
     run_manager = MagicMock()
@@ -41,25 +42,28 @@ def _make_app(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "body"),
+    ("method", "path", "body", "creates_run"),
     [
-        ("GET", "/api/threads/thread-1/runs/run-1/join", None),
-        ("GET", "/api/threads/thread-1/runs/run-1/stream", None),
-        ("POST", "/api/threads/thread-1/runs/stream", {}),
+        ("GET", "/api/threads/thread-1/runs/run-1/join", None, False),
+        ("GET", "/api/threads/thread-1/runs/run-1/stream", None, False),
+        ("POST", "/api/threads/thread-1/runs/run-1/stream", {}, False),
+        ("POST", "/api/threads/thread-1/runs/stream", {}, True),
         (
             "POST",
             "/api/runs/stream",
             {"config": {"configurable": {"thread_id": "thread-1"}}},
+            True,
         ),
     ],
 )
-def test_sse_responses_disable_intermediary_transforms_and_nginx_buffering(
+def test_sse_response_headers(
     monkeypatch: pytest.MonkeyPatch,
     method: str,
     path: str,
     body: dict | None,
+    creates_run: bool,
 ):
-    """Every public SSE route sends the shared anti-buffering contract."""
+    """SSE routes advertise transform/buffering policy and preserve SDK metadata."""
     with TestClient(_make_app(monkeypatch)) as client:
         response = client.request(method, path, json=body)
 
@@ -67,3 +71,7 @@ def test_sse_responses_disable_intermediary_transforms_and_nginx_buffering(
     directives = {part.strip() for part in response.headers["cache-control"].split(",")}
     assert directives >= {"no-cache", "no-transform"}
     assert response.headers["x-accel-buffering"] == "no"
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "connection" not in response.headers
+    if creates_run:
+        assert response.headers["content-location"] == "/api/threads/thread-1/runs/run-1"

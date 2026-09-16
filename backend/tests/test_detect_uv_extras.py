@@ -173,10 +173,135 @@ def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "channels:\n  buzz:\n    enabled: true\n    relay_url: wss://buzz.example.com\n",
+    )
+    assert detect.detect_from_config(cfg) == ["buzz"]
+
+
+def test_detect_from_config_buzz_disabled_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("channels:\n  buzz:\n    enabled: false\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_no_channels_section_returns_no_buzz_extra(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_commented_buzz_block(tmp_path):
+    """Mirrors the fully-commented example block shipped in config.example.yaml."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "# channels:\n#   buzz:\n#     enabled: true\n#     relay_url: wss://buzz.example.com\ndatabase:\n  backend: sqlite\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
     assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_via_model_use(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n    model: qwen3:32b\n    base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_is_the_first_key(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - use: langchain_ollama:ChatOllama\n    name: qwen3-local\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_commented_ollama_block(tmp_path):
+    """config.example.yaml ships the Ollama models fully commented out."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  # - name: qwen3-local\n  #   use: langchain_ollama:ChatOllama\n  #   base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_use_in_nested_model_mapping(tmp_path):
+    """A `use` inside a sub-mapping is not the model's own provider.
+
+    `when_thinking_enabled` / `when_thinking_disabled` blocks are common in
+    config.example.yaml, so matching `use:` at any depth would misread them.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: doubao\n    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n    when_thinking_enabled:\n      use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_in_setup_wizard_output(tmp_path):
+    """`make setup` writes config.yaml with yaml.safe_dump, which leaves list items unindented."""
+    from wizard.writer import build_minimal_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        build_minimal_config(
+            provider_use="langchain_ollama:ChatOllama",
+            model_name="qwen3:32b",
+            display_name="Qwen3 32B (Ollama)",
+            api_key_field="api_key",
+            env_var=None,
+            base_url="http://localhost:11434",
+        ),
+        encoding="utf-8",
+    )
+    # Pin the layout under test, so a writer change fails here rather than silently passing.
+    assert "\nmodels:\n- " in cfg.read_text(encoding="utf-8")
+    assert "ollama" in detect.detect_from_config(cfg)
+
+
+def test_detect_from_config_ollama_via_indentless_models_list(tmp_path):
+    """Same shape as the setup wizard, and as scripts/config-upgrade.sh emits."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n- name: qwen3-local\n  use: langchain_ollama:ChatOllama\n  model: qwen3:32b\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_follows_a_nested_list(tmp_path):
+    """A sequence inside a model option must not move the key indent; key order is irrelevant."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: local\n    model: qwen3:32b\n    stop:\n      - END\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_use_in_nested_indentless_sequence(tmp_path):
+    """A `- use:` item inside a model option is not that model's provider."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n- name: x\n  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n  fallbacks:\n  - use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_ollama_and_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "database:\n  backend: postgres\nmodels:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama", "postgres"]
 
 
 def test_detect_from_config_combines_postgres_and_redis(tmp_path):
@@ -191,6 +316,13 @@ def test_detect_from_config_dedupes_when_both_present(tmp_path):
     cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
     # Sorted unique extras, no double-counting.
     assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_combines_buzz_with_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nchannels:\n  buzz:\n    enabled: true\n")
+    # Existing postgres/redis/browser detection is unaffected by the new rule.
+    assert detect.detect_from_config(cfg) == ["buzz", "postgres"]
 
 
 def test_detect_from_config_missing_file_returns_empty(tmp_path):

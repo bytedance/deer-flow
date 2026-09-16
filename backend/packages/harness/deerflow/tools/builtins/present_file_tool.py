@@ -7,7 +7,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
@@ -66,7 +66,7 @@ def _normalize_presented_filepath(
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
         try:
-            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=resolve_runtime_user_id(runtime))
         except TypeError:
             actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
     else:

@@ -21,7 +21,7 @@ import {
   readGoalResponseError,
   type SlashSuggestion,
 } from "@/components/workspace/input-box-helpers";
-import type { Skill } from "@/core/skills";
+import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 
 function makeSkill(name: string, enabled = true): Skill {
   return {
@@ -331,6 +331,29 @@ describe("getMatchingSkillSuggestions", () => {
       "skill:goal-helper",
       "builtin:goal",
     ]);
+  });
+
+  it("excludes skills that collide with a reserved slash name", () => {
+    // The picker must not offer what the slash parsers refuse. Both sides drop
+    // these names, so such a skill can never activate — picking it would send
+    // literal text to the model with nothing loaded.
+    for (const reserved of RESERVED_SLASH_SKILL_NAMES) {
+      const result = getMatchingSkillSuggestions(
+        [makeSkill(reserved), makeSkill(`${reserved}-helper`)],
+        reserved,
+        builtins,
+      );
+
+      expect(
+        result.filter((s) => s.kind === "skill").map((s) => s.name),
+      ).toEqual([`${reserved}-helper`]);
+    }
+  });
+
+  it("keeps reserved names out even when no builtin commands are passed", () => {
+    const result = getMatchingSkillSuggestions([makeSkill("status")], "", []);
+
+    expect(result).toEqual([]);
   });
 
   it("caps the number of suggestions", () => {

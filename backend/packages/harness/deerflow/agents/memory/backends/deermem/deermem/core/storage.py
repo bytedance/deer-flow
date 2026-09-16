@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -31,7 +32,18 @@ from typing import Any, Protocol
 import yaml
 
 from ..config import DeerMemConfig
-from .paths import DEFAULT_AGENT_BUCKET, agent_facts_directory, fact_file_path, memory_file_path, safe_user_id, validate_agent_name
+from .eviction import FactEvictionDecision
+from .paths import (
+    DEFAULT_AGENT_BUCKET,
+    agent_eviction_audit_path,
+    agent_facts_directory,
+    agent_metadata_directory,
+    agent_usage_path,
+    fact_file_path,
+    memory_file_path,
+    safe_user_id,
+    validate_agent_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +219,12 @@ def _normalize_fact(
     normalized["scope"] = copy.deepcopy(scope)
     _require_string_list(normalized, "topics")
     _require_string_list(normalized, "consolidatedFrom")
+    last_confirmed_at = normalized.get("lastConfirmedAt")
+    if last_confirmed_at is not None and not isinstance(last_confirmed_at, str):
+        raise ValueError("fact.lastConfirmedAt must be a string when present")
+    confirmation_count = normalized.get("confirmationCount")
+    if confirmation_count is not None and (isinstance(confirmation_count, bool) or not isinstance(confirmation_count, int) or confirmation_count < 1):
+        raise ValueError("fact.confirmationCount must be an integer >= 1 when present")
     revision = normalized.get("revision", 1)
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise ValueError("fact.revision must be an integer >= 1")
@@ -412,6 +430,46 @@ class MemoryStorage(abc.ABC):
         """Clear global summaries and every agent fact bucket for one user."""
         raise NotImplementedError
 
+    def get_fact_usage(
+        self,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return optional query-usage sidecar data for capacity scoring."""
+        return {}
+
+    def record_fact_accesses(
+        self,
+        fact_ids: list[str],
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+        accessed_at: datetime | None = None,
+    ) -> None:
+        """Record actual query hits; alternative providers may override."""
+
+    def record_capacity_eviction(
+        self,
+        decision: FactEvictionDecision,
+        *,
+        max_facts: int,
+        agent_name: str,
+        user_id: str | None = None,
+        occurred_at: datetime | None = None,
+        shadow_decision: FactEvictionDecision | None = None,
+    ) -> None:
+        """Persist optional metadata-only eviction evidence."""
+
+    def clear_fact_metadata(
+        self,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+        fact_ids: list[str] | None = None,
+    ) -> None:
+        """Remove sidecar data for selected facts, or the whole scope."""
+
     def close(self) -> None:
         """Release optional storage resources."""
 
@@ -429,6 +487,234 @@ class FileMemoryStorage(MemoryStorage):
         """Release the retrieval adapter owned by this storage instance."""
         if self._retrieval is not None:
             self._retrieval.close()
+
+    @staticmethod
+    def _read_json_sidecar(path: Path, *, expected_type: type[dict] | type[list]) -> dict[str, Any] | list[Any]:
+        if not path.exists():
+            return expected_type()
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed DeerMem sidecar %s", path, exc_info=True)
+            return expected_type()
+        if not isinstance(value, expected_type):
+            logger.warning("Ignoring DeerMem sidecar with invalid root type: %s", path)
+            return expected_type()
+        return value
+
+    def get_fact_usage(
+        self,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_json_sidecar(
+                agent_usage_path(path, agent_name),
+                expected_type=dict,
+            )
+        return {str(fact_id): copy.deepcopy(entry) for fact_id, entry in raw.items() if isinstance(fact_id, str) and isinstance(entry, dict)}
+
+    def record_fact_accesses(
+        self,
+        fact_ids: list[str],
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+        accessed_at: datetime | None = None,
+    ) -> None:
+        unique_ids = list(dict.fromkeys(fact_id for fact_id in fact_ids if fact_id))
+        if not unique_ids:
+            return
+        now = (accessed_at or datetime.now(UTC)).astimezone(UTC)
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        sidecar_path = agent_usage_path(path, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            # Coordinate with deletion under the same lock. If a search raced
+            # with an explicit delete, never recreate usage metadata for a fact
+            # whose canonical file is already gone.
+            existing_ids = [fact_id for fact_id in unique_ids if fact_file_path(path, fact_id, agent_name=agent_name).exists()]
+            if not existing_ids:
+                return
+            raw = self._read_json_sidecar(sidecar_path, expected_type=dict)
+            usage = raw if isinstance(raw, dict) else {}
+            for fact_id in existing_ids:
+                previous = usage.get(fact_id)
+                previous = previous if isinstance(previous, dict) else {}
+                previous_heat = previous.get("accessHeat", 0.0)
+                try:
+                    heat = float(previous_heat)
+                except (TypeError, ValueError):
+                    heat = 0.0
+                if not math.isfinite(heat) or heat < 0:
+                    heat = 0.0
+                last_accessed = previous.get("lastAccessedAt")
+                try:
+                    parsed = datetime.fromisoformat(str(last_accessed).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    elapsed_days = max(0.0, (now - parsed.astimezone(UTC)).total_seconds() / 86400)
+                    heat *= 2 ** (-elapsed_days / self._config.eviction_access_half_life_days)
+                except (TypeError, ValueError):
+                    heat = 0.0
+                raw_count = previous.get("accessCount", 0)
+                count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0 else 0
+                usage[fact_id] = {
+                    "accessHeat": heat + 1.0,
+                    "accessCount": count + 1,
+                    "lastAccessedAt": now.isoformat().removesuffix("+00:00") + "Z",
+                }
+            _atomic_write(
+                sidecar_path,
+                json.dumps(usage, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+
+    def record_capacity_eviction(
+        self,
+        decision: FactEvictionDecision,
+        *,
+        max_facts: int,
+        agent_name: str,
+        user_id: str | None = None,
+        occurred_at: datetime | None = None,
+        shadow_decision: FactEvictionDecision | None = None,
+    ) -> None:
+        if not decision.evicted or self._config.eviction_audit_max_entries == 0:
+            return
+        now = (occurred_at or datetime.now(UTC)).astimezone(UTC)
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        sidecar_path = agent_eviction_audit_path(path, agent_name)
+        event: dict[str, Any] = {
+            "occurredAt": now.isoformat().removesuffix("+00:00") + "Z",
+            "reason": "capacity",
+            "policyVersion": decision.policy,
+            "maxFacts": max_facts,
+            "reservedCorrectionSlots": decision.reserved_correction_slots,
+            "evicted": [
+                {
+                    "factId": item.fact_id,
+                    "category": item.category,
+                    "score": item.score,
+                    "components": copy.deepcopy(item.components),
+                }
+                for item in decision.evicted
+            ],
+        }
+        if shadow_decision is not None:
+            actual_ids = {item.fact_id for item in decision.evicted}
+            shadow_ids = {item.fact_id for item in shadow_decision.evicted}
+            event["shadow"] = {
+                "policyVersion": shadow_decision.policy,
+                "wouldEvict": sorted(shadow_ids),
+                "disagrees": actual_ids != shadow_ids,
+            }
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            raw = self._read_json_sidecar(sidecar_path, expected_type=list)
+            events = raw if isinstance(raw, list) else []
+            events.append(event)
+            events = events[-self._config.eviction_audit_max_entries :]
+            _atomic_write(
+                sidecar_path,
+                json.dumps(events, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+
+    def clear_fact_metadata(
+        self,
+        *,
+        agent_name: str,
+        user_id: str | None = None,
+        fact_ids: list[str] | None = None,
+    ) -> None:
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        metadata_path = agent_metadata_directory(path, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        with (
+            self._scope_lock(key),
+            _process_file_lock(
+                path.parent / ".memory.lock",
+                float(getattr(self._config, "file_lock_timeout_seconds", 10)),
+            ),
+        ):
+            if fact_ids is None:
+                if metadata_path.exists():
+                    shutil.rmtree(metadata_path)
+                return
+            removed_ids = set(fact_ids)
+            if not removed_ids:
+                return
+            usage_path = agent_usage_path(path, agent_name)
+            raw_usage = self._read_json_sidecar(usage_path, expected_type=dict)
+            usage = raw_usage if isinstance(raw_usage, dict) else {}
+            filtered_usage = {fact_id: value for fact_id, value in usage.items() if fact_id not in removed_ids}
+            if filtered_usage:
+                _atomic_write(
+                    usage_path,
+                    json.dumps(filtered_usage, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            else:
+                usage_path.unlink(missing_ok=True)
+
+            audit_path = agent_eviction_audit_path(path, agent_name)
+            raw_events = self._read_json_sidecar(audit_path, expected_type=list)
+            events = raw_events if isinstance(raw_events, list) else []
+            filtered_events: list[dict[str, Any]] = []
+            for raw_event in events:
+                if not isinstance(raw_event, dict):
+                    continue
+                event = copy.deepcopy(raw_event)
+                evicted = event.get("evicted")
+                if not isinstance(evicted, list):
+                    continue
+                event["evicted"] = [item for item in evicted if isinstance(item, dict) and isinstance(item.get("factId"), str) and item["factId"] not in removed_ids]
+                shadow = event.get("shadow")
+                if isinstance(shadow, dict):
+                    would_evict = shadow.get("wouldEvict")
+                    if not isinstance(would_evict, list):
+                        event.pop("shadow", None)
+                    else:
+                        shadow["wouldEvict"] = [fact_id for fact_id in would_evict if isinstance(fact_id, str) and fact_id not in removed_ids]
+                elif "shadow" in event:
+                    event.pop("shadow")
+                if isinstance(event.get("shadow"), dict):
+                    shadow = event["shadow"]
+                    actual_ids = {item.get("factId") for item in event.get("evicted", []) if isinstance(item, dict) and isinstance(item.get("factId"), str)}
+                    shadow_ids = {fact_id for fact_id in shadow["wouldEvict"] if isinstance(fact_id, str)}
+                    shadow["disagrees"] = actual_ids != shadow_ids
+                if event.get("evicted"):
+                    filtered_events.append(event)
+            if filtered_events:
+                _atomic_write(
+                    audit_path,
+                    json.dumps(filtered_events, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            else:
+                audit_path.unlink(missing_ok=True)
+            try:
+                metadata_path.rmdir()
+            except OSError:
+                pass
 
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:
@@ -1073,6 +1359,7 @@ class FileMemoryStorage(MemoryStorage):
         key = self._cache_key(agent_name, user_id=user_id)
         lock_path = path.parent / ".memory.lock"
         notifications: list[RetrievalNotification] = []
+        deleted_metadata_ids: list[str] = []
         try:
             if not isinstance(memory_data, dict):
                 raise ValueError("memory_data must be an object")
@@ -1091,6 +1378,7 @@ class FileMemoryStorage(MemoryStorage):
                 if len(ids) != len(set(ids)):
                     raise ValueError("Duplicate fact ids are not allowed")
                 old_ids = set(self._agent_entries(path, agent_name, user_id=user_id)) if agent_name is not None else set()
+                deleted_metadata_ids = sorted(old_ids - set(ids))
                 summaries = None
                 if agent_name is None:
                     summaries = {"user": memory_data.get("user", {}), "history": memory_data.get("history", {})}
@@ -1099,7 +1387,7 @@ class FileMemoryStorage(MemoryStorage):
                     user_id=user_id,
                     agent_name=agent_name,
                     upserts=copy.deepcopy(facts_raw),
-                    deletes=sorted(old_ids - set(ids)),
+                    deletes=deleted_metadata_ids,
                     summaries=summaries,
                     expected_revision=expected_revision,
                 )
@@ -1114,6 +1402,12 @@ class FileMemoryStorage(MemoryStorage):
             return False
 
         self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        if agent_name is not None and deleted_metadata_ids:
+            self.clear_fact_metadata(
+                agent_name=agent_name,
+                user_id=user_id,
+                fact_ids=deleted_metadata_ids,
+            )
         return True
 
     def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
@@ -1121,6 +1415,7 @@ class FileMemoryStorage(MemoryStorage):
         path = self._get_memory_file_path(user_id=user_id)
         key = self._cache_key(user_id=user_id)
         notifications_by_agent: list[ScopedRetrievalNotifications] = []
+        metadata_agents: list[str] = []
         with (
             self._scope_lock(key),
             _process_file_lock(
@@ -1134,6 +1429,7 @@ class FileMemoryStorage(MemoryStorage):
                 for agent_dir in sorted(child for child in agents_root.iterdir() if child.is_dir()):
                     agent_name = agent_dir.name
                     validate_agent_name(agent_name)
+                    metadata_agents.append(agent_name)
                     legacy_path = self._legacy_agent_memory_path(path, agent_name)
                     if legacy_path.exists():
                         _, _, migration_notifications = self._migrate_locked(
@@ -1175,6 +1471,8 @@ class FileMemoryStorage(MemoryStorage):
 
         for agent_name, notifications in notifications_by_agent:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        for agent_name in metadata_agents:
+            self.clear_fact_metadata(agent_name=agent_name, user_id=user_id)
         return self.reload(DEFAULT_AGENT_BUCKET, user_id=user_id)
 
     @staticmethod
@@ -1301,13 +1599,20 @@ class FileMemoryStorage(MemoryStorage):
         self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
         if memory_file is None:  # defensive: the bounded loop either commits or raises
             raise MemoryStorageError("Memory repository change did not produce a result")
+        deleted_fact_ids = [str(value) for action, value, _ in notifications if action == "remove"]
+        if agent_name is not None and deleted_fact_ids:
+            self.clear_fact_metadata(
+                agent_name=agent_name,
+                user_id=user_id,
+                fact_ids=deleted_fact_ids,
+            )
         return {
             "complete": False,
             "version": memory_file.get("version", DOCUMENT_VERSION),
             "revision": memory_file.get("revision", 0),
             "lastUpdated": memory_file.get("lastUpdated", ""),
             "upsertedFacts": [copy.deepcopy(value) for action, value, _ in notifications if action == "upsert" and isinstance(value, dict)],
-            "deletedFactIds": [str(value) for action, value, _ in notifications if action == "remove"],
+            "deletedFactIds": deleted_fact_ids,
         }
 
     def upsert_fact(

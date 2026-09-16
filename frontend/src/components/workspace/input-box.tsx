@@ -297,8 +297,10 @@ export function InputBox({
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -330,21 +332,43 @@ export function InputBox({
   defaultModelName?: string | null;
   initialValue?: string;
   onContextChange?: (
-    context: Omit<
-      AgentThreadContext,
-      "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
-    > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-      reasoning_effort?: "minimal" | "low" | "medium" | "high";
-    },
+    // Explicit selections contain only the fields changed by that action,
+    // never the whole thread-resolved context (which may override the account).
+    context: Partial<
+      Omit<
+        AgentThreadContext,
+        "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+      > & {
+        mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+        reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      }
+    >,
+    options?: { automatic: boolean },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
+  /**
+   * Prepare a not-yet-materialized thread before a builtin command creates
+   * it server-side. The `/goal <condition>` PUT endpoint materializes a
+   * missing thread row itself, so a project-scoped new chat uses this to
+   * assign membership first — the later idempotent thread create would
+   * otherwise return that unassigned row without the project. Only runs for
+   * goal-set: status/clear never create a thread server-side. Rejecting
+   * aborts the command and keeps the composer's text for a retry.
+   */
+  onPrepareThread?: () => void | Promise<void>;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -417,6 +441,9 @@ export function InputBox({
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  // Set when the user stops a streaming turn. Such a turn ends on a
+  // half-finished response, so we must NOT generate follow-up suggestions for it.
+  const stoppedByUserRef = useRef(false);
   const messagesRef = useRef(thread.messages);
 
   const clearVoiceRestartTimer = useCallback(() => {
@@ -571,11 +598,14 @@ export function InputBox({
       return;
     }
 
-    onContextChange?.({
-      ...context,
-      model_name: nextModelName,
-      mode: nextMode,
-    });
+    onContextChange?.(
+      {
+        ...context,
+        model_name: nextModelName,
+        mode: nextMode,
+      },
+      { automatic: true },
+    );
   }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
@@ -828,11 +858,13 @@ export function InputBox({
       if (!model) {
         return;
       }
+      const mode = getResolvedMode(
+        context.mode,
+        model.supports_thinking ?? false,
+      );
       onContextChange?.({
-        ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        ...(mode !== context.mode ? { mode } : {}),
       });
       setModelDialogOpen(false);
     },
@@ -845,7 +877,6 @@ export function InputBox({
         return;
       }
       onContextChange?.({
-        ...context,
         mode: getResolvedMode(mode, supportThinking),
         reasoning_effort:
           mode === "ultra"
@@ -857,7 +888,7 @@ export function InputBox({
                 : "minimal",
       });
     },
-    [disabled, onContextChange, context, polishingInput, supportThinking],
+    [disabled, onContextChange, polishingInput, supportThinking],
   );
 
   const handleReasoningEffortSelect = useCallback(
@@ -866,11 +897,10 @@ export function InputBox({
         return;
       }
       onContextChange?.({
-        ...context,
         reasoning_effort: effort,
       });
     },
-    [disabled, onContextChange, context, polishingInput],
+    [disabled, onContextChange, polishingInput],
   );
 
   const handleGoalCommand = useCallback(
@@ -1116,14 +1146,17 @@ export function InputBox({
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
-        onContextChange?.({
-          ...context,
-          model_name: resolvedModelName,
-          mode: getResolvedMode(
-            context.mode,
-            selectedModel?.supports_thinking ?? false,
-          ),
-        });
+        onContextChange?.(
+          {
+            ...context,
+            model_name: resolvedModelName,
+            mode: getResolvedMode(
+              context.mode,
+              selectedModel?.supports_thinking ?? false,
+            ),
+          },
+          { automatic: true },
+        );
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
             Promise.resolve(submit()).then(resolve).catch(reject);
@@ -1147,6 +1180,24 @@ export function InputBox({
       uploadLimits,
     ],
   );
+
+  const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
+    if (!canStopStreaming) {
+      return;
+    }
+    // Mark the in-progress turn as user-interrupted so the next
+    // streaming->ready transition does not suggest follow-ups for it.
+    stoppedByUserRef.current = true;
+    setFollowups([]);
+    setFollowupsHidden(true);
+    setFollowupsLoading(false);
+    onStop?.();
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -1180,6 +1231,35 @@ export function InputBox({
           // clearing it (PromptInput only preserves input on a rejected submit).
           return Promise.reject(new Error("goal-too-long"));
         }
+        if (submitAction.command.kind === "set") {
+          // A goal-set PUT creates the thread server-side when missing, so a
+          // project-scoped new chat must assign membership first. The prepare
+          // callback toasts its own failure; reject so the composer keeps the
+          // text for a retry instead of issuing an unassigned goal.
+          //
+          // Fence against conversation switches while preparation runs: the
+          // goal PUT registers its AbortController only when it starts, so
+          // the thread-change/unmount cleanup cannot cancel an in-flight
+          // prepare. Capture the goal-request epoch before the await — the
+          // cleanup bumps it via abortGoalRequest — and drop the stale
+          // continuation before it can clear the new conversation's composer
+          // or launch the abandoned submission.
+          const requestEpoch = goalRequestStateRef.current.sequence;
+          try {
+            await onPrepareThread?.();
+          } catch (error) {
+            return Promise.reject(
+              error instanceof Error
+                ? error
+                : new Error("thread preparation failed"),
+            );
+          }
+          if (goalRequestStateRef.current.sequence !== requestEpoch) {
+            // Reject (not resolve) so PromptInput keeps the current
+            // conversation's composer text untouched.
+            return Promise.reject(new Error("goal-preparation-stale"));
+          }
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -1200,7 +1280,7 @@ export function InputBox({
         return handleCompactCommand();
       }
       if (submitAction.kind === "stop") {
-        onStop?.();
+        handleStopStreaming();
         return;
       }
       if (submitAction.kind === "empty") {
@@ -1215,7 +1295,8 @@ export function InputBox({
       abortVoiceInput,
       handleCompactCommand,
       handleGoalCommand,
-      onStop,
+      handleStopStreaming,
+      onPrepareThread,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1283,27 +1364,39 @@ export function InputBox({
     () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
-  const skillSuggestions = useMemo(
-    () =>
-      slashSkillQuery === null
-        ? []
-        : getMatchingSkillSuggestions(
-            skills,
-            slashSkillQuery,
-            builtinSlashCommands,
-          ),
-    [builtinSlashCommands, skills, slashSkillQuery],
-  );
+  const skillSuggestions = useMemo(() => {
+    if (slashSkillQuery === null) {
+      return [];
+    }
+    const matches = getMatchingSkillSuggestions(
+      skills,
+      slashSkillQuery,
+      builtinSlashCommands,
+    );
+    // Builtin commands own the whole composer line, so they cannot be combined
+    // with a skill activation: `/goal` behind a selected skill would submit as
+    // chat text instead of running the command. Drop them from the result
+    // rather than withholding them from the helper, which needs the list to
+    // reserve their names — a skill named after a builtin is unusable for the
+    // mirrored reason, its submitted text runs the command, not the skill.
+    return selectedSlashSkill
+      ? matches.filter(({ kind }) => kind === "skill")
+      : matches;
+  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
+  // A selected skill does not close the catalog: `/` reopens it so a skill can
+  // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =
     !disabled &&
     textareaFocused &&
-    !selectedSlashSkill &&
     slashSkillQuery !== null &&
     skillSuggestions.length > 0 &&
     dismissedSkillSuggestionValue !== textInput.value;
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -1883,6 +1976,16 @@ export function InputBox({
 
   const handleInlineSkillKeyDown = useCallback(
     (event: KeyboardEvent<HTMLSpanElement>) => {
+      // The catalog can be reopened from here, so its navigation keys must win
+      // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
+      // the IME candidate rather than the list.
+      if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        handleSkillSuggestionKeyDown(event);
+        if (event.defaultPrevented) {
+          return;
+        }
+      }
+
       handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
@@ -1907,7 +2010,11 @@ export function InputBox({
 
       event.currentTarget.closest("form")?.requestSubmit();
     },
-    [handleSelectedSlashSkillKeyDown, updateInlineSkillTextInput],
+    [
+      handleSelectedSlashSkillKeyDown,
+      handleSkillSuggestionKeyDown,
+      updateInlineSkillTextInput,
+    ],
   );
 
   const clearSelectedSlashSkill = useCallback(() => {
@@ -1923,6 +2030,10 @@ export function InputBox({
     !showSkillSuggestions &&
     !selectedSlashSkill &&
     !followupsHidden &&
+    // Never show stale follow-up chips while a turn is streaming: a message
+    // sent before the previous response finished would otherwise leave the
+    // old chips (and the lone close button) overlapping the input box.
+    status !== "streaming" &&
     (followupsLoading || followups.length > 0);
 
   useEffect(() => {
@@ -1942,6 +2053,13 @@ export function InputBox({
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (!wasStreaming || streaming) {
+      return;
+    }
+
+    // The turn was interrupted by the user, so skip generating follow-ups for
+    // this half-finished response.
+    if (stoppedByUserRef.current) {
+      stoppedByUserRef.current = false;
       return;
     }
 
@@ -2250,15 +2368,6 @@ export function InputBox({
         </div>
         <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
           <PromptInputTools className="min-w-0 flex-1 flex-wrap">
-            {/* TODO: Add more connectors here
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger className="px-2!" />
-            <PromptInputActionMenuContent>
-              <PromptInputActionAddAttachments
-                label={t.inputBox.addAttachments}
-              />
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu> */}
             <AddAttachmentsButton
               className="px-2!"
               disabled={composerLocked}
@@ -2626,7 +2735,7 @@ export function InputBox({
                   className="max-w-40 min-w-0 sm:max-w-56"
                   disabled={composerLocked}
                 >
-                  <div className="flex min-w-0 flex-col items-start text-left">
+                  <div className="flex min-w-0 flex-col text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}
                     </ModelSelectorName>
@@ -2660,13 +2769,25 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={composerLocked || stopDenied}
               variant="outline"
               status={status}
+              // A bare disabled stop square reads as a broken composer;
+              // explain the permission boundary (native title, since a
+              // Radix tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
-                  onStop?.();
+                  handleStopStreaming();
                 }
               }}
             />

@@ -12,9 +12,12 @@ from langchain.agents.middleware.todo import Todo
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
+from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
+
 logger = logging.getLogger(__name__)
 
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
+SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY = "subagent_token_usage_attributed"
 
 
 def _string_arg(value: Any) -> str | None:
@@ -228,6 +231,16 @@ def _has_tool_call(message: AIMessage, tool_call_id: str) -> bool:
     return False
 
 
+def _subagent_usage_from_tool_message(message: ToolMessage) -> dict[str, int] | None:
+    """Read validated subagent usage from the current run's message state."""
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return None
+    if additional_kwargs.get(SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY) is True:
+        return None
+    return normalize_token_usage(additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
+
+
 def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
@@ -273,22 +286,20 @@ class TokenUsageMiddleware(AgentMiddleware):
             return None
 
         # Annotate subagent token usage onto the AIMessage that dispatched it.
-        # When a task tool completes, its usage is cached by tool_call_id.  Detect
-        # the ToolMessage → search backward for the corresponding AIMessage → merge.
+        # Terminal usage travels with the current run's ToolMessage, so provider
+        # tool-call IDs reused by another run cannot overwrite attribution state.
         # Walk backward through consecutive ToolMessages before the new AIMessage
         # so that multiple concurrent task tool calls all get their subagent tokens
         # written back to the same dispatch message (merging into one update).
-        state_updates: dict[int, AIMessage] = {}
+        state_updates: dict[int, AIMessage | ToolMessage] = {}
         if len(messages) >= 2:
-            from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
-
             idx = len(messages) - 2
             while idx >= 0:
                 tool_msg = messages[idx]
                 if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
                     break
 
-                subagent_usage = pop_cached_subagent_usage(tool_msg.tool_call_id)
+                subagent_usage = _subagent_usage_from_tool_message(tool_msg)
                 if subagent_usage:
                     # Search backward from the ToolMessage to find the AIMessage
                     # that dispatched it.  A single model response can dispatch
@@ -301,7 +312,7 @@ class TokenUsageMiddleware(AgentMiddleware):
                             # AIMessage (multiple task calls in one response),
                             # or merge fresh from the original message.
                             existing_update = state_updates.get(dispatch_idx)
-                            prev = existing_update.usage_metadata if existing_update else (getattr(candidate, "usage_metadata", None) or {})
+                            prev = existing_update.usage_metadata if isinstance(existing_update, AIMessage) else (getattr(candidate, "usage_metadata", None) or {})
                             merged = {
                                 **prev,
                                 "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
@@ -309,6 +320,9 @@ class TokenUsageMiddleware(AgentMiddleware):
                                 "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
                             }
                             state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
+                            tool_metadata = dict(tool_msg.additional_kwargs)
+                            tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
+                            state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})
                             break
                         dispatch_idx -= 1
                 idx -= 1

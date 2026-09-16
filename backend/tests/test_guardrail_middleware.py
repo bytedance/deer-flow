@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.authz.outcome import pop_authorization_outcome
 from deerflow.guardrails.builtin import AllowlistProvider
 from deerflow.guardrails.middleware import GuardrailMiddleware
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
@@ -83,6 +84,28 @@ class _ExplodingProvider:
 
 
 class TestAllowlistProvider:
+    def test_release_policy_contract_has_stable_identity_and_effective_rules(self):
+        provider = AllowlistProvider(
+            allowed_tools=["web_search", "read_file"],
+            denied_tools=["bash"],
+        )
+        middleware = GuardrailMiddleware(provider, fail_closed=True, passport="ops-policy")
+
+        policy = middleware.release_policy_parameters()
+
+        assert policy == {
+            "fail_closed": True,
+            "passport": "ops-policy",
+            "policy": {
+                "id": "deerflow.guardrails.allowlist",
+                "version": "1.0.0",
+            },
+            "provider_parameters": {
+                "allowed_tools": ["read_file", "web_search"],
+                "denied_tools": ["bash"],
+            },
+        }
+
     def test_no_restrictions_allows_all(self):
         provider = AllowlistProvider()
         req = GuardrailRequest(tool_name="bash", tool_input={})
@@ -703,3 +726,86 @@ class TestGuardrailsConfig:
             assert config.enabled is True
         finally:
             reset_guardrails_config()
+
+
+class TestGuardrailWritesAuthorizationOutcome:
+    def test_allow_writes_allowed_outcome_with_policy_identity(self):
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request(call_id="c1")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c1")
+        assert outcome is not None
+        assert outcome.decision == "allowed"
+        assert outcome.reason_codes == ("oap.allowed",)
+        assert outcome.policy_id  # non-empty resolved identity
+
+    def test_deny_writes_denied_outcome_with_real_policy_id(self):
+        mw = GuardrailMiddleware(_DenyAllProvider())
+        req = _make_tool_call_request(call_id="c2")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c2")
+        assert outcome is not None
+        assert outcome.decision == "denied"
+        assert outcome.policy_id == "test.deny.v1"
+        assert "oap.denied" in outcome.reason_codes
+
+    def test_fail_closed_provider_error_writes_denied_outcome(self):
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=True)
+        req = _make_tool_call_request(call_id="c3")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c3")
+        assert outcome is not None and outcome.decision == "denied"
+        assert "oap.evaluator_error" in outcome.reason_codes
+
+    def test_async_allow_writes_allowed_outcome(self):
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request(call_id="c4")
+
+        async def handler(_req):
+            return MagicMock()
+
+        asyncio.run(mw.awrap_tool_call(req, handler))
+        outcome = pop_authorization_outcome(req.runtime.context, "c4")
+        assert outcome is not None and outcome.decision == "allowed"
+
+    def test_recording_the_outcome_does_not_recompute_the_providers_full_declaration(self):
+        """Per-tool-call bookkeeping must not pay for provider_parameters.
+
+        ``release_policy_parameters()`` (the middleware's own public method) is
+        the expensive path: for AllowlistProvider it sorts the allow/deny sets.
+        Building an AuthorizationOutcome only needs policy id/version, so it
+        must resolve those directly rather than going through the provider's
+        full declaration and discarding everything else.
+        """
+        calls = 0
+
+        class _CountingProvider(AllowlistProvider):
+            def release_policy_parameters(self) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return super().release_policy_parameters()
+
+        mw = GuardrailMiddleware(_CountingProvider(allowed_tools=["bash"]))
+        req = _make_tool_call_request(call_id="c5", name="bash")
+        mw.wrap_tool_call(req, MagicMock())
+        assert calls == 0
+
+        assert mw.release_policy_parameters()["provider_parameters"] == {"allowed_tools": ["bash"], "denied_tools": []}
+        assert calls == 1
+
+    def test_the_outcome_store_is_bounded_so_an_unpopped_run_cannot_grow_forever(self):
+        """No production caller pops outcomes today, so the store must self-limit."""
+        from deerflow.authz.outcome import _MAX_TRACKED_OUTCOMES
+
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        # Seeded non-empty: _FakeRuntime's ``context or {}`` fallback would
+        # otherwise hand each call an unrelated fresh dict instead of this one.
+        context: dict = {"seed": True}
+        for i in range(_MAX_TRACKED_OUTCOMES + 10):
+            req = _make_tool_call_request(call_id=f"call-{i}", context=context)
+            mw.wrap_tool_call(req, MagicMock())
+
+        store = context["__authorization_outcome"]
+        assert len(store) == _MAX_TRACKED_OUTCOMES
+        assert "call-0" not in store
+        assert f"call-{_MAX_TRACKED_OUTCOMES + 9}" in store

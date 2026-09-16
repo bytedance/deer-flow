@@ -105,6 +105,28 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # Copy so caller mutations after construction don't leak into us.
         self._detectors: list[SafetyTerminationDetector] = list(detectors) if detectors else default_detectors()
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        detectors: list[dict[str, object]] = []
+        for detector in self._detectors:
+            detector_type = type(detector)
+            parameters: dict[str, object] = {}
+            for field_name in ("_finish_reasons", "_stop_reasons"):
+                value = getattr(detector, field_name, None)
+                if value is not None:
+                    # frozenset is not JSON-serialisable; project to a sorted list.
+                    parameters[field_name.removeprefix("_")] = sorted(value)
+            descriptor: dict[str, object] = {
+                "class": f"{detector_type.__module__}.{detector_type.__qualname__}",
+                "name": str(getattr(detector, "name", detector_type.__name__)),
+            }
+            if parameters:
+                descriptor["parameters"] = parameters
+            detectors.append(descriptor)
+        return {
+            "action": "suppress_tool_calls",
+            "detectors": detectors,
+        }
+
     @classmethod
     def from_config(cls, config: SafetyFinishReasonConfig) -> SafetyFinishReasonMiddleware:
         """Construct from validated Pydantic config, honouring the
@@ -179,7 +201,8 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         new_content = self._append_user_message(message.content, explanation)
 
         # clone_ai_message_with_tool_calls handles structured tool_calls,
-        # raw additional_kwargs.tool_calls, and function_call in one shot.
+        # raw additional_kwargs.tool_calls, function_call, and provider
+        # tool-call content blocks in one shot.
         # It only rewrites finish_reason when the old value was "tool_calls",
         # which is not our case — content_filter / refusal / SAFETY stay put
         # so downstream SSE / converters keep seeing the real provider reason.

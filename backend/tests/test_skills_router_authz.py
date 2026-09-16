@@ -81,6 +81,27 @@ def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
             assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
 
 
+def test_non_admin_upload_is_rejected_before_multipart_parsing(monkeypatch):
+    parse_called = False
+
+    async def _unexpected_parse(request):
+        nonlocal parse_called
+        parse_called = True
+        raise AssertionError("multipart parsing ran before the admin guard")
+
+    monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _unexpected_parse)
+    app = _make_app(system_role="user")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"archive": ("demo.skill", b"archive bytes", "application/octet-stream")},
+        )
+
+    assert response.status_code == 403
+    assert parse_called is False
+
+
 def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
     """The basic list/detail endpoints expose only name/description and are
     needed by the normal-user UI, so they must NOT be admin-gated.
@@ -125,6 +146,17 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     from deerflow.skills.types import Skill
 
     config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {},
+                "middlewares": ["pkg:Middleware"],
+                "mcpInterceptors": ["pkg.interceptor:build"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def _load_skills(*, enabled_only: bool):
         return [
@@ -141,21 +173,12 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         ]
 
     app = _make_app(system_role="admin")
+    # Not a real LocalSkillStorage instance, so _write_extensions_skill_state's
+    # projection-mutation branch is skipped (nullcontext) and it reads the
+    # config_path fresh via ExtensionsConfig.from_file.
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    from deerflow.config.extensions_config import ExtensionsConfig
-
-    monkeypatch.setattr(
-        skills_router,
-        "get_extensions_config",
-        lambda: ExtensionsConfig(
-            mcp_servers={},
-            skills={},
-            middlewares=["pkg:Middleware"],
-            mcpInterceptors=["pkg.interceptor:build"],
-        ),
-    )
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _config_path=None: config_path))
 
     async def _refresh(_user_id: str):
         return None

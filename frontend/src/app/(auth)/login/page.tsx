@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
   saveRememberLoginPreference,
@@ -21,39 +22,6 @@ import {
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
-
-/**
- * Validate next parameter
- * Prevent open redirect attacks
- * Per RFC-001: Only allow relative paths starting with /
- */
-function validateNextParam(next: string | null): string | null {
-  if (!next) {
-    return null;
-  }
-
-  // Need start with / (relative path)
-  if (!next.startsWith("/")) {
-    return null;
-  }
-
-  // Disallow protocol-relative URLs
-  if (
-    next.startsWith("//") ||
-    next.startsWith("http://") ||
-    next.startsWith("https://")
-  ) {
-    return null;
-  }
-
-  // Disallow URLs with different protocols (e.g., javascript:, data:, etc)
-  if (next.includes(":") && !next.startsWith("/")) {
-    return null;
-  }
-
-  // Valid relative path
-  return next;
-}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -94,7 +62,7 @@ export default function LoginPage() {
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
-  const redirectPath = validateNextParam(nextParam) ?? "/workspace";
+  const redirectPath = resolveAuthNextPath(nextParam);
   const regularSignupAllowed = canCreateRegularAccount({
     // A failed probe must not expose registration while the system's setup
     // state is unknown. Existing users can still sign in normally.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore, ThreadOwnershipConflictError
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
@@ -16,10 +16,15 @@ if TYPE_CHECKING:
 __all__ = [
     "InvalidMetadataFilterError",
     "MemoryThreadMetaStore",
+    "PROJECT_FILTER_UNSET",
     "THREAD_PINNED_METADATA_KEY",
+    "THREAD_ARCHIVED_METADATA_KEY",
+    "THREAD_PINNED_METADATA_KEY",
+    "THREAD_PROJECT_METADATA_KEY",
     "ThreadMetaRepository",
     "ThreadMetaRow",
     "ThreadMetaStore",
+    "ThreadOwnershipConflictError",
     "make_thread_store",
 ]
 

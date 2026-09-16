@@ -178,13 +178,33 @@ For scenarios where visual accuracy is critical, **use the `image_search` tool f
 
 This approach significantly improves generation quality by providing the model with concrete visual guidance rather than relying solely on text descriptions.
 
-## Providers (Gemini / MiniMax)
+## Providers (Gemini / MiniMax / OpenAI-compatible)
 
 This skill auto-selects the provider by environment variables (no CLI change):
 
 - `GEMINI_API_KEY` set → use Gemini (default, unchanged).
-- Only `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
-- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax`.
+- Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
+- Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
+- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
+  `openai-compatible` is also accepted as an alias for `openai`.
+
+OpenAI-compatible settings:
+
+- `IMAGE_GENERATION_API_KEY` (required)
+- `IMAGE_GENERATION_BASE_URL` (default `https://api.openai.com/v1`)
+- `IMAGE_GENERATION_MODEL` (default `gpt-image-2.5-flare`)
+- `IMAGE_GENERATION_SIZE` (optional fixed size override)
+
+Text-to-image calls use `POST {base_url}/images/generations`. Reference-image calls
+use multipart `POST {base_url}/images/edits`; a relay may support generation without
+supporting edits. Responses may contain base64 image data, a data URL, or a downloadable
+URL. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
+`IMAGE_GENERATION_SIZE` is set. The output extension selects the API `output_format`:
+`.jpg`/`.jpeg` uses `jpeg`, `.webp` uses `webp`, and all other extensions use `png`.
+When `dall-e-2` or `dall-e-3` is configured instead, the request uses the model's
+supported dimensions and `response_format=b64_json`; DALL-E output files must use a
+`.png` extension. Reference-image editing with DALL-E models is not supported by this
+skill; use the default GPT Image model for edits.
 
 MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
 `MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax

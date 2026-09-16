@@ -219,10 +219,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
+            # Runtime/UI metadata used to size the context indicator. Provider
+            # clients do not accept this as a model-constructor argument.
+            "context_window",
             # Presentation-only metadata (consumed by the console's cost
             # display) — must never reach the provider client, which would
             # forward unknown kwargs into the completion request payload.
             "pricing",
+            "request_admission",
         },
     )
     # Layer per-caller sampling overrides (e.g. a custom agent's temperature /
@@ -233,6 +237,17 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # value exactly as it would a profile-native one.
     if model_overrides:
         model_settings_from_config.update({key: value for key, value in model_overrides.items() if value is not None})
+    # The per-request reasoning effort layers the same way. The regular lead-agent
+    # build forwards the key even when None (neither the request nor the custom
+    # agent chose one), so it must leave kwargs: a profile that also yields
+    # reasoning_effort would otherwise hand the constructor the keyword twice.
+    # Codex validates and maps the requested value itself below.
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    is_codex_model = issubclass(model_class, CodexChatModel)
+    requested_reasoning_effort = kwargs.pop("reasoning_effort", None)
+    if requested_reasoning_effort is not None and not is_codex_model:
+        model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
     has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
@@ -266,7 +281,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             # Native langchain_anthropic: thinking is a direct constructor parameter
             model_settings_from_config["thinking"] = {"type": "disabled"}
     if not model_config.supports_reasoning_effort:
-        kwargs.pop("reasoning_effort", None)
+        requested_reasoning_effort = None
         model_settings_from_config.pop("reasoning_effort", None)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
@@ -275,18 +290,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
-    from deerflow.models.openai_codex_provider import CodexChatModel
-
-    if issubclass(model_class, CodexChatModel):
+    if is_codex_model:
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
 
         # Use explicit reasoning_effort from frontend if provided (low/medium/high)
-        explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
-            model_settings_from_config["reasoning_effort"] = explicit_effort
+        elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
+            model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"
 
@@ -305,9 +317,40 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
 
+    # Translate the declared context window into the langchain profile so
+    # profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    # which resolve thresholds from profile["max_input_tokens"]) work for
+    # third-party OpenAI-compatible models whose SDK ships no profile of its
+    # own (#3103). ``profile`` is a metadata-only BaseChatModel field
+    # (exclude=True) and never reaches the provider request payload. An
+    # explicit profile from a caller or model_overrides is never clobbered.
+    translate_context_window = bool(model_config.context_window) and "profile" not in kwargs and "profile" not in model_settings_from_config
+
+    if model_config.request_admission is not None:
+        from deerflow.models.request_admission import get_request_admission
+
+        if "rate_limiter" in kwargs or "rate_limiter" in model_settings_from_config:
+            raise ValueError("request_admission cannot be combined with a custom rate_limiter")
+        model_settings_from_config["rate_limiter"] = get_request_admission(name, model_config.request_admission)
+        # SDK-internal retries do not re-enter BaseChatModel's admission hook.
+        # Keep retries at the middleware layer where each attempt is paced.
+        if "max_retries" in model_class.model_fields:
+            kwargs.pop("max_retries", None)
+            model_settings_from_config["max_retries"] = 0
+
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
+
+    if translate_context_window:
+        # Applied *after* construction and merged into the provider's inferred
+        # profile: passing ``profile`` to the constructor would REPLACE the whole
+        # inferred metadata (tool_calling, structured_output, io capabilities,
+        # output limits) with just this one key. The declared window wins on
+        # max_input_tokens itself — the operator set it precisely because the
+        # inferred (or absent) value doesn't match their gateway.
+        inferred_profile = getattr(model_instance, "profile", None)
+        model_instance.profile = {**(inferred_profile or {}), "max_input_tokens": model_config.context_window}
 
     if attach_tracing:
         callbacks = build_tracing_callbacks()

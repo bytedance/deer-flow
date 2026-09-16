@@ -48,6 +48,8 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -146,6 +148,8 @@ function promptMessageFiles(message: PromptInputMessage) {
 
 export function SidecarPanel({ className }: { className?: string }) {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
   const [localSettings] = useLocalSettings();
@@ -539,7 +543,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
-        {hasSidecarThread && (
+        {hasSidecarThread && canDeleteThreads && (
           <Tooltip content={t.sidecar.delete}>
             <Button
               aria-label={t.sidecar.delete}
@@ -939,7 +943,7 @@ function SidecarModelSelector({
     <ModelSelector open={open} onOpenChange={onOpenChange}>
       <ModelSelectorTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
-          <div className="flex min-w-0 flex-col items-start text-left">
+          <div className="flex min-w-0 flex-col text-left">
             <ModelSelectorName className="truncate text-xs font-normal">
               {selectedModel.display_name}
             </ModelSelectorName>

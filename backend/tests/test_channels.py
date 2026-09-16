@@ -7,7 +7,7 @@ import json
 import logging
 import tempfile
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,6 +31,7 @@ def test_known_channel_command_detection_only_matches_control_commands():
     from app.channels.commands import is_known_channel_command
 
     assert is_known_channel_command("/new")
+    assert is_known_channel_command("/agent list")
     assert is_known_channel_command("/HELP now")
     assert not is_known_channel_command("/mnt/user-data/uploads/report.pdf")
     assert not is_known_channel_command("/data-analysis analyze uploads/foo.csv")
@@ -264,6 +265,47 @@ class TestChannelStore:
         assert len(entries) == 1
         assert entries[0]["channel_name"] == "slack"
 
+    def test_channel_store_concurrent_list_and_mutation(self, store, monkeypatch):
+        iteration_started = threading.Event()
+        mutation_requested = threading.Event()
+        mutation_finished = threading.Event()
+
+        class CoordinatedData(dict):
+            def items(self):
+                iterator = iter(super().items())
+                first = next(iterator)
+                iteration_started.set()
+
+                if store._lock.locked():
+                    assert mutation_requested.wait(timeout=5), "mutation thread never requested the store lock"
+                else:
+                    assert mutation_finished.wait(timeout=5), "mutation thread never changed the unlocked store"
+
+                yield first
+                yield from iterator
+
+        store._data = CoordinatedData(
+            {
+                "slack:ch1": {"thread_id": "t1", "user_id": "u1", "created_at": 1.0, "updated_at": 1.0},
+                "feishu:ch2": {"thread_id": "t2", "user_id": "u2", "created_at": 2.0, "updated_at": 2.0},
+            }
+        )
+        monkeypatch.setattr(store, "_save", lambda: None)
+
+        def mutate():
+            assert iteration_started.wait(timeout=5), "list_entries never started iterating"
+            mutation_requested.set()
+            store.set_thread_id("test", "new", "t3")
+            mutation_finished.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list_future = executor.submit(store.list_entries)
+            mutation_future = executor.submit(mutate)
+            mutation_future.result(timeout=5)
+            entries = list_future.result(timeout=5)
+
+        assert {(entry["channel_name"], entry["chat_id"]) for entry in entries} == {("slack", "ch1"), ("feishu", "ch2")}
+
     def test_persistence(self, tmp_path):
         path = tmp_path / "store.json"
         store1 = ChannelStore(path=path)
@@ -397,6 +439,7 @@ class TestChannelBase:
         assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
 
     def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.buzz import BuzzChannel
         from app.channels.dingtalk import DingTalkChannel
         from app.channels.discord import DiscordChannel
         from app.channels.feishu import FeishuChannel
@@ -409,6 +452,7 @@ class TestChannelBase:
 
         bus = MessageBus()
         defaults = {
+            "buzz": BuzzChannel(bus=bus, config={"relay_url": "wss://buzz.example.com"}).supports_streaming,
             "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
@@ -1002,7 +1046,7 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_dispatch_loop_dedupes_stable_provider_message_id(self, tmp_path):
+    def test_worker_pool_dedupes_stable_provider_message_id(self, tmp_path):
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -1184,7 +1228,7 @@ class TestChannelManager:
             ("feishu", "oc_abc"),
         ),
     )
-    def test_dispatch_loop_dedupes_unbound_chat_scoped_redelivery(self, tmp_path, monkeypatch, channel, chat_id):
+    def test_worker_pool_dedupes_unbound_chat_scoped_redelivery(self, tmp_path, monkeypatch, channel, chat_id):
         """Provider redelivery of an unbound chat-scoped message runs the agent once.
 
         Shaped like wechat.py / telegram.py inbound metadata (message_id only, no
@@ -1481,7 +1525,7 @@ class TestChannelManager:
         # silently drop this user's run (willem-bd, PR #4104 review).
         assert await manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
 
-    def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
+    def test_worker_pool_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
         from app.channels.manager import ChannelManager
 
@@ -2382,6 +2426,7 @@ class TestChannelManager:
             manager._get_client = MagicMock(return_value=object())
             manager._get_or_create_thread = AsyncMock(return_value=(thread_id, False))
             manager._update_thread_channel_metadata = AsyncMock()
+            manager._load_thread_agent = AsyncMock(return_value=None)
             manager._publish_progress_update = AsyncMock(side_effect=asyncio.CancelledError())
             manager._handle_chat_on_thread = AsyncMock()
 
@@ -3092,6 +3137,250 @@ class TestChannelManager:
 
             # threads.create should be called for /new
             mock_client.threads.create.assert_called_once()
+
+        _run(go())
+
+    def test_handle_command_agent_list_is_owner_scoped(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        seen_user_ids = []
+
+        def fake_list_custom_agents(*, user_id=None):
+            seen_user_ids.append(user_id)
+            return [
+                SimpleNamespace(name="researcher", description="Researches sources"),
+                SimpleNamespace(name="writer", description=""),
+            ]
+
+        monkeypatch.setattr("app.channels.manager.list_custom_agents", fake_list_custom_agents)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    owner_user_id="deerflow-user-1",
+                    text="/agent list",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert seen_user_ids == ["deerflow-user-1"]
+            assert outbound_received[0].text == ("Available agents:\n• lead_agent — Default agent\n• researcher — Researches sources\n• writer")
+
+        _run(go())
+
+    def test_handle_command_agent_use_starts_pinned_conversation(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        loaded = []
+
+        def fake_load_agent_config(name, *, user_id=None):
+            loaded.append((name, user_id))
+            return SimpleNamespace(name=name)
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "old-thread")
+            manager = ChannelManager(bus=bus, store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/agent use Researcher",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_agent_command(msg, "use Researcher")
+
+            assert loaded == [("researcher", "deerflow-user-1")]
+            assert store.get_thread_id("test", "chat1") == "research-thread"
+            create_kwargs = mock_client.threads.create.call_args.kwargs
+            assert create_kwargs["metadata"]["channel_agent_name"] == "researcher"
+            assert create_kwargs["metadata"]["agent_name"] == "researcher"
+            assert reply == "Agent 'researcher' selected. New conversation started."
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    @pytest.mark.parametrize("config_carrier", ["context", "configurable"])
+    def test_agent_use_custom_agent_overrides_every_gateway_config_carrier(self, monkeypatch, config_carrier):
+        """The command pin must win after the real Gateway config merge.
+
+        Channel session config can carry ``agent_name`` in either RunnableConfig
+        container.  Leaving an inherited value in one container makes Gateway's
+        ``setdefault`` merge preserve a stale agent even though the command
+        reports that the new agent was selected.
+        """
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        monkeypatch.setattr(
+            "app.channels.manager.load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(name=name),
+        )
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "config": {config_carrier: {"agent_name": "configured-writer"}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="research-thread")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/agent use researcher",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use researcher")
+            assistant_id, run_config, run_context = manager._resolve_run_params(msg, "research-thread")
+            gateway_config = build_run_config(
+                "research-thread",
+                run_config,
+                None,
+                assistant_id=assistant_id,
+            )
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+
+            assert gateway_config["configurable"]["agent_name"] == "researcher"
+            assert gateway_config["context"]["agent_name"] == "researcher"
+            assert _get_runtime_config(gateway_config)["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_selected_agent_is_restored_from_thread_metadata(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(
+                bus=bus,
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "assistant_id": "configured-writer",
+                        "context": {"agent_name": "configured-context-agent"},
+                    }
+                },
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            mock_client.threads.get.return_value = {
+                "thread_id": "research-thread",
+                "metadata": {"channel_agent_name": "researcher"},
+            }
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="Continue",
+            )
+
+            await manager._load_thread_agent(mock_client, msg, "research-thread")
+            mock_client.threads.get.assert_awaited_once()
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_agent_use_lead_agent_overrides_configured_default(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                channel_sessions={"test": {"assistant_id": "configured-writer"}},
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="default-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/agent use lead_agent",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use lead_agent")
+
+            create_metadata = mock_client.threads.create.call_args.kwargs["metadata"]
+            assert create_metadata["channel_agent_name"] == "lead_agent"
+            assert "agent_name" not in create_metadata
+            _, _, run_context = manager._resolve_run_params(msg, "default-thread")
+            assert "agent_name" not in run_context
+
+        _run(go())
+
+    @pytest.mark.parametrize("config_carrier", ["context", "configurable"])
+    def test_agent_use_lead_agent_clears_every_gateway_config_carrier(self, config_carrier):
+        """Resetting to lead_agent must remove every inherited custom-agent pin."""
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "config": {config_carrier: {"agent_name": "configured-writer"}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="default-thread")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/agent use lead_agent",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use lead_agent")
+            assistant_id, run_config, run_context = manager._resolve_run_params(msg, "default-thread")
+            gateway_config = build_run_config(
+                "default-thread",
+                run_config,
+                None,
+                assistant_id=assistant_id,
+            )
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+
+            assert "agent_name" not in gateway_config["configurable"]
+            assert "agent_name" not in gateway_config["context"]
+            assert "agent_name" not in _get_runtime_config(gateway_config)
 
         _run(go())
 
@@ -4824,7 +5113,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         _run(go())
 
-    def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
+    def test_unbound_auth_enabled_chat_is_rejected_before_run_creation(self, monkeypatch):
         from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
 
         monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
@@ -4840,8 +5129,6 @@ class TestChannelManagerBoundIdentityPolicy:
 
             bus.subscribe_outbound(capture)
             await manager.start()
-            assert manager._semaphore is not None
-            await manager._semaphore.acquire()
             try:
                 await asyncio.wait_for(
                     manager._handle_message(
@@ -4855,7 +5142,6 @@ class TestChannelManagerBoundIdentityPolicy:
                     timeout=0.5,
                 )
             finally:
-                manager._semaphore.release()
                 await manager.stop()
 
             assert len(outbound_received) == 1
@@ -5421,6 +5707,9 @@ class TestHandleChatWithArtifacts:
 
         paths = Paths(tmp_path)
         monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+        # Attachment resolution goes through the shared outputs-confinement
+        # helper, which binds ``get_paths`` at import like the other consumers.
+        monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
         outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
         outputs_dir.mkdir(parents=True)
         (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
@@ -5688,6 +5977,219 @@ class TestHandleChatWithArtifacts:
             assert outbound_received[1].artifacts == ["/mnt/user-data/outputs/chart.png"]
 
         _run(go())
+
+
+class TestDiscordChannel:
+    def test_stop_prevents_queued_typing_starter_from_creating_task(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            # Queue the starter without yielding to it.  stop() therefore runs
+            # first and must form a boundary that the delayed starter cannot
+            # cross by installing a fresh infinite typing loop afterwards.
+            starter = asyncio.create_task(channel._start_typing(typing_target, "chat-1"))
+            await channel.stop()
+            await starter
+
+            try:
+                assert channel._typing_tasks == {}
+            finally:
+                leaked_tasks = list(channel._typing_tasks.values())
+                for task in leaked_tasks:
+                    task.cancel()
+                await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+        _run(go())
+
+    def test_stop_serializes_typing_cleanup_with_discord_loop(self):
+        from app.channels.discord import DiscordChannel
+
+        class BlockingTypingTasks(dict):
+            def __init__(self, lookup_started: threading.Event, release_lookup: threading.Event):
+                super().__init__()
+                self._lookup_started = lookup_started
+                self._release_lookup = release_lookup
+                self.registered_task = None
+
+            def __contains__(self, key):
+                self._lookup_started.set()
+                if not self._release_lookup.wait(timeout=5):
+                    raise TimeoutError("typing-task lookup was not released")
+                return super().__contains__(key)
+
+            def __setitem__(self, key, value):
+                self.registered_task = value
+                super().__setitem__(key, value)
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            discord_loop = asyncio.new_event_loop()
+            loop_ready = threading.Event()
+
+            def run_discord_loop():
+                asyncio.set_event_loop(discord_loop)
+                loop_ready.set()
+                discord_loop.run_forever()
+
+            discord_thread = threading.Thread(target=run_discord_loop, daemon=True)
+            discord_thread.start()
+            assert await asyncio.to_thread(loop_ready.wait, 5)
+
+            lookup_started = threading.Event()
+            release_lookup = threading.Event()
+            stop_started = threading.Event()
+            channel._discord_loop = discord_loop
+            typing_tasks = BlockingTypingTasks(lookup_started, release_lookup)
+            channel._typing_tasks = typing_tasks
+            channel.bus.unsubscribe_outbound = MagicMock(side_effect=lambda _callback: stop_started.set())
+
+            starter = asyncio.run_coroutine_threadsafe(channel._start_typing(typing_target, "chat-1"), discord_loop)
+            stop_task = None
+
+            try:
+                # Pause the Discord loop after _start_typing() has observed
+                # _running=True but before it can create and register the task.
+                assert await asyncio.to_thread(lookup_started.wait, 5)
+
+                stop_task = asyncio.create_task(channel.stop())
+                # unsubscribe_outbound() runs immediately after stop() flips
+                # _running to False.  Once this fires, release the Discord
+                # loop so any queued cleanup can serialize after registration.
+                assert await asyncio.to_thread(stop_started.wait, 5)
+                release_lookup.set()
+
+                await asyncio.wait_for(stop_task, timeout=5)
+                await asyncio.wait_for(asyncio.wrap_future(starter), timeout=5)
+
+                assert typing_tasks == {}
+                assert typing_tasks.registered_task is not None
+                assert typing_tasks.registered_task.done()
+            finally:
+                release_lookup.set()
+                if stop_task is not None and not stop_task.done():
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
+
+                if not starter.done():
+                    starter.cancel()
+                await asyncio.gather(asyncio.wrap_future(starter), return_exceptions=True)
+
+                async def cleanup_typing_tasks():
+                    leaked_tasks = list(channel._typing_tasks.values())
+                    for task in leaked_tasks:
+                        task.cancel()
+                    await asyncio.gather(*leaked_tasks, return_exceptions=True)
+                    channel._typing_tasks.clear()
+
+                cleanup = asyncio.run_coroutine_threadsafe(cleanup_typing_tasks(), discord_loop)
+                await asyncio.wait_for(asyncio.wrap_future(cleanup), timeout=5)
+                discord_loop.call_soon_threadsafe(discord_loop.stop)
+                await asyncio.to_thread(discord_thread.join, 5)
+                assert not discord_thread.is_alive()
+                discord_loop.close()
+
+        _run(go())
+
+    def test_stop_does_not_await_typing_tasks_from_stopped_discord_loop(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            discord_loop = asyncio.new_event_loop()
+            loop_ready = threading.Event()
+
+            def run_discord_loop():
+                asyncio.set_event_loop(discord_loop)
+                loop_ready.set()
+                discord_loop.run_forever()
+
+            discord_thread = threading.Thread(target=run_discord_loop, daemon=True)
+            discord_thread.start()
+            assert await asyncio.to_thread(loop_ready.wait, 5)
+
+            channel._discord_loop = discord_loop
+            channel._thread = discord_thread
+            starter = asyncio.run_coroutine_threadsafe(channel._start_typing(typing_target, "chat-1"), discord_loop)
+            await asyncio.wait_for(asyncio.wrap_future(starter), timeout=5)
+            typing_task = channel._typing_tasks["chat-1"]
+
+            discord_loop.call_soon_threadsafe(discord_loop.stop)
+            await asyncio.to_thread(discord_thread.join, 5)
+            assert not discord_thread.is_alive()
+            assert not discord_loop.is_running()
+            assert not typing_task.done()
+
+            try:
+                # The task belongs to a loop that has already exited.  stop()
+                # must not gather it from the main loop, and must still finish
+                # clearing all channel lifecycle state.
+                await channel.stop()
+
+                assert channel._typing_tasks == {}
+                assert channel._thread is None
+                assert channel._discord_loop is None
+            finally:
+
+                def drain_stopped_loop():
+                    asyncio.set_event_loop(discord_loop)
+                    if not typing_task.done():
+                        typing_task.cancel()
+                    discord_loop.run_until_complete(asyncio.gather(typing_task, return_exceptions=True))
+                    discord_loop.close()
+
+                await asyncio.to_thread(drain_stopped_loop)
+
+        _run(go())
+
+    def test_run_client_drains_typing_tasks_before_worker_loop_exits(self):
+        from app.channels.discord import DiscordChannel
+
+        channel = DiscordChannel(MessageBus(), config={})
+        channel._running = True
+        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+        class FailingClient:
+            def __init__(self):
+                self.closed = False
+                self.typing_task = None
+
+            async def start(self, _token):
+                await channel._start_typing(typing_target, "chat-1")
+                self.typing_task = channel._typing_tasks["chat-1"]
+                raise RuntimeError("simulated disconnect")
+
+            def is_closed(self):
+                return self.closed
+
+            async def close(self):
+                self.closed = True
+
+        client = FailingClient()
+        channel._client = client
+        channel._bot_token = "token"
+
+        try:
+            with patch("app.channels.discord.logger.exception"):
+                channel._run_client()
+
+            assert channel._typing_tasks == {}
+            assert client.typing_task is not None
+            assert client.typing_task.done()
+            assert client.closed
+        finally:
+            discord_loop = channel._discord_loop
+            if discord_loop is not None and not discord_loop.is_closed():
+                discord_loop.close()
 
 
 class TestFeishuChannel:
@@ -6388,13 +6890,249 @@ class TestFeishuCardSuccessChecks:
         _run(go())
 
 
+class _ControlledWeComManager:
+    def __init__(self, shutdown_started: asyncio.Event, release_shutdown: asyncio.Event, shutdown_finished: asyncio.Event) -> None:
+        self._ws = object()
+        self._is_manual_close = False
+        self.shutdown_started = shutdown_started
+        self.release_shutdown = release_shutdown
+        self.shutdown_finished = shutdown_finished
+        self.shutdown_tasks: list[asyncio.Task] = []
+        self.heartbeat_stopped = False
+        self.pending_messages_cleared = False
+
+    def _stop_heartbeat(self) -> None:
+        self.heartbeat_stopped = True
+
+    def _clear_pending_messages(self, _reason: str) -> None:
+        self.pending_messages_cleared = True
+
+    def disconnect(self) -> None:
+        self._is_manual_close = True
+        self._stop_heartbeat()
+        self._clear_pending_messages("Connection manually closed")
+        if self._ws:
+            asyncio.ensure_future(self._async_disconnect())
+
+    async def _async_disconnect(self) -> None:
+        shutdown_task = asyncio.current_task()
+        assert shutdown_task is not None
+        self.shutdown_tasks.append(shutdown_task)
+        self.shutdown_started.set()
+        try:
+            await self.release_shutdown.wait()
+        finally:
+            self._ws = None
+            self.shutdown_finished.set()
+
+
+class _ControlledWeComClient:
+    def __init__(self, manager: _ControlledWeComManager) -> None:
+        self._ws_manager = manager
+        self._started = False
+        self.connect_started = asyncio.Event()
+
+    def on(self, *_args) -> None:
+        pass
+
+    async def connect(self):
+        self._started = True
+        self.connect_started.set()
+        return self
+
+    def disconnect(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        self._ws_manager.disconnect()
+
+
+async def _wait_for_next_event_loop_turn() -> None:
+    checkpoint = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
+    await checkpoint
+
+
 class TestWeComChannel:
+    def test_stop_waits_for_connection_task_cancellation(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            connection_started = asyncio.Event()
+            cancellation_finished = asyncio.Event()
+
+            async def connect():
+                connection_started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancellation_finished.set()
+
+            connection_task = asyncio.create_task(connect())
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = connection_task
+            await connection_started.wait()
+
+            try:
+                await channel.stop()
+
+                assert connection_task.done()
+                assert cancellation_finished.is_set()
+                assert channel._ws_task is None
+            finally:
+                if not connection_task.done():
+                    connection_task.cancel()
+                await asyncio.gather(connection_task, return_exceptions=True)
+
+        _run(go())
+
+    def test_stop_waits_for_sdk_shutdown_after_connect_returns(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+
+            try:
+                assert not stop_task.done()
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(stop_task, *manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert len(manager.shutdown_tasks) == 1
+            assert manager.heartbeat_stopped
+            assert manager.pending_messages_cleared
+            assert not client._started
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+
+        _run(go())
+
+    def test_concurrent_start_waits_for_stop_before_installing_new_client(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            old_cancellation_started = asyncio.Event()
+            release_old_cancellation = asyncio.Event()
+            start_attempted = asyncio.Event()
+            new_client = MagicMock()
+            new_client.connect_started = asyncio.Event()
+
+            async def connect_new_client():
+                new_client.connect_started.set()
+                return new_client
+
+            new_client.connect = connect_new_client
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(
+                    WSClient=lambda _options: new_client,
+                    WSClientOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+                ),
+            )
+
+            async def connect_old_client():
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    old_cancellation_started.set()
+                    await release_old_cancellation.wait()
+                    raise
+
+            old_task = asyncio.create_task(connect_old_client())
+            channel = WeComChannel(MessageBus(), config={"bot_id": "bot", "bot_secret": "secret"})
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = old_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await old_cancellation_started.wait()
+
+            async def start_concurrently():
+                start_attempted.set()
+                await channel.start()
+
+            start_task = asyncio.create_task(start_concurrently())
+            await start_attempted.wait()
+            release_old_cancellation.set()
+            await asyncio.gather(stop_task, start_task)
+            await new_client.connect_started.wait()
+
+            assert channel._running
+            assert channel._ws_client is new_client
+            assert channel._ws_task is not None
+            assert channel._ws_task.done()
+
+        _run(go())
+
+    def test_cancelled_stop_finishes_sdk_shutdown_and_clears_state(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+            channel._ws_frames["message-1"] = {"body": {}}
+            channel._ws_stream_ids["message-1"] = "stream-1"
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+            stop_task.cancel()
+            await _wait_for_next_event_loop_turn()
+
+            assert not stop_task.done()
+            assert not shutdown_finished.is_set()
+
+            release_shutdown.set()
+
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(*manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+            assert channel._ws_frames == {}
+            assert channel._ws_stream_ids == {}
+
+        _run(go())
+
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
 
         async def go():
             bus = MessageBus()
-            bus.publish_inbound = AsyncMock()
             channel = WeComChannel(bus, config={})
             channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
 
@@ -6417,9 +7155,8 @@ class TestWeComChannel:
             await channel._publish_ws_inbound(frame, "hello", files=files)
 
             channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "Working on it...", False)
-            bus.publish_inbound.assert_awaited_once()
-
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await bus.get_inbound()
+            bus.inbound_task_done()
             assert inbound.channel_name == "wecom"
             assert inbound.chat_id == "user-1"
             assert inbound.user_id == "user-1"
@@ -6438,7 +7175,6 @@ class TestWeComChannel:
 
         async def go():
             bus = MessageBus()
-            bus.publish_inbound = AsyncMock()
             channel = WeComChannel(bus, config={"working_message": "Please wait..."})
             channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
             channel._working_message = "Please wait..."
@@ -6467,7 +7203,6 @@ class TestWeComChannel:
 
         async def go():
             bus = MessageBus()
-            bus.publish_inbound = AsyncMock()
             channel = WeComChannel(bus, config={})
             channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
 
@@ -6486,7 +7221,8 @@ class TestWeComChannel:
 
             await channel._publish_ws_inbound(frame, "/mnt/user-data/uploads/report.pdf")
 
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await bus.get_inbound()
+            bus.inbound_task_done()
             assert inbound.text == "/mnt/user-data/uploads/report.pdf"
             assert inbound.msg_type == InboundMessageType.CHAT
 
@@ -6782,6 +7518,367 @@ class TestChannelService:
 
             assert results == [True, True]
             assert start_calls == ["telegram"]
+            await service.stop()
+
+        _run(go())
+
+    def test_readiness_retry_defers_when_old_instance_fails_to_stop(self):
+        """A retained channel whose stop() fails must not be replaced this round.
+
+        The pre-retry cleanup retains the instance when stop() raises; the
+        readiness attempt then declines instead of letting _start_channel
+        overwrite the still-tracked, still-listening channel — the one-hop-
+        later orphan shape from the review.
+        """
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            stale = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = stale
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert service._channels.get("telegram") is stale  # retained, not overwritten
+            assert stale.stop_calls == 1  # each retry stops the retained instance again
+            # The listener stays subscribed precisely because the instance is
+            # retained: only a completed stop may unsubscribe it.
+            assert any(getattr(listener, "__self__", None) is stale for listener in service.bus._outbound_listeners)
+
+            # Shutdown reports the retained channel's failing stop (ExceptionGroup)
+            # instead of silently orphaning it — expected here by construction.
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_readiness_attempts_do_not_replace_retained_instance(self, monkeypatch):
+        """Within one ensure_channel_ready loop, a failed attempt whose cleanup
+        retains the instance must end the loop instead of being overwritten.
+
+        The reviewer repro on #5227: with attempts=2 (the production default),
+        a channel whose start() never reaches is_running AND whose stop()
+        raises used to let attempt 2 construct a fresh instance and overwrite
+        the retained one — returning True while the first instance's outbound
+        listener stayed subscribed forever.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class FailFastAndUncleanChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    # Subscribe the listener, then report a client thread that
+                    # died before start() returned (the Discord invalid-token
+                    # shape).
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    raise RuntimeError("stop boom")
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: FailFastAndUncleanChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert len(created) == 1  # attempt 2 never constructed a replacement
+            retained = created[0]
+            assert service._channels.get("telegram") is retained
+            assert retained.stop_calls == 1
+            assert any(getattr(listener, "__self__", None) is retained for listener in service.bus._outbound_listeners)
+
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_restart_and_remove_retain_channel_when_stop_fails(self):
+        """restart_channel and remove_channel defer instead of orphaning a failed stop."""
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            original = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = original
+
+            assert await service.restart_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 1
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            assert await service.remove_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 2
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_failed_channel_startup_is_transactional(self, monkeypatch):
+        """A channel that never reaches is_running must be stopped before discard.
+
+        start() subscribes the outbound listener before the transport is
+        confirmed up, so a client thread that dies immediately (the Discord
+        invalid-token shape) must not leave a stale listener behind on the
+        bus — repeated readiness attempts would otherwise accumulate dead
+        listeners the service can no longer clean up.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class DeadOnArrivalChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    # Every adapter subscribes outbound before its transport is up.
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a dead listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: DeadOnArrivalChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=3)
+
+            assert ready is False
+            assert len(created) == 3
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
+    def test_cancelled_failed_start_cleanup_retains_channel_until_cleaned(self, monkeypatch):
+        """Cancellation during failed-start cleanup must not orphan the channel.
+
+        ``_stop_and_discard_channel`` keeps the half-started instance tracked
+        until its ``stop()`` completes: cancelling the readiness request
+        mid-cleanup (review repro) leaves the instance reachable, so a later
+        readiness retry stops it again before replacing it and service
+        shutdown can still clean it up. Untracking first would leave the
+        subscribed outbound listener owned by nobody — stop count stuck at
+        one and the listener still registered after ``service.stop()``.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            release = asyncio.Event()
+            created = []
+
+            class SuspendableStopChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    self.stop_entered = asyncio.Event()
+                    created.append(self)
+
+                async def start(self):
+                    # Every adapter subscribes outbound before its transport is up.
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self.stop_entered.set()
+                    if not release.is_set():
+                        await release.wait()
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: SuspendableStopChannel)
+
+            # Phase 1: readiness cancelled while the failed-start cleanup is
+            # suspended inside stop().
+            readiness = asyncio.ensure_future(service.ensure_channel_ready("telegram", attempts=1))
+            while not created:
+                await asyncio.sleep(0.01)
+            await created[0].stop_entered.wait()
+            readiness.cancel()
+            try:
+                await readiness
+            except asyncio.CancelledError:
+                pass
+
+            retained = service._channels.get("telegram")
+            assert retained is created[0]  # retained for retry/shutdown, not orphaned
+            assert retained.stop_calls == 1  # first cleanup was interrupted
+            assert service.bus._outbound_listeners  # listener still registered
+
+            # Phase 2: a later readiness retry stops the retained instance
+            # before replacing it — never swaps an uncleaned channel out.
+            release.set()
+            ready = await service.ensure_channel_ready("telegram", attempts=1)
+            assert ready is False
+            assert len(created) == 2
+            assert created[0].stop_calls == 2  # cleanup completed on retry
+            assert created[1].stop_calls == 1  # replacement got its own teardown
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
+    def test_start_channel_exception_stops_and_discards(self, monkeypatch):
+        """A start() that raises mid-way must also stop the half-started channel."""
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class StartRaisesChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+                    raise RuntimeError("simulated invalid token")
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a discarded listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: StartRaisesChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert len(created) == 2
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
             await service.stop()
 
         _run(go())
@@ -7398,9 +8495,16 @@ class TestSlackSendRetry:
 
 class TestSlackAllowedUsers:
     @staticmethod
-    def _submit_coro(coro, loop):
+    def _submit_coro(coro, loop, **_kwargs):
         coro.close()
-        return MagicMock()
+        return True
+
+    @staticmethod
+    def _immediate_loop():
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        loop.call_soon_threadsafe.side_effect = lambda callback, *args: callback(*args)
+        return loop
 
     def test_numeric_allowed_users_match_string_event_user_id(self):
         from app.channels.slack import SlackChannel
@@ -7411,8 +8515,7 @@ class TestSlackAllowedUsers:
             bus=bus,
             config={"allowed_users": [123456]},
         )
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7426,13 +8529,13 @@ class TestSlackAllowedUsers:
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
             side_effect=self._submit_coro,
-        ) as submit:
+        ):
             channel._handle_message_event(event)
 
         channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
         channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
-        submit.assert_called_once()
-        inbound = bus.publish_inbound.call_args.args[0]
+        channel._loop.call_soon_threadsafe.assert_called_once()
+        inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
@@ -7446,8 +8549,7 @@ class TestSlackAllowedUsers:
             bus=bus,
             config={"allowed_users": "U123456"},
         )
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7461,13 +8563,13 @@ class TestSlackAllowedUsers:
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
             side_effect=self._submit_coro,
-        ) as submit:
+        ):
             channel._handle_message_event(event)
 
         channel._add_reaction.assert_called_once_with("C123", "1710000000.000100", "eyes")
         channel._send_running_reply.assert_called_once_with("C123", "1710000000.000100")
-        submit.assert_called_once()
-        inbound = bus.publish_inbound.call_args.args[0]
+        channel._loop.call_soon_threadsafe.assert_called_once()
+        inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "U123456"
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
@@ -7495,8 +8597,9 @@ class TestSlackAllowedUsers:
             "ts": "1710000000.000100",
         }
 
-        with patch(
-            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+        with patch.object(
+            channel,
+            "_submit_threadsafe_coroutine",
             side_effect=self._submit_coro,
         ) as submit:
             channel._handle_message_event(event)
@@ -7513,8 +8616,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7532,7 +8634,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
@@ -7542,8 +8644,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7561,7 +8662,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
@@ -7571,8 +8672,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7590,7 +8690,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "/data-analysis analyze uploads/foo.csv"
         assert inbound.msg_type == InboundMessageType.CHAT
 
@@ -7600,8 +8700,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7619,7 +8718,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "<@UASSIGNEE> please review this"
         assert inbound.msg_type == InboundMessageType.CHAT
 
@@ -7629,8 +8728,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7648,7 +8746,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "<@UASSIGNEE> <@UBOT> please review this"
         assert inbound.msg_type == InboundMessageType.CHAT
 
@@ -7658,8 +8756,7 @@ class TestSlackAllowedUsers:
         bus = MessageBus()
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={})
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7677,7 +8774,7 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert inbound.text == "<@UASSIGNEE> /help <@UBOT>"
         assert inbound.msg_type == InboundMessageType.CHAT
 
@@ -7688,8 +8785,8 @@ class TestSlackAllowedUsers:
         bus.publish_inbound = AsyncMock()
         channel = SlackChannel(bus=bus, config={})
         channel._SocketModeResponse = lambda envelope_id: SimpleNamespace(envelope_id=envelope_id)
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
+        channel._running = True
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7715,7 +8812,7 @@ class TestSlackAllowedUsers:
         ):
             channel._on_socket_event(client, req)
 
-        inbound = bus.publish_inbound.call_args.args[0]
+        inbound = bus.get_inbound_nowait()
         assert channel._bot_user_id == "UBOT"
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
@@ -7730,8 +8827,7 @@ class TestSlackAllowedUsers:
                 bus=bus,
                 config={"allowed_users": 123456},
             )
-        channel._loop = MagicMock()
-        channel._loop.is_running.return_value = True
+        channel._loop = self._immediate_loop()
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 
@@ -7745,12 +8841,12 @@ class TestSlackAllowedUsers:
         with patch(
             "app.channels.slack.asyncio.run_coroutine_threadsafe",
             side_effect=self._submit_coro,
-        ) as submit:
+        ):
             channel._handle_message_event(event)
 
         assert "Slack allowed_users should be a list" in caplog.text
-        submit.assert_called_once()
-        inbound = bus.publish_inbound.call_args.args[0]
+        channel._loop.call_soon_threadsafe.assert_called_once()
+        inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"
 
     def test_raises_after_all_retries_exhausted(self):
@@ -9649,3 +10745,254 @@ def test_merge_stream_text_newline_split():
 def test_merge_stream_text_normal_append():
     _merge = _get_merge_stream_text()
     assert _merge("Hello ", "world") == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# LIVE-TEST FINDING 1 (critical, data disclosure): _accumulate_stream_text
+# decided what streamed payloads become displayable assistant text by REJECTING
+# only payloads whose ``type`` contained "tool".  DeerFlow injects hidden
+# context -- memory facts (DynamicContextMiddleware) and durable context
+# (DurableContextMiddleware) -- as hidden HumanMessages whose ``type`` is
+# "human", and DynamicContextMiddleware also rewrites the user's own turn into
+# a fresh HumanMessage.  All of those are written to the messages channel, so
+# LangGraph fans them out on the ``messages-tuple`` stream and the old denylist
+# accumulated them and published them to the IM channel as the assistant's
+# reply.  Proved live on a Buzz relay: the connector published
+# "<memory>\nFacts:\n- [context | 0.70] ...\n</memory> ▉" and, in another run,
+# a verbatim echo of the user's own inbound message.
+#
+# The filter is now an ALLOWLIST of assistant message types.  These tests pin
+# both directions: hidden context never accumulates, and assistant streaming --
+# including multi-chunk merging across one message id -- is untouched.
+# ---------------------------------------------------------------------------
+
+
+def _get_accumulate_stream_text():
+    from app.channels.manager import _accumulate_stream_text
+
+    return _accumulate_stream_text
+
+
+_MEMORY_LEAK_TEXT = "<memory>\nFacts:\n- [context | 0.70] User interacts with the assistant through the DeerFlow chat channel.\n</memory>"
+
+
+def test_accumulate_stream_text_rejects_hidden_memory_human_message():
+    """The exact live leak: a hidden HumanMessage carrying a <memory> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "id": "run-1__memory",
+                "type": "human",
+                "content": _MEMORY_LEAK_TEXT,
+                "additional_kwargs": {"hide_from_ui": True},
+            },
+            {"langgraph_node": "model_request"},
+        ],
+    )
+    assert text is None
+    assert message_id is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_durable_context_human_message():
+    """DurableContextMiddleware's hidden <durable_context_data> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {"id": "dc-1", "type": "human", "content": "<durable_context_data>\n## Conversation summary so far\nsecret\n</durable_context_data>"},
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_echo_of_plain_human_message():
+    """DynamicContextMiddleware re-writes the user's own turn as a new
+    HumanMessage; echoing it back to the channel as the assistant's reply is
+    the second half of the same live leak."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_system_message():
+    """The <system-reminder> SystemMessage is hidden context too."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "s-1", "type": "system", "content": "<system-reminder>Today is 2026-08-01</system-reminder>"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_still_rejects_tool_payloads():
+    """Pre-existing behavior: tool calls and tool results are never displayable."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, [{"id": "t-1", "type": "tool", "content": "bash output"}, {}]) == (None, None)
+    assert _accumulate(buffers, None, [{"id": "t-2", "type": "ToolMessageChunk", "content": "more output"}, {}]) == (None, None)
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_hidden_context_wrapped_in_kwargs_shape():
+    """The LangChain ``to_json`` shape the function already reads content from:
+    the wrapper's own ``type`` is "constructor", so the real message type has to
+    be resolved from ``kwargs``/``id`` or hidden context walks straight through."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "HumanMessage"],
+                "kwargs": {"id": "m-1", "content": _MEMORY_LEAK_TEXT},
+            },
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_accepts_assistant_chunk_in_kwargs_shape():
+    """...and the same shape must still stream an AIMessageChunk."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessageChunk"],
+                "kwargs": {"id": "ai-9", "content": "Hello"},
+            },
+            {},
+        ],
+    )
+    assert text == "Hello"
+    assert message_id == "ai-9"
+
+
+def test_accumulate_stream_text_rejects_untyped_bare_string_payload():
+    """A bare ``str`` payload carries no type information at all, so it cannot be
+    attributed to the assistant.  Under an allowlist an unattributable payload
+    must not be published -- hidden context arriving that way would be
+    indistinguishable from assistant output."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, "Hello") == (None, None)
+    assert _accumulate(buffers, "ai-1", ["raw text", {}]) == (None, "ai-1")
+    assert buffers == {}
+
+
+@pytest.mark.parametrize("payload_type", ["ai", "AIMessageChunk", "AIMessage", "assistant"])
+def test_accumulate_stream_text_accepts_every_assistant_type_spelling(payload_type):
+    """The literal ``type`` values assistant output actually carries: LangChain
+    serializes AIMessage as "ai" and AIMessageChunk as "AIMessageChunk"; the
+    OpenAI-style "assistant" spelling is accepted for foreign runtimes."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(buffers, None, [{"id": "ai-1", "content": "Hi", "type": payload_type}, {"langgraph_node": "agent"}])
+    assert text == "Hi"
+    assert message_id == "ai-1"
+
+
+def test_accumulate_stream_text_merges_multi_chunk_assistant_stream_across_one_message_id():
+    """The function's entire purpose.  Pinned hard so the allowlist can never
+    silently kill streaming for Feishu / Telegram / WeCom / Buzz."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    current: str | None = None
+    seen = []
+    for delta in ("Hello", " ", "world", "!"):
+        text, current = _accumulate(buffers, current, [{"id": "ai-1", "content": delta, "type": "AIMessageChunk"}, {"langgraph_node": "agent"}])
+        seen.append(text)
+    assert seen == ["Hello", "Hello ", "Hello world", "Hello world!"]
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "Hello world!"}
+
+
+def test_accumulate_stream_text_keeps_separate_buffers_per_message_id():
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _accumulate(buffers, None, [{"id": "ai-1", "content": "first", "type": "AIMessageChunk"}, {}])
+    _accumulate(buffers, "ai-1", [{"id": "ai-2", "content": "second", "type": "AIMessageChunk"}, {}])
+    text, current = _accumulate(buffers, "ai-2", [{"id": "ai-1", "content": "-more", "type": "AIMessageChunk"}, {}])
+    assert text == "first-more"
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "first-more", "ai-2": "second"}
+
+
+def test_accumulate_stream_text_hidden_context_between_assistant_chunks_never_enters_the_buffer():
+    """Interleaving is the realistic live shape: the middleware writes its hidden
+    HumanMessage in the middle of a turn.  It must neither be published nor
+    corrupt the assistant buffer it sits between."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _, current = _accumulate(buffers, None, [{"id": "ai-1", "content": "Deploy ", "type": "AIMessageChunk"}, {}])
+    leaked, current_after = _accumulate(buffers, current, [{"id": "mem-1", "type": "human", "content": _MEMORY_LEAK_TEXT}, {}])
+    assert leaked is None
+    assert current_after == "ai-1"  # the assistant message id is preserved
+    text, _ = _accumulate(buffers, current_after, [{"id": "ai-1", "content": "succeeded.", "type": "AIMessageChunk"}, {}])
+    assert text == "Deploy succeeded."
+    assert buffers == {"ai-1": "Deploy succeeded."}
+
+
+def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
+    """End-to-end through _handle_streaming_chat: the hidden <memory> HumanMessage
+    the live relay actually received must reach no outbound message at all."""
+    from app.channels.manager import ChannelManager
+
+    monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+    async def go():
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store)
+        outbound_received: list[OutboundMessage] = []
+
+        async def capture_outbound(msg):
+            outbound_received.append(msg)
+
+        bus.subscribe_outbound(capture_outbound)
+
+        stream_events = [
+            _make_stream_part("messages-tuple", [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "u-1__memory", "type": "human", "content": _MEMORY_LEAK_TEXT, "additional_kwargs": {"hide_from_ui": True}}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "ai-1", "content": "All green.", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}]),
+            _make_stream_part(
+                "values",
+                {"messages": [{"type": "human", "content": "what is my deploy status?"}, {"type": "ai", "content": "All green."}], "artifacts": []},
+            ),
+        ]
+
+        mock_client = _make_mock_langgraph_client()
+        mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+        manager._client = mock_client
+        await manager.start()
+
+        await bus.publish_inbound(InboundMessage(channel_name="buzz", chat_id="chan-1", user_id="pk-1", text="what is my deploy status?", thread_ts=None))
+        await _wait_for(lambda: any(m.is_final for m in outbound_received))
+        await manager.stop()
+
+        assert outbound_received, "expected at least the final outbound"
+        for published in outbound_received:
+            assert "<memory>" not in published.text
+            assert "what is my deploy status?" not in published.text
+        assert [m.text for m in outbound_received] == ["All green. ▉", "All green."]
+
+    _run(go())

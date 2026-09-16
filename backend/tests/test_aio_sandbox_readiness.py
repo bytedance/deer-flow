@@ -75,6 +75,9 @@ def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monke
     class FakeSession:
         trust_env = True
 
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
         def __enter__(self):
             sessions.append(self)
             return self
@@ -89,9 +92,18 @@ def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monke
 
     monkeypatch.setattr(readiness.requests, "Session", FakeSession)
 
-    assert readiness.wait_for_sandbox_ready("http://host.docker.internal:8080", timeout=1) is True
+    headers = {"X-DeerFlow-Relay-Token": "secret-token"}
+    assert (
+        readiness.wait_for_sandbox_ready(
+            "http://host.docker.internal:8080",
+            timeout=1,
+            headers=headers,
+        )
+        is True
+    )
     assert len(sessions) == 1
     assert sessions[0].trust_env is False
+    assert sessions[0].headers == headers
 
 
 @pytest.mark.anyio
@@ -99,8 +111,10 @@ async def test_wait_for_sandbox_ready_async_uses_nonblocking_polling(monkeypatch
     calls: list[str] = []
     sleeps: list[float] = []
     clients: list[_FakeAsyncClient] = []
+    client_headers: list[dict[str, str]] = []
 
-    def fake_client(*, timeout: float, trust_env: bool):
+    def fake_client(*, timeout: float, trust_env: bool, headers: dict[str, str]):
+        client_headers.append(headers)
         client = _FakeAsyncClient(
             responses=[SimpleNamespace(status_code=503), SimpleNamespace(status_code=200)],
             calls=calls,
@@ -118,11 +132,21 @@ async def test_wait_for_sandbox_ready_async_uses_nonblocking_polling(monkeypatch
     monkeypatch.setattr(readiness.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("requests.get should not be used")))
     monkeypatch.setattr(readiness.time, "sleep", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("time.sleep should not be used")))
 
-    assert await readiness.wait_for_sandbox_ready_async("http://sandbox", timeout=5, poll_interval=0.05) is True
+    headers = {"X-DeerFlow-Relay-Token": "secret-token"}
+    assert (
+        await readiness.wait_for_sandbox_ready_async(
+            "http://sandbox",
+            timeout=5,
+            poll_interval=0.05,
+            headers=headers,
+        )
+        is True
+    )
 
     assert calls == ["http://sandbox/v1/sandbox", "http://sandbox/v1/sandbox"]
     assert sleeps == [0.05]
     assert clients[0].trust_env is False
+    assert client_headers == [headers]
 
 
 @pytest.mark.anyio

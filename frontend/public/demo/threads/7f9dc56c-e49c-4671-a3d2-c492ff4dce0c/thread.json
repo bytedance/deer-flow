@@ -15,7 +15,7 @@
         "id": "37aacd32-f56f-4bb3-8184-ebcafde0bd14"
       },
       {
-        "content": "<uploaded_files>\nNo files have been uploaded yet.\n</uploaded_files>",
+        "content": "<current_uploads>\nNo files have been uploaded yet.\n</current_uploads>",
         "additional_kwargs": {},
         "response_metadata": {},
         "type": "system",

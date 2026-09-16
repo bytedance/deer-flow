@@ -1,4 +1,4 @@
-import type { Skill } from "@/core/skills";
+import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
@@ -167,9 +167,15 @@ export function getMatchingSkillSuggestions(
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  const builtinCommandNames = new Set(
-    builtinCommands.map(({ name }) => name.toLowerCase()),
-  );
+  // A name the slash parsers refuse must not be offered here either. Both
+  // parsers drop `RESERVED_SLASH_SKILL_NAMES` (the shared contract), and the
+  // builtin commands own their own names in the composer, so a skill carrying
+  // either one is unreachable: submitting it either runs the command or
+  // reaches the model as literal text with nothing activated.
+  const reservedNames = new Set([
+    ...RESERVED_SLASH_SKILL_NAMES,
+    ...builtinCommands.map(({ name }) => name.toLowerCase()),
+  ]);
 
   const builtinMatches = builtinCommands.filter(({ name, description }) => {
     if (!normalizedQuery) {
@@ -191,7 +197,7 @@ export function getMatchingSkillSuggestions(
       if (!skill.enabled) {
         return false;
       }
-      if (builtinCommandNames.has(name)) {
+      if (reservedNames.has(name)) {
         return false;
       }
       return !normalizedQuery || name.includes(normalizedQuery);

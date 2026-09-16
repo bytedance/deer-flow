@@ -4,7 +4,7 @@
 # Stage 3 (runtime): clean image without compiler toolchain for production
 
 # UV source image (override for restricted networks that cannot reach ghcr.io)
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.7.20
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.1
 FROM ${UV_IMAGE} AS uv-source
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
@@ -28,6 +28,7 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
 # Install build tools + Node.js (build-essential needed for native Python extensions)
 RUN apt-get update && apt-get install -y \
     curl \
+    git \
     build-essential \
     gnupg \
     ca-certificates \
@@ -70,7 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         esac; \
         extras_flags="$extras_flags --extra $extra"; \
     done; \
-    UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --extra redis $extras_flags'
+    UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --locked --extra redis $extras_flags'
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
@@ -88,7 +89,7 @@ COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
 EXPOSE 8001
 
-CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
+CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 # Clean image without build-essential — reduces size (~200 MB) and attack surface.

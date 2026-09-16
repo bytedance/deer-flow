@@ -265,8 +265,9 @@ def test_join_store_only_run_allowed_with_cross_process_bridge():
     assert "event: end" in response.text
 
 
-def test_list_run_messages_injects_turn_duration():
-    """Verify that list_run_messages injects turn_duration into ALL AI messages for the run."""
+def test_list_run_messages_injects_turn_duration_only_on_last_ai():
+    """#4152: turn_duration is the run's wall-clock elapsed and belongs to the run,
+    so only the run's final AI message carries it — not every AI message."""
     from unittest.mock import AsyncMock
 
     from deerflow.runtime import RunRecord
@@ -300,13 +301,13 @@ def test_list_run_messages_injects_turn_duration():
     data = response.json()["data"]
 
     assert "turn_duration" not in data[0]["content"].get("additional_kwargs", {})
-
-    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})
     assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
 
 
-def test_list_thread_messages_injects_turn_duration():
-    """Verify that list_thread_messages injects turn_duration into the inner content."""
+def test_list_run_messages_turn_duration_skips_middleware_tail():
+    """The duration badge lands on the assistant's final answer, not on a
+    trailing middleware-caller message (e.g. title generation)."""
     from unittest.mock import AsyncMock
 
     from deerflow.runtime import RunRecord
@@ -320,9 +321,101 @@ def test_list_thread_messages_injects_turn_duration():
         created_at="2026-06-20T10:00:00Z",
         updated_at="2026-06-20T10:00:05Z",
     )
+
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Title"}, "metadata": {"caller": "middleware:title"}},
+    ]
+
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = mock_run
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    assert data[0]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})
+
+
+def test_list_thread_messages_injects_turn_duration_once_per_run():
+    """#4152: in the thread feed each run contributes exactly one duration badge —
+    on its last AI message — even when the run produced several AI messages and
+    other runs interleave in the same thread."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    def _run(run_id: str, seconds: int) -> RunRecord:
+        return RunRecord(
+            run_id=run_id,
+            thread_id="thread-1",
+            assistant_id=None,
+            status="success",
+            on_disconnect="cancel",
+            created_at="2026-06-20T10:00:00Z",
+            updated_at=f"2026-06-20T10:00:{seconds:02d}Z",
+        )
+
     rows = [
         {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
-        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Before tools"}},
+        {"seq": 3, "run_id": "run-1", "content": {"type": "ai", "text": "Final answer"}},
+        {"seq": 4, "run_id": "run-2", "content": {"type": "human", "text": "Again"}},
+        {"seq": 5, "run_id": "run-2", "content": {"type": "ai", "text": "Second answer"}},
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[_run("run-1", 5), _run("run-2", 9)])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
+    assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})
+    assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert "turn_duration" not in data[3].get("content", {}).get("additional_kwargs", {})
+    assert data[4]["content"]["additional_kwargs"]["turn_duration"] == 9
+
+
+def test_list_thread_messages_turn_duration_skips_middleware_tail():
+    """The thread feed gained the middleware skip through the same
+    ``stamp_turn_duration_on_last_ai`` helper as the per-run endpoint — before
+    that it stamped every AI message, middleware included. Lock the contract
+    on this path too, not just ``list_run_messages``."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Title"}, "metadata": {"caller": "middleware:title"}},
     ]
 
     event_store = MagicMock()
@@ -343,5 +436,5 @@ def test_list_thread_messages_injects_turn_duration():
     assert response.status_code == 200
     data = response.json()
 
-    assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
-    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert data[0]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})

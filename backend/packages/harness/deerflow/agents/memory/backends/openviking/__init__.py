@@ -1,4 +1,4 @@
-"""OpenViking HTTP memory backend."""
+"""OpenViking memory backend using the official LangChain integration."""
 
 from .openviking_manager import OpenVikingMemoryManager
 

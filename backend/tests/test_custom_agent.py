@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -513,6 +514,20 @@ class TestMemoryFilePath:
 # ===========================================================================
 
 
+# Model names the agents API tests may send in a create/update payload. The
+# router validates `model` against the app config, so the fixture pins a stub
+# config exposing exactly these instead of leaving the assertion at the mercy
+# of whatever `config.yaml` happens to sit in the repo root: CI has none (the
+# validation is skipped and the request passes), a real dev checkout does (an
+# unlisted model name yields 422 and the test fails).
+_KNOWN_TEST_MODELS = frozenset({"deepseek-v3"})
+
+
+def _stub_app_config():
+    """App config that knows only ``_KNOWN_TEST_MODELS``."""
+    return SimpleNamespace(get_model_config=lambda name: SimpleNamespace(name=name) if name in _KNOWN_TEST_MODELS else None)
+
+
 def _make_test_app(tmp_path: Path):
     """Create a FastAPI app with the agents router, patching paths to tmp_path."""
     from fastapi import FastAPI
@@ -532,7 +547,11 @@ def agent_client(tmp_path):
     paths_instance = _make_paths(tmp_path)
     previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+    with (
+        patch("deerflow.config.agents_config.get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_app_config", _stub_app_config),
+    ):
         set_agents_api_config(AgentsApiConfig(enabled=True))
         try:
             app = _make_test_app(tmp_path)
@@ -562,6 +581,50 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    @pytest.mark.parametrize("display_name", ["x" * 150, 123, "\u200b" * 3])
+    def test_invalid_stored_display_name_falls_back_in_api(self, agent_client, display_name):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        FileAgentStore().create("reviewer", {"display_name": display_name, "description": "healthy"}, "Soul")
+        response = agent_client.get("/api/agents/reviewer")
+        assert response.status_code == 200
+        assert response.json()["display_name"] is None
+        assert response.json()["description"] == "healthy"
+        assert agent_client.get("/api/agents").json()["agents"][0]["name"] == "reviewer"
+        response = agent_client.put("/api/agents/reviewer", json={"display_name": "已修复"})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "已修复"
+
+    @pytest.mark.parametrize("display_name", ["a\u202eb", "line1\nline2", "z\x00ero", "\u200b" * 3, "a\u200fb", "a\u2028b", "\u200c\u200d"])
+    def test_invalid_display_name_cannot_be_persisted(self, agent_client, display_name):
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "🦌" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "🦌" * 100
+
+    def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
+        response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "代码审查助手"
+        assert response.json()["name"] == "code-reviewer"
+        assert agent_client.get("/api/agents").json()["agents"][0]["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"description": "Updated"})
+        assert response.json()["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": "审查员 🦌"})
+        assert response.json()["display_name"] == "审查员 🦌"
+        assert agent_client.get("/api/agents/code-reviewer").json()["display_name"] == "审查员 🦌"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": None})
+        assert response.json()["display_name"] is None
+        assert response.json()["name"] == "code-reviewer"
+
+    def test_display_name_validation_does_not_relax_agent_identifier(self, agent_client):
+        assert agent_client.post("/api/agents", json={"name": "中文"}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 101}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": "名" * 101}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "名" * 100
+
     def test_list_agents_empty(self, agent_client):
         response = agent_client.get("/api/agents")
         assert response.status_code == 200
@@ -640,8 +703,8 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
-    def test_update_agent_preserves_hand_authored_github_block(self, agent_client):
-        """A hand-authored ``github:`` block on disk must survive PATCH.
+    def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
+        """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
         The HTTP route does not expose ``github`` as an editable field
         (and rightly so — the GitHub App credentials and binding triggers
@@ -673,6 +736,7 @@ class TestAgentsAPI:
                 }
             ],
         }
+        config_data["memory_enabled"] = False
         config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
 
         # PATCH only the description.
@@ -682,6 +746,7 @@ class TestAgentsAPI:
         # github: block must survive verbatim.
         reloaded = yaml.safe_load(config_file.read_text())
         assert reloaded["description"] == "new desc"
+        assert reloaded["memory_enabled"] is False
         assert reloaded["github"] == {
             "installation_id": 99999,
             "bot_login": "github-agent-bot",

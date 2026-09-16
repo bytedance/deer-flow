@@ -35,6 +35,12 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+_DURABLE_USER_CLASSIFICATION = {
+    "scope": "user",
+    "durability": "durable",
+    "authority": "descriptive",
+}
+
 
 def _memory_config(**overrides: object) -> DeerMemConfig:
     """Build a DeerMemConfig with test overrides (validation bypassed via setattr).
@@ -247,6 +253,7 @@ class TestNormalizeFactsToConsolidate:
                 {
                     "sourceIds": ["fact_a", "fact_b"],
                     "consolidated": {
+                        **_DURABLE_USER_CLASSIFICATION,
                         "content": "User is a full-stack engineer",
                         "category": "knowledge",
                         "confidence": 0.9,
@@ -287,7 +294,7 @@ class TestNormalizeFactsToConsolidate:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_only"],
-                    "consolidated": {"content": "should be skipped", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "should be skipped", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -304,7 +311,7 @@ class TestNormalizeFactsToConsolidate:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "  ", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "  ", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -359,6 +366,7 @@ class TestApplyUpdatesConsolidation:
                 {
                     "sourceIds": ["fact_a", "fact_b", "fact_c"],
                     "consolidated": {
+                        **_DURABLE_USER_CLASSIFICATION,
                         "content": "Full-stack: React frontend, Python backend, PostgreSQL",
                         "category": "knowledge",
                         "confidence": 0.9,
@@ -398,9 +406,9 @@ class TestApplyUpdatesConsolidation:
             "factsToRemove": [],
             "staleFactsToRemove": [],
             "factsToConsolidate": [
-                {"sourceIds": ["f_0", "f_1"], "consolidated": {"content": "Group 1", "category": "knowledge", "confidence": 0.8}},
-                {"sourceIds": ["f_2", "f_3"], "consolidated": {"content": "Group 2", "category": "knowledge", "confidence": 0.8}},
-                {"sourceIds": ["f_4", "f_5"], "consolidated": {"content": "Group 3", "category": "knowledge", "confidence": 0.8}},
+                {"sourceIds": ["f_0", "f_1"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Group 1", "category": "knowledge", "confidence": 0.8}},
+                {"sourceIds": ["f_2", "f_3"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Group 2", "category": "knowledge", "confidence": 0.8}},
+                {"sourceIds": ["f_4", "f_5"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Group 3", "category": "knowledge", "confidence": 0.8}},
             ],
         }
 
@@ -433,7 +441,7 @@ class TestApplyUpdatesConsolidation:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_hallucinated"],
-                    "consolidated": {"content": "Should not apply", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Should not apply", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -461,7 +469,7 @@ class TestApplyUpdatesConsolidation:
             "factsToConsolidate": [
                 {
                     "sourceIds": [f"f_{i}" for i in range(10)],  # 10 sources, cap is 5
-                    "consolidated": {"content": "Over-merged", "category": "knowledge", "confidence": 0.8},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Over-merged", "category": "knowledge", "confidence": 0.8},
                 },
             ],
         }
@@ -494,8 +502,8 @@ class TestApplyUpdatesConsolidation:
             "factsToRemove": [],
             "staleFactsToRemove": [],
             "factsToConsolidate": [
-                {"sourceIds": ["fact_a", "fact_b"], "consolidated": {"content": "AB", "category": "knowledge", "confidence": 0.9}},
-                {"sourceIds": ["fact_b", "fact_c"], "consolidated": {"content": "BC", "category": "knowledge", "confidence": 0.8}},
+                {"sourceIds": ["fact_a", "fact_b"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "AB", "category": "knowledge", "confidence": 0.9}},
+                {"sourceIds": ["fact_b", "fact_c"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "BC", "category": "knowledge", "confidence": 0.8}},
             ],
         }
 
@@ -529,10 +537,10 @@ class TestApplyUpdatesConsolidation:
             "user": {},
             "history": {},
             "newFacts": [],
-            "factsToRemove": ["fact_contradicted"],
+            "factsToRemove": [{"id": "fact_contradicted", "scope": "user", "reason": "Explicit contradiction in test fixture"}],
             "staleFactsToRemove": [{"id": "fact_stale", "reason": "outdated"}],
             "factsToConsolidate": [
-                {"sourceIds": ["fact_a", "fact_b"], "consolidated": {"content": "React + Python", "category": "knowledge", "confidence": 0.9}},
+                {"sourceIds": ["fact_a", "fact_b"], "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "React + Python", "category": "knowledge", "confidence": 0.9}},
             ],
         }
 
@@ -559,7 +567,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_a"],
-                    "consolidated": {"content": "Rewritten", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Rewritten", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -596,11 +604,11 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "Merged", "category": "  knowledge  ", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged", "category": "  knowledge  ", "confidence": 0.9},
                 },
                 {
                     "sourceIds": ["fact_c", "fact_d"],
-                    "consolidated": {"content": "Also merged", "category": "   ", "confidence": 0.85},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Also merged", "category": "   ", "confidence": 0.85},
                 },
             ],
         }
@@ -632,15 +640,15 @@ class TestReviewerFindings:
             "newFacts": [
                 # 2 high-confidence new facts that push us to max_facts=3,
                 # forcing the trim to evict low_a and low_b
-                {"content": "New high 1", "category": "knowledge", "confidence": 0.98},
-                {"content": "New high 2", "category": "knowledge", "confidence": 0.97},
+                {**_DURABLE_USER_CLASSIFICATION, "content": "New high 1", "category": "knowledge", "confidence": 0.98},
+                {**_DURABLE_USER_CLASSIFICATION, "content": "New high 2", "category": "knowledge", "confidence": 0.97},
             ],
             "factsToRemove": [],
             "staleFactsToRemove": [],
             "factsToConsolidate": [
                 {
                     "sourceIds": ["low_a", "low_b"],
-                    "consolidated": {"content": "Merged low", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged low", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -680,7 +688,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "Merged AB", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged AB", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -714,7 +722,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["corr_0", "corr_1"],
-                    "consolidated": {"content": "Merged corrections", "category": "correction", "confidence": 0.95},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged corrections", "category": "correction", "confidence": 0.95},
                 },
             ],
         }
@@ -752,7 +760,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "Merged", "category": "knowledge", "confidence": 1.0},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged", "category": "knowledge", "confidence": 1.0},
                 },
             ],
         }
@@ -777,7 +785,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_c", "fact_d"],
-                    "consolidated": {"content": "Below threshold", "category": "knowledge", "confidence": 1.0},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Below threshold", "category": "knowledge", "confidence": 1.0},
                 },
             ],
         }
@@ -809,7 +817,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "Should not merge", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Should not merge", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -852,7 +860,7 @@ class TestReviewerFindings:
                 {
                     "sourceIds": ["fact_null", "fact_b"],
                     # LLM returns 1.0; cap = max(0.5, 0.9) = 0.9
-                    "consolidated": {"content": "Merged", "category": "knowledge", "confidence": 1.0},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged", "category": "knowledge", "confidence": 1.0},
                 },
             ],
         }
@@ -888,7 +896,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_old", "fact_new"],
-                    "consolidated": {"content": "Old and new merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Old and new merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -935,7 +943,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "A and B merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "A and B merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -975,7 +983,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1021,7 +1029,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1069,7 +1077,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_legacy", "fact_stable"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1128,7 +1136,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_stable", "fact_volatile"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1176,7 +1184,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_bad", "fact_stable"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1226,7 +1234,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_bad", "fact_stable"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1273,7 +1281,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_old", "fact_fresh"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1316,7 +1324,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_stable", "fact_volatile"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1358,7 +1366,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1400,7 +1408,7 @@ class TestReviewerFindings:
             "factsToConsolidate": [
                 {
                     "sourceIds": ["fact_a", "fact_b"],
-                    "consolidated": {"content": "merged stable skill", "category": "knowledge", "confidence": 0.9},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "merged stable skill", "category": "knowledge", "confidence": 0.9},
                 },
             ],
         }
@@ -1440,7 +1448,7 @@ class TestReviewerFindings:
                 {
                     "sourceIds": ["fact_a", "fact_b"],
                     # LLM omits the confidence field entirely
-                    "consolidated": {"content": "Merged without confidence", "category": "knowledge"},
+                    "consolidated": {**_DURABLE_USER_CLASSIFICATION, "content": "Merged without confidence", "category": "knowledge"},
                 },
             ],
         }

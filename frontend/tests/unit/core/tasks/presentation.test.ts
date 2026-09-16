@@ -2,8 +2,23 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   formatSubtaskTokenUsage,
+  resolveSubtaskDescription,
   resolveSubtaskModelLabel,
 } from "@/core/tasks/presentation";
+
+describe("resolveSubtaskDescription", () => {
+  it("prefers the short label and falls back to the required prompt", () => {
+    expect(
+      resolveSubtaskDescription(" Research auth ", "long prompt", "Subtask"),
+    ).toBe("Research auth");
+    expect(resolveSubtaskDescription("", " Investigate auth ", "Subtask")).toBe(
+      "Investigate auth",
+    );
+    expect(resolveSubtaskDescription(undefined, undefined, "Subtask")).toBe(
+      "Subtask",
+    );
+  });
+});
 
 describe("resolveSubtaskModelLabel", () => {
   it("prefers the configured display name and falls back to the model identifier", () => {

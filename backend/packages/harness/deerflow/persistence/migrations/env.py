@@ -25,6 +25,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.migrations._env_filters import (
     LANGGRAPH_OWNED_TABLES,
     include_object,
+    register_configured_extension_table_prefixes,
 )
 
 # Re-export under the module namespace for any consumer that addresses them
@@ -43,6 +44,14 @@ except ImportError:
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# This process never starts a Gateway, so ``load_extensions()`` has not run and
+# ``EXTENSION_TABLE_PREFIXES`` would be empty in the one place ``include_object``
+# reads it. Read the declarations straight from config instead; extension code
+# is never imported here.
+_extension_prefixes = register_configured_extension_table_prefixes()
+if _extension_prefixes:
+    logging.getLogger(__name__).info("alembic: excluding extension-owned tables with prefixes %s", ", ".join(sorted(_extension_prefixes)))
 
 target_metadata = Base.metadata
 
@@ -72,7 +81,26 @@ def do_run_migrations(connection):
 
 
 async def run_migrations_online() -> None:
-    connectable = create_async_engine(config.get_main_option("sqlalchemy.url"))
+    url = config.get_main_option("sqlalchemy.url")
+    # When a custom Postgres schema is configured, pin the alembic-spawned
+    # engine's search_path to it. This engine is built from the bare URL and
+    # does NOT inherit the asyncpg ``server_settings`` the app engine sets via
+    # ``connect_args``, so without this both ``alembic_version`` and every
+    # migration's DDL would land in the default (``public``) schema while the
+    # ORM tables land in the custom schema. ``init_engine`` has already created
+    # the schema (``CREATE SCHEMA IF NOT EXISTS``) before bootstrap runs.
+    pg_schema = config.get_main_option("deerflow_pg_schema")
+    connect_args: dict = {}
+    # Accept both the canonical ``postgresql`` scheme and libpq's ``postgres``
+    # short scheme (with or without a SQLAlchemy ``+driver`` suffix) so a
+    # ``postgres://`` DSN still gets its search_path pinned instead of silently
+    # writing ``alembic_version`` + migration DDL to the default schema.
+    if pg_schema and url and url.split("+", 1)[0].split(":", 1)[0] in {"postgresql", "postgres"}:
+        from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+        connect_args = build_asyncpg_connect_args(pg_schema)
+
+    connectable = create_async_engine(url, connect_args=connect_args)
 
     # Cross-process bootstrap safety for SQLite: every connection alembic
     # opens needs a wide ``busy_timeout`` so that when another process holds

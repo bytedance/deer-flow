@@ -237,10 +237,11 @@ memory:
     #   api_key: $OPENAI_API_KEY
 ```
 
-The optional `openviking` backend connects to an independent OpenViking HTTP
-server and currently supports `mode: middleware`. Its private configuration
-uses `base_url`, `auth_mode`, `account`, `api_key_env`, `failure_policy`, and
-`retrieval` instead of the DeerMem fields shown above. See
+The optional `openviking` backend connects to an independent OpenViking server
+through `langchain-openviking` and currently supports one DeerFlow user in
+`mode: middleware`. Its private configuration uses `base_url`,
+`owner_user_id`, `api_key_env`, `failure_policy`, and `retrieval` with an
+ordinary OpenViking USER API key instead of the DeerMem fields shown above. See
 `docs/OPENVIKING.md` in the repository for the complete configuration and
 Docker startup sequence.
 

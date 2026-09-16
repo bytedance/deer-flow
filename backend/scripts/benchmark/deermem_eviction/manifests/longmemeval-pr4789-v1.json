@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
+  "selection": {
+    "eligible_question_types": [
+      "knowledge-update",
+      "temporal-reasoning"
+    ],
+    "excluded_pilot_ids": [
+      "0f05491a",
+      "dfde3500",
+      "4b24c848",
+      "7e974930",
+      "8077ef71",
+      "bcbe585f",
+      "gpt4_85da3956",
+      "gpt4_af6db32f"
+    ],
+    "exclude_abstention_suffix": "_abs",
+    "answer_min_chars": 1,
+    "answer_max_chars": 100,
+    "answer_excluded_substrings": [
+      "not enough",
+      "only mentioned"
+    ],
+    "evidence_min_chars": 1,
+    "evidence_max_chars": 2000,
+    "take_per_question_type": 20,
+    "cases_per_type_per_scenario": 5
+  },
+  "scenario_order": [
+    "confirmation_help",
+    "access_help",
+    "confidence_control",
+    "noisy_signal_control"
+  ],
+  "loss_ranks": [6, 6, 6, 8, 8, 8, 10, 10, 10, 10],
+  "scenarios": {
+    "confirmation_help": [
+      "01493427",
+      "06db6396",
+      "07741c44",
+      "07741c45",
+      "08e075c7",
+      "08f4fc43",
+      "0bb5a684",
+      "0bc8ad92",
+      "0db4c65d",
+      "2a1811e2"
+    ],
+    "access_help": [
+      "0977f2af",
+      "0ddfec37",
+      "0e4e4c46",
+      "10e09553",
+      "184da446",
+      "2c63a862",
+      "2ebe6c90",
+      "2ebe6c92",
+      "370a8ff4",
+      "4dfccbf7"
+    ],
+    "confidence_control": [
+      "18bc8abd",
+      "1cea1afa",
+      "2133c1b5",
+      "22d2cb42",
+      "2698e78f",
+      "5e1b23de",
+      "6e984301",
+      "71017276",
+      "71017277",
+      "8c18457d"
+    ],
+    "noisy_signal_control": [
+      "26bdc477",
+      "3ba21379",
+      "41698283",
+      "42ec0761",
+      "45dc21b6",
+      "982b5123",
+      "993da5e2",
+      "9a707b81",
+      "a3045048",
+      "af082822"
+    ]
+  }
+}

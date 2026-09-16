@@ -11,8 +11,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.tool_promotion_audit_middleware import record_tool_promotion
 from deerflow.config.tool_search_config import clamp_auto_promote_top_k
-from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
+from deerflow.utils.messages import get_original_user_content_text
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +74,14 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _latest_user_message(messages: list[Any]) -> HumanMessage | None:
+        """Latest user-authored message, including a hidden Human Input Card reply.
+
+        The card reply is hidden from the UI but is still the user's current
+        request, so ``is_genuine_user_message`` — not ``is_real_user_message``,
+        which drops every ``hide_from_ui`` message — decides this.
+        """
         for message in reversed(messages):
-            if is_real_user_message(message):
+            if is_genuine_user_message(message):
                 return message
         return None
 
@@ -101,10 +109,20 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
         matched.sort(key=lambda item: (-item[0], item[1]))
         return [name for _, name in matched[: self._top_k]]
 
-    def _state_update(self, state: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def _state_update(self, state: Mapping[str, Any] | None, runtime: Runtime | None) -> dict[str, Any] | None:
         names = self._matched_names(state)
         if not names:
             return None
+        promoted = (state or {}).get("promoted")
+        raw_promoted_names = promoted.get("names") if isinstance(promoted, Mapping) and promoted.get("catalog_hash") == self._catalog_hash else None
+        already_promoted = {name for name in raw_promoted_names if isinstance(name, str)} if isinstance(raw_promoted_names, Sequence) and not isinstance(raw_promoted_names, (str, bytes)) else set()
+        record_tool_promotion(
+            runtime,
+            producer=type(self).__name__,
+            hook="before_model",
+            source="routing_hint",
+            tool_names=set(names) - already_promoted,
+        )
         logger.debug(
             "McpRoutingMiddleware auto-promoted %d deferred tool schema(s) catalog=%s names=%s",
             len(names),
@@ -120,11 +138,11 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        return self._state_update(state)
+        return self._state_update(state, runtime)
 
     @override
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        return self._state_update(state)
+        return self._state_update(state, runtime)
 
 
 def assert_mcp_routing_before_deferred_filter(middlewares: Sequence[AgentMiddleware]) -> None:
