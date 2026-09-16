@@ -1840,7 +1840,7 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
     return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}" + preserved
 
 
-def _truncate_read_file_output(output: str, max_chars: int) -> str:
+def _truncate_read_file_output(output: str, max_chars: int, line_offset: int = 0) -> str:
     """Head-truncate read_file output, preserving the beginning of the file.
 
     Source code and documents are read top-to-bottom; the head contains the
@@ -1852,7 +1852,10 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
 
     The marker reports the 1-indexed line the character cut lands in, so the
     model can resume with ``start_line`` without re-reading or skipping
-    content (#5475).
+    content (#5475). ``line_offset`` is the 0-based absolute line number of
+    ``output``'s first line — ranged reads pass the requested ``start_line -
+    1`` so the reported lines are absolute file lines, keeping the resume
+    point from looping back onto the slice's own beginning.
     """
     if max_chars == 0:
         return output
@@ -1861,16 +1864,19 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     total = len(output)
     total_lines = output.count("\n") + (0 if output.endswith("\n") else 1)
     # Compute the exact worst-case marker length: every numeric field is at
-    # its maximum (total), so this is a tight upper bound.
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars (cut lands in line {total} of {total}). Use start_line={total} — optionally with end_line — to continue without a gap] ...")
+    # its maximum (total + offset), so this is a tight upper bound.
+    bound = total + max(line_offset, 0)
+    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars (cut lands in line {bound} of {bound}). Use start_line={bound} — optionally with end_line — to continue without a gap] ...")
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
     # 1-indexed line holding the first hidden character: a cut mid-line lands
     # in the partially shown line, a cut exactly after a newline lands in the
-    # next line — either way resuming at this line leaves no gap.
-    cut_line = output[:kept].count("\n") + 1
-    marker = f"\n... [truncated: showing first {kept} of {total} chars (cut lands in line {cut_line} of {total_lines}). Use start_line={cut_line} — optionally with end_line — to continue without a gap] ..."
+    # next line — either way resuming at this line leaves no gap. Expressed in
+    # absolute file lines via line_offset.
+    cut_line = line_offset + output[:kept].count("\n") + 1
+    last_line = line_offset + total_lines
+    marker = f"\n... [truncated: showing first {kept} of {total} chars (cut lands in line {cut_line} of {last_line}). Use start_line={cut_line} — optionally with end_line — to continue without a gap] ..."
     return f"{output[:kept]}{marker}"
 
 
@@ -2454,7 +2460,10 @@ def read_file_tool(
             max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         except Exception:
             max_chars = 50000
-        return _truncate_read_file_output(content, max_chars)
+        # Ranged reads hand a slice to the truncator; line_offset converts the
+        # slice-relative cut line back to the absolute file lines the tool's
+        # start_line/end_line arguments speak in (#5475).
+        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

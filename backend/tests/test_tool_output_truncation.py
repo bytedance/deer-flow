@@ -250,6 +250,26 @@ class TestTruncateReadFileOutput:
         _, marker = _head_and_marker(result)
         assert f"of {output.count(chr(10))}" in marker
 
+    def test_ranged_read_reports_absolute_lines(self):
+        # Ranged reads hand a slice to the truncator; reported lines must be
+        # absolute file lines or the resume hint loops back onto the slice's
+        # own start (the repro from the #5478 review: start_line=831 kept
+        # suggesting start_line=831 forever).
+        slice_lines = [f"row-{i}-content\n" for i in range(1, 5171)]
+        slice_output = "".join(slice_lines)
+        offset = 830  # slice starts at absolute line 831
+        result = _truncate_read_file_output(slice_output, 50000, line_offset=offset)
+        head, marker = _head_and_marker(result)
+        absolute_cut = offset + head.count("\n") + 1
+        absolute_last = offset + len(slice_lines)
+        assert f"cut lands in line {absolute_cut} of {absolute_last}" in marker
+        assert f"start_line={absolute_cut}" in marker
+        assert absolute_cut > offset + 1  # resume strictly advances
+
+    def test_ranged_read_zero_offset_keeps_full_read_semantics(self):
+        output = "".join(f"line-{i}-with-padding\n" for i in range(3000))
+        assert _truncate_read_file_output(output, 50000) == _truncate_read_file_output(output, 50000, line_offset=0)
+
     def test_max_chars_zero_disables_truncation(self):
         output = "X" * 100000
         assert _truncate_read_file_output(output, 0) == output
