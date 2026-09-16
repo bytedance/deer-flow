@@ -1100,7 +1100,9 @@ opaque resumable cursor, pages a known run's persisted events with `after_seq`, 
 authoritative run status separately from event evidence. A database-backed run store keeps
 the discovery cursor valid across Gateway restarts; the memory run store provides the same
 ordering only for the current process lifetime. Event metadata is secret-redacted at this
-boundary, but event content is returned unchanged. The production Gateway supplies an
+boundary, but event content is returned unchanged. Both payloads are detached snapshots,
+so modifying nested values cannot change the host's stored evidence. The production
+Gateway supplies an
 app-scoped, cross-user reader to trusted operator extensions; an embedded host may bind the
 same adapter to one user. Changed-run pages contain creations and changes to retained rows,
 not deletion tombstones; consumers that reconcile deletions must poll status for known runs

@@ -171,7 +171,11 @@ Deletes produce no tombstone and therefore do not advance the cursor; consumers
 that require deletion reconciliation must poll authoritative status for known
 runs and treat a missing result as absent.
 The extension-facing cursor is versioned, opaque, and bound to the reader's
-fixed user scope.
+fixed user scope. `RunEventStore.list_events()` accepts the same explicit
+`user_id` override as `list_messages()`; evidence readers must propagate their
+bound scope (including global `None`) rather than resolving an ambient request
+user. The adapter deep-copies event content and redacted metadata before
+exposing them, detaching nested mutable payloads from host storage.
 
 Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
 messages. An exhaustive miss preserves the human-boundary fallback; an

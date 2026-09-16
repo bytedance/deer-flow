@@ -309,7 +309,17 @@ class JsonlRunEventStore(RunEventStore):
                 break
         return result
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+    async def list_events(
+        self,
+        thread_id,
+        run_id,
+        *,
+        event_types=None,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         if event_types is not None:
             events = [e for e in events if e.get("event_type") in event_types]

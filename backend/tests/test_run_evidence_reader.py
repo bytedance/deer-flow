@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api import InvalidRunEvidenceCursor
@@ -76,6 +77,103 @@ async def test_event_pages_resume_and_status_is_authoritative():
     assert status is not None
     assert status.status == "error"
     assert status.error == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_backend", ["memory", "jsonl", "db"])
+async def test_event_views_detach_nested_payloads_from_store(tmp_path, event_backend):
+    engine = None
+    runs = MemoryRunStore()
+    if event_backend == "memory":
+        events = MemoryRunEventStore()
+    elif event_backend == "jsonl":
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        events = JsonlRunEventStore(tmp_path / "events")
+    else:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from deerflow.persistence.base import Base
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'events.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        events = DbRunEventStore(async_sessionmaker(engine, expire_on_commit=False))
+
+    await _put_run(runs, "run-a", "thread-a")
+    try:
+        await events.put(
+            thread_id="thread-a",
+            run_id="run-a",
+            event_type="test.event",
+            category="trace",
+            content={"text": ["original"]},
+            metadata={"custom": {"value": "original"}},
+        )
+
+        reader = StoreRunEvidenceReader(runs, events, user_id=None)
+        page = await reader.list_run_events(thread_id="thread-a", run_id="run-a", after_seq=None, limit=10)
+        page.items[0].content["text"][0] = "changed"
+        page.items[0].metadata["custom"]["value"] = "changed"
+
+        reread = await reader.list_run_events(thread_id="thread-a", run_id="run-a", after_seq=None, limit=10)
+        stored = await events.list_events("thread-a", "run-a", user_id=None)
+        assert reread.items[0].content == {"text": ["original"]}
+        assert reread.items[0].metadata["custom"] == {"value": "original"}
+        assert stored[0]["content"] == {"text": ["original"]}
+        assert stored[0]["metadata"]["custom"] == {"value": "original"}
+    finally:
+        if engine is not None:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_db_event_reads_use_reader_scope_not_ambient_user(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.runtime import user_context
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'scoped-events.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        runs = RunRepository(factory)
+        events = DbRunEventStore(factory)
+        await runs.put("run-a", thread_id="thread-a", user_id="alice")
+
+        alice_token = user_context.set_current_user(SimpleNamespace(id="alice"))
+        try:
+            await events.put(
+                thread_id="thread-a",
+                run_id="run-a",
+                event_type="test.event",
+                category="trace",
+                content={"owner": "alice"},
+            )
+        finally:
+            user_context.reset_current_user(alice_token)
+
+        for ambient_user in (None, SimpleNamespace(id="bob")):
+            ambient_token = user_context._current_user.set(ambient_user)
+            try:
+                for reader_user in (None, "alice"):
+                    reader = StoreRunEvidenceReader(runs, events, user_id=reader_user)
+                    page = await reader.list_run_events(
+                        thread_id="thread-a",
+                        run_id="run-a",
+                        after_seq=None,
+                        limit=10,
+                    )
+                    assert [item.content for item in page.items] == [{"owner": "alice"}]
+            finally:
+                user_context._current_user.reset(ambient_token)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

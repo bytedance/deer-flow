@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 from typing import Any
@@ -64,14 +65,15 @@ def _status_view(record: dict[str, Any]) -> RunStatusView:
 
 
 def _event_view(event: dict[str, Any]) -> RunEventView:
-    metadata = redact_metadata_secrets(event.get("metadata"))
+    content = copy.deepcopy(event.get("content"))
+    metadata = copy.deepcopy(redact_metadata_secrets(event.get("metadata")))
     return RunEventView(
         thread_id=str(event.get("thread_id") or ""),
         run_id=str(event.get("run_id") or ""),
         seq=int(event.get("seq") or 0),
         event_type=str(event.get("event_type") or ""),
         category=str(event.get("category") or ""),
-        content=event.get("content"),
+        content=content,
         metadata=metadata if isinstance(metadata, dict) else {},
         created_at=str(event.get("created_at") or ""),
     )
@@ -138,6 +140,7 @@ class StoreRunEvidenceReader:
             run_id,
             limit=limit + 1,
             after_seq=after_seq,
+            user_id=self._user_id,
         )
         page_events = events[:limit]
         next_after_seq = after_seq

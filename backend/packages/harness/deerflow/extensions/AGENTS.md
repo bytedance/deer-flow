@@ -288,7 +288,11 @@ covers creations and changes to retained rows only; synchronization consumers mu
 is required. A DB run store preserves positions across restarts, while memory only provides
 process-lifetime ordering. Per-run events retain the event store's thread-scoped
 `after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
-and status comes from the authoritative run store. The production Gateway injects one
+and status comes from the authoritative run store. The reader passes its fixed scope to
+event reads explicitly, including global `None`, so ambient request identity cannot
+change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
+fields are frozen, but nested containers remain locally mutable without touching host
+storage. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
 global cross-user visibility because services have no request principal. A host embedding
 the harness may instead bind a reader to one user. This is not a sandbox boundary: services

@@ -25,7 +25,11 @@ class RunStatusView:
 
 @dataclass(frozen=True)
 class RunEventView:
-    """Persisted evidence envelope; ``seq`` is monotonic within its thread."""
+    """Persisted evidence envelope; ``seq`` is monotonic within its thread.
+
+    Reader-returned content and metadata are detached from host storage.
+    Fields are frozen, but nested payload containers may be modified locally.
+    """
 
     thread_id: str = ""
     run_id: str = ""
