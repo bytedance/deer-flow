@@ -503,3 +503,42 @@ test("agent selection saves explicit plugin IDs and an empty skill list", async 
     plugins.getByLabel("Team GitHub", { exact: true }),
   ).toBeChecked();
 });
+
+test("renaming an Agent preserves concurrently updated plugin and skill selections", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  let saved = {
+    name: "analyst",
+    display_name: "Analyst",
+    mcp_plugins: ["old-plugin"],
+    skills: ["old-skill"],
+  };
+  let request: Record<string, unknown> | undefined;
+  await page.route("**/api/agents", (route) =>
+    route.fulfill({ json: { agents: [saved] } }),
+  );
+  await page.route("**/api/agents/analyst", (route) => {
+    if (route.request().method() === "PUT") {
+      request = route.request().postDataJSON() as Record<string, unknown>;
+      saved = { ...saved, ...request };
+    }
+    return route.fulfill({ json: saved });
+  });
+  await page.goto("/workspace/agents");
+  await page.getByTitle("Agent settings", { exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Display name")).toHaveValue("Analyst");
+  // Another editor saves capability selections after this dialog has opened.
+  saved = { ...saved, mcp_plugins: ["new-plugin"], skills: ["new-skill"] };
+  await dialog.getByLabel("Display name").fill("Renamed analyst");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(request).not.toHaveProperty("mcp_plugins");
+  expect(request).not.toHaveProperty("skills");
+  expect(saved).toMatchObject({
+    display_name: "Renamed analyst",
+    mcp_plugins: ["new-plugin"],
+    skills: ["new-skill"],
+  });
+});

@@ -60,8 +60,11 @@ and credential-bearing URLs. Tool schemas never include credentials. An exact
 only the provider's known credential environment keys is accepted by the MCP
 API; arbitrary interpreter paths/modules/flags/environment remain rejected.
 The isolated interpreter ignores the working directory and Python environment
-injection. If a deployment moves its Python environment, recreate these
-connections in the new deployment to regenerate the interpreter path.
+injection. If a deployment moves its Python environment, enabling an old launcher
+returns a targeted error with the current interpreter path. Edit that connection's JSON
+and replace only `command` with the indicated path; preserve its capability
+metadata and masked credentials. This repairs the connection in place without
+changing its installation ID or existing Agent selections.
 
 The implementation is independently written against the provider contracts;
 Dify's plugins informed the feature scope, not the source implementation:
@@ -167,6 +170,8 @@ or grants access to another user's account.
 The lead Agent filters tools by their MCP source metadata. Ordinary delegated
 and durable batch tasks carry the selection in their execution metadata. Each
 Agent run gets a filtered list without altering the shared MCP tool cache.
+The settings dialog omits unchanged plugin and skill selections on save, so an
+unrelated edit does not overwrite a concurrent capability selection.
 Existing skill policy, user-scoped MCP authentication, and tool execution guards
 continue to run. Changes take effect on subsequent runs.
 

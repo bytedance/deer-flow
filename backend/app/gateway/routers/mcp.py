@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, NoReturn
 
@@ -787,6 +788,15 @@ def _validate_mcp_update_request(
         # our bundled adapter, never an arbitrary API-supplied executable path.
         if is_bundled_connection(server.command, server.args, server.env):
             continue
+        if enforce_execution_policy and is_bundled_connection(sys.executable, server.args, server.env):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Bundled MCP server '{name}' uses a different Python interpreter. "
+                    f"Edit this server's JSON and set 'command' to {sys.executable!r}. "
+                    "Keep its capability metadata and credentials unchanged to preserve Agent selections; do not delete and reinstall it."
+                ),
+            )
         command_name = _stdio_command_name(server.command, server_name=name)
         if enforce_execution_policy:
             if command_name not in allowed_commands:

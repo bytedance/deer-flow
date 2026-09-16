@@ -41,6 +41,15 @@ import {
   thinkingEnabledToSelection,
 } from "./agent-settings-dialog-helpers";
 
+function sameSelection(left: string[] | null, right: string[] | null) {
+  if (left === null || right === null) return left === right;
+  const selected = new Set(left);
+  return (
+    selected.size === new Set(right).size &&
+    right.every((id) => selected.has(id))
+  );
+}
+
 const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high"];
 
 interface AgentSettingsDialogProps {
@@ -65,6 +74,11 @@ export function AgentSettingsDialog({
   const { subagents } = useSubagents();
   const subagentDescriptionId = useId();
   const updateAgent = useUpdateAgent();
+  // Keep the opening snapshot even if a background refetch updates agent props.
+  const [initialSelections] = useState(() => ({
+    plugins: agent.mcp_plugins ?? null,
+    skills: agent.skills ?? null,
+  }));
   const [plugins, setPlugins] = useState<string[] | null>(
     agent.mcp_plugins ?? null,
   );
@@ -147,8 +161,10 @@ export function AgentSettingsDialog({
         name: agent.name,
         request: {
           display_name: displayName.trim() || null,
-          mcp_plugins: plugins,
-          skills,
+          ...(!sameSelection(plugins, initialSelections.plugins) && {
+            mcp_plugins: plugins,
+          }),
+          ...(!sameSelection(skills, initialSelections.skills) && { skills }),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking

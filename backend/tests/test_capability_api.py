@@ -195,3 +195,34 @@ def test_targeted_edit_enable_and_delete_handle_identity_collisions(capability_c
     assert all(item["selectable"] is False for item in discovery)
     assert client.delete("/api/mcp/config/servers/second").status_code == 200
     assert client.get("/api/capabilities/installations/mcp").json()["items"][0]["selectable"] is True
+
+
+@pytest.mark.parametrize("provider", ["dingtalk", "wecom", "hubspot"])
+def test_stale_bundled_interpreter_can_be_repaired_without_reinstall(capability_client, provider):
+    import sys
+
+    from deerflow.capabilities.business import CREDENTIALS, connection_config
+
+    client, path = capability_client
+    configuration = connection_config(provider, {field: "private-token" for field in CREDENTIALS[provider]})
+    configuration.update(command="/removed/venv/bin/python", enabled=False, capability={"id": "keep-agent-selection", "plugin_id": provider, "version": "2"})
+    raw = json.loads(path.read_text())
+    raw["mcpServers"]["team"] = configuration
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    response = client.patch("/api/mcp/config", json={"server_name": "team", "enabled": True})
+    assert response.status_code == 400
+    assert "different Python interpreter" in response.json()["detail"]
+    assert sys.executable in response.json()["detail"]
+    assert "private-token" not in response.text
+    assert path.read_bytes() == before
+    masked = client.get("/api/mcp/config").json()["mcp_servers"]["team"]
+    assert set(masked["env"].values()) == {"***"}
+    masked.update(command=sys.executable, enabled=True)
+    response = client.put("/api/mcp/config/server", json={"server_name": "team", "server": masked})
+    assert response.status_code == 200
+    repaired = json.loads(path.read_text())["mcpServers"]["team"]
+    assert repaired["capability"] == configuration["capability"]
+    assert repaired["env"] == configuration["env"]
+    assert repaired["command"] == sys.executable
+    assert client.patch("/api/mcp/config", json={"server_name": "team", "enabled": True}).status_code == 200

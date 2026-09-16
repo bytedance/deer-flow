@@ -1,3 +1,6 @@
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+
 import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
@@ -66,9 +69,11 @@ for (const plugin of [
       await expect(field).toHaveAttribute("type", "password");
       await field.fill(value);
     }
-    if (plugin.id === "hubspot") {
+    const screenshotDirectory = process.env.CAPABILITY_SCREENSHOT_DIR;
+    if (plugin.id === "hubspot" && screenshotDirectory) {
+      await mkdir(screenshotDirectory, { recursive: true });
       await page.screenshot({
-        path: "/tmp/deerflow-hubspot-configuration-en.png",
+        path: path.join(screenshotDirectory, "hubspot-configuration-en.png"),
       });
     }
     await dialog.getByRole("button", { name: "Save configuration" }).click();

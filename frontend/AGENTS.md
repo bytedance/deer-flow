@@ -206,7 +206,9 @@ connections. These also appear in MCP discovery, so deduplicate projections by
 installation ID. Keep their labels as configuration, not package installation.
 Keep installation, enabled state, configured credentials, and verified authorization
 distinct. Agent `mcp_plugins` uses stable installation IDs; null means all, [] means
-none. It is runtime selection, not a replacement authorization policy. See
+none. The settings dialog submits only selections changed from its opening
+snapshot, preserving concurrent updates on unrelated saves and treating restored
+selections as unchanged. It is runtime selection, not a replacement authorization policy. See
 `docs/capability-center.md` for the complete contract and extension example.
 `PluginIcon` is shared by recommendations, configured entries, and the editor;
 brand assets and their provenance live in `public/images/plugins/`. Brand icons
