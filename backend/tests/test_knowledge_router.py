@@ -149,9 +149,7 @@ def test_retrieval_catalog_accepts_main_assistant(
         )
 
     assert response.status_code == 200
-    assert response.json()["items"] == [
-        {"id": "dataset-1", "name": "Policies", "selectable": True}
-    ]
+    assert response.json()["items"] == [{"id": "dataset-1", "name": "Policies", "selectable": True}]
 
 
 def test_retrieval_catalog_documents_reject_outside_allowlist_without_provider_call(

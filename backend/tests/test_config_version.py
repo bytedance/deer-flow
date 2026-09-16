@@ -27,6 +27,7 @@ def test_knowledge_base_config_is_provider_agnostic() -> None:
     )
     assert config.model_dump() == {"enabled": True, "scope_selection_enabled": True}
 
+
 # Only the upgrade-script test shells out; it needs Git Bash on Windows (the
 # WSL launcher and Store alias stubs cannot run the repo scripts).
 SCRIPT_BASH = find_script_bash()
