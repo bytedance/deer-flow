@@ -320,6 +320,21 @@ async def test_global_launch_budget_holds_when_distinct_rows_are_claimed_concurr
         # per-connection PRAGMA setup staggers them enough to hide the race.
         await asyncio.gather(*(run_repo.count_active_runs() for _ in range(claimants)))
 
+        # That warm-up is load-bearing, and it only works because the SQLite
+        # engine keeps pooled connections (init_engine_from_config builds it on
+        # SQLAlchemy's default AsyncAdaptedQueuePool, so `pool_size` of them
+        # survive this gather while the overflow is discarded). Under a
+        # non-pooling class such as NullPool every claimer would open its own
+        # connection, the PRAGMA setup would serialize them, and this test
+        # would pass against an unserialized claim instead of failing. Assert
+        # the reuse so that a pool change breaks this test loudly rather than
+        # quietly draining it of guard strength.
+        pool = sf.kw["bind"].sync_engine.pool
+        # A non-pooling class does not implement checkedin() at all, so treat a
+        # missing counter as "nothing was reused" and report it the same way.
+        pooled = pool.checkedin() if hasattr(pool, "checkedin") else 0
+        assert pooled >= 2, f"{type(pool).__name__} left {pooled} connections pooled after the warm-up; the claimers cannot overlap, so this test would pass against an unserialized claim"
+
         claims = await asyncio.gather(
             *(
                 run_repo.claim_queued_run(
