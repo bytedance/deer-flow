@@ -395,6 +395,68 @@ async def test_goal_worker_waits_for_an_unanswered_clarification(monkeypatch, as
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_later_tool_result", [False, True])
+async def test_goal_worker_resumes_after_the_user_answers_clarification(monkeypatch, with_later_tool_result):
+    """An old card remains in history, but cannot block the answered turn."""
+    checkpointer = InMemorySaver()
+    thread_id = "answered-clarification-goal-thread"
+    messages = [
+        HumanMessage(content="Migrate the orders database."),
+        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {"question": "Keep the legacy table?"}, "id": "call-ask"}]),
+        ToolMessage(
+            content="Keep the legacy table?",
+            tool_call_id="call-ask",
+            name="ask_clarification",
+            artifact={"human_input": {"kind": "human_input_request"}},
+        ),
+    ]
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish the migration", messages=messages)
+    evaluator_calls = []
+
+    async def fake_evaluate_goal_completion(_goal, evaluated_messages, **_kwargs):
+        evaluator_calls.append(evaluated_messages)
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Validation remains.", evidence_summary="Migrated while retaining the legacy table.")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+    kwargs = {
+        "accessor": _full_accessor(checkpointer),
+        "bridge": _CollectingBridge(),
+        "checkpointer": checkpointer,
+        "thread_id": thread_id,
+        "model_name": "test-model",
+        "app_config": None,
+    }
+    assert await worker._prepare_goal_continuation_input(**kwargs, run_id="run-question") is None
+    assert evaluator_calls == []
+    waiting_goal = await read_thread_goal(checkpointer, thread_id)
+    assert waiting_goal["last_evaluation"]["stand_down_reason"] == "blocked:needs_user_input"
+
+    messages.extend(
+        [
+            HumanMessage(content="Yes, keep the legacy table."),
+            AIMessage(
+                content="Migrated the schema and kept the legacy table. Validation remains.",
+                tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-ls"}] if with_later_tool_result else [],
+            ),
+        ]
+    )
+    if with_later_tool_result:
+        messages.append(ToolMessage(content="orders_v1 orders_v2", tool_call_id="call-ls", name="bash"))
+    await _write_messages(checkpointer, thread_id=thread_id, messages=messages)
+
+    continuation = await worker._prepare_goal_continuation_input(**kwargs, run_id="run-answer")
+
+    assert len(evaluator_calls) == 1
+    assert any(isinstance(message, HumanMessage) and message.content == "Yes, keep the legacy table." for message in evaluator_calls[0])
+    assert continuation is not None
+    assert continuation["messages"][0].additional_kwargs["hide_from_ui"] is True
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert "stand_down_reason" not in latest_goal["last_evaluation"]
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_token_budget(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "token-capped-done-goal-thread"
