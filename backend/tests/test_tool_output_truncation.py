@@ -274,6 +274,45 @@ class TestTruncateReadFileOutput:
         output = "X" * 100000
         assert _truncate_read_file_output(output, 0) == output
 
+    def test_cut_lands_on_a_line_boundary_and_names_the_next_line(self):
+        lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
+        output = "\n".join(lines) + "\n"
+        result = _truncate_read_file_output(output, 50000)
+        kept_text = result[: result.index("... [truncated:")]
+        assert kept_text.endswith("\n")
+        shown = kept_text.count("\n")
+        assert kept_text == "\n".join(lines[:shown]) + "\n"
+        assert f"showing first {shown} of 3000 lines" in result
+        assert f"({len(kept_text)} of {len(output)} chars)" in result
+        assert f"Continue with start_line={shown + 1}" in result
+        assert "start_line/end_line" in result
+        assert len(result) <= 50000
+
+    def test_next_start_line_reads_the_rest_without_gap_or_overlap(self):
+        lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
+        output = "\n".join(lines) + "\n"
+        result = _truncate_read_file_output(output, 50000)
+        kept_text = result[: result.index("... [truncated:")]
+        shown = kept_text.count("\n")
+        # What read_file(start_line=shown + 1) returns is exactly the unread remainder.
+        assert output[len(kept_text) :] == "\n".join(lines[shown:]) + "\n"
+
+    def test_long_line_at_the_cut_falls_back_to_a_char_cut_that_names_the_line(self):
+        output = "a\nb\n" + "X" * 60000
+        result = _truncate_read_file_output(output, 50000)
+        assert result.startswith("a\nb\nXXXX")
+        assert result.count("X") > 49000  # the line boundary at char 4 is not used: it would drop the whole budget
+        assert f"of {len(output)} chars" in result
+        assert "cut inside line 3 of 3" in result
+        assert "Continue with start_line=3" in result
+        assert len(result) <= 50000
+
+    def test_file_without_trailing_newline_counts_its_last_line(self):
+        lines = [f"line {i} " + "y" * (i % 50) for i in range(1, 3001)]
+        output = "\n".join(lines)
+        result = _truncate_read_file_output(output, 50000)
+        assert "of 3000 lines" in result
+
     def test_tail_is_not_preserved(self):
         # head-truncation: tail should be cut off
         output = "H" * 50000 + "TAIL_SHOULD_NOT_APPEAR"

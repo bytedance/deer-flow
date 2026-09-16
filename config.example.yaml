@@ -1453,6 +1453,8 @@ sandbox:
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
   # read_file and ls use head-truncation since their content is front-loaded.
+  # A read_file cut lands on a line boundary when the budget allows, and the marker names
+  # the next start_line to continue with, so the agent can page through a long file exactly.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
