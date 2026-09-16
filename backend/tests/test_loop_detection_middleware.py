@@ -1381,6 +1381,24 @@ class TestHardStopWithListContent:
         assert msg.content[2]["type"] == "text"
         assert _HARD_STOP_MSG in msg.content[2]["text"]
 
+    def test_hard_stop_drops_provider_tool_use_blocks(self):
+        """A stripped call's Anthropic tool_use block must not outlive it in content."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+        list_content = [
+            {"type": "text", "text": "I'll run ls"},
+            {"type": "tool_use", "id": "call_ls", "name": "bash", "input": {"command": "ls"}},
+        ]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+        result = mw._apply(_make_state(tool_calls=call, content=list_content), runtime)
+
+        msg = result["messages"][0]
+        assert [block["type"] for block in msg.content] == ["text", "text"]
+        assert _HARD_STOP_MSG in msg.content[-1]["text"]
+
     def test_hard_stop_with_none_content(self):
         """Hard stop on None content should produce a plain string."""
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)

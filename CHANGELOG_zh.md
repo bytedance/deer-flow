@@ -403,6 +403,12 @@
   与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
   **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
   有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
+- **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
+  token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
+  却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
+  导致下一次请求带着没有结果的工具调用而被 provider 拒绝；写入 checkpoint 的硬停止消息还会让之后
+  每条新消息都失败。现在所有守卫都通过同一个共享 helper 删除对应的 content 块，该 helper 也会保留
+  clarification 所保留的 Responses 调用。([#5447])
 - **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
   OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
@@ -2190,3 +2196,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447
