@@ -154,6 +154,7 @@ def _make_app(
     app = FastAPI()
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=auth_source)
     app.state.thread_store = thread_store if thread_store is not None else _PermissiveThreadStore()
+    app.state.run_store = run_store
     app.state.run_manager = RunManager(store=run_store)
     if event_store is not None:
         app.state.run_event_store = event_store
@@ -519,3 +520,86 @@ def test_subresource_reads_stay_owner_isolated_without_meta() -> None:
     assert [row["content"]["id"] for row in messages.json()["data"]] == ["msg-owner-run"]
     assert events.status_code == 200
     assert any(event.get("run_id") == "run-owner-777" for event in events.json())
+
+
+def test_null_owner_thread_gates_cancel_and_archive_for_internal_callers() -> None:
+    """NULL-owner meta rows gate POST /cancel and the archive pair too.
+
+    The round-2 findings: cancel resolved runs unscoped (an interrupt-vs-join
+    inconsistency) and the archive manifest leaked the other owner's
+    delivered-file count plus a 200-vs-409 delivery oracle on shared threads.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+
+    stranger_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: "feishu:owner-999"}
+    stranger = _make_app(
+        user=_internal_user("feishu:owner-999"),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with stranger:
+        cancel = stranger.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/cancel?action=interrupt",
+            headers=stranger_headers,
+        )
+        manifest = stranger.get(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers=stranger_headers,
+        )
+        archive = stranger.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers=stranger_headers,
+        )
+
+    assert cancel.status_code == 404
+    assert manifest.status_code == 404
+    assert archive.status_code == 404
+
+
+def test_null_owner_thread_matching_owner_cancels_and_reads_manifest() -> None:
+    """The acting owner keeps cancel and archive access on shared threads."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+    asyncio.run(
+        event_store.put(
+            thread_id=THREAD_ID,
+            run_id="run-owner-777",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 2, "by_tool": {"present_files": ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.txt"]}},
+        )
+    )
+
+    owner_client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with owner_client:
+        manifest = owner_client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        cancel = owner_client.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/cancel?action=interrupt",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert manifest.status_code == 200
+    assert manifest.json() == {"file_count": 2}
+    # A terminal run cannot be cancelled again: the acting owner reaches the
+    # real conflict path instead of a 404 anti-enumeration answer.
+    assert cancel.status_code == 409

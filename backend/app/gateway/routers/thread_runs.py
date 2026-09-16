@@ -1119,14 +1119,15 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
 
 
 async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Request) -> None:
-    """Gate run-scoped sub-resource reads (events, messages, join, stream).
+    """Gate run-scoped sub-resource reads and writes (events, messages, join,
+    stream, cancel, artifact archive).
 
-    These sub-resources query by ``(thread_id, run_id)`` without a per-user
-    filter of their own. For trusted internal callers on threads without
-    established ownership, that let an internal caller acting for owner A
-    read owner B's run content by id (#5448 review P1 follow-up). The run's
-    own stamp must therefore match the acting owner's raw value (or the
-    legacy ``"default"`` stamp); every other caller and every
+    These routes query or mutate by ``(thread_id, run_id)`` without a
+    per-user filter of their own. For trusted internal callers on threads
+    without established ownership, that let an internal caller acting for
+    owner A read or cancel owner B's run by id (#5448 review P1 follow-up).
+    The run's own stamp must therefore match the acting owner's raw value (or
+    the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
     """
     user = getattr(request.state, "user", None)
@@ -1227,6 +1228,7 @@ async def cancel_run(
     durably notifies the owner when its lease is live, or takes over and
     terminalizes the run when that lease has expired.
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1704,6 +1706,7 @@ async def get_run_artifact_archive_manifest(
     request: Request,
 ) -> ArtifactArchiveManifestResponse:
     """Return the verified terminal delivery count used by the archive."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
     return ArtifactArchiveManifestResponse(file_count=len(dict.fromkeys(presented_paths)))
 
@@ -1716,6 +1719,7 @@ async def create_run_artifact_archive(
     request: Request,
 ) -> StreamingResponse:
     """Download the current contents of the files presented by one terminal run."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
