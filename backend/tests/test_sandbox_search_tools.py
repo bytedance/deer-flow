@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -510,6 +511,102 @@ def test_find_grep_matches_skips_symlink_outside_root(tmp_path) -> None:
 
     assert matches == []
     assert truncated is False
+
+
+def test_find_glob_matches_reports_an_exactly_full_result_as_complete(tmp_path) -> None:
+    """A walk that ends on the cap found everything there was, so it is not truncated."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("a.py", "b.py", "c.py"):
+        (workspace / name).write_text("print('x')\n", encoding="utf-8")
+
+    matches, truncated = find_glob_matches(workspace, "**/*.py", max_results=3)
+
+    assert sorted(Path(match).name for match in matches) == ["a.py", "b.py", "c.py"]
+    assert truncated is False
+
+
+def test_find_glob_matches_reports_truncation_when_a_match_is_dropped(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("a.py", "b.py", "c.py", "d.py"):
+        (workspace / name).write_text("print('x')\n", encoding="utf-8")
+
+    matches, truncated = find_glob_matches(workspace, "**/*.py", max_results=3)
+
+    assert len(matches) == 3
+    assert truncated is True
+
+
+def test_find_glob_matches_include_dirs_reports_an_exactly_full_result_as_complete(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pkg").mkdir()
+    (workspace / "docs").mkdir()
+    (workspace / "a.txt").write_text("a\n", encoding="utf-8")
+    (workspace / "b.txt").write_text("b\n", encoding="utf-8")
+
+    matches, truncated = find_glob_matches(workspace, "*", include_dirs=True, max_results=4)
+
+    assert sorted(Path(match).name for match in matches) == ["a.txt", "b.txt", "docs", "pkg"]
+    assert truncated is False
+
+
+def test_find_glob_matches_include_dirs_truncates_at_the_cap(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pkg").mkdir()
+    (workspace / "docs").mkdir()
+
+    matches, truncated = find_glob_matches(workspace, "*", include_dirs=True, max_results=1)
+
+    assert len(matches) == 1
+    assert truncated is True
+
+
+def test_find_glob_matches_returns_nothing_for_a_zero_cap(tmp_path) -> None:
+    """A zero cap must not hand back a match one past the caller's limit."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("print('a')\n", encoding="utf-8")
+
+    matches, truncated = find_glob_matches(workspace, "**/*.py", max_results=0)
+
+    assert matches == []
+    assert truncated is True
+
+
+def test_find_grep_matches_reports_an_exactly_full_result_as_complete(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("TODO one\nTODO two\nTODO three\n", encoding="utf-8")
+
+    matches, truncated = find_grep_matches(workspace, "TODO", max_results=3)
+
+    assert [match.line for match in matches] == ["TODO one", "TODO two", "TODO three"]
+    assert truncated is False
+
+
+def test_find_grep_matches_reports_truncation_when_a_match_is_dropped(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("TODO one\nTODO two\nTODO three\nTODO four\n", encoding="utf-8")
+
+    matches, truncated = find_grep_matches(workspace, "TODO", max_results=3)
+
+    assert [match.line for match in matches] == ["TODO one", "TODO two", "TODO three"]
+    assert truncated is True
+
+
+def test_find_grep_matches_returns_nothing_for_a_zero_cap(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("TODO one\n", encoding="utf-8")
+
+    matches, truncated = find_grep_matches(workspace, "TODO", max_results=0)
+
+    assert matches == []
+    assert truncated is True
 
 
 def test_glob_tool_honors_smaller_requested_max_results(tmp_path, monkeypatch) -> None:

@@ -116,7 +116,6 @@ def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
 
 def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
     matches: list[str] = []
-    truncated = False
     root = root.resolve()
 
     if not root.exists():
@@ -135,9 +134,8 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
                 rel_path = (rel_dir / name).as_posix()
                 if path_matches(pattern, rel_path):
                     matches.append(str(Path(current_root) / name))
-                    if len(matches) >= max_results:
-                        truncated = True
-                        return matches, truncated
+                    if len(matches) > max_results:
+                        return matches[:max_results], True
 
         for name in files:
             if should_ignore_name(name):
@@ -145,11 +143,17 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
             rel_path = (rel_dir / name).as_posix()
             if path_matches(pattern, rel_path):
                 matches.append(str(Path(current_root) / name))
-                if len(matches) >= max_results:
-                    truncated = True
-                    return matches, truncated
+                # Look one match past the cap before deciding. Stopping on the
+                # max-th match cannot tell a tree that held exactly
+                # ``max_results`` matches from one that held more, so an
+                # exhausted walk was reported as truncated; the same line also
+                # returned one match for ``max_results=0``. ``AioSandbox.glob``
+                # and the shared ``parse_remote_search_output`` cap decide the
+                # same way.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
 
-    return matches, truncated
+    return matches, False
 
 
 def find_grep_matches(
@@ -164,7 +168,6 @@ def find_grep_matches(
     line_summary_length: int = DEFAULT_LINE_SUMMARY_LENGTH,
 ) -> tuple[list[GrepMatch], bool]:
     matches: list[GrepMatch] = []
-    truncated = False
     root = root.resolve()
 
     if not root.exists():
@@ -217,10 +220,12 @@ def find_grep_matches(
                                 line=truncate_line(line, line_summary_length),
                             )
                         )
-                        if len(matches) >= max_results:
-                            truncated = True
-                            return matches, truncated
+                        # Same one-past-the-cap decision as ``find_glob_matches``:
+                        # a search whose last eligible line lands exactly on the
+                        # cap is complete, not truncated.
+                        if len(matches) > max_results:
+                            return matches[:max_results], True
         except OSError:
             continue
 
-    return matches, truncated
+    return matches, False
