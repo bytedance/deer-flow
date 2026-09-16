@@ -287,8 +287,8 @@ function MCPServerList({
         open={editor !== null}
         onOpenChange={(open) => !open && !isWriting && closeEditor()}
       >
-        <DialogContent>
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-y-auto sm:max-w-2xl">
+          <DialogHeader className="shrink-0 break-words">
             <DialogTitle>
               {editor?.mode === "edit"
                 ? t.settings.tools.editServer
@@ -304,7 +304,7 @@ function MCPServerList({
             </DialogDescription>
           </DialogHeader>
           <Textarea
-            className="min-h-52 font-mono text-xs"
+            className="field-sizing-fixed h-96 min-h-24 resize-none overflow-auto font-mono text-xs"
             aria-label={t.settings.tools.serverDefinitionLabel}
             spellCheck={false}
             value={definition}
@@ -312,11 +312,14 @@ function MCPServerList({
             onChange={(event) => setDefinition(event.target.value)}
           />
           {definitionError && (
-            <div className="text-destructive text-sm" role="alert">
+            <div
+              className="text-destructive shrink-0 text-sm break-words"
+              role="alert"
+            >
               {definitionError}
             </div>
           )}
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button
               variant="outline"
               disabled={isWriting}
