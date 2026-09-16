@@ -115,6 +115,30 @@ def test_a_one_shot_iterator_with_a_bad_item_still_reports_the_item_error():
     assert not any(error["type"] == "conversation_references_conflict" for error in errors)
 
 
+class _OneShotIterable:
+    """An iterable that is not an ``Iterator`` but can be walked only once."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self._spent = False
+
+    def __iter__(self):
+        if self._spent:
+            return iter(())
+        self._spent = True
+        return iter(self._items)
+
+
+def test_a_one_shot_iterable_that_is_not_an_iterator_is_also_read_once():
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=_OneShotIterable(["", "source"]), context={"conversation_references": ["source"]})
+    errors = exc.value.errors()
+    assert [error["loc"] for error in errors] == [("conversation_references", 0)]
+    assert not any(error["type"] == "conversation_references_conflict" for error in errors)
+    body = RunCreateRequest(conversation_references=_OneShotIterable(["source"]), context={"thinking_enabled": True})
+    assert body.conversation_references == ["source"]
+
+
 def test_a_one_shot_iterator_of_valid_items_is_read_once_and_kept():
     body = RunCreateRequest(conversation_references=(item for item in ["source"]), context={"thinking_enabled": True})
     assert body.conversation_references == ["source"]

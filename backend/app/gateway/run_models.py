@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator, model_validator
@@ -20,6 +20,10 @@ MAX_CONVERSATION_REFERENCES = 3
 # a pydantic upgrade (lax mode also coerces tuples, sets, generators, ...).
 ConversationReference = Annotated[str, Field(strict=True, min_length=1, max_length=2048)]
 _REFERENCES_ADAPTER = TypeAdapter(list[ConversationReference])
+# Inputs the lift never materialises: lists and tuples can be read again, and
+# str, bytes and dict are rejected by the field as a whole (``list_type``), a
+# verdict the field must keep reporting itself.
+_READ_MANY_TIMES = (list, tuple, str, bytes, bytearray, dict)
 
 
 class RunCreateRequest(BaseModel):
@@ -72,10 +76,11 @@ class RunCreateRequest(BaseModel):
             return data
         references = context["conversation_references"]
         top_level = data.get("conversation_references")
-        if isinstance(top_level, Iterator):
-            # A one-shot iterator can be read only once. Materialise it so the
-            # probe below and the field validate the same items, instead of the
-            # field seeing an exhausted iterator that coerces to [].
+        if isinstance(top_level, Iterable) and not isinstance(top_level, _READ_MANY_TIMES):
+            # Anything else the field would coerce may be walkable only once
+            # (a generator, or an object whose ``__iter__`` hands out one).
+            # Materialise it so the probe below and the field validate the same
+            # items, instead of the field seeing an exhausted input as [].
             top_level = list(top_level)
             data = {**data, "conversation_references": top_level}
         lifted = {**data, "context": {key: value for key, value in context.items() if key != "conversation_references"}}
