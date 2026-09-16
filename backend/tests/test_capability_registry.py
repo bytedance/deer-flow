@@ -76,3 +76,15 @@ async def test_selected_mcp_executes_real_stdio_tool_without_mutating_shared_cat
     assert "42" in str(result)
     assert not any(is_mcp_tool(tool) for tool in get_available_tools(app_config=app_config, mcp_plugins=[]))
     assert any(is_mcp_tool(tool) for tool in get_available_tools(app_config=app_config))
+
+
+@pytest.mark.parametrize("collision", ["explicit", "fallback", "disabled"])
+def test_ambiguous_installation_selection_fails_closed(collision):
+    identity = installation_id("two", {}) if collision == "fallback" else "same"
+    servers = {"one": {"enabled": True, "capability": {"id": identity}}, "two": {"enabled": collision != "disabled"}}
+    if collision != "fallback":
+        servers["two"]["capability"] = {"id": identity}
+    config = ExtensionsConfig.model_validate({"mcpServers": servers})
+    tools = [SimpleNamespace(name=name, metadata={"deerflow_mcp": True, "deerflow_mcp_source": {"server_name": name}}) for name in servers]
+    assert filter_mcp_plugins(tools, [identity], config) == []
+    assert filter_mcp_plugins(tools, None, config) == tools

@@ -1176,10 +1176,14 @@ def _mcp_server_response_from_raw(server_name: str, raw_server: Any) -> McpServe
 
 def _validate_extensions_config_candidate(raw_data: dict) -> None:
     """Reject a runtime-invalid candidate without changing its placeholders."""
+    from deerflow.capabilities.runtime import ambiguous_installation_ids
+
     try:
         validate_raw_extensions_config(raw_data)
     except ValidationError as exc:
         _raise_invalid_mcp_configuration(_validation_error_summary(exc), cause=exc)
+    if ambiguous_installation_ids(_raw_mcp_servers(raw_data)):
+        _raise_invalid_mcp_configuration("Duplicate MCP installation IDs; remove conflicting entries or assign unique capability IDs in the deployment configuration")
 
 
 def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:

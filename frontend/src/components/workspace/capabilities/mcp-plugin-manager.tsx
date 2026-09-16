@@ -99,6 +99,11 @@ function MCPServerList({
   const previewEntry = previewEntries[0];
   const previewName =
     editor?.mode === "edit" ? editor.name : (previewEntry?.[0] ?? "");
+  const previewMetadata = catalogForServer(
+    previewName,
+    previewEntry?.[1],
+    definitions,
+  );
   const previewIcon =
     draftIcon === undefined && previewEntry
       ? readPluginIcon(previewEntry[1])
@@ -299,6 +304,7 @@ function MCPServerList({
                       name={name}
                       icon={readPluginIcon(config)}
                       asset={metadata?.icon}
+                      capabilityId={metadata?.id}
                     />
                   }
                   onDetails={
@@ -363,6 +369,8 @@ function MCPServerList({
           </DialogHeader>
           <PluginIconPicker
             name={previewName}
+            asset={previewMetadata?.icon}
+            capabilityId={previewMetadata?.id}
             value={previewIcon}
             disabled={isWriting || previewEntries.length > 1}
             onChange={setDraftIcon}

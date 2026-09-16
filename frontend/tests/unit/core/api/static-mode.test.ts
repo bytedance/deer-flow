@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 
 import { listAgents } from "@/core/agents/api";
@@ -196,4 +199,92 @@ describe("static website API requests", () => {
       expect.objectContaining({ credentials: "include" }),
     );
   });
+});
+
+it("serves the canonical capability catalog locally and rejects writes", async () => {
+  const response = await apiFetch("/api/capabilities/catalog");
+  expect(response.status).toBe(200);
+  const catalog = (await response.json()) as { id: string }[];
+  expect(catalog).toEqual(
+    JSON.parse(
+      readFileSync(
+        path.resolve(
+          process.cwd(),
+          "../backend/packages/harness/deerflow/capabilities/builtin.json",
+        ),
+        "utf8",
+      ),
+    ),
+  );
+  expect(network).not.toHaveBeenCalled();
+  const write = await apiFetch("/api/capabilities/installations", {
+    method: "POST",
+    body: "{}",
+  });
+  expect(write.status).toBe(405);
+  expect(network).not.toHaveBeenCalled();
+});
+
+it("projects demo installations without copying secrets or calling the Gateway", async () => {
+  env.NEXT_PUBLIC_BACKEND_BASE_URL = "https://gateway.example/prefix";
+  network.mockResolvedValueOnce(
+    Response.json({
+      mcp_servers: {
+        github: {
+          enabled: true,
+          env: { TOKEN: "private" },
+          url: "https://private.example",
+          capability: { plugin_id: "github" },
+        },
+      },
+    }),
+  );
+  const response = await apiFetch(
+    "https://gateway.example/prefix/api/capabilities/installations/mcp",
+  );
+  expect(response.status).toBe(200);
+  const data = await response.json();
+  expect(data).toMatchObject({
+    can_manage: false,
+    items: [
+      { name: "github", plugin_id: "github", adapter: "mcp", installed: true },
+    ],
+  });
+  expect(JSON.stringify(data)).not.toContain("private");
+  expect(network.mock.calls[0]?.[0]).toContain("/mock/api/mcp/config");
+});
+
+it("provides Lark, skills and business projections from the owning fixtures", async () => {
+  for (const [adapter, fixture, count] of [
+    ["lark", { installed: false }, 1],
+    [
+      "skills",
+      {
+        skills: [
+          {
+            name: "research",
+            category: "public",
+            enabled: true,
+            description: "Research",
+          },
+        ],
+      },
+      1,
+    ],
+    ["business", { mcp_servers: {} }, 0],
+  ] as const) {
+    network.mockResolvedValueOnce(Response.json(fixture));
+    const response = await apiFetch(
+      `/api/capabilities/installations/${adapter}`,
+    );
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as {
+      items: unknown[];
+      can_manage: boolean;
+    };
+    expect(data.items).toHaveLength(count);
+    expect(data.can_manage).toBe(false);
+  }
+  const unknown = await apiFetch("/api/capabilities/installations/unknown");
+  expect(unknown.status).toBe(404);
 });

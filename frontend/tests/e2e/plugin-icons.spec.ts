@@ -92,7 +92,6 @@ test("brand icons load locally for both recommendations and configured MCP serve
     "hubspot",
     "atlassian",
     "github",
-    "postgres",
   ]) {
     const icon = page.locator(`img[data-plugin-icon="${name}"]`);
     await expect(icon).toHaveCount(1);
@@ -105,6 +104,8 @@ test("brand icons load locally for both recommendations and configured MCP serve
       )
       .toBe(true);
   }
+  // A generic database capability does not assert a specific vendor brand.
+  await expect(page.locator('img[data-plugin-icon="postgres"]')).toHaveCount(0);
   await screenshot(page, "plugin-brand-icons-zh.png");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(
@@ -315,4 +316,33 @@ test("invalid or oversized uploads do not replace the existing icon", async ({
       "/images/plugins/github.svg",
     );
   }
+});
+
+test("a custom MCP name does not impersonate a catalog brand in rows or editing", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.route("**/api/mcp/config", (route) =>
+    route.fulfill({
+      json: {
+        mcp_servers: {
+          github: {
+            enabled: false,
+            description: "Private connection without provider metadata",
+            type: "http",
+            url: "https://example.test/private",
+          },
+        },
+      },
+    }),
+  );
+  await page.goto("/workspace/capabilities");
+  const row = page
+    .locator("article")
+    .filter({ hasText: "Private connection without provider metadata" });
+  await expect(row).toBeVisible();
+  await expect(row.locator("img")).toHaveCount(0);
+  await row.getByRole("button", { name: "Edit github", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog").locator("img")).toHaveCount(0);
 });

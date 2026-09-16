@@ -1,0 +1,497 @@
+[
+  {
+    "id": "lark",
+    "category": "office",
+    "name": { "en-US": "Lark / Feishu", "zh-CN": "飞书 / Lark" },
+    "description": {
+      "en-US": "Connect documents, messages, calendars, and tables.",
+      "zh-CN": "连接文档、消息、日历与多维表格。"
+    },
+    "setup": {
+      "en-US": "Install the managed integration and connect your account.",
+      "zh-CN": "安装集成并连接自己的账号。"
+    },
+    "kind": "cli",
+    "source": "https://github.com/larksuite/cli",
+    "aliases": ["lark", "feishu", "飞书"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "lark",
+    "auth_methods": ["oauth"],
+    "icon": "/images/plugins/lark.ico",
+    "contributions": ["tools", "skills"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "dingtalk",
+    "category": "office",
+    "name": { "en-US": "DingTalk group notifications", "zh-CN": "钉钉群通知" },
+    "description": {
+      "en-US": "Send text and Markdown notifications to a configured DingTalk group robot.",
+      "zh-CN": "向配置的钉钉群机器人发送文本或 Markdown 通知。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Create a signed custom group robot. Enter its access_token and signing secret. This does not read chats, documents or calendars.",
+      "zh-CN": "创建启用加签的自定义群机器人，填写 Webhook 的 access_token 和加签密钥。此插件不读取聊天、文档或日历。"
+    },
+    "source": "https://open.dingtalk.com/document/orgapp/custom-robot-access",
+    "aliases": ["dingtalk", "钉钉"],
+    "schema_version": 1,
+    "version": "2",
+    "adapter": "business",
+    "auth_methods": ["api_key"],
+    "icon": "/images/plugins/dingtalk.ico",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Connection name" },
+        "access_token": {
+          "type": "string",
+          "format": "password",
+          "title": "access_token"
+        },
+        "sign_secret": {
+          "type": "string",
+          "format": "password",
+          "title": "sign_secret"
+        }
+      },
+      "required": ["name", "access_token", "sign_secret"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "wecom",
+    "category": "office",
+    "name": { "en-US": "WeCom group notifications", "zh-CN": "企业微信群通知" },
+    "description": {
+      "en-US": "Send text and Markdown notifications to a configured WeCom group robot.",
+      "zh-CN": "向配置的企业微信群机器人发送文本或 Markdown 通知。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Create a group robot and copy the key parameter from its webhook URL. This does not connect the incoming chat channel or access documents.",
+      "zh-CN": "创建群机器人，复制 Webhook 地址中的 key 参数。此插件用于主动通知，不接入收消息通道或读取文档。"
+    },
+    "source": "https://developer.work.weixin.qq.com/document/path/91770",
+    "aliases": ["wecom", "企业微信", "企微"],
+    "schema_version": 1,
+    "version": "2",
+    "adapter": "business",
+    "auth_methods": ["api_key"],
+    "icon": "/images/plugins/wecom.png",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Connection name" },
+        "webhook_key": {
+          "type": "string",
+          "format": "password",
+          "title": "webhook_key"
+        }
+      },
+      "required": ["name", "webhook_key"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "tencent-docs",
+    "category": "knowledge",
+    "name": { "en-US": "Tencent Docs", "zh-CN": "腾讯文档" },
+    "description": {
+      "en-US": "Find and update shared documents and spreadsheets.",
+      "zh-CN": "查找与更新在线文档、表格，协同整理团队资料。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://docs.qq.com/open/auth/mcp.html",
+    "aliases": ["tencent-docs", "腾讯文档"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": "/images/plugins/tencent-docs.ico",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "notion",
+    "category": "knowledge",
+    "name": { "en-US": "Notion", "zh-CN": "Notion" },
+    "description": {
+      "en-US": "Search your team's wiki, notes, and project knowledge.",
+      "zh-CN": "搜索团队知识库、笔记与项目文档，沉淀工作信息。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://github.com/makenotion/notion-mcp-server",
+    "aliases": ["notion"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": "/images/plugins/notion.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "openviking",
+    "category": "knowledge",
+    "name": { "en-US": "OpenViking", "zh-CN": "OpenViking" },
+    "description": {
+      "en-US": "Organize long-term memory and reusable agent resources.",
+      "zh-CN": "统一管理长期记忆与资源，为 Agent 提供工作上下文。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://github.com/volcengine/OpenViking",
+    "aliases": ["openviking", "openviking context"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": "/images/plugins/openviking.png",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "web-search",
+    "category": "research",
+    "name": { "en-US": "Web search", "zh-CN": "网页搜索" },
+    "description": {
+      "en-US": "Search the web with your configured search provider.",
+      "zh-CN": "搜索公开网页，为研究和决策补充信息来源。"
+    },
+    "kind": "native",
+    "setup": {
+      "en-US": "This capability is supported by DeerFlow. Ask your administrator to select a provider and configure its credentials in config.yaml. Availability depends on this deployment; this directory does not check its runtime status.",
+      "zh-CN": "DeerFlow 已支持此能力。请由管理员在 config.yaml 中选择服务并配置所需凭据；能否使用取决于当前部署，本目录尚未检测运行状态。"
+    },
+    "source": "https://github.com/bytedance/deer-flow/blob/main/config.example.yaml",
+    "aliases": [
+      "web-search",
+      "duckduckgo",
+      "tavily",
+      "brave",
+      "brave search",
+      "serper"
+    ],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "guide",
+    "auth_methods": ["none", "api_key"],
+    "icon": null,
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "web-fetch",
+    "category": "research",
+    "name": { "en-US": "Web reader", "zh-CN": "网页读取" },
+    "description": {
+      "en-US": "Read web pages and extract useful content with Jina.",
+      "zh-CN": "读取网页正文，提取资料，供 Agent 进一步分析。"
+    },
+    "kind": "native",
+    "setup": {
+      "en-US": "This capability is supported by DeerFlow. Ask your administrator to select a provider and configure its credentials in config.yaml. Availability depends on this deployment; this directory does not check its runtime status.",
+      "zh-CN": "DeerFlow 已支持此能力。请由管理员在 config.yaml 中选择服务并配置所需凭据；能否使用取决于当前部署，本目录尚未检测运行状态。"
+    },
+    "source": "https://github.com/bytedance/deer-flow/tree/main/backend/packages/harness/deerflow/community/jina_ai",
+    "aliases": ["web-fetch", "jina"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "guide",
+    "auth_methods": ["none", "api_key"],
+    "icon": null,
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "exa",
+    "category": "research",
+    "name": { "en-US": "Exa", "zh-CN": "Exa" },
+    "description": {
+      "en-US": "Find relevant sources with semantic web search.",
+      "zh-CN": "通过语义搜索找到相关网页，开展行业与公司研究。"
+    },
+    "kind": "native",
+    "setup": {
+      "en-US": "This capability is supported by DeerFlow. Ask your administrator to select a provider and configure its credentials in config.yaml. Availability depends on this deployment; this directory does not check its runtime status.",
+      "zh-CN": "DeerFlow 已支持此能力。请由管理员在 config.yaml 中选择服务并配置所需凭据；能否使用取决于当前部署，本目录尚未检测运行状态。"
+    },
+    "source": "https://github.com/bytedance/deer-flow/tree/main/backend/packages/harness/deerflow/community/exa",
+    "aliases": ["exa"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "guide",
+    "auth_methods": ["none", "api_key"],
+    "icon": "/images/plugins/exa.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "firecrawl",
+    "category": "research",
+    "name": { "en-US": "Firecrawl", "zh-CN": "Firecrawl" },
+    "description": {
+      "en-US": "Search and extract content from websites at scale.",
+      "zh-CN": "搜索与抓取网站内容，将网页转为可分析的资料。"
+    },
+    "kind": "native",
+    "setup": {
+      "en-US": "This capability is supported by DeerFlow. Ask your administrator to select a provider and configure its credentials in config.yaml. Availability depends on this deployment; this directory does not check its runtime status.",
+      "zh-CN": "DeerFlow 已支持此能力。请由管理员在 config.yaml 中选择服务并配置所需凭据；能否使用取决于当前部署，本目录尚未检测运行状态。"
+    },
+    "source": "https://github.com/bytedance/deer-flow/tree/main/backend/packages/harness/deerflow/community/firecrawl",
+    "aliases": ["firecrawl"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "guide",
+    "auth_methods": ["none", "api_key"],
+    "icon": "/images/plugins/firecrawl.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "database",
+    "category": "business",
+    "name": { "en-US": "SQL databases", "zh-CN": "SQL 数据库" },
+    "description": {
+      "en-US": "Connect business data in PostgreSQL, MySQL, and more.",
+      "zh-CN": "连接 PostgreSQL、MySQL 等数据库，查询与分析业务数据。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://github.com/googleapis/genai-toolbox",
+    "aliases": ["postgres", "postgresql", "mysql", "database", "mcp-toolbox"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": null,
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "hubspot",
+    "category": "business",
+    "name": { "en-US": "HubSpot CRM", "zh-CN": "HubSpot CRM" },
+    "description": {
+      "en-US": "Read companies and create contacts with a private app access token.",
+      "zh-CN": "使用私有应用令牌查询公司、创建联系人。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Provide a private app access token with crm.objects.companies.read and crm.objects.contacts.write. Reading companies does not create records; contacts are created only when the tool is called.",
+      "zh-CN": "填写私有应用令牌，并授予 crm.objects.companies.read 和 crm.objects.contacts.write 权限。查询公司不会创建数据；只有调用创建联系人工具时才写入。"
+    },
+    "source": "https://developers.hubspot.com/docs/apps/legacy-apps/authentication/intro-to-auth",
+    "aliases": ["hubspot", "crm"],
+    "schema_version": 1,
+    "version": "2",
+    "adapter": "business",
+    "auth_methods": ["api_key"],
+    "icon": "/images/plugins/hubspot.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Connection name" },
+        "access_token": {
+          "type": "string",
+          "format": "password",
+          "title": "access_token"
+        }
+      },
+      "required": ["name", "access_token"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "github",
+    "category": "development",
+    "name": { "en-US": "GitHub", "zh-CN": "GitHub" },
+    "description": {
+      "en-US": "Find code, triage issues, and review pull requests.",
+      "zh-CN": "检索代码与仓库，跟进 Issue，协助审查 Pull Request。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://github.com/github/github-mcp-server",
+    "aliases": ["github"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": "/images/plugins/github.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "atlassian",
+    "category": "development",
+    "name": { "en-US": "Jira / Confluence", "zh-CN": "Jira / Confluence" },
+    "description": {
+      "en-US": "Connect project issues, team pages, and delivery plans.",
+      "zh-CN": "连接项目需求、团队文档与交付计划，追踪研发进展。"
+    },
+    "kind": "mcp",
+    "setup": {
+      "en-US": "Follow the provider's setup guide, prepare the required account or API credentials, then add its MCP server using Add MCP plugin. Adding a configuration does not verify the connection.",
+      "zh-CN": "按提供方文档准备账号或 API 凭据，再通过「添加 MCP 插件」录入服务配置。保存配置后仍需验证连接和权限。"
+    },
+    "source": "https://github.com/sooperset/mcp-atlassian",
+    "aliases": ["atlassian", "jira", "confluence", "mcp-atlassian"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "mcp",
+    "auth_methods": ["api_key", "oauth"],
+    "icon": "/images/plugins/jira.svg",
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "url": { "type": "string", "title": "Server URL" },
+        "authorization": {
+          "type": "string",
+          "title": "Authorization header",
+          "format": "password"
+        }
+      },
+      "required": ["name", "url"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "id": "browser",
+    "category": "development",
+    "name": { "en-US": "Browser automation", "zh-CN": "浏览器自动化" },
+    "description": {
+      "en-US": "Open pages and complete browser tasks with Playwright.",
+      "zh-CN": "基于 Playwright 打开网页、提取内容与执行页面操作。"
+    },
+    "kind": "native",
+    "setup": {
+      "en-US": "This capability is supported by DeerFlow. Ask your administrator to select a provider and configure its credentials in config.yaml. Availability depends on this deployment; this directory does not check its runtime status.",
+      "zh-CN": "DeerFlow 已支持此能力。请由管理员在 config.yaml 中选择服务并配置所需凭据；能否使用取决于当前部署，本目录尚未检测运行状态。"
+    },
+    "source": "https://github.com/bytedance/deer-flow/tree/main/backend/packages/harness/deerflow/community/browser_automation",
+    "aliases": ["browser", "playwright"],
+    "schema_version": 1,
+    "version": "1",
+    "adapter": "guide",
+    "auth_methods": ["none", "api_key"],
+    "icon": null,
+    "contributions": ["tools"],
+    "config_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+]

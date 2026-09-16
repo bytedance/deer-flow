@@ -102,7 +102,13 @@ export function PluginGallery({ query }: { query: string }) {
           <PluginRow
             name={catalogText(plugin.name, locale)}
             description={catalogText(plugin.description, locale)}
-            icon={<PluginIcon name={plugin.id} asset={plugin.icon} />}
+            icon={
+              <PluginIcon
+                name={plugin.id}
+                asset={plugin.icon}
+                capabilityId={plugin.id}
+              />
+            }
             label={
               unavailable
                 ? labels.adapterError
@@ -164,10 +170,15 @@ export function PluginGallery({ query }: { query: string }) {
                 name={item.name}
                 icon={item.icon}
                 asset={manifest?.icon}
+                capabilityId={manifest?.id}
               />
             }
             label={
-              item.enabled ? t.capabilities.enabled : t.capabilities.disabled
+              item.selectable === false
+                ? labels.unavailable
+                : item.enabled
+                  ? t.capabilities.enabled
+                  : t.capabilities.disabled
             }
           >
             <span className="text-muted-foreground text-xs">
@@ -249,7 +260,11 @@ export function PluginGallery({ query }: { query: string }) {
           {selected && (
             <>
               <DialogHeader>
-                <PluginIcon name={selected.id} asset={selected.icon} />
+                <PluginIcon
+                  name={selected.id}
+                  asset={selected.icon}
+                  capabilityId={selected.id}
+                />
                 <DialogTitle>{catalogText(selected.name, locale)}</DialogTitle>
                 <DialogDescription>
                   {catalogText(selected.description, locale)}

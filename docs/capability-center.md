@@ -127,7 +127,10 @@ service's authorization and validation; never add a provider branch to the galle
   for `mcp`, `business`, `lark`, and `skills`; separate requests isolate integration failures.
 - `POST /api/capabilities/installations`: administrator installation dispatch.
   Body: `plugin_id`, `name`, and adapter `configuration`. MCP configuration uses
-  the existing server definition schema. Duplicate server names return 409.
+  the existing server definition schema. HTTP/SSE connections require a valid
+  HTTP(S) URL without embedded credentials; stdio connections require a command.
+  Invalid transport configuration returns 422 before saving. Duplicate server
+  names return 409.
 - Existing owner APIs perform edit, enable/disable, uninstall, skill import/export,
   and account authorization. Query invalidation refreshes discovery after writes.
 
@@ -144,7 +147,15 @@ non-executable metadata in the existing config. Transport builders ignore it.
 Configuration edits preserve installation identity, including edits by older
 clients that omit metadata. Old entries get a deterministic ID from the existing
 server key without rewriting files on GET. No provider identity is inferred from
-a display name. Multiple installations of one provider remain separate rows.
+a display name, including when choosing brand icons. Multiple installations of
+one provider remain separate rows.
+
+Installation IDs must be unique across all servers, including disabled entries
+and legacy derived IDs. MCP writes reject collisions before saving. Old ambiguous
+configurations remain visible with `selectable: false` and `health: ambiguous`;
+explicit Agent selections load none of the colliding connections. Remove a
+conflicting entry or repair the deployment configuration before selecting it.
+The inherited-all mode retains its previous behavior.
 
 `mcp_plugins: null` (or omitted) keeps the previous behavior: all enabled MCP
 servers. `[]` selects none. A list selects installation IDs. Missing or disabled
@@ -158,6 +169,17 @@ and durable batch tasks carry the selection in their execution metadata. Each
 Agent run gets a filtered list without altering the shared MCP tool cache.
 Existing skill policy, user-scoped MCP authentication, and tool execution guards
 continue to run. Changes take effect on subsequent runs.
+
+## Static demo
+
+The read-only demo bundles a generated snapshot of the gateway catalog. After
+editing `builtin.json`, run `cd frontend && pnpm catalog:sync`; the frontend unit
+tests check that the snapshot matches the source. This keeps Docker and standalone
+frontend builds independent of the backend source tree. Installation
+projections come from existing same-origin MCP, Lark and Skills mock fixtures;
+they do not require a running gateway. Demo projections omit credentials and
+connection details, set `can_manage: false`, and do not imply live verification.
+Writes still return 405 locally.
 
 ## Validation
 

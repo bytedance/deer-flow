@@ -14,23 +14,6 @@ import { cn } from "@/lib/utils";
 
 import { CapabilityIcon } from "./capability-card";
 
-const brands: Record<string, string> = {
-  lark: "lark.ico",
-  dingtalk: "dingtalk.ico",
-  wecom: "wecom.png",
-  "tencent-docs": "tencent-docs.ico",
-  notion: "notion.svg",
-  openviking: "openviking.png",
-  exa: "exa.svg",
-  firecrawl: "firecrawl.svg",
-  hubspot: "hubspot.svg",
-  github: "github.svg",
-  atlassian: "jira.svg",
-  postgres: "postgresql.svg",
-  postgresql: "postgresql.svg",
-  brave: "brave.svg",
-  "brave search": "brave.svg",
-};
 const nativeIcons = {
   "web-search": SearchIcon,
   "web-fetch": FileSearchIcon,
@@ -45,23 +28,19 @@ export function PluginIcon({
   icon,
   className,
   asset,
+  capabilityId,
 }: {
   name: string;
   icon?: string | null;
   className?: string;
   asset?: string | null;
+  capabilityId?: string;
 }) {
-  const normalized = name.trim().toLowerCase();
-  const id =
-    normalized === "feishu" || normalized === "飞书" ? "lark" : normalized;
-  const file = brands[normalized] ?? brands[id];
   const custom = safePluginIcon(icon);
   const builtin =
     asset?.startsWith("/images/plugins/") && !asset.includes("..")
       ? asset
-      : file
-        ? `/images/plugins/${file}`
-        : undefined;
+      : undefined;
   const [failed, setFailed] = useState<string[]>([]);
   const src =
     custom && !failed.includes(custom)
@@ -94,7 +73,7 @@ export function PluginIcon({
     <span className={className}>
       <CapabilityIcon
         name={name}
-        icon={nativeIcons[id as keyof typeof nativeIcons]}
+        icon={nativeIcons[capabilityId as keyof typeof nativeIcons]}
       />
     </span>
   );

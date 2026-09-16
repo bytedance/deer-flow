@@ -115,8 +115,9 @@ Leave these unset for the standard `make dev` / Docker flow, where nginx serves 
 
 `make build-static` creates a standalone read-only demo and copies `.next/static`
 and `public` into the output. In static mode, `core/api/static-response.ts`
-resolves Gateway REST reads with empty capability/catalog responses or existing
-same-origin `/mock/api` fixtures; writes and unknown API routes fail locally.
+resolves Gateway REST reads with the bundled capability catalog and safe
+installation projections from existing same-origin `/mock/api` fixtures; writes
+and unknown API routes fail locally.
 The homepage client counter calls `/github-stars`, outside the Gateway proxy.
 That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
 GitHub data for one hour, and returns 204 when the count is unavailable. Start
@@ -191,7 +192,9 @@ metadata; runtime names and full descriptions remain unchanged. Public, custom,
 integration, and legacy sources must stay distinct. Community currently offers
 archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.
 `backend/packages/harness/deerflow/capabilities/builtin.json` owns localized
-catalog manifests. `plugin-catalog.ts` only resolves localized text and explicit
+catalog manifests. Refresh the generated demo snapshot with `pnpm catalog:sync`
+after changing the catalog; unit tests enforce equality with the source.
+`plugin-catalog.ts` only resolves localized text and explicit
 installation metadata; never infer provider identity from server display names.
 `plugin-directory.tsx` groups rows and applies search/category/installed filters.
 `core/capabilities` consumes catalog and safe status projections; MCP secrets and
@@ -206,7 +209,9 @@ distinct. Agent `mcp_plugins` uses stable installation IDs; null means all, [] m
 none. It is runtime selection, not a replacement authorization policy. See
 `docs/capability-center.md` for the complete contract and extension example.
 `PluginIcon` is shared by recommendations, configured entries, and the editor;
-brand assets and their provenance live in `public/images/plugins/`. The icon picker
+brand assets and their provenance live in `public/images/plugins/`. Brand icons
+require explicit catalog metadata; a custom server name never selects a brand.
+Ambiguous installation IDs remain visible but cannot be selected for an Agent. The icon picker
 accepts local PNG/JPEG/WebP up to 2 MiB, checks the signature, decodes and contains
 the image in a 128px PNG, and stages changes until the existing targeted MCP save.
 `presentation.icon` is a bounded PNG data URL carried by the API's existing extra

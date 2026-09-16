@@ -12,7 +12,7 @@ from app.gateway.deps import is_admin_user
 from app.gateway.routers import integrations, mcp, skills
 from deerflow.capabilities.business import connection_config
 from deerflow.capabilities.catalog import PluginManifest
-from deerflow.capabilities.runtime import installation_id
+from deerflow.capabilities.runtime import ambiguous_installation_ids, installation_id
 from deerflow.config.app_config import AppConfig
 from deerflow.integrations.lark_cli import get_lark_integration_status
 from deerflow.runtime.user_context import get_effective_user_id
@@ -24,6 +24,7 @@ class CapabilityInstallation(BaseModel):
     adapter: str
     name: str
     description: str = ""
+    selectable: bool = True
     installed: bool = True
     enabled: bool | None = None
     version: str | None = None
@@ -57,6 +58,7 @@ class MCPAdapter:
     async def list_installations(self, context: AdapterContext) -> list[CapabilityInstallation]:
         servers = await asyncio.to_thread(mcp._load_raw_mcp_server_responses)
         result = []
+        ambiguous = ambiguous_installation_ids({name: server.model_dump() for name, server in servers.items()})
         for name, server in servers.items():
             raw = server.model_dump()
             metadata = raw.get("capability") or {}
@@ -72,9 +74,12 @@ class MCPAdapter:
             icon = presentation.get("icon") if isinstance(presentation, dict) else None
             # Public discovery projects explicit safe fields, never connection
             # URLs, commands, env, OAuth configuration, or another user's IDs.
+            identity = installation_id(name, raw)
             result.append(
                 CapabilityInstallation(
-                    id=installation_id(name, raw),
+                    id=f"ambiguous:{installation_id(name, {})}" if identity in ambiguous else identity,
+                    selectable=identity not in ambiguous,
+                    health="ambiguous" if identity in ambiguous else "unknown",
                     plugin_id=metadata.get("plugin_id") if isinstance(metadata.get("plugin_id"), str) else None,
                     adapter="mcp",
                     name=name,
@@ -91,6 +96,27 @@ class MCPAdapter:
     async def install(self, context: AdapterContext, manifest: PluginManifest, name: str, configuration: dict[str, Any]) -> None:
         if not name.strip():
             raise HTTPException(422, "Installation name is required")
+        if manifest.adapter == "mcp":
+            # The manifest form is normalized to a transport definition by the
+            # UI. Validate that wire contract, not form-only name/auth fields.
+            from urllib.parse import urlsplit
+
+            transport = configuration.get("type", configuration.get("transport", "stdio"))
+            if not isinstance(transport, str):
+                raise HTTPException(422, "Supply a supported MCP transport")
+            if transport in {"http", "sse"}:
+                url = configuration.get("url")
+                try:
+                    parsed = urlsplit(url) if isinstance(url, str) else None
+                    valid = parsed is not None and parsed.scheme in {"https", "http"} and bool(parsed.hostname) and parsed.username is None and parsed.password is None and not parsed.fragment and not any(c.isspace() for c in url)
+                    if parsed is not None:
+                        _ = parsed.port  # Validate malformed ports too.
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise HTTPException(422, "Supply an HTTP(S) MCP server URL without embedded credentials")
+            elif transport != "stdio" or not isinstance(configuration.get("command"), str) or not configuration["command"].strip():
+                raise HTTPException(422, "Supply a supported MCP transport and its required connection fields")
         definition = {**configuration, "capability": {"id": str(uuid4()), "plugin_id": manifest.id, "version": manifest.version}}
         try:
             body = mcp.McpConfigUpdateRequest(mcp_servers={name: mcp.McpServerConfigResponse.model_validate(definition)})

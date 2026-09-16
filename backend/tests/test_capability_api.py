@@ -140,3 +140,58 @@ def test_business_config_rejects_arbitrary_execution_and_preserves_store(capabil
         response = client.post("/api/mcp/config/servers", json={"mcp_servers": {"bad": {**definition, **change}}})
         assert response.status_code == 400
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("configuration", [{"type": "http"}, {"type": "http", "url": ""}, {"type": "http", "url": "file:///tmp/a"}, {"type": "http", "url": "https://user:secret@example.test"}, {"type": "http", "url": "not-a-url"}])
+def test_catalog_rejects_incomplete_or_unsafe_http_configuration(capability_client, configuration):
+    client, path = capability_client
+    before = path.read_bytes()
+    response = client.post("/api/capabilities/installations", json={"plugin_id": "github", "name": "bad", "configuration": configuration})
+    assert response.status_code == 422
+    assert "secret" not in response.text
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("route", ["/api/mcp/config/servers", "/api/mcp/config"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_mcp_writes_reject_colliding_installation_ids(capability_client, route, fallback):
+    from deerflow.capabilities.runtime import installation_id
+
+    client, path = capability_client
+    raw = json.loads(path.read_text())
+    identity = installation_id("legacy", {}) if fallback else "shared"
+    if not fallback:
+        raw["mcpServers"]["legacy"]["capability"] = {"id": identity}
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    method = client.post if route.endswith("/servers") else client.put
+    candidate = {"other": {"type": "http", "url": "https://example.test", "capability": {"id": identity}}}
+    if route == "/api/mcp/config":
+        candidate["legacy"] = raw["mcpServers"]["legacy"]
+    response = method(route, json={"mcp_servers": candidate})
+    assert response.status_code == 400
+    assert path.read_bytes() == before
+
+
+def test_targeted_edit_enable_and_delete_handle_identity_collisions(capability_client):
+    from deerflow.capabilities.runtime import installation_id
+
+    client, path = capability_client
+    raw = json.loads(path.read_text())
+    raw["mcpServers"]["second"] = {"type": "http", "url": "https://example.test", "enabled": False}
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    response = client.put("/api/mcp/config/server", json={"server_name": "second", "server": {"type": "http", "url": "https://example.test", "capability": {"id": installation_id("legacy", {})}}})
+    assert response.status_code == 400
+    assert path.read_bytes() == before
+    raw["mcpServers"]["second"]["capability"] = {"id": installation_id("legacy", {})}
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    response = client.patch("/api/mcp/config", json={"server_name": "second", "enabled": True})
+    assert response.status_code == 400
+    assert path.read_bytes() == before
+    discovery = client.get("/api/capabilities/installations/mcp").json()["items"]
+    assert len({item["id"] for item in discovery}) == 2
+    assert all(item["selectable"] is False for item in discovery)
+    assert client.delete("/api/mcp/config/servers/second").status_code == 200
+    assert client.get("/api/capabilities/installations/mcp").json()["items"][0]["selectable"] is True

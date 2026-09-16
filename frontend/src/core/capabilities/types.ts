@@ -37,6 +37,7 @@ export interface CapabilityInstallation {
   name: string;
   description: string;
   reference: string;
+  selectable?: boolean;
   installed: boolean;
   enabled: boolean | null;
   version: string | null;

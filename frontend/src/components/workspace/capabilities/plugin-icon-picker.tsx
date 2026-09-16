@@ -11,12 +11,16 @@ import { PluginIcon } from "./plugin-icon";
 
 export function PluginIconPicker({
   name,
+  asset,
+  capabilityId,
   value,
   disabled = false,
   onChange,
   onBusyChange,
 }: {
   name: string;
+  asset?: string | null;
+  capabilityId?: string;
   value?: string | null;
   disabled?: boolean;
   onChange: (value: string | null) => void;
@@ -74,7 +78,13 @@ export function PluginIconPicker({
           onClick={() => input.current?.click()}
           className="shrink-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-4"
         >
-          <PluginIcon name={name} icon={value} className="size-16" />
+          <PluginIcon
+            name={name}
+            icon={value}
+            asset={asset}
+            capabilityId={capabilityId}
+            className="size-16"
+          />
         </button>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">{copy.title}</p>

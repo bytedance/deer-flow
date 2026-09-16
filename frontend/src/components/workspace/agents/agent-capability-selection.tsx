@@ -16,7 +16,9 @@ function Selection({
   const { locale, t } = useI18n();
   const copy = capabilityCopy(locale);
   const query = useCapabilityInstallations(adapter);
-  const items = (query.data?.items ?? []).filter((item) => item.installed);
+  const items = (query.data?.items ?? []).filter(
+    (item) => item.installed && item.selectable !== false,
+  );
   const options = new Map(
     items.map((item) => [
       adapter === "skills" ? item.reference : item.id,
