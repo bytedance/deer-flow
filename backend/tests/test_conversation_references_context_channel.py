@@ -105,6 +105,24 @@ def test_invalid_items_at_the_top_level_report_the_item_error_not_the_conflict(t
     assert not any(error["type"] == "conversation_references_conflict" for error in errors)
 
 
+def test_a_one_shot_iterator_with_a_bad_item_still_reports_the_item_error():
+    # The probe must not consume a generator and leave the field an exhausted
+    # one that coerces to [] and validates silently with the key left in context.
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=(item for item in ["", "source"]), context={"conversation_references": ["source"]})
+    errors = exc.value.errors()
+    assert [error["loc"] for error in errors] == [("conversation_references", 0)]
+    assert not any(error["type"] == "conversation_references_conflict" for error in errors)
+
+
+def test_a_one_shot_iterator_of_valid_items_is_read_once_and_kept():
+    body = RunCreateRequest(conversation_references=(item for item in ["source"]), context={"thinking_enabled": True})
+    assert body.conversation_references == ["source"]
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=(item for item in ["source"]), context={"conversation_references": ["other"]})
+    assert [error["type"] for error in exc.value.errors()] == ["conversation_references_conflict"]
+
+
 def test_an_empty_top_level_list_does_not_conflict_with_context():
     body = RunCreateRequest(conversation_references=[], context={"conversation_references": ["source"]})
     assert body.conversation_references == ["source"]

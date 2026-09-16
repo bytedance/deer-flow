@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator, model_validator
@@ -70,10 +71,16 @@ class RunCreateRequest(BaseModel):
         if not isinstance(context, dict) or "conversation_references" not in context:
             return data
         references = context["conversation_references"]
+        top_level = data.get("conversation_references")
+        if isinstance(top_level, Iterator):
+            # A one-shot iterator can be read only once. Materialise it so the
+            # probe below and the field validate the same items, instead of the
+            # field seeing an exhausted iterator that coerces to [].
+            top_level = list(top_level)
+            data = {**data, "conversation_references": top_level}
         lifted = {**data, "context": {key: value for key, value in context.items() if key != "conversation_references"}}
         if references is None:
             return lifted
-        top_level = data.get("conversation_references")
         if top_level is not None:
             try:
                 top_level = _REFERENCES_ADAPTER.validate_python(top_level)
