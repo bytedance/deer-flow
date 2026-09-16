@@ -124,6 +124,72 @@ one accumulated receipt across multiple goal-continuation `_stream_once` calls;
 journal tests drive LangChain's real async callback dispatcher against a single
 journal to pin serialized, deduplicated parallel tool callbacks.
 
+**Authoritative run terminal events** (`runtime/journal.py` +
+`runs/terminal_events.py` + `runs/worker.py`): root `on_chain_end()` captures
+the latest opaque graph output but never publishes `run.end`; one Gateway run
+may execute several root graphs while continuing a goal. After the worker has
+published every visible tail frame and durably persisted its final
+`RunRow.status`, it writes exactly one run-scoped `run.end` with
+`put_if_absent`. Metadata contains `authoritative: true` plus the terminal
+status (`success`, `error`, `timeout`, or `interrupted`); recovery additionally
+sets `recovered: true`, and error text, prompts, tool arguments, and tool
+results must not be added. Runs without a completed root output use `{}`. An ownership-
+lost worker writes neither the row nor the event. Every non-owner terminalizer
+must first win its atomic RunStore transition, then best-effort backfill both a
+zero `run.delivery` receipt and `run.end` under the claimed row's user context:
+this covers orphan reconciliation, expired-lease `cancel()` takeover, and
+store rows claimed as `interrupted` by cross-worker interrupt/rollback
+admission. Multi-instance scheduled-task reconciliation is another takeover
+caller: its repository commits and closes the scheduler transaction before it
+hands the claimed run IDs to `RunManager.terminalize_recovered_run_ids()`,
+which re-reads the authoritative rows and shares this event plus Gateway END
+path. The scheduled parent stays in an executing state as a durable retry
+marker until that callback succeeds; only then does a second short transaction
+terminalize the exact parent row. This closes crashes both before and after
+callback dispatch without writing events while scheduler locks are held.
+Claimed non-run reservations never receive run events, and active
+local worker tasks retain responsibility for their own final output once they
+have started. Direct cancellation durably records the first cancel action but
+leaves their `RunRow` active while staging the local outcome; the worker writes
+its receipt before committing that terminal row. Local interrupt/rollback
+admission instead commits the replacement and predecessor transition together:
+the atomic store primitive preserves the first cancel action and marks each
+claimed live local producer as `local_finalizer_pending` with a fresh lease.
+Only claimed local records are cancelled after commit. Their finalizers renew
+that terminal marker through receipt, terminal event, completion hooks, and
+stream END; consumers may finish early only from a durable receipt, a terminal
+row plus a matching marked `run.end`, or after an atomic expired-marker
+takeover converts it to orphan recovery. Admission waits for an already-staged
+local terminal finalizer for at most `grace_seconds`; timeout returns a
+retryable conflict while the shielded finalizer continues, so a wedged hook
+cannot make thread admission wait forever. A pending run
+cancelled before Agent startup remains `interrupted`; rollback is never
+attempted without a captured pre-run boundary, and a cancelled metadata wrapper
+that never entered `run_agent()` becomes recoverable after its marker lease.
+During bounded shutdown, if that wrapper is cancelled before Agent startup,
+`RunManager` terminalizes only the active rows it newly persists as
+`interrupted`; a worker that already reached its own terminal path is not
+re-persisted or re-published.
+Heartbeat-mode startup atomically checks pending status, worker owner, a live
+lease, and the absence of an accepted cancellation before Agent construction.
+Startup-failure compensation uses that same owner/live/not-cancelled CAS: an
+already-accepted remote cancellation keeps its durable action and is
+acknowledged as `interrupted`, rather than being overwritten by the wrapper's
+`error`. Every compensated outcome carries `orphan_recovered`, including when
+the metadata wrapper is still active, because that wrapper can crash before
+entering `run_agent`'s terminal tail.
+Terminalization atomically checks the worker owner, active status, and
+cancellation request; lease takeover transfers the owner in the same CAS so
+the stale worker cannot publish even an identical terminal status. Runs that
+terminalize before a worker can attach receive the same idempotent zero receipt
+and recovered terminal singleton from their compensation path. Event-store
+failure never rolls back a terminal row or a replacement admission, so
+`RunRow.status` remains authoritative when `run.end` is missing. Recovery does
+not scan already-terminal historical rows. A fresh owner-scoped event query may
+use a matching `authoritative: true` event with a terminal row to recover a
+missing bridge END; an older unmarked `run.end` is preserved but cannot provide
+that proof because its ordering relative to late visible frames is unknown.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can

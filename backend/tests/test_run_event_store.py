@@ -550,6 +550,103 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_delivery_receipt_lookup_supports_unowned_and_owner_scoped_rows(
+        self,
+        tmp_path,
+    ):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.runs.schemas import RunStatus
+        from deerflow.runtime.runs.terminal_events import (
+            has_authoritative_run_terminal_event,
+            has_run_delivery_receipt,
+            persist_run_delivery_receipt,
+            persist_run_terminal_event,
+        )
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            events = DbRunEventStore(get_session_factory())
+            await persist_run_delivery_receipt(
+                events,
+                thread_id="unowned-thread",
+                run_id="unowned-run",
+                content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id=None,
+            )
+            assert await has_run_delivery_receipt(
+                events,
+                thread_id="unowned-thread",
+                run_id="unowned-run",
+                user_id=None,
+            )
+            await persist_run_terminal_event(
+                events,
+                thread_id="unowned-thread",
+                run_id="unowned-run",
+                status=RunStatus.success,
+                user_id=None,
+            )
+            assert await has_authoritative_run_terminal_event(
+                events,
+                thread_id="unowned-thread",
+                run_id="unowned-run",
+                status=RunStatus.success,
+                user_id=None,
+            )
+
+            await persist_run_delivery_receipt(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id="owner-a",
+            )
+            assert await has_run_delivery_receipt(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                user_id="owner-a",
+            )
+            assert not await has_run_delivery_receipt(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                user_id="owner-b",
+            )
+            await persist_run_terminal_event(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                status=RunStatus.interrupted,
+                user_id="owner-a",
+            )
+            assert await has_authoritative_run_terminal_event(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                status=RunStatus.interrupted,
+                user_id="owner-a",
+            )
+            assert not await has_authoritative_run_terminal_event(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                status=RunStatus.interrupted,
+                user_id="owner-b",
+            )
+            assert not await has_authoritative_run_terminal_event(
+                events,
+                thread_id="owned-thread",
+                run_id="owner-a-run",
+                status=RunStatus.error,
+                user_id="owner-a",
+            )
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
     async def test_find_latest_ai_message_run_ids_contract_and_owner_filter(self, tmp_path):
         from types import SimpleNamespace
 

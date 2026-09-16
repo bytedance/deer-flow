@@ -35,6 +35,7 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 _NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=UTC)
+_RECOVERY_OWNER_WORKER_ID = "scheduler-recovery-test"
 
 
 async def _init_db(tmp_path) -> tuple[ScheduledTaskRepository, ScheduledTaskRunRepository]:
@@ -436,6 +437,7 @@ class TestReconcileStuckOnceTasksOutcomeAware:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -464,6 +466,7 @@ class TestReconcileStuckOnceTasksOutcomeAware:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -486,6 +489,7 @@ class TestReconcileStuckOnceTasksOutcomeAware:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -531,6 +535,7 @@ class TestReconcileStuckOnceTasksOutcomeAware:
                 count = await task_repo.reconcile_stuck_once_tasks(
                     error="interrupted: lease expired",
                     now=_NOW,
+                    owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                     lease_grace_seconds=10,
                 )
                 assert count == 1
@@ -584,6 +589,7 @@ async def test_once_recovery_uses_occurrence_order_despite_clock_skew(tmp_path, 
         kwargs = {"error": "interrupted: recovery"}
         if recovery_method == "reconcile_stuck_once_tasks":
             kwargs["now"] = _NOW + timedelta(minutes=1)
+            kwargs["owner_worker_id"] = _RECOVERY_OWNER_WORKER_ID
         count = await getattr(task_repo, recovery_method)(**kwargs)
 
         task = await _get_task(task_repo, "task-once-1")
@@ -773,6 +779,7 @@ class TestReconcileStuckMultipleRuns:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -810,6 +817,7 @@ class TestReconcileStuckMultipleRuns:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -847,6 +855,7 @@ class TestReconcileStuckMultipleRuns:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 1
@@ -884,6 +893,7 @@ class TestReconcileStuckMultipleRuns:
             count = await task_repo.reconcile_stuck_once_tasks(
                 error="interrupted: lease expired",
                 now=_NOW,
+                owner_worker_id=_RECOVERY_OWNER_WORKER_ID,
                 lease_grace_seconds=10,
             )
             assert count == 0

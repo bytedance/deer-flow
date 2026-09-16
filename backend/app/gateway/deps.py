@@ -195,14 +195,19 @@ async def _publish_recovered_run_stream_end(
     *,
     cleanup_delay: float = 60.0,
     on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
-) -> list[tuple[str, asyncio.Task[None]]]:
-    """Terminate retained streams for runs recovered as orphaned."""
+) -> tuple[list[tuple[str, asyncio.Task[None]]], bool]:
+    """Terminate retained streams and report whether every END was published."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
+    all_streams_terminalized = True
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
         if stream_exists is not None:
             try:
                 if not await stream_exists(record.run_id):
+                    # Do not create an END-only retained stream: an idempotent
+                    # retry needs the missing key to synthesize a gap and reload
+                    # durable state. Existing blocked subscribers terminate on
+                    # the explicit recovery stop reason at their next heartbeat.
                     logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
                     continue
             except Exception:
@@ -210,6 +215,7 @@ async def _publish_recovered_run_stream_end(
         try:
             await bridge.publish_end(record.run_id)
         except Exception:
+            all_streams_terminalized = False
             logger.warning(
                 "Failed to publish recovered run stream end for %s",
                 record.run_id,
@@ -221,7 +227,7 @@ async def _publish_recovered_run_stream_end(
         cleanup_tasks.append((record.run_id, task))
         if on_cleanup_scheduled is not None:
             on_cleanup_scheduled(record.run_id, task)
-    return cleanup_tasks
+    return cleanup_tasks, all_streams_terminalized
 
 
 def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
@@ -319,14 +325,15 @@ async def _terminalize_recovered_runs(
     *,
     cleanup_delay: float,
     on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
-) -> list[tuple[str, asyncio.Task[None]]]:
-    """Publish terminal markers and schedule retained-stream cleanup."""
-    return await _publish_recovered_run_stream_end(
+) -> bool:
+    """Publish terminal markers and confirm every retained stream received END."""
+    _cleanup_tasks, all_streams_terminalized = await _publish_recovered_run_stream_end(
         bridge,
         recovered_runs,
         cleanup_delay=cleanup_delay,
         on_cleanup_scheduled=on_cleanup_scheduled,
     )
+    return all_streams_terminalized
 
 
 def get_config() -> AppConfig:
@@ -559,8 +566,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             recovered_stream_cleanup_tasks[task] = run_id
             task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
 
-        async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
-            await _terminalize_recovered_runs(
+        async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> bool:
+            return await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
                 cleanup_delay=cleanup_delay,
