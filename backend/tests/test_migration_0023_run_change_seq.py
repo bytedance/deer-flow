@@ -5,9 +5,10 @@ import asyncio
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
+from deerflow.persistence.bootstrap import _MIGRATIONS_DIR, _get_alembic_config
 from deerflow.persistence.run import RunRepository
 
 pytestmark = pytest.mark.asyncio
@@ -16,8 +17,12 @@ REVISION = "0023_run_change_seq"
 PREVIOUS = "0022_scheduled_occurrence_seq"
 
 
-async def test_changed_run_revision_is_single_head():
-    assert _get_head_revision() == "0023_user_preferences"
+async def test_changed_run_revision_is_in_single_head_chain():
+    script = ScriptDirectory(str(_MIGRATIONS_DIR))
+    assert len(script.get_heads()) == 1
+    # Later migrations may advance the head without removing this revision.
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
 async def test_upgrade_exposes_legacy_runs_and_allocates_new_positions(tmp_path):
