@@ -630,8 +630,15 @@ class AioSandbox(Sandbox):
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
                 matches.append(entry.path)
-                if len(matches) >= max_results:
-                    return matches, True
+                # Look one match past the cap before deciding. Returning on
+                # the max-th match cannot tell a listing that held exactly
+                # ``max_results`` from one that held more, so an exhausted
+                # listing was reported as truncated; it also returned a match
+                # for ``max_results=0``. The ``include_dirs=False`` branch
+                # below and the shared ``parse_remote_search_output`` path
+                # decide the same way.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, False
 
     def grep(

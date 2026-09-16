@@ -76,6 +76,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [项目 (Projects)](#项目-projects)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
     - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
@@ -562,7 +563,7 @@ logging:
 
 Gateway 的运行历史还会为每次运行记录一条终止时的 `run.delivery` 回执，包括零产出与崩溃恢复的运行。正常执行时，该回执会在持久化终止运行状态之前写入。孤儿恢复会先原子地认领过期租约，再幂等地回填回执，因此过期的恢复扫描不会覆盖仍在运行的详细交付事实。在事件存储中断期间，回执持久化保持尽力而为。对 checkpoint 预检失败（或在等待前序 finalization 时被取消）的运行，保持既有的完成数据行为：它们会收到零交付回执，但不会用空快照覆盖 RunStore 的完成字段。
 
-同一份运行事件历史还会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
+当 `tool_progress.enabled` 为 true 时，同一份运行事件历史还会记录结果质量防护器的阶段变化。它也会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
 
 #### LangSmith 链路追踪
 
@@ -808,19 +809,38 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
-## 项目成员归属 (Project Membership)
+## 项目 (Projects)
 
-会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
-永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
-某个 project 后，它会保持未指派状态，直到被再次显式移动。
+项目把相关会话组织在同一个名称、共享指令和文档架之下。
 
-移动会话时会同时刷新其头部归属信息和 project 列表，即使此前的元数据请求仍
-在途中也是如此。
+会话在创建时（选择了某个项目）或之后通过移动菜单加入项目。运行不会修改归属关系：发送消息不会把会话指派或改派到任何项目。把会话移出项目后，它会保持未归属状态，直到再次被显式移动。
 
-Projects 需要当前版本的数据库表和列。如果数据库已打上旧 0018 迁移序列的
-`0019_thread_incarnations` 版本标记而缺少 project schema，本次构建会在启动
-时拒绝该数据库。针对这类数据库启动此构建前，请先遵循
-[离线数据库恢复流程](docs/database-forward-revision-recovery.md)。
+移动会话会同时刷新会话顶部的归属信息和项目列表，即使还有较早的元数据请求尚未返回。
+
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018  rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018 rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+### 项目指令 (Project instructions)
+
+每个项目可以保存一段自由文本指令——适用于项目内所有会话的背景、约定和约束——在项目页的 Instructions 标签页编辑，并带有实时字节计数。成员线程每次发起运行时，Gateway 会一次性固定（pin）项目当前状态，把指令渲染成一个有界的、仅在本次请求内有效的 `<project>` 块：它不会进入系统提示词，也不会写入持久化历史；每次新运行都会读到最新保存的指令。指令长度上限为 `projects.instructions_max_bytes`（按 UTF-8 字节计，默认 8192，可配范围 256–262144），多字节字符按其 UTF-8 字节长度计数。超限的指令会在写入时被 `422` 拒绝，绝不会被静默截断。
+
+### 文档架 (Document shelf)
+
+每个项目都有一个文档架，用于存放整个项目共享的文件，在项目页的 Documents 区域管理：
+
+- **上传**文件（按钮或拖拽，每次请求一个文件）。大小限制复用 `uploads.max_file_size`（默认 50 MiB）；重复上传相同内容会返回已有条目，而不是产生重复。
+- **列出**条目，包含名称、大小、修改时间和来源徽标（直接上传 vs. 从会话保存），并可预览或下载任意条目。
+- **从会话文件保存到项目**：文档架下方只读的会话文件浏览器按 thread 分组列出成员会话的上传与输出文件，每个条目都带 Save to project 操作。
+- **附加到会话（Attach to thread）**：把文档架文件复制到某个会话的上传目录，走与常规上传相同的接入管线，让该会话可以直接使用。
+
+成员线程的运行还会收到一个按运行渲染的有界 `<documents>` 索引（由固定快照生成，受 `projects.shelf_index_max_entries` 和 `projects.shelf_index_max_bytes` 限制），agent 也可以通过 `list_project_documents` 和 `read_project_document` 工具分页浏览文档架并读取文档。
+
+### 归档读取语义 (Archive read semantics)
+
+归档项目会冻结写入，但保留读取。归档项目中的会话仍可运行，仍会收到项目指令和文档架索引；文档架也保持完全可读：列表、预览/下载、会话文件浏览器和附加到会话都继续可用。上传、保存到项目、把单个文档架文件移入回收站都要求项目处于活跃状态，回收站中的文档也不能恢复到已归档的项目。删除已归档项目仍然允许，并会把它的整个文档架移入回收站。
+
+### 回收站 (Trash)
+
+删除文档架文档会把它移入回收站而不是直接抹除：条目保留其字节内容和来源项目快照，保留期为 `projects.trash_retention_days`（默认 30 天），之后保留期清理才可能将其永久清除。`/workspace/trash` 页面——可从项目页 Documents 区域和侧边栏 Projects 标题进入——列出回收站中的文档及其来源项目和剩余保留天数，提供逐条 Restore（恢复）和 Delete permanently（永久删除）操作，以及清空回收站（Empty trash，立即永久删除回收站中的全部条目，无需等到保留期结束；保留期只决定单条记录在被保留期清理回收前最多能停留多久）。恢复会把文档放回其来源项目；来源项目已删除或已归档时，可以选择一个目标项目；如果目标项目中已有内容完全相同的活跃文件，两个条目会合并。删除项目会在同一步骤中把它的整个文档架移入回收站。
 
 ## 定时任务 (Scheduled Tasks)
 
@@ -839,6 +859,12 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
+
+**通过 API 筛选执行历史**
+
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+
+筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 

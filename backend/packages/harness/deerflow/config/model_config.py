@@ -1,10 +1,21 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class RequestAdmissionConfig(BaseModel):
+    """Optional per-process pacing of model requests, shared by quota group."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    requests_per_minute: int = Field(gt=0, strict=True)
+    group: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    max_wait_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    max_queue_size: int = Field(default=256, gt=0, strict=True)
+
+
 class ModelConfig(BaseModel):
     """Config section for a model"""
 
     name: str = Field(..., description="Unique name for the model")
+    request_admission: RequestAdmissionConfig | None = Field(default=None, description="Opt-in process-local RPM pacing. Changing an active group's policy requires a process restart.")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(

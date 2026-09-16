@@ -6,6 +6,10 @@ subagent assembly withhold it. The tool requires the worker-owned
 `__conversation_reader` capability and rejects subagents. Hosts enforce the
 current run's explicit references and user permissions. Do not import Gateway
 routers into the harness or recover this capability from persisted messages.
+Reads use live visible history; expiry/deletion does not erase destination copies.
+The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
+results stay inline. Cut messages carry a `message_seq`/`offset` continuation that
+the same host reader serves; keep reading guidance separate from permission enforcement.
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
@@ -22,7 +26,7 @@ routers into the harness or recover this capability from persisted messages.
    - `batch_task`, `batch_status`, `cancel_batch` - Explicit durable batch submission/progress/cancellation. Added only while the startup SQL-backed batch submitter is installed; large results stay in the owner-scoped API/JSONL export rather than the lead context. Items accept optional `acceptance_criteria`; item queries and exports expose the separate `acceptance_verdict`. Progress counts describe execution, not acceptance; unmet and UNVERIFIED conditions never trigger automatic retries.
    - Direct `create_deerflow_agent` integrations receive cloned tools bound to their explicit `SubagentRuntime`. The bound `task` forwards that runtime's exact execution controller and optional caller-owned `AppConfig` into registry/model/tool resolution and `SubagentExecutor`; bound batch tools use the same config snapshot and resolve only that runtime's submitter before falling back to no other application's active worker. Keep the original tool name/schema unchanged so model contracts and user-tool deduplication remain stable.
 
-The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection and tool-promotion keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
+The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
 - Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.

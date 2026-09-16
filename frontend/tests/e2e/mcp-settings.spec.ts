@@ -54,10 +54,10 @@ test.describe("MCP server settings", () => {
       });
     });
 
-    await page.goto("/workspace/chats/new?settings=tools");
+    await page.goto("/workspace/capabilities");
 
-    const settingsDialog = page.getByRole("dialog", { name: "Settings" });
-    await expect(settingsDialog).toBeVisible();
+    const settingsDialog = page;
+    await expect(page).toHaveURL(/workspace\/capabilities$/);
     await settingsDialog.getByRole("button", { name: "Edit remote" }).click();
 
     const editor = page.getByRole("dialog", { name: "Edit MCP server" });

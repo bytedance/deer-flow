@@ -397,6 +397,30 @@
 
 ### 修复
 
+- **沙箱：** AIO 的 `glob` 不再把"恰好填满"的结果报告为截断。其 `include_dirs` 分支在收集到
+  `max_results` 个匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录列表也会被标记为
+  被截断，工具据此告诉模型结果不完整。该分支本就持有整份目录列表，现在改为多看一个匹配再判断，
+  与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
+  **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
+  有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
+- **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
+  token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
+  却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
+  导致下一次请求带着没有结果的工具调用而被 provider 拒绝；写入 checkpoint 的硬停止消息还会让之后
+  每条新消息都失败。现在所有守卫都通过同一个共享 helper 删除对应的 content 块，该 helper 也会保留
+  clarification 所保留的 Responses 调用。([#5447])
+- **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
+  OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
+  范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
+  真实匹配的搜索会返回空结果且显示为完整。现在搜索会多输出一行以判断是否被截断，`glob` 和 `grep`
+  工具对被截断的空结果会说明结果不完整，而不是显示 "No matches found"。([#5427])
+- **沙箱：** 当输出用 `:` 连接主机路径（如 `$PATH`、`$PYTHONPATH`）时，主机路径不再暴露给模型。
+  匹配的路径会一直延伸到列表末尾，导致同一根目录下之后的条目都未被遮蔽；多余的遮蔽轮次每次
+  恰好补回一个条目，因此短列表掩盖了这一泄露。现在遮蔽时匹配的路径在 `:` 处结束。
+  挂载目录内指向所有挂载之外的符号链接，在命令输出和 `glob` 结果中改为显示其挂载路径，而不是目标的主机路径。([#5418])
+- **沙箱：** BoxLite `grep` 不再忽略 `glob` 的目录部分。此前只比较文件名，`src/*.js`
+  会匹配整棵目录树中的所有 `.js` 文件。现在 glob 作用于相对搜索根目录的路径，与 `glob()`
+  及其他 provider 的范围一致。([#5419])
 - **模型：** 通过 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 传递 Claude Code OAuth
   token 时，第一个之后的 Claude 模型不再丢失凭据。每个 `ClaudeChatModel` 实例都会重新加载凭据，
   但文件描述符只能读取一次，导致标题、摘要、subagent 模型以及之后的每次运行都没有凭据，并以
@@ -914,6 +938,16 @@
 
 ### 安全
 
+- **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
+  文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
+  `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
+  覆盖先前的文件。现在 SkillScan 会逐字节接收每个文件，仅 eval fixture 的 `SKILL.md` 样本
+  仍被豁免，路径冲突会将审查标记为不完整。SkillScan 此前还会跳过含有 NUL 或非 UTF-8 字节
+  的代码文件，注释中的一个字节就能让反弹 shell 躲过审查门禁，NUL 字节也会让安装时的静态
+  分析被跳过。此类文件现在会报告 `package-undecodable-script` 并照常分析，`CRITICAL`
+  命中仍会拦截。SkillScan 的 Mach-O 检测遗漏了安装器会拦截的 32 位小端和 fat 变体；安装器、
+  导出校验与 SkillScan 现在共用同一份代码文件与可执行文件魔数定义。审查快照为二进制文件
+  新增 `content_base64` 字段。([#5431])
 - **提示词注入：** 新增输入净化中间件防御提示词注入，输入护栏中伪造的框架标签会
   被拦截，系统上下文以 `SystemMessage` 注入以隔离角色。([#3662]、[#4155]、[#3661])
 - **提示词注入：** 对渲染进模型 prompt 的不可信内容进行 HTML 转义——记忆事实与摘
@@ -2158,3 +2192,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447

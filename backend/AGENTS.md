@@ -15,7 +15,8 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 - Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
 - With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
 - Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack. Scheduled launches pass `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`) via `launch_scheduled_thread_run`; the value is read from `get_app_config()` at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
+- Scheduled tasks dispatch through the normal Gateway run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch and passes `scheduler.recursion_limit` (default 1000, matching the web UI; clamped by `max_recursion_limit`), so YAML changes apply on the next run without restarting Gateway.
+- Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
 - Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
 - MCP task notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 are part of that same contract — see [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
@@ -83,23 +84,17 @@ regression exercises the production extractor under a generous process deadline.
 ## Important Development Guidelines
 
 ### Documentation Update Policy
-**CRITICAL: Always update README.md and AGENTS.md after every code change**
-
-When making code changes, you MUST update the relevant documentation:
-- Update `README.md` for user-facing changes (features, setup, usage instructions)
-- Update `AGENTS.md` for development changes (architecture, commands, workflows, internal systems). `CLAUDE.md` imports it via `@AGENTS.md`, so editing `AGENTS.md` updates both.
-- Keep documentation synchronized with the codebase at all times
-- Ensure accuracy and timeliness of all documentation
+Every code change must keep docs accurate and current: update `README.md` for
+user-facing behavior and the relevant `AGENTS.md` for development changes.
+`CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
 ### Backend Benchmarks
 
 `scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
 vars; `summarize` and pytest are offline. See its README for the protocol.
 
-`scripts/benchmark/` contains standalone, reproducible measurements and
-evaluations of production backend behavior. A benchmark may import the
-production function it measures, but it must not duplicate or introduce an
-alternative runtime implementation.
+Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
+production functions; never duplicate them or introduce an alternative runtime.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -279,12 +274,7 @@ InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test
 
 ### Running the Full Application
 
-From the **project root** directory:
-```bash
-make dev
-```
-
-This starts all services and makes the application available at `http://localhost:2026`.
+Run `make dev` from the repo root to start all services at `http://localhost:2026`.
 
 **All startup modes:**
 

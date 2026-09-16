@@ -26,6 +26,7 @@ async def read_visible_message_page(
     user_id: str | None,
     limit: int,
     before_seq: int | None = None,
+    after_seq: int | None = None,
     message_filter: Callable[[dict[str, Any]], bool] | None = None,
     batch_size: int = 201,
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -34,6 +35,8 @@ async def read_visible_message_page(
     ``message_filter`` may narrow the HTTP-visible transcript (for example to
     user/assistant text), but cannot admit rows excluded by the shared history rules. The caller
     can continue before the first returned row's ``seq`` when ``has_more`` is true.
+    ``after_seq`` bounds the scan from below, so one known row can be read
+    without walking older history.
     No feedback, duration, or other UI-only enrichment is performed here.
     """
     hidden_run_ids = await default_history_hidden_run_ids(run_manager, thread_id, user_id=user_id)
@@ -41,7 +44,7 @@ async def read_visible_message_page(
         thread_id,
         limit=limit,
         before_seq=before_seq,
-        after_seq=None,
+        after_seq=after_seq,
         event_store=event_store,
         user_id=user_id,
         hidden_run_ids=hidden_run_ids,

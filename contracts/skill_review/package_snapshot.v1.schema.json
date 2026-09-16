@@ -37,6 +37,7 @@
           "size": { "type": "integer", "minimum": 0 },
           "sha256": { "type": "string" },
           "content": { "type": ["string", "null"] },
+          "content_base64": { "type": "string", "contentEncoding": "base64" },
           "target": { "type": "string" }
         },
         "additionalProperties": true

@@ -20,7 +20,7 @@ from typing import BinaryIO
 import yaml
 
 from deerflow.skills.frontmatter import _FRONTMATTER_RE, split_skill_markdown
-from deerflow.skills.installer import is_executable_binary_prefix
+from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.projection import skill_projection_read_lock
 from deerflow.skills.validation import validate_skill_frontmatter_text

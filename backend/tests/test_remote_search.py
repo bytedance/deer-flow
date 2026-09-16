@@ -54,30 +54,30 @@ def _env_with_fake(tmp_path, name: str, script: str) -> dict[str, str]:
 
 def test_parse_missing_root_marker_is_file_not_found() -> None:
     with pytest.raises(FileNotFoundError):
-        parse_remote_search_output("__DF_SEARCH_STATUS__:missing\n", "/dir", tool="grep")
+        parse_remote_search_output("__DF_SEARCH_STATUS__:missing\n", "/dir", tool="grep", limit=450)
 
 
 @pytest.mark.parametrize("stdout", ["", "/dir/a.py:1:needle\n"])
 def test_parse_without_marker_is_a_failure_not_a_result(stdout: str) -> None:
     with pytest.raises(OSError, match="status marker missing"):
-        parse_remote_search_output(stdout, "/dir", tool="grep")
+        parse_remote_search_output(stdout, "/dir", tool="grep", limit=450)
 
 
 @pytest.mark.parametrize(("tool", "status"), [("grep", 0), ("grep", 141), ("find", 0), ("find", 141)])
 def test_parse_success_keeps_output_and_trailing_space(tool: str, status: int) -> None:
     stdout = f"/dir/notes.txt \n\n__DF_SEARCH_STATUS__:{status}\n"
-    assert parse_remote_search_output(stdout, "/dir", tool=tool) == "/dir/notes.txt "
+    assert parse_remote_search_output(stdout, "/dir", tool=tool, limit=450) == ("/dir/notes.txt ", False)
 
 
 def test_parse_genuine_no_match_is_empty() -> None:
-    assert parse_remote_search_output("\n__DF_SEARCH_STATUS__:1\n", "/dir", tool="grep") == ""
-    assert parse_remote_search_output("\n__DF_SEARCH_STATUS__:0\n", "/dir", tool="find") == ""
+    assert parse_remote_search_output("\n__DF_SEARCH_STATUS__:1\n", "/dir", tool="grep", limit=450) == ("", False)
+    assert parse_remote_search_output("\n__DF_SEARCH_STATUS__:0\n", "/dir", tool="find", limit=850) == ("", False)
 
 
 @pytest.mark.parametrize(("tool", "status"), [("grep", 2), ("grep", 126), ("grep", 127), ("find", 1), ("find", 127)])
 def test_parse_failure_without_output_raises(tool: str, status: int) -> None:
     with pytest.raises(OSError, match=f"exited with code {status}"):
-        parse_remote_search_output(f"\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool)
+        parse_remote_search_output(f"\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool, limit=450)
 
 
 @pytest.mark.parametrize(("tool", "status"), [("grep", 2), ("find", 1)])
@@ -86,7 +86,7 @@ def test_parse_error_after_partial_output_still_raises(tool: str, status: int) -
     # have no partial-result channel: it must not pass as a complete search, and
     # the error must tell the agent how to recover.
     with pytest.raises(OSError, match=f"exited with code {status}") as info:
-        parse_remote_search_output(f"/dir/a.py\n\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool)
+        parse_remote_search_output(f"/dir/a.py\n\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool, limit=450)
     assert "could not be read" in str(info.value)
     assert "narrower path" in str(info.value)
 
@@ -94,21 +94,33 @@ def test_parse_error_after_partial_output_still_raises(tool: str, status: int) -
 @pytest.mark.parametrize(("tool", "status"), [("grep", 126), ("grep", 127), ("find", 127)])
 def test_parse_other_failures_do_not_blame_unreadable_paths(tool: str, status: int) -> None:
     with pytest.raises(OSError, match=f"exited with code {status}") as info:
-        parse_remote_search_output(f"\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool)
+        parse_remote_search_output(f"\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool, limit=450)
     assert "could not be read" not in str(info.value)
 
 
 def test_parse_unparseable_status_is_a_failure() -> None:
     with pytest.raises(OSError, match="status unavailable"):
-        parse_remote_search_output("\n__DF_SEARCH_STATUS__:\n", "/dir", tool="find")
+        parse_remote_search_output("\n__DF_SEARCH_STATUS__:\n", "/dir", tool="find", limit=850)
+
+
+@pytest.mark.parametrize(("lines", "truncated"), [(0, False), (3, False), (4, True)])
+def test_parse_reports_truncation_only_when_output_passes_the_limit(lines: int, truncated: bool) -> None:
+    """Callers filter these lines in Python, so fewer results than ``max_results``
+    no longer proves the search was complete; only the extra line does. Exactly
+    ``limit`` lines is a complete result, not a truncated one."""
+    body = "".join(f"/dir/f{index}.py\n" for index in range(lines))
+    result = parse_remote_search_output(f"{body}\n__DF_SEARCH_STATUS__:0\n", "/dir", tool="find", limit=3)
+    assert result.text == "\n".join(f"/dir/f{index}.py" for index in range(min(lines, 3)))
+    assert result.truncated is truncated
 
 
 def test_command_checks_root_first_and_records_status_after_head() -> None:
     command = remote_search_command(_grep("/mnt/data dir"), "/mnt/data dir", limit=450)
     assert command.startswith("set +e; ")
     assert "[ ! -e '/mnt/data dir' ]" in command
-    assert command.index("[ ! -e ") < command.index("grep ") < command.index("head -n 450")
-    assert command.index("head -n 450") < command.rindex("__DF_SEARCH_STATUS__:")
+    # One line past the limit is what lets the parser tell a full result from a cut one.
+    assert command.index("[ ! -e ") < command.index("grep ") < command.index("head -n 451")
+    assert command.index("head -n 451") < command.rindex("__DF_SEARCH_STATUS__:")
     assert command.endswith("exit 0")
 
 
@@ -130,14 +142,14 @@ def test_grep_distinguishes_match_no_match_and_missing_root(tmp_path) -> None:
     (tmp_path / "src" / "app.py").write_text("def needle():\n    return 1\n", encoding="utf-8")
     root = str(tmp_path)
 
-    found = parse_remote_search_output(_run(remote_search_command(_grep(root), root, limit=450)), root, tool="grep")
-    assert found == f"{tmp_path / 'src' / 'app.py'}:1:def needle():"
-    none = parse_remote_search_output(_run(remote_search_command(_grep(root, "zzz_nothing"), root, limit=450)), root, tool="grep")
-    assert none == ""
+    found = parse_remote_search_output(_run(remote_search_command(_grep(root), root, limit=450)), root, tool="grep", limit=450)
+    assert found == (f"{tmp_path / 'src' / 'app.py'}:1:def needle():", False)
+    none = parse_remote_search_output(_run(remote_search_command(_grep(root, "zzz_nothing"), root, limit=450)), root, tool="grep", limit=450)
+    assert none == ("", False)
 
     missing = str(tmp_path / "missing")
     with pytest.raises(FileNotFoundError):
-        parse_remote_search_output(_run(remote_search_command(_grep(missing), missing, limit=450)), missing, tool="grep")
+        parse_remote_search_output(_run(remote_search_command(_grep(missing), missing, limit=450)), missing, tool="grep", limit=450)
 
 
 @_POSIX_SH
@@ -147,7 +159,7 @@ def test_missing_search_binary_is_a_failure_not_a_no_match(tmp_path, binary: str
     root = str(tmp_path)
     search, tool = (_grep(root), "grep") if binary == "grep" else (_find(root), "find")
     with pytest.raises(OSError, match="exited with code 127"):
-        parse_remote_search_output(_run(remote_search_command(search, root, limit=450), env=env), root, tool=tool)
+        parse_remote_search_output(_run(remote_search_command(search, root, limit=450), env=env), root, tool=tool, limit=450)
 
 
 @_POSIX_SH
@@ -158,12 +170,12 @@ def test_find_follows_a_symlinked_root_and_reports_an_empty_tree(tmp_path) -> No
     (real / "sub" / "a.txt").write_text("x", encoding="utf-8")
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    out = parse_remote_search_output(_run(remote_search_command(_find(str(link)), str(link), limit=850)), str(link), tool="find")
-    assert out == f"{link}/sub/a.txt"
+    out = parse_remote_search_output(_run(remote_search_command(_find(str(link)), str(link), limit=850)), str(link), tool="find", limit=850)
+    assert out == (f"{link}/sub/a.txt", False)
 
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert parse_remote_search_output(_run(remote_search_command(_find(str(empty)), str(empty), limit=850)), str(empty), tool="find") == ""
+    assert parse_remote_search_output(_run(remote_search_command(_find(str(empty)), str(empty), limit=850)), str(empty), tool="find", limit=850) == ("", False)
 
 
 @_POSIX_SH
@@ -176,7 +188,7 @@ def test_unreadable_root_is_a_failure_not_a_no_match(tmp_path) -> None:
     locked.chmod(0)
     try:
         with pytest.raises(OSError, match="exited with code 2"):
-            parse_remote_search_output(_run(remote_search_command(_grep(str(locked)), str(locked), limit=450)), str(locked), tool="grep")
+            parse_remote_search_output(_run(remote_search_command(_grep(str(locked)), str(locked), limit=450)), str(locked), tool="grep", limit=450)
     finally:
         locked.chmod(0o700)
 
@@ -196,17 +208,31 @@ def test_unreadable_subtree_is_a_failure_not_a_partial_result(tmp_path) -> None:
     try:
         # Both searches print the readable match before failing on the locked subtree.
         with pytest.raises(OSError, match="exited with code 2.*could not be read"):
-            parse_remote_search_output(_run(remote_search_command(_grep(root), root, limit=450)), root, tool="grep")
+            parse_remote_search_output(_run(remote_search_command(_grep(root), root, limit=450)), root, tool="grep", limit=450)
         with pytest.raises(OSError, match="exited with code 1.*could not be read"):
-            parse_remote_search_output(_run(remote_search_command(_find(root), root, limit=850)), root, tool="find")
+            parse_remote_search_output(_run(remote_search_command(_find(root), root, limit=850)), root, tool="find", limit=850)
     finally:
         locked.chmod(0o700)
 
 
+def _counting_grep(count: int) -> str:
+    return f'#!/bin/sh\ni=1\nwhile [ "$i" -le {count} ]; do\n  echo "/dir/f$i:1:needle"\n  i=$((i+1))\ndone\nexit 0\n'
+
+
 @_POSIX_SH
 def test_head_truncation_is_not_a_failure(tmp_path) -> None:
-    env = _env_with_fake(tmp_path, "grep", '#!/bin/sh\ni=1\nwhile [ "$i" -le 5000 ]; do\n  echo "/dir/f$i:1:needle"\n  i=$((i+1))\ndone\nexit 0\n')
-    out = parse_remote_search_output(_run(remote_search_command(_grep("/"), "/", limit=450), env=env), "/", tool="grep")
-    lines = out.split("\n")
+    env = _env_with_fake(tmp_path, "grep", _counting_grep(5000))
+    out = parse_remote_search_output(_run(remote_search_command(_grep("/"), "/", limit=450), env=env), "/", tool="grep", limit=450)
+    lines = out.text.split("\n")
     assert len(lines) == 450
     assert lines[0] == "/dir/f1:1:needle"
+    assert out.truncated is True
+
+
+@_POSIX_SH
+@pytest.mark.parametrize(("count", "truncated"), [(450, False), (451, True)])
+def test_real_pipeline_reports_truncation_at_the_limit_boundary(tmp_path, count: int, truncated: bool) -> None:
+    env = _env_with_fake(tmp_path, "grep", _counting_grep(count))
+    out = parse_remote_search_output(_run(remote_search_command(_grep("/"), "/", limit=450), env=env), "/", tool="grep", limit=450)
+    assert len(out.text.split("\n")) == 450
+    assert out.truncated is truncated
