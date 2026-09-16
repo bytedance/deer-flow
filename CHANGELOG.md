@@ -582,6 +582,14 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **scheduler:** Enforce the global `max_concurrent_runs` budget on SQLite,
+  which previously only held on Postgres. Claiming a queued occurrence counts
+  the executing rows and then promotes one row to `launching`, and Postgres
+  serializes that pair with an advisory lock. SQLite's deferred transaction
+  reserved the writer only at the promoting UPDATE, so claimants racing on
+  distinct rows — a manual trigger overlapping the poller, or a second Gateway
+  process sharing the database file — all read the same stale count, all passed
+  the budget check, and the configured cap was exceeded. ([#5469])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2868,4 +2876,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
 [#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469
 

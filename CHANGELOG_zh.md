@@ -397,6 +397,11 @@
 
 ### 修复
 
+- **调度器：** 在 SQLite 上同样强制执行全局 `max_concurrent_runs`，此前该上限只在 Postgres 上成立。
+  认领排队中的 occurrence 时，会先统计正在执行的行，再把其中一行提升为 `launching`，Postgres 用
+  advisory lock 将这两步串行化。而 SQLite 的 deferred 事务直到那条提升用的 UPDATE 才占用 writer，
+  因此在不同行上并发认领的调用方——手动触发与轮询重叠，或第二个 Gateway 进程共用同一个数据库
+  文件——会读到同一个过期计数并全部通过预算检查，导致实际运行数超过配置的上限。([#5469])
 - **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
   token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
   却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
@@ -2191,3 +2196,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
 [#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469
