@@ -953,7 +953,7 @@ This release closes that milestone with **765 merged pull requests**.
   sets its own timeout, and only the sibling `/api/skills/install/upload`
   endpoint had been given the longer timeout, so the same install through
   `POST /api/skills/install` failed at 60 seconds. Applied to the Docker,
-  local, and Helm configs.
+  local, and Helm configs. ([#5524])
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
@@ -4268,3 +4268,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
+[#5524]: https://github.com/bytedance/deer-flow/pull/5524
