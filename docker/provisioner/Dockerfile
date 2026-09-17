@@ -24,6 +24,9 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 COPY app.py .
 
+RUN useradd --create-home --uid 1000 deerflow
+USER deerflow
+
 EXPOSE 8002
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]

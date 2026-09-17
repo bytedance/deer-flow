@@ -120,6 +120,14 @@ WORKDIR /app
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
 
+# Run as an unprivileged user. The Gateway writes runtime state under
+# ~/.deer-flow, so keep HOME writable for this user. Deployments that need
+# the DooD sandbox overlay can opt back into root via `user: root` in
+# docker-compose (see docker/docker-compose.dood.yaml).
+RUN useradd --create-home --uid 1000 deerflow
+USER deerflow
+ENV HOME=/home/deerflow
+
 # Expose Gateway API port.
 EXPOSE 8001
 
