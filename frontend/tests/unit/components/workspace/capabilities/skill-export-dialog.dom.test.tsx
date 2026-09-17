@@ -30,7 +30,7 @@ rs.mock("@/core/skills/export", () => ({
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({ locale: "en-US", t: enUS }),
 }));
-import SkillExportDialog from "@/components/workspace/settings/skill-export-dialog";
+import SkillExportDialog from "@/components/workspace/capabilities/skill-export-dialog";
 import { enUS } from "@/core/i18n/locales/en-US";
 import {
   SkillExportRequestError,

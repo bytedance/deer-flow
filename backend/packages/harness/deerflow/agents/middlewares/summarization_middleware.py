@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol, override, runtime_checkable
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -575,7 +575,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         # The latest real user message (the current request) must survive: peer
-        # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
+        # rescue no longer covers it (see _preserve_required_context), so
         # lock its id here and rescue by exact id. This keeps the current request
         # without "moving cutoff" — which would also retain early AI/Tool turns and
         # never compress a first-turn long analysis. A Human Input Card reply is
@@ -587,7 +587,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 break
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
+        messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -760,28 +760,36 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
-    def _preserve_dynamic_context_reminders(
+    def _preserve_required_context(
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         *,
         latest_user_id: str | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep tagged dynamic-context reminders and the current user request out of compression.
+        """Keep system messages, tagged dynamic-context reminders and the current user request out of compression.
 
-        Only tagged reminders (date ``SystemMessage`` + optional ``__memory`` peer,
-        both carrying ``dynamic_context_reminder=True``) and the latest real user
-        message are rescued. The untagged ``__user`` peer is deliberately NOT
+        State-level SystemMessages are framework-owned instructions and must
+        survive compaction, including legacy untagged reminders and extension
+        instructions. Transient instructions should be injected into requests,
+        not state. Tagged reminders (including their ``__memory`` peers) and the
+        latest real user message are also rescued. A subagent keeps its whole system
+        prompt as the leading ``SystemMessage`` in state (``create_agent`` is built
+        with ``system_prompt=None``), so compressing it would leave every later
+        call without its instructions. The untagged ``__user`` peer is deliberately NOT
         rescued by ID-swap prefix: it is a stale historical request that must be
         allowed to compress — the source of cross-turn prompt contamination. The
         *current* request is instead identified by ``latest_user_id``, so a
         first-turn long analysis keeps its ``__user`` request while its early
         AI/Tool turns still compress.
+
+        Rescuing the whole partition is legitimate: ``_prepare_compaction``
+        skips compaction when there is no history left to summarize.
         """
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
+            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
@@ -931,7 +939,8 @@ def create_summarization_middleware(
 
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
-    chain keeps it (research should persist); the subagent chain sets it so a
+    chain keeps it unless its Custom Agent opted out of memory; manual
+    compaction follows that same policy. The subagent chain always sets it so a
     subagent's INTERNAL turns (the "Task" human message + intermediate AI/tool
     turns) are not written into the PARENT thread's durable memory — the hook
     is keyed by ``thread_id`` and subagents share the parent's ``thread_id``

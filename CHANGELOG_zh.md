@@ -397,6 +397,37 @@
 
 ### 修复
 
+- **中间件：** 循环检测不再中断正在分段读取文件的智能体。此前 `read_file` 调用按 200 行分桶作为
+  键，因此任何短于一个桶的读取都会与相邻读取塌缩到同一个键：连续五次 40 行读取会哈希成相同值并
+  触发硬停止，运行被迫给出最终答复并带上 `stop_reason=loop_capped`——而这恰恰是 `read_file` 自身
+  的截断提示要求模型去做的分段读取。现在键使用精确的行区间，省略 `end_line` 时保持"读到末行"的
+  开放语义，因此不带范围的读取与显式 `start_line=1` 仍共用同一个键。重复同一区间依然会在原有阈值
+  被拦下，边界抖动的读取循环仍由按工具类型计数的频率层覆盖。
+- **子智能体：** `max_turns` 现在真正表示运维人员理解的"轮次"。此前它被直接当作 LangGraph 的
+  `recursion_limit` 传入，而后者统计的是 super-step——每个图节点一步，且 `create_agent` 会为每个
+  中间件生命周期钩子编译出一个节点，因此在子智能体的中间件链上一轮要花掉 7~8 步：内置
+  `general-purpose` 的 `max_turns=150` 实际只买到约 18 轮带工具调用的轮次，随后以 `turn_capped`
+  结束；每往链上加一个中间件，有效预算还会再缩水一次。现在执行器会按实际组装出的中间件链的
+  每轮节点数来换算配置的轮次，调高 `max_turns` 就能得到它所声明的轮次。没有配置项变化；既有的
+  `max_turns` 取值现在会获得完整预算，因此原先被截断的子智能体运行可能变长，其上界仍由
+  `subagents.timeout_seconds` 与 `subagents.token_budget` 约束。
+- **调度器：** 在 SQLite 上同样强制执行全局 `max_concurrent_runs`，此前该上限只在 Postgres 上成立。
+  认领排队中的 occurrence 时，会先统计正在执行的行，再把其中一行提升为 `launching`，Postgres 用
+  advisory lock 将这两步串行化。而 SQLite 的 deferred 事务直到那条提升用的 UPDATE 才占用 writer，
+  因此在不同行上并发认领的调用方——手动触发与轮询重叠，或第二个 Gateway 进程共用同一个数据库
+  文件——会读到同一个过期计数并全部通过预算检查，导致实际运行数超过配置的上限。([#5469])
+- **沙箱：** AIO 的 `glob` 不再把"恰好填满"的结果报告为截断。其 `include_dirs` 分支在收集到
+  `max_results` 个匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录列表也会被标记为
+  被截断，工具据此告诉模型结果不完整。该分支本就持有整份目录列表，现在改为多看一个匹配再判断，
+  与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
+  **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
+  有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
+- **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
+  token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
+  却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
+  导致下一次请求带着没有结果的工具调用而被 provider 拒绝；写入 checkpoint 的硬停止消息还会让之后
+  每条新消息都失败。现在所有守卫都通过同一个共享 helper 删除对应的 content 块，该 helper 也会保留
+  clarification 所保留的 Responses 调用。([#5447])
 - **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
   OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
@@ -926,6 +957,16 @@
 
 ### 安全
 
+- **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
+  文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
+  `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
+  覆盖先前的文件。现在 SkillScan 会逐字节接收每个文件，仅 eval fixture 的 `SKILL.md` 样本
+  仍被豁免，路径冲突会将审查标记为不完整。SkillScan 此前还会跳过含有 NUL 或非 UTF-8 字节
+  的代码文件，注释中的一个字节就能让反弹 shell 躲过审查门禁，NUL 字节也会让安装时的静态
+  分析被跳过。此类文件现在会报告 `package-undecodable-script` 并照常分析，`CRITICAL`
+  命中仍会拦截。SkillScan 的 Mach-O 检测遗漏了安装器会拦截的 32 位小端和 fat 变体；安装器、
+  导出校验与 SkillScan 现在共用同一份代码文件与可执行文件魔数定义。审查快照为二进制文件
+  新增 `content_base64` 字段。([#5431])
 - **提示词注入：** 新增输入净化中间件防御提示词注入，输入护栏中伪造的框架标签会
   被拦截，系统上下文以 `SystemMessage` 注入以隔离角色。([#3662]、[#4155]、[#3661])
 - **提示词注入：** 对渲染进模型 prompt 的不可信内容进行 HTML 转义——记忆事实与摘
@@ -2173,3 +2214,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469

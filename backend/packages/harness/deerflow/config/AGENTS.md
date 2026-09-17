@@ -47,6 +47,14 @@ Configuration priority:
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
+`ModelConfig.request_admission` is optional and is not a provider parameter.
+Its positive RPM, finite wait deadline, queue bound and optional quota-group name
+configure process-local model pacing. Models sharing an explicit group must use
+identical policies. Restart after changing, disabling or regrouping an active
+policy; conflicting policies fail construction rather than silently resetting
+an active budget. This nested model option is enforced by its limiter registry,
+not by the top-level infrastructure reload-boundary registry.
+
 **Extensions Configuration** (`extensions_config.json`):
 
 MCP servers and skills are configured together in `extensions_config.json` in project root:
