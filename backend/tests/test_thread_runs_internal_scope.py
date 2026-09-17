@@ -648,7 +648,8 @@ def test_helper_fallback_paths_resolve_internal_caller_runs() -> None:
     assert store.get_user_ids[-1] == OWNER_RAW
 
     # Fallback scan without any event-store or kwargs anchors still scans the
-    # authorized thread unfiltered (and 409s on the miss).
+    # authorized thread through the acting owner's raw-stamp scope (and 409s
+    # on the miss).
     with pytest.raises(HTTPException) as exc2:
         asyncio.run(
             thread_runs._find_target_run_id(
@@ -686,3 +687,58 @@ def test_helper_fallback_paths_keep_per_user_filter_for_browser_sessions() -> No
         asyncio.run(thread_runs._require_successful_source_run(THREAD_ID, RUN_OWNER, request))
     assert exc.value.status_code == 409
     assert store.get_user_ids[-1] == str(BROWSER_USER_ID)
+
+
+def test_token_usage_isolated_without_meta_for_internal_callers() -> None:
+    """Token-usage aggregate honors the acting owner's raw stamp (#5484 r4)."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-other-user"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 999}}
+    run_store._runs["run-other-user"]["total_tokens"] = 999
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/token-usage",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_tokens"] == 111
+    assert body["total_runs"] == 1
+
+
+def test_token_usage_narrowed_for_browser_sessions_without_meta() -> None:
+    """Browser sessions on shared threads see only their own spend too."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-browser", user_id=str(BROWSER_USER_ID), status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-browser"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 222}}
+    run_store._runs["run-browser"]["total_tokens"] = 222
+
+    client = _make_app(
+        user=_browser_user(),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(f"/api/threads/{THREAD_ID}/token-usage")
+
+    assert response.status_code == 200
+    assert response.json()["total_tokens"] == 222

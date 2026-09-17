@@ -1095,7 +1095,8 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     per-user filter is only dropped when the thread's meta row exists with an
     established owner; otherwise the raw trusted owner — the exact value
     ``start_run`` stamps — is retained as the filter. Browser/API sessions
-    always keep the per-user filter.
+    always keep the per-user filter. The thread token-usage aggregate is
+    scoped the same way.
 
     Feedback note: an explicit ``None`` also skips the ``user_id`` WHERE in
     ``FeedbackRepository``, so on shared/NULL-owner threads several users'
@@ -1841,9 +1842,10 @@ async def thread_token_usage(
 ) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
+    scope_user_id = await _run_scope_user_id(request, thread_id)
     if include_active:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True, user_id=scope_user_id)
     else:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    context_usage = await build_context_usage(request, thread_id, run_store)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, user_id=scope_user_id)
+    context_usage = await build_context_usage(request, thread_id, run_store, user_id=scope_user_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)
