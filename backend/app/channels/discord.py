@@ -71,6 +71,12 @@ class DiscordChannel(Channel):
         # Lock protecting _active_threads and the JSON file from concurrent access.
         # _run_client (Discord loop thread) and the main thread both read/write.
         self._thread_store_lock = threading.Lock()
+        # Set once _load_active_threads() has run: the in-memory map is then a
+        # faithful view of the file, so stop() may flush it. It stays False when
+        # start() bails before the load (missing bot_token, discord import
+        # error) — ChannelService then stops the instance, and an ungated flush
+        # would overwrite the persisted mappings with an empty snapshot (#2897).
+        self._thread_store_loaded = False
         store = config.get("channel_store")
         if store is not None:
             self._thread_store_path = store._path.parent / "discord_threads.json"
@@ -140,17 +146,24 @@ class DiscordChannel(Channel):
             try:
                 if not self._thread_store_path.exists():
                     logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
-                    return
-                data = json.loads(self._thread_store_path.read_text())
-                self._active_threads.clear()
-                self._active_thread_ids.clear()
-                for channel_id, thread_id in data.items():
-                    self._active_threads[channel_id] = thread_id
-                    self._active_thread_ids.add(thread_id)
-                if self._active_threads:
-                    logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+                else:
+                    data = json.loads(self._thread_store_path.read_text())
+                    self._active_threads.clear()
+                    self._active_thread_ids.clear()
+                    for channel_id, thread_id in data.items():
+                        self._active_threads[channel_id] = thread_id
+                        self._active_thread_ids.add(thread_id)
+                    if self._active_threads:
+                        logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
             except Exception:
                 logger.exception("[Discord] failed to load thread mappings")
+                return
+            # The in-memory map is now a superset of the on-disk store (empty
+            # when the file is absent), so stop() may safely flush it. Until
+            # this point — a start() that bailed on a missing bot_token or a
+            # discord import error, which ChannelService then stops — the map is
+            # empty and flushing would clobber the file with {}.
+            self._thread_store_loaded = True
 
     def _record_thread_mapping(self, channel_id: str, thread_id: str) -> None:
         """Synchronously update the in-memory channel->thread mapping and its reverse-lookup set.
@@ -195,6 +208,20 @@ class DiscordChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+
+        # Best-effort durability: flush in-memory thread mappings so the most
+        # recent channel->thread mapping survives a hard shutdown (process
+        # killed between a thread creation and its background persistence
+        # write). The create path already persists off the event loop after
+        # each new thread, so this is a safety net, not the primary write path.
+        # Gated on _thread_store_loaded: a stop() taken before the initial load
+        # has an empty in-memory map, and flushing it would overwrite the file
+        # with {} — the #2897 data loss this PR exists to prevent.
+        if self._thread_store_loaded:
+            try:
+                await asyncio.to_thread(self._persist_thread_mappings)
+            except Exception:
+                logger.warning("[Discord] failed to flush thread mappings during shutdown")
 
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()

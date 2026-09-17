@@ -46,6 +46,22 @@ class _FakeModel(FakeMessagesListChatModel):
         return self
 
 
+class _FakeRequest:
+    """Minimal ModelRequest stand-in for the wrap_model_call hooks."""
+
+    def __init__(self, messages, runtime):
+        self.messages = list(messages)
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return _FakeRequest(kwargs.get("messages", self.messages), self.runtime)
+
+
+def _drive_model_call(mw: DynamicContextMiddleware, messages, runtime) -> None:
+    """Drive one model-request assembly; the context event fires here now."""
+    mw.wrap_model_call(_FakeRequest(messages, runtime), lambda _request: "response")
+
+
 class _LegacyBackend(MemoryManager):
     """Third-party backend that inherits the default timeout-policy resolver."""
 
@@ -193,8 +209,15 @@ async def test_abefore_agent_returns_none_on_timeout(
 
     assert started.is_set()
     assert result is None
+    # The timed-out injection produced no state update, so the first model
+    # call assembles without any memory block and records no context event.
+    _drive_model_call(mw, state["messages"], runtime)
+    journal.record_memory_context.assert_not_called()
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
+    # The late worker's phantom ``__memory`` never entered state: a subsequent
+    # assembly still finds nothing to claim.
+    _drive_model_call(mw, state["messages"], runtime)
     journal.record_memory_context.assert_not_called()
 
 
@@ -385,13 +408,18 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
     ):
         result = await mw.abefore_agent(state, runtime)
 
+    assert result is None
+    # The first model call assembles with the frozen checkpoint block: the
+    # recorded identity is the checkpointed content, not the late replacement.
+    _drive_model_call(mw, state["messages"], runtime)
     recorded_call = journal.record_memory_context.call_args
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     assert started.is_set()
-    assert result is None
     assert recorded_call == mock.call(
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+        project_context_revision=None,
+        project_shelf_revision=None,
     )
     journal.record_memory_context.assert_called_once()
 

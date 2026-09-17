@@ -390,6 +390,103 @@ class TestAgentConstruction:
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
+    def test_create_agent_scales_max_turns_into_a_super_step_budget(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: ``max_turns`` used to be passed to LangGraph verbatim.
+
+        ``recursion_limit`` counts graph nodes and ``create_agent`` compiles one
+        per middleware lifecycle hook, so a verbatim hand-off bought roughly
+        ``max_turns / chain_depth`` turns — about 18 of the built-in
+        ``general-purpose`` agent's 150.
+        """
+        from langchain.agents.middleware import AgentMiddleware
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _AfterModel(AgentMiddleware):
+            def after_model(self, state, runtime):
+                return None
+
+        middlewares = [_AfterModel(), _AfterModel()]
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        executor._create_agent()
+
+        # model + tools + two after_model nodes, once per turn.
+        assert executor._recursion_limit == base_config.max_turns * 4
+
+    def test_create_agent_warns_when_a_counted_hook_can_jump(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """A jump re-enters the loop without traversing ``tools``.
+
+        The flat per-turn cost does not model that, so the resolved limit becomes
+        a lower bound. Nothing in today's subagent chain declares a jump; if one
+        ever does, the run must not quietly cap short the way it did before this
+        translation existed.
+        """
+        import logging
+
+        from langchain.agents.middleware import AgentMiddleware, hook_config
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _Jumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                return None
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [_Jumper()],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        with caplog.at_level(logging.WARNING, logger=executor_module.logger.name):
+            executor._create_agent()
+
+        assert "_Jumper.after_model" in caplog.text
+        assert "lower bound" in caplog.text
+
     @pytest.mark.anyio
     async def test_load_skills_uses_explicit_app_config_for_skill_storage(
         self,
@@ -2121,6 +2218,56 @@ class TestAsyncExecutionPath:
             assert base_config.system_prompt in system_messages[0].content
             assert "regression-skill" in system_messages[0].content
             assert "Skill instruction text" not in system_messages[0].content
+
+    @pytest.mark.anyio
+    async def test_aexecute_sends_the_resolved_recursion_limit_to_the_graph(self, classes, base_config):
+        """The run config carries the scaled super-step budget ``_create_agent`` resolved."""
+        from langchain_core.messages import AIMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        def create_agent_resolving_budget(*args, **kwargs):
+            executor._recursion_limit = 77
+            return mock_agent
+
+        with patch.object(executor, "_create_agent", side_effect=create_agent_resolving_budget):
+            await executor._aexecute("Do something")
+
+        assert captured_configs[0]["recursion_limit"] == 77
+
+    @pytest.mark.anyio
+    async def test_aexecute_falls_back_to_the_turn_count_when_the_chain_is_unknown(self, classes, base_config, mock_agent, msg):
+        """A test double replacing ``_create_agent`` leaves no chain to measure.
+
+        The run must still get a usable limit rather than ``None``, which
+        LangGraph would reject.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [msg.ai("Done", msg_id="msg-1")]}
+
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            await executor._aexecute("Do something")
+
+        assert executor._recursion_limit is None
+        assert captured_configs[0]["recursion_limit"] == base_config.max_turns
 
 
 class TestSkillAllowedTools:
@@ -3987,6 +4134,7 @@ class TestSubagentGuardrailAttribution:
         run_id=None,
         loop_detection_recorder=None,
         tool_promotion_recorder=None,
+        tool_progress_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3999,6 +4147,12 @@ class TestSubagentGuardrailAttribution:
             max_turns=5,
             timeout_seconds=30,
         )
+        recorder_kwargs = {}
+        if tool_progress_recorder is not None:
+            # Kept conditional so the pre-feature attribution cases exercise
+            # the existing constructor surface; only the new propagation case
+            # requires the additive recorder argument.
+            recorder_kwargs["tool_progress_recorder"] = tool_progress_recorder
         return SubagentExecutor(
             config=config,
             tools=[],
@@ -4012,6 +4166,7 @@ class TestSubagentGuardrailAttribution:
             run_id=run_id,
             loop_detection_recorder=loop_detection_recorder,
             tool_promotion_recorder=tool_promotion_recorder,
+            **recorder_kwargs,
         )
 
     @pytest.mark.anyio
@@ -4101,6 +4256,32 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("__run_tool_promotion_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_tool_progress_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Progress audit crosses the child-loop boundary without the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            tool_progress_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_tool_progress_recorder") is recorder
         assert "__run_journal" not in context
         assert context.get("agent_id") == "general-purpose"
 

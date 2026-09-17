@@ -704,6 +704,68 @@ class TestStream:
         assert any(event.data.get("content") == "Hello!" for event in ai_events)
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
 
+    @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
+        """A guard's ``after_model`` replaces the message under the same id after it was sent."""
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        sent = AIMessage(content="Checking again.", id="ai-1", tool_calls=[call])
+        stopped = AIMessage(content="Checking again.\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit.", id="ai-1")
+        chunks = [
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+        ]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content="Checking again.", id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-replaced"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
+
+    def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
+        """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
+        sent = AIMessage(content="Let me look.", id="ai-1")
+        rewritten = AIMessage(content="The model returned no final response.", id="ai-1")
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), rewritten]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-rewritten"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Let me look."]
+
+    def test_stream_emits_metadata_a_later_node_adds_to_a_sent_ai_message(self, client):
+        attribution = {"version": 1, "kind": "final_answer", "shared_attribution": False, "actions": []}
+        sent = AIMessage(content="Hello!", id="ai-1")
+        attributed = AIMessage(content="Hello!", id="ai-1", additional_kwargs={"token_usage_attribution": attribution})
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), attributed]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-attributed"))
+
+        ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert [(event.data["content"], event.data.get("additional_kwargs")) for event in ai_events] == [("Hello!", None), ("", {"token_usage_attribution": attribution})]
+
     def test_stream_emits_new_additional_kwargs_after_prior_metadata(self, client):
         """stream() emits later attribution metadata even after earlier kwargs for the same id."""
         attribution = {
@@ -1131,6 +1193,40 @@ class TestChat:
             result = client.chat("q", thread_id="t6")
 
         assert result == "final answer"
+
+    def test_returns_the_loop_detection_stop_notice(self, client):
+        """Real graph: the hard stop rewrites the last AI message after it was sent."""
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        @tool
+        def bash(command: str) -> str:
+            """Run a command."""
+            return "ok"
+
+        responses = [AIMessage(content="Checking again.", id=f"ai-{i}", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": f"call-{i}"}]) for i in range(3)]
+        graph = create_agent(
+            model=_ToolCallingFakeModel(responses=[*responses, AIMessage(content="unreachable", id="ai-end")]),
+            tools=[bash],
+            middleware=[LoopDetectionMiddleware(warn_threshold=10, hard_limit=3)],
+            state_schema=ThreadState,
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+        ):
+            result = client.chat("q", thread_id="t-loop-stop")
+
+        assert result.startswith("Checking again.")
+        assert "[FORCED STOP]" in result
 
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""

@@ -110,6 +110,17 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    async def list_changed(
+        self,
+        *,
+        after_change_seq: int,
+        after_run_id: str,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List public run-record changes in stable ascending cursor order."""
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def put(
         self,

@@ -135,6 +135,24 @@ their per-execution parent-loop proxy, preserving separate events when two
 different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
+**Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
+The persisted projection accepts
+only framework-defined error/action values and strict booleans (using null for
+invalid values) from the producer-supplied tool stamp; tool content, args,
+prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
+recorder proxy, never the journal itself; durable batch runs have no parent
+journal and emit no such event. Recorder failures are fail-open.
+
 **JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
@@ -158,6 +176,32 @@ checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
+**Extension changed-run discovery** (`runtime/runs/store/` and
+`extensions/run_evidence.py`) orders public run-record changes by the
+backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
+event sequence numbers. The singleton SQL clock allocates positions in the same
+transaction as each public record mutation; memory uses a process-local counter.
+The clock row serializes position-bearing SQL mutations globally until their
+transactions commit, so every mutator must acquire it before any run-row lock.
+An atomic thread operation uses one position for its interrupted rows and new
+row, with `run_id` ordering ties. High-frequency progress snapshots and lease
+heartbeats do not advance this position: they are not lifecycle-discovery
+signals, progress evidence remains available from the event stream, and
+excluding them bounds clock contention. A later lifecycle change exposes the
+run row's latest `updated_at` and accumulated progress fields to internal readers.
+Rows from before the migration retain `change_seq=0` and page deterministically
+by run id. Because a later mutation only moves a row forward, concurrent paging
+may replay a run but cannot move an unseen run behind the committed cursor.
+Deletes produce no tombstone and therefore do not advance the cursor; consumers
+that require deletion reconciliation must poll authoritative status for known
+runs and treat a missing result as absent.
+The extension-facing cursor is versioned, opaque, and bound to the reader's
+fixed user scope. `RunEventStore.list_events()` accepts the same explicit
+`user_id` override as `list_messages()`; evidence readers must propagate their
+bound scope (including global `None`) rather than resolving an ambient request
+user. The adapter deep-copies event content and redacted metadata before
+exposing them, detaching nested mutable payloads from host storage.
+
 Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
 messages. An exhaustive miss preserves the human-boundary fallback; an
 incomplete lookup removes unproven synthesized IDs. Its metadata-only
@@ -175,7 +219,7 @@ The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
 the number of required IDs, whichever is larger; missing exact runs use targeted
 `get()` calls.
 
-**Terminal run cleanup explicitly breaks graph-scoped references while preserving the existing `RunRecord` grace period.** Every `agent.astream()` iterator is closed in `_stream_once`, including abort/exception/early-break paths. A close failure after an abort is warning-only and cannot replace the user-requested `interrupted` outcome; normal-completion close failures still surface, and an in-flight stream exception remains authoritative over a secondary close failure. Journal construction and cancellable preflight work (including MCP task projection and the prior-finalization wait) live inside the worker's guarded body, so cancellation before agent startup still terminalizes the run and closes its stream. `run_agent()` wraps the complete terminal-finalization sequence in an outer teardown guard, so cancellation or failure from any terminal-stage await cannot skip `RunJournal.close()`, removal of the journal, `__pregel_runtime`, and internal runtime-context values from every runnable config, or release of local graph/payload references. That guard schedules bridge cleanup, run-record cleanup, and cyclic GC even when interruption happens before the terminal stream marker or terminal publication itself fails, so neither a cancelled observer nor a delivery-backend outage can strand process-local run state. A non-`Exception` `BaseException` caught while awaiting the completion hook or task-stop notification (including host-task cancellation) is deferred through the ordinary remaining finalization, with the first interruption preserved and every caught host-task `CancelledError` balanced by calling `Task.uncancel()` until the current task’s cumulative cancellation count is clear. Task-stop fan-out runs in one child task and every host wait uses `shield`, so repeated cancellation of the worker cannot cancel that fan-out or skip later observers; the worker keeps awaiting the same child task. A rogue observer that raises its own `CancelledError` remains contained by the extension dispatcher and distinguishable from host cancellation. This guarantee applies only to cancellation caught during those hook stages: clearing the finalizing barrier and publishing END remain direct awaits, so another cancellation in the subsequent critical tail retains forceful-termination semantics instead of creating an unbounded shield. If that tail completes without another interruption, the first deferred interruption is re-raised after END; a barrier-clear failure prevents END publication, while an END failure is raised after the barrier is clear. `RunJournal.flush()` clears its `_pending_progress_task` after awaiting or cancelling it; ordinary `close()` detaches the event store/progress reporter and clears callback bookkeeping only after that flush succeeds, preserving the buffer for retry on a transient store failure. A fenced worker instead calls `close(flush=False)`, which cancels pending journal work and detaches without initiating another event-store write after lease ownership is lost; its final detach runs even if a second cancellation interrupts pending-task shutdown. `RunManager.cleanup(run_id)` retains the process-local `RunRecord`, completed task, and request payload for its default 300-second local join/status window before releasing them. Durable history remains in `RunStore`; `StreamBridge` data keeps its separate 60-second late-subscriber window, and both cleanup coroutines run in a fresh empty `contextvars.Context`. A contextless full cyclic-GC pass, coalesced to at most once every 10 seconds and dispatched through the default executor, bounds the lifetime of unreachable LangGraph callback/loop cycles without synchronously walking the heap in the event-loop timer; passes taking at least 100 ms are logged at INFO because CPython GC may still impose interpreter-level pauses.
+**Terminal run cleanup explicitly breaks graph-scoped references while preserving the existing `RunRecord` grace period.** Every `agent.astream()` iterator is closed in `_stream_once`, including abort/exception/early-break paths. A close failure after an abort is warning-only and cannot replace the user-requested `interrupted` outcome; normal-completion close failures still surface, and an in-flight stream exception remains authoritative over a secondary close failure. Journal construction and cancellable preflight work (including MCP task projection and the prior-finalization wait) live inside the worker's guarded body, so cancellation before agent startup still terminalizes the run and closes its stream. `run_agent()` wraps the complete terminal-finalization sequence in an outer teardown guard, so cancellation or failure from any terminal-stage await cannot skip `RunJournal.close()`, removal of the journal, `__pregel_runtime`, and internal runtime-context values from every runnable config, or release of local graph/payload references. That guard schedules bridge cleanup, run-record cleanup, and cyclic GC even when interruption happens before the terminal stream marker or terminal publication itself fails, so neither a cancelled observer nor a delivery-backend outage can strand process-local run state. A non-`Exception` `BaseException` caught while awaiting the completion hook or task-stop notification (including host-task cancellation) is deferred through the ordinary remaining finalization, with the first interruption preserved and every caught host-task `CancelledError` balanced by calling `Task.uncancel()` until the current task’s cumulative cancellation count is clear. Task-stop fan-out runs in one child task and every host wait uses `shield`, so repeated cancellation of the worker cannot cancel that fan-out or skip later observers; the worker keeps awaiting the same child task. A rogue observer that raises its own `CancelledError` remains contained by the extension dispatcher and distinguishable from host cancellation. This guarantee applies only to cancellation caught during those hook stages: clearing the finalizing barrier and publishing END remain direct awaits, so another cancellation in the subsequent critical tail retains forceful-termination semantics instead of creating an unbounded shield. If that tail completes without another interruption, the first deferred interruption is re-raised after END; a barrier-clear failure prevents END publication, while an END failure is raised after the barrier is clear. `RunJournal.flush()` clears its `_pending_progress_task` after awaiting or cancelling it; ordinary `close()` detaches the event store/progress reporter and clears callback bookkeeping only after that flush succeeds, preserving the buffer for retry on a transient store failure. A fenced worker instead calls `close(flush=False)`, which cancels pending journal work and detaches without initiating another event-store write after lease ownership is lost; its final detach runs even if a second cancellation interrupts pending-task shutdown. `RunManager.cleanup(run_id)` retains the process-local `RunRecord`, completed task, and request payload for its default 300-second local join/status window before releasing them, and evicts only when a `RunStore` backs the manager — without one there is no hydration fallback, so the record is retained rather than silently dropping the run's history. Durable history remains in `RunStore`; `StreamBridge` data keeps its separate 60-second late-subscriber window, and both cleanup coroutines run in a fresh empty `contextvars.Context`. A contextless full cyclic-GC pass, coalesced to at most once every 10 seconds and dispatched through the default executor, bounds the lifetime of unreachable LangGraph callback/loop cycles without synchronously walking the heap in the event-loop timer; passes taking at least 100 ms are logged at INFO because CPython GC may still impose interpreter-level pauses.
 
 **`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 
@@ -289,3 +333,19 @@ rejects caller-supplied `__conversation_reader` values in both context carriers,
 installs only the host value, and releases it during terminal cleanup. The
 callback is not checkpoint state and must never be recovered from an earlier
 run or serialized into run kwargs.
+
+## JSONL mutation cancellation
+
+`JsonlRunEventStore._run_mutation` acquires the per-thread lock before admitting
+an operation, then drains the shielded operation through filesystem I/O, rollback,
+and sequence/lock bookkeeping before releasing the lock or re-raising caller
+cancellation. Repeated cancellation must not detach an active disk worker; a failed
+mutation remains the cause of the propagated cancellation. There is deliberately
+no drain timeout that would release ownership while a worker can still modify files.
+A queued caller can cancel before admission, and unrelated threads remain independent.
+Drain tasks are named `jsonl-mutation:{thread_id}` for asyncio task dumps. Multi-thread
+`put_batch` drains its current group on cancellation and never starts later groups;
+the admitted group keeps its records on success or completes rollback on failure.
+This is a store-local guarantee, not a change to RunJournal cancellation policy or
+JSONL's single-process deployment constraint. Regression coverage is in
+`tests/test_jsonl_event_store_cancellation.py`.

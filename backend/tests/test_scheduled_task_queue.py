@@ -285,6 +285,75 @@ async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
         await close_engine()
 
 
+async def test_global_launch_budget_holds_when_distinct_rows_are_claimed_concurrently(tmp_path):
+    """The global launch budget must survive claims racing on *distinct* rows.
+
+    ``claim_queued_run`` counts executing rows and then promotes one row to
+    ``launching``. Postgres serializes that pair with an advisory lock. SQLite
+    needs ``BEGIN IMMEDIATE`` for the same reason ``ThreadMetaRepository``
+    does: a deferred transaction does not reserve the writer until the UPDATE,
+    so every claimer reads the same stale count and overshoots
+    ``max_concurrent_runs``.
+
+    Distinct rows are the load-bearing part. Two claims of the *same* row are
+    already safe via the ``status == "queued"`` CAS, which is what
+    ``test_only_one_worker_can_claim_a_queued_run`` covers.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime(2026, 8, 20, 9, 0, tzinfo=UTC)
+        claimants = 8
+        for index in range(claimants):
+            await run_repo.create(
+                run_record_id=f"task-run-budget-{index}",
+                task_id=f"task-budget-{index}",
+                thread_id=f"thread-budget-{index}",
+                scheduled_for=now,
+                trigger="scheduled",
+                status="queued",
+            )
+
+        # Open every connection the claimers need up front. On a cold pool the
+        # per-connection PRAGMA setup staggers them enough to hide the race.
+        await asyncio.gather(*(run_repo.count_active_runs() for _ in range(claimants)))
+
+        # That warm-up is load-bearing, and it only works because the SQLite
+        # engine keeps pooled connections (init_engine_from_config builds it on
+        # SQLAlchemy's default AsyncAdaptedQueuePool, so `pool_size` of them
+        # survive this gather while the overflow is discarded). Under a
+        # non-pooling class such as NullPool every claimer would open its own
+        # connection, the PRAGMA setup would serialize them, and this test
+        # would pass against an unserialized claim instead of failing. Assert
+        # the reuse so that a pool change breaks this test loudly rather than
+        # quietly draining it of guard strength.
+        pool = sf.kw["bind"].sync_engine.pool
+        # A non-pooling class does not implement checkedin() at all, so treat a
+        # missing counter as "nothing was reused" and report it the same way.
+        pooled = pool.checkedin() if hasattr(pool, "checkedin") else 0
+        assert pooled >= 2, f"{type(pool).__name__} left {pooled} connections pooled after the warm-up; the claimers cannot overlap, so this test would pass against an unserialized claim"
+
+        claims = await asyncio.gather(
+            *(
+                run_repo.claim_queued_run(
+                    f"task-run-budget-{index}",
+                    lease_owner=f"worker-{index}",
+                    now=now,
+                    lease_seconds=120,
+                    global_max_concurrent_runs=1,
+                )
+                for index in range(claimants)
+            )
+        )
+
+        assert sum(claim is not None for claim in claims) == 1
+        assert await run_repo.count_active_runs() == 1
+    finally:
+        await close_engine()
+
+
 async def test_same_thread_queue_is_claimed_in_fifo_order(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
