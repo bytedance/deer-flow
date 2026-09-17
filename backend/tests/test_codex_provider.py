@@ -247,6 +247,57 @@ def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call
     assert output_ids <= call_ids
 
 
+def test_convert_messages_drops_invalid_calls_missing_a_name_or_call_id():
+    """A call the middleware has not repaired must not serialize as null fields.
+
+    InvalidToolCall fields are nullable, and a ``function_call`` item carrying a
+    null ``name`` or ``call_id`` is schema-invalid, so serializing one turns a
+    case the old serializer dropped into a rejected request. The middleware
+    repairs exactly these calls (see the test below), so dropping them here
+    cannot leave a placeholder ToolMessage without its call.
+    """
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        assert ai_msg.invalid_tool_calls, output_item
+
+        _, items = model._convert_messages([HumanMessage(content="hi"), ai_msg])
+        assert [i for i in items if i.get("type") == "function_call"] == []
+
+
+def test_convert_messages_serializes_invalid_calls_the_middleware_repaired():
+    """A repaired invalid call is still sent, and still paired with its result."""
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
+
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="hi"), ai_msg])
+
+        _, items = model._convert_messages(patched)
+        call_ids = {i["call_id"] for i in items if i.get("type") == "function_call"}
+        output_ids = {i["call_id"] for i in items if i.get("type") == "function_call_output"}
+        assert output_ids == call_ids
+        assert call_ids
+        assert all(cid for cid in call_ids)
+        for item in items:
+            if item.get("type") == "function_call":
+                assert item["name"]
+                assert item["arguments"]
+
+
 # ---------------------------------------------------------------------------
 # _parse_sse_data_line
 # ---------------------------------------------------------------------------

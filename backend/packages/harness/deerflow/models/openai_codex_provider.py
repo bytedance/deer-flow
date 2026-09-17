@@ -158,13 +158,27 @@ class CodexChatModel(BaseChatModel):
                 # DanglingToolCallMiddleware answers them with a placeholder ToolMessage;
                 # Responses rejects that function_call_output unless its function_call
                 # item is in the request too.
+                #
+                # A function_call item needs both a name and a call_id, and every
+                # InvalidToolCall field is nullable, so a call missing either is dropped
+                # rather than serialized as a schema-invalid item. Dropping one cannot
+                # orphan a placeholder ToolMessage: the middleware mints a synthetic id
+                # and a fallback name for exactly these calls before serialization, so a
+                # call still missing them here has no placeholder to pair with.
                 for tc in [*msg.tool_calls, *(msg.invalid_tool_calls or [])]:
+                    name = tc.get("name")
+                    call_id = tc.get("id")
+                    if not (isinstance(name, str) and name):
+                        continue
+                    if not (isinstance(call_id, str) and call_id):
+                        continue
+                    args = tc.get("args")
                     input_items.append(
                         {
                             "type": "function_call",
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["args"]) if isinstance(tc["args"], dict) else tc["args"],
-                            "call_id": tc["id"],
+                            "name": name,
+                            "arguments": json.dumps(args) if isinstance(args, dict) else (args or "{}"),
+                            "call_id": call_id,
                         }
                     )
             elif isinstance(msg, ToolMessage):
