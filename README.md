@@ -530,6 +530,8 @@ Text results retain their original representation, including large numeric IDs a
 Copy actions copy only the displayed preview. This is a frontend view of data
 already received by the browser, without an additional secret-redaction layer.
 
+When the agent asks for clarification, accompanying answer text stays outside the execution steps panel. Answering the request keeps previously completed text in the conversation while the agent continues.
+
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.

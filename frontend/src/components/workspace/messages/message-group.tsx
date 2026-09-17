@@ -76,7 +76,24 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const allSteps = useMemo(() => convertToSteps(messages), [messages]);
+  // Keep the original messages and tool associations intact. Only the display
+  // of clarification context moves outside the execution disclosure (#5503).
+  const clarificationTextSteps = useMemo(
+    () =>
+      allSteps.filter(
+        (step): step is CoTAssistantTextStep =>
+          step.type === "assistantText" && step.isClarificationContext === true,
+      ),
+    [allSteps],
+  );
+  const steps = useMemo(
+    () =>
+      allSteps.filter(
+        (step) => step.type !== "assistantText" || !step.isClarificationContext,
+      ),
+    [allSteps],
+  );
   const stepIndexByStep = useMemo(
     () => new Map(steps.map((step, index) => [step, index] as const)),
     [steps],
@@ -315,7 +332,7 @@ function MessageGroupComponent({
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
 
-  return (
+  const processingPanel = (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
@@ -446,6 +463,17 @@ function MessageGroupComponent({
         </>
       )}
     </ChainOfThought>
+  );
+
+  return (
+    <>
+      {processingPanel}
+      {clarificationTextSteps.map((step) => (
+        <div key={step.id} className="w-full">
+          <MarkdownContent content={step.content} isLoading={isLoading} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -973,6 +1001,7 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
 }
 
 interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  isClarificationContext?: boolean;
   content: string;
 }
 
@@ -1046,6 +1075,9 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "assistantText",
           content,
+          isClarificationContext: message.tool_calls?.some(
+            (toolCall) => toolCall.name === "ask_clarification",
+          ),
         });
       }
       for (const tool_call of message.tool_calls ?? []) {

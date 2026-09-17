@@ -1426,3 +1426,65 @@ describe("orphan tool messages", () => {
     expect(t1b?.type).toBe("tool");
   });
 });
+
+describe("clarification run boundaries", () => {
+  const beforeReply = [
+    { id: "human", type: "human", content: "Plan the deployment" },
+    { id: "plan", type: "ai", content: "The completed deployment plan." },
+    {
+      id: "ask",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call",
+      content: "Which environment?",
+    },
+  ] as Message[];
+
+  test("keeps completed text outside processing when the request arrives and during hidden-reply continuation", () => {
+    const reply = {
+      id: "reply",
+      type: "human",
+      content: "staging",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const continuation = {
+      id: "next",
+      type: "ai",
+      content: "Deploying now.",
+    } as Message;
+    for (const messages of [
+      beforeReply,
+      [...beforeReply, reply, continuation],
+    ]) {
+      const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+      expect(groups.find((group) => group.id === "plan")?.type).toBe(
+        "assistant",
+      );
+      expect(groups.filter((group) => group.type === "human")).toHaveLength(1);
+    }
+    const groups = getMessageGroups([...beforeReply, reply, continuation], {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups.find((group) => group.id === "next")?.type).toBe(
+      "assistant:processing",
+    );
+    expect(
+      getMessageGroups([...beforeReply, reply, continuation]).find(
+        (group) => group.id === "next",
+      )?.type,
+    ).toBe("assistant");
+  });
+
+  test("recognizes a clarification boundary without a loaded visible human message", () => {
+    const groups = getMessageGroups(beforeReply.slice(1), {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups[0]?.type).toBe("assistant");
+  });
+});

@@ -46,7 +46,14 @@ export function getMessageGroups(
   if (isCurrentTurnLoading) {
     for (let index = messages.length - 1; index >= 0; index--) {
       const message = messages[index];
-      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      // A clarification ends the preceding run. Its reply is hidden from
+      // the transcript, so the last visible human alone cannot delimit the
+      // continuation: it would pull already completed answers back into steps.
+      if (
+        message &&
+        !isHiddenFromUIMessage(message) &&
+        (message.type === "human" || isClarificationToolMessage(message))
+      ) {
         currentTurnStartIndex = index;
         break;
       }
