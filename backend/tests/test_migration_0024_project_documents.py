@@ -1,8 +1,8 @@
 """Migration tests for 0024_project_documents (Phase-2 spec §6.1).
 
-Pins the table shape and the four indexes on upgrade, the clean downgrade,
-and the chain head (the forward-revision-compat pin moved here with 0023,
-forwarded to 0024 after the rebase onto 0023_user_preferences).
+Pins the table shape and the four indexes on upgrade, and the clean downgrade
+(the chain-head pin moved on to 0025_repair_run_change_seq with that
+revision).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 
-from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
+from deerflow.persistence.bootstrap import _get_alembic_config
 from deerflow.persistence.engine import close_engine, init_engine
 
 pytestmark = pytest.mark.asyncio
@@ -65,10 +65,6 @@ async def _inspect(engine):
             )
 
         return await conn.run_sync(_read)
-
-
-async def test_0024_is_the_chain_head():
-    assert _get_head_revision() == REVISION
 
 
 async def test_0024_upgrade_creates_table_and_indexes(tmp_path):
