@@ -19,6 +19,7 @@ from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.workspace_changes import WorkspaceChangeLimits, capture_workspace_snapshot
 
 
 def _make_bridge():
@@ -218,6 +219,65 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
     assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("modify_existing", [False, True], ids=["unproven-new-output", "observed-modified-output"])
+async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, monkeypatch, modify_existing):
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    outputs = paths.sandbox_outputs_dir("thread-1", user_id=get_effective_user_id())
+    outputs.mkdir(parents=True)
+    for name in ["b.txt", "c.txt", "d.txt"]:
+        (outputs / name).write_text("before\n", encoding="utf-8")
+
+    snapshots = []
+
+    async def capture_bounded_snapshot(*args, **kwargs):
+        snapshot = await capture_workspace_snapshot(*args, limits=WorkspaceChangeLimits(max_scanned_files=2), **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker.capture_workspace_snapshot", capture_bounded_snapshot)
+
+    class ProducingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            (outputs / "a.txt").write_text("new output\n", encoding="utf-8")
+            if modify_existing:
+                (outputs / "b.txt").write_text("modified\n", encoding="utf-8")
+            yield {"messages": [AIMessage(content="Created the output.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProducingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert snapshots[0].truncated is True
+    assert snapshots[-1].truncated is True
+    assert "/mnt/user-data/outputs/a.txt" not in snapshots[0].files
+    assert "/mnt/user-data/outputs/a.txt" in snapshots[-1].files
+    assert (outputs / "a.txt").is_file()
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert len(delivery) == 1
+    content = delivery[0]["content"]
+    if modify_existing:
+        assert content["produced_paths"] == ["/mnt/user-data/outputs/b.txt"]
+        assert content["verification"]["source"] == "outputs_changed"
+        assert content["satisfied"] is False
+        assert record.status == RunStatus.error
+        assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+    else:
+        assert content == {"presented": 0, "paths": [], "by_tool": {}}
+        assert record.status == RunStatus.success
+        assert record.error is None
 
 
 @pytest.mark.anyio
