@@ -403,6 +403,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
+   Reads the configured sandbox image from UTF-8 `config.yaml`, with or without a leading BOM.
 
 4. **(Optional) Load sample memory data for local review**:
    ```bash
