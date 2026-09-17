@@ -526,6 +526,10 @@ def format_memory_for_injection(
         if top_of_mind.get("summary"):
             user_sections.append(f"Current Focus: {_escape_summary(top_of_mind['summary'])}")
 
+        cognitive_style = user_data.get("cognitiveStyle", {})
+        if cognitive_style.get("summary"):
+            user_sections.append(f"Thinking Style: {_escape_summary(cognitive_style['summary'])}")
+
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
 
