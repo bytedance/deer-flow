@@ -1103,7 +1103,9 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     / ``list_by_run_ids`` order deterministically (latest wins, ``feedback_id``
     breaks ties) to keep that well-defined.
     """
-    user = getattr(request.state, "user", None)
+    # Tolerate state-less request stand-ins used by focused unit tests.
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
         return await get_current_user(request)
     if await _thread_ownership_established(request, thread_id):
@@ -1130,7 +1132,8 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
     """
-    user = getattr(request.state, "user", None)
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
         return
     if await _thread_ownership_established(request, thread_id):
