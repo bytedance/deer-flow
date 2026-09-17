@@ -58,12 +58,26 @@ Apply these evidence rules:
 - Use canonical source URLs. Mirrors, reposts, and aliases of one origin are one
   source, even when their URLs differ.
 
+## Audit Limits
+
+- The upstream `verified` claim label counts distinct source keys (URL, or
+  name when URL is absent). It does not establish source independence or
+  whether cited content supports the claim. Different URLs can be mirrors.
+- An overall `PASS` can coexist with `unverifiable` claims. Do not describe
+  either `PASS` or `verified` as factual verification.
+- Gate 6 runs only when integrity data is supplied. Report which checks ran;
+  skipped or absent checks are not successful verification.
+- The pinned server has an unresolved DNS-rebinding weakness: its address
+  check does not bind the subsequent connection to the validated IP. Until a
+  fixed revision is reviewed and pinned, do not request live verification.
+  This workflow provides offline structural checks only.
+
 ## Run And Interpret The Audit
 
 1. Call `research_audit_audit_report` with `report` set to the constructed
-   object. Set `verify_sources` to `true` when claims contain public HTTP(S)
-   sources; otherwise use `false` and state that live source verification was
-   not run. Private and loopback URLs are blocked by default.
+   object and `verify_sources` set to `false` for the current pinned revision.
+   State that live source verification was not run. Do not treat a public
+   hostname as sufficient protection against DNS rebinding.
 2. Treat `outputs.verdict` as the audit decision. A `FAIL` verdict is a valid
    tool result, not a tool failure.
 3. If the first verdict is `FAIL`, inspect the failed gates and make one honest
@@ -78,10 +92,13 @@ Apply these evidence rules:
 
 - For every valid tool result, write the complete, unmodified
   `audit-output-v1` envelope to `<report-stem>.audit.json` beside the report.
+  JSON re-serialization is allowed; preserve every field and value.
   For example, `market-report.md` produces `market-report.audit.json`.
 - Present the report and JSON sidecar together. In the final response, show
-  only the verdict, `degraded` state, failed gate names, and both artifact
-  paths. Do not dump the full envelope into chat.
+  the verdict, `degraded` state, failed gate names, and both artifact paths.
+  Include a short note that structural audit results do not establish factual
+  accuracy, and state whether live source verification ran. Do not dump the
+  full envelope into chat.
 - If the tool is missing or raises an execution/protocol error, deliver the
   report normally, do not create a fabricated sidecar, and label the result
   `UNAUDITED` with the short operational reason.
@@ -97,6 +114,7 @@ Before finishing, confirm that:
 - the audit input is traceable to the actual research record;
 - no item or source was invented, silently removed, or counted twice;
 - no more than two audit calls were made;
-- a valid envelope was saved byte-for-byte as JSON, or the report was labeled
+- a valid envelope was saved as JSON with all fields and values preserved,
+  or the report was labeled
   `UNAUDITED` without a fake sidecar;
 - report delivery continued for `FAIL`, `DEGRADED`, and tool-error outcomes.

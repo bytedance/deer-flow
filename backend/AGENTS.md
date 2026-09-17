@@ -395,3 +395,15 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+
+### Optional Research Report Audit
+
+The `research_audit` MCP example is disabled and preference routing is off. The
+`research-report-audit` Skill is explicitly activated and fail-open, preserving
+the complete result envelope in a JSON sidecar (re-serialization is allowed).
+Its current pin has an unresolved upstream DNS-rebinding weakness; the Skill
+requests offline checks only, which is not server-side enforcement. Review an
+upstream transport fix and repin before enabling live verification or merging
+the integration. Structural `PASS` and source-count `verified` labels do not
+establish factual accuracy or source independence. See
+[the MCP setup guide](docs/MCP_SERVER.md#research-report-audit-optional).

@@ -129,7 +129,9 @@ Copy that entry into the root `extensions_config.json` and set `enabled` to
 `true`. The Gateway launches it with `uvx`, so the Gateway host or container
 must have outbound access to GitHub on the first launch. Docker deployments do
 not use a Python checkout from the Docker host; `uvx` installs the pinned source
-inside the Gateway container.
+inside the Gateway container. The example allows 300 seconds for session
+initialization, including a cold install. Preference routing is off, so ordinary
+report or citation requests do not automatically promote this audit tool.
 
 The default visible tool name is `research_audit_audit_report`. Enable the
 public `research-report-audit` skill and explicitly ask DeerFlow to audit a
@@ -145,13 +147,25 @@ server is unavailable, the report is still delivered as `UNAUDITED`; network
 uncertainty during live citation checks is delivered as `DEGRADED`, not as a
 dead-link failure.
 
-Live source verification is disabled in the MCP call unless the skill sends
-`verify_sources: true`. When enabled, only public HTTP(S) targets are allowed by
-default, including after redirects. An operator may set
-`ADVERSARIAL_RESEARCH_AUDIT_ALLOW_PRIVATE_NETWORKS=1` in the server's `env`
-block for a trusted intranet deployment, but doing so permits model-supplied
-report URLs to reach private services and must not be used with untrusted
-inputs.
+The current pinned server has an unresolved DNS-rebinding weakness: it checks
+resolved addresses but resolves the hostname again when connecting. Its
+private-address filter is therefore not an SSRF boundary. Keep
+`verify_sources: false`; the Skill currently requests offline structural checks
+only. This is a workflow precaution, not a server-enforced fix: direct MCP calls
+can still enable verification. Live verification and merge readiness remain
+blocked on a reviewed upstream transport fix and a new pin. Do not enable the
+private-network override for untrusted inputs.
+
+The server's `verified` claim label counts distinct source keys, not independently
+corroborated evidence. It does not verify that cited content supports a claim;
+mirrors at different URLs can count separately. Overall `PASS` can coexist with
+`unverifiable` claims, and gate 6 runs only when integrity data is supplied.
+Neither label establishes factual accuracy. Coverage checks require original
+research records; polished report text alone cannot establish the candidate set.
+
+The 120-second call timeout is a bounded wait, not a guarantee that arbitrarily
+large audits complete. A timeout without a valid envelope remains `UNAUDITED`;
+only a returned envelope with `degraded: true` establishes `DEGRADED`.
 
 The pinned commit is the review unit. When upgrading it, review the upstream
 diff, replace the full 40-character SHA, and rerun the MCP configuration and
