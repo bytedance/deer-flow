@@ -97,12 +97,19 @@ conversation, so enable it only if you are comfortable sending that data to
 Parallel.
 
 Access is anonymous by default: no API key or authentication headers are needed.
-For higher rate limits, optionally add this `headers` field to the
+Keep `"User-Agent": "deer-flow"` in the entry's `headers`. This stable,
+project-wide identity lets Parallel measure aggregate usage from this
+integration to understand adoption and support it; it does not identify an
+individual user or installation. Preserve it on search and fetch HTTP requests
+if the transport changes. Existing configurations can add the same header.
+
+For higher rate limits, optionally add authorization to the `headers` field of the
 `parallel-search` entry in your local `extensions_config.json`:
 
 ```json
 {
   "headers": {
+    "User-Agent": "deer-flow",
     "Authorization": "$PARALLEL_AUTHORIZATION"
   }
 }
@@ -112,7 +119,7 @@ Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
 value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
 in the environment variable because DeerFlow expands only whole-string
 `$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
-files. Remove the `headers` field and restart DeerFlow to return to anonymous
+files. Remove only `Authorization` and restart DeerFlow to return to anonymous
 access. See the
 [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 for details.
