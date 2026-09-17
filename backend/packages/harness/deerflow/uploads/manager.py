@@ -365,6 +365,19 @@ def upload_virtual_path(filename: str) -> str:
     return f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
 
 
+def output_artifact_url(thread_id: str, filename: str) -> str:
+    """Build the artifact URL for a file in a thread's outputs directory.
+
+    *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
+    """
+    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/outputs/{quote(filename, safe='')}"
+
+
+def output_virtual_path(filename: str) -> str:
+    """Build the virtual path for a file in the outputs directory."""
+    return f"{VIRTUAL_PATH_PREFIX}/outputs/{filename}"
+
+
 def enrich_file_listing(result: dict, thread_id: str) -> dict:
     """Add virtual paths and artifact URLs on a listing result.
 

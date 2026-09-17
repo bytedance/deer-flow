@@ -173,6 +173,70 @@ def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+@pytest.mark.parametrize("indent", ["", "  "])
+@pytest.mark.parametrize("first_key", ["use", "group"])
+def test_detect_browser_name_after_other_fields(tmp_path, indent, first_key):
+    """A tool mapping's field order must not change its required extras."""
+    fields = {
+        "use": "deerflow.community.browser_automation.tools:browser_navigate_tool",
+        "group": "browser",
+    }
+    second_key = "group" if first_key == "use" else "use"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n"
+        f"{indent}- name: web_fetch\n"
+        f"{indent}  group: web\n"
+        f"{indent}- {first_key}: {fields[first_key]}\n"
+        f"{indent}  {second_key}: {fields[second_key]}\n"
+        f"{indent}  # The name does not have to be the first field.\n"
+        f"{indent}  name: 'browser_navigate' # enable browser\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+@pytest.mark.parametrize(
+    "other_name",
+    [
+        "  options:\n    name: browser_navigate\n",
+        "  options:\n    - name: browser_navigate\n",
+        "  description: |\n    name: browser_navigate\n",
+        "  # name: browser_navigate\n",
+    ],
+    ids=["nested-mapping", "nested-list", "block-scalar", "comment"],
+)
+def test_detect_browser_ignores_names_outside_tool_fields(tmp_path, indent, other_name):
+    """Nested or commented names must not install an unrelated optional extra."""
+    cfg = tmp_path / "config.yaml"
+    nested_lines = "".join(f"{indent}{line}\n" for line in other_name.splitlines())
+    cfg.write_text(f"tools:\n{indent}- name: web_fetch\n{nested_lines}", encoding="utf-8")
+    assert detect.detect_from_config(cfg) == []
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_detect_browser_name_after_nested_block(tmp_path, indent):
+    """A nested block must not reset tracking of the tool's direct fields."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"tools:\n{indent}- group: browser\n{indent}  options:\n{indent}    x: 1\n{indent}  name: browser_navigate\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_detect_browser_stops_at_following_section(tmp_path, indent):
+    """A later section's item name is not a tool name."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"tools:\n{indent}- group: web\n{indent}  name: web_fetch\nmodels:\n{indent}- use: provider:Model\n{indent}  name: browser_navigate\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(

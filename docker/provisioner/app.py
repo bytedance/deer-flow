@@ -109,6 +109,7 @@ SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+DEFAULT_MAX_SHELL_SESSIONS = 10
 MAX_EXTRA_MOUNTS = 10
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
@@ -483,12 +484,16 @@ class CreateSandboxRequest(BaseModel):
     # mounted into the sidecar only, never the sandbox. Supersedes the runtime
     # binary + credential mounts when enabled.
     provision_lark_cli_broker: bool = False
+    # New Gateways size this from their process-wide subagent capacity. None
+    # keeps requests from older Gateways and custom provisioner callers working.
+    max_shell_sessions: int | None = Field(default=None, gt=0)
 
 
 class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str
     status: str
+    max_shell_sessions: int | None = None
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -958,11 +963,27 @@ def _build_pod(
     skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
+    max_shell_sessions: int | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     init_containers = (
         _build_lark_cli_init_containers(provision_lark_cli_runtime, provision_lark_cli_broker) or None
     )
+    sandbox_env: list[k8s_client.V1EnvVar] = []
+    if max_shell_sessions is not None:
+        sandbox_env.append(
+            k8s_client.V1EnvVar(
+                name="MAX_SHELL_SESSIONS",
+                value=str(max_shell_sessions),
+            )
+        )
+    if _lark_cli_broker_enabled(provision_lark_cli_broker):
+        sandbox_env.append(
+            k8s_client.V1EnvVar(
+                name="DEERFLOW_LARK_BROKER_URL",
+                value=LARK_BROKER_URL,
+            )
+        )
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -980,11 +1001,7 @@ def _build_pod(
                     name="sandbox",
                     image=SANDBOX_IMAGE,
                     image_pull_policy="IfNotPresent",
-                    env=(
-                        [k8s_client.V1EnvVar(name="DEERFLOW_LARK_BROKER_URL", value=LARK_BROKER_URL)]
-                        if _lark_cli_broker_enabled(provision_lark_cli_broker)
-                        else None
-                    ),
+                    env=sandbox_env or None,
                     ports=[
                         k8s_client.V1ContainerPort(
                             name="http",
@@ -1129,6 +1146,24 @@ def _get_pod_phase(sandbox_id: str) -> str:
         return "NotFound"
 
 
+def _get_pod_shell_capacity(sandbox_id: str) -> int:
+    """Return the effective AIO shell capacity persisted in the sandbox Pod."""
+    pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    containers = getattr(getattr(pod, "spec", None), "containers", None) or []
+    sandbox_container = next((container for container in containers if getattr(container, "name", None) == "sandbox"), None)
+    for env_var in getattr(sandbox_container, "env", None) or []:
+        if getattr(env_var, "name", None) != "MAX_SHELL_SESSIONS":
+            continue
+        try:
+            value = int(env_var.value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value") from exc
+        if value <= 0:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value")
+        return value
+    return DEFAULT_MAX_SHELL_SESSIONS
+
+
 # ── API endpoints ────────────────────────────────────────────────────────
 
 
@@ -1169,9 +1204,10 @@ def create_sandbox(req: CreateSandboxRequest):
     )
     provision_lark_cli_runtime = req.provision_lark_cli_runtime
     provision_lark_cli_broker = req.provision_lark_cli_broker
+    max_shell_sessions = req.max_shell_sessions
 
     logger.info(
-        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s skills_container_path=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s",
+        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s skills_container_path=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s max_shell_sessions=%s",
         sandbox_id,
         thread_id,
         user_id,
@@ -1179,16 +1215,33 @@ def create_sandbox(req: CreateSandboxRequest):
         skills_container_path,
         _lark_cli_runtime_enabled(provision_lark_cli_runtime),
         _lark_cli_broker_enabled(provision_lark_cli_broker),
+        max_shell_sessions,
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
-        return SandboxResponse(
-            sandbox_id=sandbox_id,
-            sandbox_url=existing_url,
-            status=_get_pod_phase(sandbox_id),
-        )
+        try:
+            existing_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+        except (ApiException, RuntimeError) as exc:
+            # A Service can outlive its old Pod during asynchronous replacement.
+            # Only a confirmed missing Pod may fall through to creation.
+            if not isinstance(exc, ApiException) or exc.status != 404:
+                raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
+        else:
+            if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
+                # Only the Gateway can fence replacement against active owners.
+                # A transient discovery failure can route a live Pod through create.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
+                )
+            return SandboxResponse(
+                sandbox_id=sandbox_id,
+                sandbox_url=existing_url,
+                status=_get_pod_phase(sandbox_id),
+                max_shell_sessions=existing_shell_capacity,
+            )
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
@@ -1203,6 +1256,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 skills_container_path=skills_container_path,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
+                max_shell_sessions=max_shell_sessions,
             ),
         )
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
@@ -1234,10 +1288,20 @@ def create_sandbox(req: CreateSandboxRequest):
     if not sandbox_url:
         raise HTTPException(status_code=500, detail="Service access URL was not available in time")
 
+    # A concurrent creator can win the 409 race with a lower-capacity Pod.
+    # Never claim that the requested value was applied without reading it back.
+    try:
+        actual_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+    except (ApiException, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
+    if max_shell_sessions is not None and actual_shell_capacity < max_shell_sessions:
+        raise HTTPException(status_code=409, detail="Existing sandbox shell capacity is below the requested value")
+
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=actual_shell_capacity,
     )
 
 
@@ -1279,6 +1343,7 @@ def get_sandbox(sandbox_id: str):
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=_get_pod_shell_capacity(sandbox_id),
     )
 
 
@@ -1301,11 +1366,20 @@ def list_sandboxes():
         sandbox_url = _url_from_service(svc, sid)
         if not sandbox_url:
             continue
+        try:
+            shell_capacity = _get_pod_shell_capacity(sid)
+        except (ApiException, RuntimeError) as exc:
+            if isinstance(exc, ApiException) and exc.status == 404:
+                continue
+            reason = getattr(exc, "reason", str(exc))
+            logger.warning("Skipping sandbox %s while inspecting shell capacity: %s", sid, reason)
+            continue
         sandboxes.append(
             SandboxResponse(
                 sandbox_id=sid,
                 sandbox_url=sandbox_url,
                 status=_get_pod_phase(sid),
+                max_shell_sessions=shell_capacity,
             )
         )
 
