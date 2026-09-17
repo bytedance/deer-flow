@@ -401,7 +401,7 @@
   而该 location 没有设置 `proxy_read_timeout`，因此沿用 nginx 默认的 60 秒，而 `/api/langgraph/`
   允许 600 秒。较慢的 `/compact` 会返回 504，但 Gateway 仍会继续执行并保存压缩结果，于是 UI
   对已经生效的操作显示错误，诱使用户重试并再次压缩。`/suggestions` 也受同一限制，`/runs/wait`
-  则会在 nginx 断开连接时取消其运行。Docker、本地开发与 Helm 配置现在都为该 location 允许 600 秒。
+  则会在 nginx 断开连接时取消其运行。Docker、本地开发与 Helm 配置现在都为该 location 允许 600 秒。([#5505])
 - **中间件：** 循环检测不再中断正在分段读取文件的智能体。此前 `read_file` 调用按 200 行分桶作为
   键，因此任何短于一个桶的读取都会与相邻读取塌缩到同一个键：连续五次 40 行读取会哈希成相同值并
   触发硬停止，运行被迫给出最终答复并带上 `stop_reason=loop_capped`——而这恰恰是 `read_file` 自身
@@ -2222,3 +2222,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
 [#5447]: https://github.com/bytedance/deer-flow/pull/5447
 [#5469]: https://github.com/bytedance/deer-flow/pull/5469
+[#5505]: https://github.com/bytedance/deer-flow/pull/5505

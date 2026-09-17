@@ -590,7 +590,7 @@ This section accumulates work toward the **2.1.0** milestone
   work that had been applied, inviting a retry that compacts it again.
   `/suggestions` hit the same limit, and `/runs/wait` cancelled its run when
   nginx dropped the connection. The Docker, local, and Helm configs now allow
-  600 seconds on that location.
+  600 seconds on that location. ([#5505])
 - **middleware:** Stop loop detection from cutting off an agent that pages
   through a file. `read_file` calls were keyed by 200-line buckets, so every
   read shorter than a bucket collapsed onto its neighbours: five sequential
@@ -2918,4 +2918,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
 [#5447]: https://github.com/bytedance/deer-flow/pull/5447
 [#5469]: https://github.com/bytedance/deer-flow/pull/5469
-
+[#5505]: https://github.com/bytedance/deer-flow/pull/5505
