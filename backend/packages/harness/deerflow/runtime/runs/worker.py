@@ -1820,6 +1820,23 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     return _message_type(visible_messages[-1]) == "ai"
 
 
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. The goal evaluator only reads human and AI text and never sees it.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
+
+
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
     if evaluation["satisfied"]:
         return None
@@ -1976,6 +1993,19 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(

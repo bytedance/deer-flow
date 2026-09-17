@@ -590,7 +590,7 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -677,7 +677,7 @@ def _run_status_value(record: Any) -> str | None:
 
 async def _require_successful_source_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None:
         # The run-event journal is the authoritative lookup above. This fallback
@@ -704,7 +704,7 @@ async def _find_interrupted_target_run_id(
         return None
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(source_run_id, user_id=user_id)
     if record is None:
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)

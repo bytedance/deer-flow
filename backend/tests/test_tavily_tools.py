@@ -4,8 +4,59 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tavily import TavilyClient
 
 from deerflow.community.tavily.tools import web_fetch_tool, web_search_tool
+from deerflow.config.tool_config import ToolConfig
+
+
+@pytest.mark.parametrize(
+    ("search_provider", "fetch_key", "expected_key"),
+    [
+        ("serper", "fetch-key", "fetch-key"),
+        (None, "fetch-key", "fetch-key"),
+        ("tavily", "fetch-key", "fetch-key"),
+        ("serper", None, "env-key"),
+        ("tavily", None, "env-key"),
+        (None, None, "env-key"),
+    ],
+)
+def test_web_fetch_uses_own_credentials(monkeypatch, search_provider, fetch_key, expected_key) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "env-key")
+    fetch_config = ToolConfig(name="web_fetch", group="web", use="deerflow.community.tavily.tools:web_fetch_tool", **({"api_key": fetch_key} if fetch_key else {}))
+    configs = {"web_fetch": fetch_config}
+    if search_provider:
+        configs["web_search"] = ToolConfig(name="web_search", group="web", use=f"deerflow.community.{search_provider}.tools:web_search_tool", api_key="search-key")
+
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch.object(TavilyClient, "extract", autospec=True, return_value={"results": []}) as extract,
+    ):
+        mock_config.return_value.get_tool_config.side_effect = configs.get
+        web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    client, urls = extract.call_args.args
+    assert client.api_key == expected_key
+    assert urls == ["https://example.com/report"]
+
+
+@pytest.mark.parametrize("search_key", ["search-key", None])
+def test_web_search_preserves_own_credentials(monkeypatch, search_key) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "env-key")
+    configs = {
+        "web_search": ToolConfig(name="web_search", group="web", use="deerflow.community.tavily.tools:web_search_tool", api_key=search_key),
+        "web_fetch": ToolConfig(name="web_fetch", group="web", use="deerflow.community.tavily.tools:web_fetch_tool", api_key="fetch-key"),
+    }
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch.object(TavilyClient, "search", autospec=True, return_value={"results": []}) as search,
+    ):
+        mock_config.return_value.get_tool_config.side_effect = configs.get
+        web_search_tool.invoke({"query": "documentation"})
+
+    client, query = search.call_args.args
+    assert client.api_key == (search_key or "env-key")
+    assert query == "documentation"
 
 
 def _tavily_response() -> dict:

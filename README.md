@@ -964,6 +964,8 @@ A standard Agent Skill is a structured capability module — a Markdown file tha
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
 
+When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
+
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. Namespace directories without their own `SKILL.md` can still group nested skills.
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
@@ -1073,6 +1075,11 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+Tavily search and fetch each read `api_key` from their own tool entry in
+`config.yaml`, falling back to `TAVILY_API_KEY` when omitted. Fetch does not
+reuse the search entry's key, so search can use a different provider. If you
+previously configured a shared Tavily key only under `web_search`, also set it
+under `web_fetch` or use `TAVILY_API_KEY` for both.
 
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
@@ -1133,7 +1140,22 @@ libraries they import.
 
 DeerFlow allocates a task-scoped extension store only for middleware, lifecycle, or
 system-model observation. Services receive app-scoped runtime dependencies after Gateway
-persistence is ready and stop in reverse order after active runs drain. Extension HTTP
+persistence is ready and stop in reverse order after active runs drain. The optional
+`ExtensionRuntimeDeps.run_evidence_reader` is a stable, read-only interface for audit,
+evaluation, synchronization, and observability services: it discovers changed runs with an
+opaque resumable cursor, pages a known run's persisted events with `after_seq`, and reads the
+authoritative run status separately from event evidence. A database-backed run store keeps
+the discovery cursor valid across Gateway restarts; the memory run store provides the same
+ordering only for the current process lifetime. Event metadata is secret-redacted at this
+boundary, but event content is returned unchanged. Both payloads are detached snapshots,
+so modifying nested values cannot change the host's stored evidence. The production
+Gateway supplies an
+app-scoped, cross-user reader to trusted operator extensions; an embedded host may bind the
+same adapter to one user. Changed-run pages contain creations and changes to retained rows,
+not deletion tombstones; consumers that reconcile deletions must poll status for known runs
+and treat a missing result as absent. Extensions still execute with Gateway privileges and
+retain the legacy `session_factory`, so the reader is an API-stability and
+least-accidental-privilege boundary, not a sandbox for untrusted Python packages. Extension HTTP
 routers are mounted after every host route; definite shadows and routes entering the
 host's authentication- or CSRF-exempt paths are rejected with attributed diagnostics,
 while unrelated routers continue to load. Because the host's public paths are a reserved
@@ -1530,7 +1552,10 @@ continuation, so the agent can read the rest; it asks for the missing part only
 if that read is unavailable.
 SDK clients that cannot add top-level request fields may send the same list as
 `context.conversation_references`, and `GET /api/features` reports whether the
-tool is enabled. There is no frontend selector or automatic history search. See
+tool is enabled. When it is, the web composer shows a "Reference a conversation"
+button next to the attachment button: pick up to three of your recent
+conversations, and they are attached to the next message only, shown as chips
+in the composer and in the transcript. There is no automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 

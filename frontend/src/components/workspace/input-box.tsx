@@ -71,6 +71,10 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
+import {
+  buildConversationReferenceMetadata,
+  type ConversationReference,
+} from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import {
@@ -128,6 +132,8 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
+import { ReferenceConversationsButton } from "./conversation-references/reference-conversations-button";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -135,6 +141,7 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  filterSkillsForAgent,
   getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
@@ -226,6 +233,8 @@ function escapeXmlAttribute(value: string) {
 export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  /** Thread IDs attached through the conversation picker; sent as run context. */
+  conversationReferences?: string[];
   onSent?: () => void;
 };
 
@@ -301,6 +310,8 @@ export function InputBox({
   onSubmit,
   onStop,
   canStopStreaming = true,
+  agentSkillNames,
+  agentSkillsLoading = false,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -323,6 +334,8 @@ export function InputBox({
   threadId: string;
   draftThreadId?: string;
   draftAgentName?: string | null;
+  agentSkillNames?: string[] | null;
+  agentSkillsLoading?: boolean;
   /**
    * The active custom agent's configured default model, if any. Used as the
    * auto-selection fallback so an agent chat honors the agent's own default
@@ -381,6 +394,14 @@ export function InputBox({
   const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
+  // Conversations attached for the next message only. Not persisted with the
+  // draft; cleared once a send proceeds or the composer moves to another thread.
+  const [conversationReferences, setConversationReferences] = useState<
+    ConversationReference[]
+  >([]);
+  useEffect(() => {
+    setConversationReferences([]);
+  }, [threadId]);
   const removeAttachment = attachments.remove;
   // Project documents attached from the shelf arrive already ingested
   // thread-side (spec §9): the composer shows them as completed attachments
@@ -645,12 +666,19 @@ export function InputBox({
       }),
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
+  const agentScopedSkills = useMemo(
+    () =>
+      agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
+    [agentSkillNames, agentSkillsLoading, skills],
+  );
   const enabledSkillNames = useMemo(
     () =>
       new Set(
-        skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+        agentScopedSkills
+          .filter((skill) => skill.enabled)
+          .map((skill) => skill.name),
       ),
-    [skills],
+    [agentScopedSkills],
   );
   const cancelDraftSaveTimer = useCallback(() => {
     if (draftSaveTimerRef.current === null) {
@@ -756,7 +784,7 @@ export function InputBox({
   }, [flushLatestDraft]);
 
   useEffect(() => {
-    if (skillsLoading || hydratedDraftKey === draftKey) {
+    if (skillsLoading || agentSkillsLoading || hydratedDraftKey === draftKey) {
       return;
     }
 
@@ -775,7 +803,7 @@ export function InputBox({
     const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
     setTextInput(resolvedDraft.text);
     const restoredSkill = resolvedDraft.skillName
-      ? skills.find(
+      ? agentScopedSkills.find(
           (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
         )
       : undefined;
@@ -795,7 +823,8 @@ export function InputBox({
     hydratedDraftKey,
     initialValue,
     setTextInput,
-    skills,
+    agentScopedSkills,
+    agentSkillsLoading,
     skillsLoading,
     textInput.value,
   ]);
@@ -1125,6 +1154,9 @@ export function InputBox({
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
+      const referenceIds = conversationReferences.map(
+        (reference) => reference.threadId,
+      );
       // Project-shelf attachments are already ingested thread-side (§9):
       // they join ``additional_kwargs.files`` as completed uploads without a
       // re-upload, and merge with any files uploaded in this send
@@ -1137,18 +1169,15 @@ export function InputBox({
           status: "uploaded" as const,
         }),
       );
-      const quoteKwargs = quotes.length
-        ? buildReferenceMessageMetadata(quoteContexts)
-        : {};
-      const submitOptions: InputBoxSubmitOptions = {
-        ...(quotes.length || stagedFiles.length > 0
-          ? {
-              additionalKwargs: {
-                ...quoteKwargs,
-                ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
-              },
-            }
+      const additionalKwargs = {
+        ...(quotes.length ? buildReferenceMessageMetadata(quoteContexts) : {}),
+        ...(referenceIds.length
+          ? buildConversationReferenceMetadata(conversationReferences)
           : {}),
+        ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
+      };
+      const submitOptions: InputBoxSubmitOptions = {
+        ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
         ...(quotes.length
           ? {
               additionalInputMessages: [
@@ -1157,6 +1186,9 @@ export function InputBox({
                 }),
               ],
             }
+          : {}),
+        ...(referenceIds.length
+          ? { conversationReferences: referenceIds }
           : {}),
         // Clear one-time state only once the send genuinely proceeds. If the
         // send is dropped by the in-flight guard, `onSent` never fires.
@@ -1168,6 +1200,7 @@ export function InputBox({
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
           sidecar?.clearConversationQuotes(quoteIds);
+          setConversationReferences([]);
           setProjectAttachments([]);
         },
       };
@@ -1198,6 +1231,7 @@ export function InputBox({
     },
     [
       context,
+      conversationReferences,
       draftKey,
       invalidateDraftSaveTimer,
       onContextChange,
@@ -1408,7 +1442,7 @@ export function InputBox({
       return [];
     }
     const matches = getMatchingSkillSuggestions(
-      skills,
+      agentScopedSkills,
       slashSkillQuery,
       builtinSlashCommands,
     );
@@ -1421,7 +1455,12 @@ export function InputBox({
     return selectedSlashSkill
       ? matches.filter(({ kind }) => kind === "skill")
       : matches;
-  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
+  }, [
+    agentScopedSkills,
+    builtinSlashCommands,
+    selectedSlashSkill,
+    slashSkillQuery,
+  ]);
   // A selected skill does not close the catalog: `/` reopens it so a skill can
   // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =
@@ -2342,6 +2381,22 @@ export function InputBox({
               </button>
             </div>
           ))}
+          {conversationReferences.map((reference) => (
+            <ConversationReferenceChip
+              key={reference.threadId}
+              onRemove={() =>
+                setConversationReferences((current) =>
+                  current.filter(
+                    (item) => item.threadId !== reference.threadId,
+                  ),
+                )
+              }
+              removeLabel={t.inputBox.referenceConversationsRemove(
+                reference.title,
+              )}
+              title={reference.title}
+            />
+          ))}
           {polishingInput && (
             <div
               aria-live="polite"
@@ -2436,6 +2491,13 @@ export function InputBox({
               className="px-2!"
               disabled={composerLocked}
               uploadLimits={uploadLimits}
+            />
+            <ReferenceConversationsButton
+              className="px-2!"
+              currentThreadId={threadId}
+              disabled={composerLocked}
+              onChange={setConversationReferences}
+              references={conversationReferences}
             />
             <VoiceInputButton
               disabled={composerLocked}

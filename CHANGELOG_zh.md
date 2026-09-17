@@ -403,6 +403,14 @@
   的截断提示要求模型去做的分段读取。现在键使用精确的行区间，省略 `end_line` 时保持"读到末行"的
   开放语义，因此不带范围的读取与显式 `start_line=1` 仍共用同一个键。重复同一区间依然会在原有阈值
   被拦下，边界抖动的读取循环仍由按工具类型计数的频率层覆盖。
+- **子智能体：** `max_turns` 现在真正表示运维人员理解的"轮次"。此前它被直接当作 LangGraph 的
+  `recursion_limit` 传入，而后者统计的是 super-step——每个图节点一步，且 `create_agent` 会为每个
+  中间件生命周期钩子编译出一个节点，因此在子智能体的中间件链上一轮要花掉 7~8 步：内置
+  `general-purpose` 的 `max_turns=150` 实际只买到约 18 轮带工具调用的轮次，随后以 `turn_capped`
+  结束；每往链上加一个中间件，有效预算还会再缩水一次。现在执行器会按实际组装出的中间件链的
+  每轮节点数来换算配置的轮次，调高 `max_turns` 就能得到它所声明的轮次。没有配置项变化；既有的
+  `max_turns` 取值现在会获得完整预算，因此原先被截断的子智能体运行可能变长，其上界仍由
+  `subagents.timeout_seconds` 与 `subagents.token_budget` 约束。
 - **调度器：** 在 SQLite 上同样强制执行全局 `max_concurrent_runs`，此前该上限只在 Postgres 上成立。
   认领排队中的 occurrence 时，会先统计正在执行的行，再把其中一行提升为 `launching`，Postgres 用
   advisory lock 将这两步串行化。而 SQLite 的 deferred 事务直到那条提升用的 UPDATE 才占用 writer，
