@@ -114,6 +114,17 @@ _HIDDEN_SENSITIVE_FILES = {
     "config",
 }
 _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
+_TYPE_ANNOTATION_RE = re.compile(
+    r"^(?:(?:typing|collections(?:\.abc)?)\.)?"
+    r"(?:"
+    r"Optional|Union|List|Dict|Set|FrozenSet|Tuple|Type|Literal|Annotated|"
+    r"Sequence|Mapping|Callable|Iterable|Iterator|Generator|TypeVar|"
+    r"ClassVar|Final|Required|NotRequired|TypedDict|Any|Self|LiteralString|"
+    r"Pattern|Match|IO|TextIO|BinaryIO|list|dict|set|tuple|type|frozenset|"
+    r"str|int|float|bool|bytes|bytearray|complex|object|None|NoneType"
+    r")"
+    r"(?:\[[^\s]+\])?$"
+)
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
@@ -323,12 +334,14 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
 
-    assignment_re = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
+    # Same-line only: ``\s*`` would let ``if token:`` bind to the next line.
+    assignment_re = re.compile(r"(?i)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b[ \t]*[:=][ \t]*[\"']?([^\"'\s#]+)")
     for match in assignment_re.finditer(text):
-        value = match.group(2).strip()
-        if not _looks_like_placeholder(value):
-            findings.append(_finding_from_match("secret-env-assignment", rel_path, text, match))
-            break
+        value = match.group(2).strip().rstrip("),;")
+        if _looks_like_placeholder(value) or _looks_like_non_secret_assignment_value(value, keyword=match.group(1)):
+            continue
+        findings.append(_finding_from_match("secret-env-assignment", rel_path, text, match))
+        break
     return findings
 
 
@@ -655,6 +668,36 @@ def _looks_like_placeholder(value: str) -> bool:
     if normalized in _PLACEHOLDER_VALUES:
         return True
     return normalized.startswith("<") or normalized.startswith("${") or "your" in normalized or "example" in normalized
+
+
+def _looks_like_type_annotation(value: str) -> bool:
+    """Return True for Python type text captured after ``token:`` / ``password:``.
+
+    The assignment regex stops at whitespace, so ``token: Optional[str] = None``
+    yields ``Optional[str]`` (or ``Optional[str]=None`` when the default is
+    jammed against the annotation). Those are not secret literals.
+    """
+    normalized = value.strip().strip("\"'")
+    if not normalized:
+        return False
+    head, sep, _tail = normalized.partition("=")
+    candidate = head if sep else normalized
+    return bool(_TYPE_ANNOTATION_RE.fullmatch(candidate))
+
+
+def _looks_like_non_secret_assignment_value(value: str, *, keyword: str) -> bool:
+    """Skip type annotations, calls, and ``token=token`` keyword pass-throughs."""
+    normalized = value.strip().strip("\"'")
+    if not normalized:
+        return True
+    if _looks_like_type_annotation(normalized):
+        return True
+    if normalized.lower() in {"none", "true", "false"}:
+        return True
+    if normalized.lower() == keyword.lower():
+        return True
+    # ``token = os.getenv("GITHUB_TOKEN")`` captures ``os.getenv(``.
+    return "(" in normalized
 
 
 def _http_host(url: str) -> str | None:

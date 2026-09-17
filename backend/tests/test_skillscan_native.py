@@ -471,6 +471,57 @@ def test_secret_token_evidence_leaks_no_secret_bytes(tmp_path: Path) -> None:
     assert "a1" not in evidence
 
 
+def test_secret_env_assignment_skips_python_type_annotations(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "client.py").write_text(
+        "from typing import Optional\nimport os\n\nclass GitHubAPI:\n    def __init__(self, token: Optional[str] = None):\n        self.headers = {}\n\ntoken = os.getenv('GITHUB_TOKEN')\napi = GitHubAPI(token=token)\n",
+        encoding="utf-8",
+    )
+
+    rules = {finding["rule_id"] for finding in scan_skill_dir(skill_dir)["findings"]}
+
+    assert "secret-env-assignment" not in rules
+
+
+def test_secret_env_assignment_still_flags_literal_secrets(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "client.py").write_text(
+        'from typing import Optional\n\ndef connect(token: Optional[str] = None):\n    password = "hunter2"\n    return token, password\n',
+        encoding="utf-8",
+    )
+
+    finding = _finding_by_rule(scan_skill_dir(skill_dir)["findings"], "secret-env-assignment")
+
+    assert finding["file"] == "scripts/client.py"
+    assert finding["severity"] == "HIGH"
+    assert finding["line"] == 4
+
+
+def test_secret_env_assignment_still_flags_env_file_literals(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    (skill_dir / "config.txt").write_text("TOKEN=hunter2\n", encoding="utf-8")
+
+    finding = _finding_by_rule(scan_skill_dir(skill_dir)["findings"], "secret-env-assignment")
+
+    assert finding["file"] == "config.txt"
+    assert finding["severity"] == "HIGH"
+
+
+def test_github_deep_research_has_no_secret_assignment_finding() -> None:
+    skill_dir = Path(__file__).parents[2] / "skills" / "public" / "github-deep-research"
+
+    rules = {finding["rule_id"] for finding in scan_skill_dir(skill_dir)["findings"]}
+
+    assert "secret-env-assignment" not in rules
+
+
 def test_shell_weak_reverse_shell_idioms_warn_not_block(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
