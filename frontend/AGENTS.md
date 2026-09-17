@@ -193,7 +193,9 @@ integration, and legacy sources must stay distinct. Community currently offers
 archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.
 `backend/packages/harness/deerflow/capabilities/builtin.json` owns localized
 catalog manifests. Refresh the generated demo snapshot with `pnpm catalog:sync`
-after changing the catalog; unit tests enforce equality with the source.
+after changing the catalog; unit tests enforce equality with the source. Demo
+business projections derive provider IDs from the catalog adapter metadata. The
+sync script uses decoded filesystem paths for formatter configuration lookup.
 `plugin-catalog.ts` only resolves localized text and explicit
 installation metadata; never infer provider identity from server display names.
 `plugin-directory.tsx` groups rows and applies search/category/installed filters.

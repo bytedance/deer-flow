@@ -88,13 +88,16 @@ export async function staticCapabilityInstallations(
       },
     ];
   } else {
+    const businessPluginIds = new Set(
+      staticCapabilityCatalog
+        .filter((plugin) => plugin.adapter === "business")
+        .map((plugin) => plugin.id),
+    );
     items = Object.entries(data.mcp_servers ?? {})
       .filter(
         ([, server]) =>
           adapter !== "business" ||
-          ["dingtalk", "wecom", "hubspot"].includes(
-            server.capability?.plugin_id ?? "",
-          ),
+          businessPluginIds.has(server.capability?.plugin_id ?? ""),
       )
       .map(([name, server]) => ({
         ...base,

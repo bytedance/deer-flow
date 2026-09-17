@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 
 import { listAgents } from "@/core/agents/api";
 import { fetch as apiFetch } from "@/core/api/fetcher";
+import { staticCapabilityCatalog } from "@/core/capabilities/static";
 import {
   listChannelConnections,
   listChannelProviders,
@@ -287,4 +288,34 @@ it("provides Lark, skills and business projections from the owning fixtures", as
   }
   const unknown = await apiFetch("/api/capabilities/installations/unknown");
   expect(unknown.status).toBe(404);
+});
+
+it("discovers newly cataloged business adapters without a provider allowlist", async () => {
+  const template = staticCapabilityCatalog.find(
+    (plugin) => plugin.adapter === "business",
+  )!;
+  staticCapabilityCatalog.push({ ...template, id: "future-business" });
+  try {
+    network.mockResolvedValueOnce(
+      Response.json({
+        mcp_servers: {
+          future: {
+            enabled: true,
+            capability: { plugin_id: "future-business" },
+          },
+          github: { enabled: true, capability: { plugin_id: "github" } },
+          unknown: { enabled: true, capability: { plugin_id: "unknown" } },
+        },
+      }),
+    );
+    const response = await apiFetch("/api/capabilities/installations/business");
+    const result = await response.json();
+    expect(result).toMatchObject({
+      can_manage: false,
+      items: [{ name: "future", plugin_id: "future-business" }],
+    });
+    expect(result.items).toHaveLength(1);
+  } finally {
+    staticCapabilityCatalog.pop();
+  }
 });

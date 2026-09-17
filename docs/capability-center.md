@@ -154,8 +154,12 @@ a display name, including when choosing brand icons. Multiple installations of
 one provider remain separate rows.
 
 Installation IDs must be unique across all servers, including disabled entries
-and legacy derived IDs. MCP writes reject collisions before saving. Old ambiguous
-configurations remain visible with `selectable: false` and `health: ambiguous`;
+and legacy derived IDs. Creation, replacement and state changes reject collisions
+before saving. Deletion still validates the configuration schema but permits
+remaining ID collisions: administrators can remove entries one at a time, even
+with multiple independent collision pairs. Other writes remain blocked until
+those collisions are repaired; deletion never changes surviving connection IDs.
+Old ambiguous configurations remain visible with `selectable: false` and `health: ambiguous`;
 explicit Agent selections load none of the colliding connections. Remove a
 conflicting entry or repair the deployment configuration before selecting it.
 The inherited-all mode retains its previous behavior.

@@ -226,3 +226,32 @@ def test_stale_bundled_interpreter_can_be_repaired_without_reinstall(capability_
     assert repaired["env"] == configuration["env"]
     assert repaired["command"] == sys.executable
     assert client.patch("/api/mcp/config", json={"server_name": "team", "enabled": True}).status_code == 200
+
+
+def test_delete_recovers_multiple_legacy_identity_collisions(capability_client):
+    from deerflow.capabilities.runtime import installation_id
+
+    client, path = capability_client
+    raw = json.loads(path.read_text())
+    raw["mcpServers"].update(
+        {
+            "legacy-peer": {"type": "http", "url": "https://example.test", "capability": {"id": installation_id("legacy", {})}},
+            "pair-two-a": {"type": "http", "url": "https://example.test", "capability": {"id": "pair-two"}},
+            "pair-two-b": {"type": "http", "url": "https://example.test", "capability": {"id": "pair-two"}, "enabled": False},
+            "unrelated": {"type": "http", "url": "https://example.test"},
+        }
+    )
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    assert client.delete("/api/mcp/config/servers/legacy-peer", headers={"test-role": "user"}).status_code == 403
+    assert path.read_bytes() == before
+    for removed in ["unrelated", "legacy-peer", "pair-two-b"]:
+        before_raw = json.loads(path.read_text())
+        assert client.delete(f"/api/mcp/config/servers/{removed}").status_code == 200
+        del before_raw["mcpServers"][removed]
+        assert json.loads(path.read_text()) == before_raw
+        items = client.get("/api/capabilities/installations/mcp").json()["items"]
+        ambiguous = [item for item in items if not item["selectable"]]
+        assert len(ambiguous) == {"unrelated": 4, "legacy-peer": 2, "pair-two-b": 0}[removed]
+    assert client.patch("/api/mcp/config", json={"server_name": "legacy", "enabled": False}).status_code == 200
+    assert client.post("/api/mcp/config/servers", json={"mcp_servers": {"recovered": {"type": "http", "url": "https://example.test"}}}).status_code == 200

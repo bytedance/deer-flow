@@ -351,14 +351,16 @@ function MCPServerList({
         open={editor !== null}
         onOpenChange={(open) => !open && !isWriting && closeEditor()}
       >
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-w-2xl">
+          <DialogHeader className="shrink-0 pr-6 break-words">
             <DialogTitle>
               {editor?.mode === "edit"
                 ? t.settings.tools.editServer
                 : t.settings.tools.addServer}
             </DialogTitle>
-            <DialogDescription>
+          </DialogHeader>
+          <div className="-m-1 flex min-h-0 flex-col gap-4 overflow-y-auto p-1">
+            <DialogDescription className="shrink-0 text-center break-words sm:text-left">
               {editor?.mode === "edit"
                 ? t.settings.tools.editServerDescription.replace(
                     "{name}",
@@ -366,35 +368,38 @@ function MCPServerList({
                   )
                 : t.settings.tools.addServerDescription}
             </DialogDescription>
-          </DialogHeader>
-          <PluginIconPicker
-            name={previewName}
-            asset={previewMetadata?.icon}
-            capabilityId={previewMetadata?.id}
-            value={previewIcon}
-            disabled={isWriting || previewEntries.length > 1}
-            onChange={setDraftIcon}
-            onBusyChange={setIconBusy}
-          />
-          {previewEntries.length > 1 && (
-            <p className="text-muted-foreground text-xs">
-              {t.capabilities.icon.singleServer}
-            </p>
-          )}
-          <Textarea
-            className="min-h-52 font-mono text-xs"
-            aria-label={t.settings.tools.serverDefinitionLabel}
-            spellCheck={false}
-            value={definition}
-            placeholder={t.settings.tools.addServerPlaceholder}
-            onChange={(event) => setDefinition(event.target.value)}
-          />
-          {definitionError && (
-            <div className="text-destructive text-sm" role="alert">
-              {definitionError}
-            </div>
-          )}
-          <DialogFooter>
+            <PluginIconPicker
+              name={previewName}
+              asset={previewMetadata?.icon}
+              capabilityId={previewMetadata?.id}
+              value={previewIcon}
+              disabled={isWriting || previewEntries.length > 1}
+              onChange={setDraftIcon}
+              onBusyChange={setIconBusy}
+            />
+            {previewEntries.length > 1 && (
+              <p className="text-muted-foreground text-xs">
+                {t.capabilities.icon.singleServer}
+              </p>
+            )}
+            <Textarea
+              className="field-sizing-fixed h-96 min-h-24 resize-none overflow-auto font-mono text-xs"
+              aria-label={t.settings.tools.serverDefinitionLabel}
+              spellCheck={false}
+              value={definition}
+              placeholder={t.settings.tools.addServerPlaceholder}
+              onChange={(event) => setDefinition(event.target.value)}
+            />
+            {definitionError && (
+              <div
+                className="text-destructive shrink-0 text-sm break-words"
+                role="alert"
+              >
+                {definitionError}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="shrink-0">
             <Button
               variant="outline"
               disabled={isWriting}

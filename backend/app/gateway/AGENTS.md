@@ -176,3 +176,8 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LIFECYCLE.md).
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
+
+Capability installation IDs must be unique for MCP create/replace/state writes.
+Single-server DELETE keeps schema validation but allows residual identity
+collisions, so legacy duplicate groups can be repaired incrementally. Runtime
+explicit selections still exclude ambiguous identities until repaired.

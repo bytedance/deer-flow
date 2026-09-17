@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import { format, resolveConfig } from "prettier";
 
@@ -15,7 +16,7 @@ await writeFile(
   destination,
   await format(JSON.stringify(catalog), {
     ...(await resolveConfig(
-      new URL("../package.json", import.meta.url).pathname,
+      fileURLToPath(new URL("../package.json", import.meta.url)),
     )),
     parser: "json",
   }),
