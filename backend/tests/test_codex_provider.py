@@ -211,6 +211,42 @@ def test_convert_messages_tool_message():
     assert items[0]["output"] == "result data"
 
 
+def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():
+    """A malformed call stays on invalid_tool_calls but is answered by a placeholder
+    ToolMessage, so it must still serialize as a function_call item.
+
+    Responses rejects a function_call_output whose call_id has no matching
+    function_call item, so dropping the invalid call turns the placeholder the
+    middleware injected for recovery into the provider error it exists to prevent.
+    """
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "function_call",
+                "name": "write_file",
+                "arguments": '{"path": "report.md", "content": "unterminated',
+                "call_id": "call_bad",
+            }
+        ],
+        "usage": {},
+    }
+    ai_msg = model._parse_response(response).generations[0].message
+    assert [tc["id"] for tc in ai_msg.invalid_tool_calls] == ["call_bad"]
+
+    patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="write it"), ai_msg])
+    assert isinstance(patched[-1], ToolMessage)
+    assert patched[-1].tool_call_id == "call_bad"
+
+    _, items = model._convert_messages(patched)
+    call_ids = {item["call_id"] for item in items if item.get("type") == "function_call"}
+    output_ids = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+    assert output_ids == {"call_bad"}
+    assert output_ids <= call_ids
+
+
 # ---------------------------------------------------------------------------
 # _parse_sse_data_line
 # ---------------------------------------------------------------------------
