@@ -478,13 +478,26 @@ run_service() {
     else
         sh -c "$cmd" &
     fi
+    local child_pid=$!
 
-    bash ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
+    # wait-for-port.sh owns liveness, timeout accounting, and the per-second
+    # progress output: if the service process dies before opening its port, it
+    # fails immediately (exit 2) instead of burning the whole timeout on a dead
+    # launcher (empty logs, silent shim failures, interpreter mismatches, etc.).
+    local wait_status=0
+    bash ./scripts/wait-for-port.sh "$port" "$timeout" "$name" "$child_pid" || wait_status=$?
+    if [ "$wait_status" -ne 0 ]; then
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
-        echo "✗ $name failed to start."
-        [ -f "$logfile" ] && tail -20 "$logfile"
+        if [ "$wait_status" -eq 2 ]; then
+            echo "✗ $name exited before listening on port $port."
+        else
+            echo "✗ $name failed to start."
+        fi
+        if [ -f "$logfile" ]; then
+            tail -20 "$logfile"
+        fi
         cleanup 1
-    }
+    fi
     echo "✓ $name started on localhost:$port"
 }
 
