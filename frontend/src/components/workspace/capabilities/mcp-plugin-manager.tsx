@@ -1,7 +1,7 @@
 "use client";
 
 import { PencilIcon, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,13 +12,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Item,
-  ItemActions,
-  ItemContent,
-  ItemDescription,
-  ItemTitle,
-} from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
@@ -36,38 +29,47 @@ import {
 import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
 
-import { SettingsSection } from "./settings-section";
+import { CapabilityCard, CapabilityIcon } from "./capability-card";
 
-export function ToolSettingsPage() {
+type MCPPluginManagerProps = {
+  query?: string;
+  children?: ReactNode;
+  toolbar?: ReactNode;
+};
+
+export function MCPPluginManager(props: MCPPluginManagerProps) {
   const { t } = useI18n();
   const { config, isLoading, error } = useMCPConfig();
-  const adminRequired =
-    error instanceof MCPConfigRequestError && error.isAdminRequired;
-  return (
-    <SettingsSection
-      title={t.settings.tools.title}
-      description={t.settings.tools.description}
-    >
-      {isLoading ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : adminRequired ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.tools.adminRequired}
+  if (isLoading || error) {
+    return (
+      <div className="space-y-4">
+        {props.toolbar}
+        {isLoading ? (
+          <p role="status" className="text-muted-foreground text-sm">
+            {t.common.loading}
+          </p>
+        ) : (
+          <p role="alert" className="text-muted-foreground text-sm">
+            {error instanceof MCPConfigRequestError && error.isAdminRequired
+              ? t.settings.tools.adminRequired
+              : `${t.common.error} ${error?.message}`}
+          </p>
+        )}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {props.children}
         </div>
-      ) : error ? (
-        <div>
-          {t.common.error} {error.message}
-        </div>
-      ) : (
-        config && <MCPServerList servers={config.mcp_servers} />
-      )}
-    </SettingsSection>
-  );
+      </div>
+    );
+  }
+  return <MCPServerList {...props} servers={config?.mcp_servers} />;
 }
 
 function MCPServerList({
   servers,
-}: {
+  query = "",
+  children,
+  toolbar,
+}: MCPPluginManagerProps & {
   servers?: Record<string, MCPServerConfig>;
 }) {
   const { t } = useI18n();
@@ -82,7 +84,11 @@ function MCPServerList({
 
   const readOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const current = servers ?? {};
-  const entries = Object.entries(current);
+  const entries = Object.entries(current).filter(([name, config]) =>
+    `${name} ${config.description ?? ""}`
+      .toLowerCase()
+      .includes(query.trim().toLowerCase()),
+  );
   const isMutating = isPending || isWriting;
 
   function displayServerName(name: string | null) {
@@ -189,39 +195,32 @@ function MCPServerList({
 
   return (
     <div className="flex w-full flex-col gap-4">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {toolbar ?? <span />}
         <Button
           size="sm"
           variant="outline"
           disabled={readOnly || isMutating}
           onClick={openAddEditor}
         >
-          {t.settings.tools.addServer}
+          {t.capabilities.addPlugin}
         </Button>
       </div>
 
-      {entries.length === 0 ? (
+      {entries.length === 0 && !children ? (
         <div className="text-muted-foreground text-sm">
-          {t.settings.tools.empty}
+          {query ? t.capabilities.noResults : t.settings.tools.empty}
         </div>
       ) : (
-        entries.map(([name, config]) => {
-          const displayName = displayServerName(name);
-          return (
-            <Item className="w-full" variant="outline" key={name}>
-              <ItemContent>
-                <ItemTitle>
-                  <div className="flex items-center gap-2">
-                    <div>{displayName}</div>
-                  </div>
-                </ItemTitle>
-                <ItemDescription className="line-clamp-4">
-                  {config.description}
-                </ItemDescription>
-              </ItemContent>
-              <ItemActions className="gap-1">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {children}
+          {entries.map(([name, config]) => {
+            const displayName = displayServerName(name);
+            const actions = (
+              <>
                 <Switch
                   checked={config.enabled}
+                  aria-label={`${t.capabilities.enabled} ${displayName}`}
                   disabled={readOnly || isMutating}
                   onCheckedChange={(checked) =>
                     enableMCPServer({ serverName: name, enabled: checked })
@@ -245,24 +244,59 @@ function MCPServerList({
                 >
                   <Trash2 className="size-4" />
                 </Button>
-              </ItemActions>
-            </Item>
-          );
-        })
+              </>
+            );
+            return (
+              <CapabilityCard
+                key={name}
+                name={displayName}
+                description={
+                  config.description || t.capabilities.mcpDescription
+                }
+                label={t.capabilities.mcpLabel}
+                icon={<CapabilityIcon name={name} />}
+                status={
+                  <>
+                    <span
+                      className={
+                        config.enabled
+                          ? "size-1.5 rounded-full bg-emerald-500"
+                          : "bg-muted-foreground/40 size-1.5 rounded-full"
+                      }
+                    />
+                    {config.enabled
+                      ? t.capabilities.enabled
+                      : t.capabilities.disabled}
+                  </>
+                }
+                onDetails={
+                  readOnly || isMutating
+                    ? undefined
+                    : () => openEditEditor(name, config)
+                }
+                detailsLabel={`${t.capabilities.details} ${displayName}`}
+              >
+                {actions}
+              </CapabilityCard>
+            );
+          })}
+        </div>
       )}
 
       <Dialog
         open={editor !== null}
         onOpenChange={(open) => !open && !isWriting && closeEditor()}
       >
-        <DialogContent>
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden sm:max-w-2xl">
+          <DialogHeader className="shrink-0 pr-6 break-words">
             <DialogTitle>
               {editor?.mode === "edit"
                 ? t.settings.tools.editServer
                 : t.settings.tools.addServer}
             </DialogTitle>
-            <DialogDescription>
+          </DialogHeader>
+          <div className="-m-1 flex min-h-0 flex-col gap-4 overflow-y-auto p-1">
+            <DialogDescription className="shrink-0 text-center break-words sm:text-left">
               {editor?.mode === "edit"
                 ? t.settings.tools.editServerDescription.replace(
                     "{name}",
@@ -270,21 +304,24 @@ function MCPServerList({
                   )
                 : t.settings.tools.addServerDescription}
             </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            className="min-h-52 font-mono text-xs"
-            aria-label={t.settings.tools.serverDefinitionLabel}
-            spellCheck={false}
-            value={definition}
-            placeholder={t.settings.tools.addServerPlaceholder}
-            onChange={(event) => setDefinition(event.target.value)}
-          />
-          {definitionError && (
-            <div className="text-destructive text-sm" role="alert">
-              {definitionError}
-            </div>
-          )}
-          <DialogFooter>
+            <Textarea
+              className="field-sizing-fixed h-96 min-h-24 resize-none overflow-auto font-mono text-xs"
+              aria-label={t.settings.tools.serverDefinitionLabel}
+              spellCheck={false}
+              value={definition}
+              placeholder={t.settings.tools.addServerPlaceholder}
+              onChange={(event) => setDefinition(event.target.value)}
+            />
+            {definitionError && (
+              <div
+                className="text-destructive shrink-0 text-sm break-words"
+                role="alert"
+              >
+                {definitionError}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="shrink-0">
             <Button
               variant="outline"
               disabled={isWriting}

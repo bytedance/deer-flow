@@ -582,6 +582,71 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **middleware:** Stop loop detection from cutting off an agent that pages
+  through a file. `read_file` calls were keyed by 200-line buckets, so every
+  read shorter than a bucket collapsed onto its neighbours: five sequential
+  40-line reads hashed identically and tripped the hard stop, ending the run
+  with a forced final answer and `stop_reason=loop_capped` — on exactly the
+  ranged reads `read_file`'s own truncation notice tells the model to make.
+  The key now uses the exact line window, with an omitted `end_line` kept
+  open-ended so a bare read and an explicit `start_line=1` still share one key.
+  Repeating a single range is still caught at the same threshold, and a read
+  loop that varies its bounds remains covered by the per-tool frequency layer.
+- **subagents:** Give `max_turns` the meaning operators read it as. It was
+  handed to LangGraph as `recursion_limit`, which counts super-steps — one per
+  graph node — while `create_agent` compiles a node for every middleware
+  lifecycle hook, so one turn cost seven to eight steps through the subagent
+  chain and the built-in `general-purpose` agent's `max_turns=150` bought about
+  18 tool-using turns before failing as `turn_capped`. Every middleware added
+  to the chain shrank the effective budget again. The executor now scales the
+  configured turn count by the per-turn node count of the chain it actually
+  assembled, so raising `max_turns` buys the turns it names. No config keys
+  changed; existing `max_turns` values now grant their full budget, which can
+  make a previously truncated subagent run longer, bounded as before by
+  `subagents.timeout_seconds` and `subagents.token_budget`.
+- **scheduler:** Enforce the global `max_concurrent_runs` budget on SQLite,
+  which previously only held on Postgres. Claiming a queued occurrence counts
+  the executing rows and then promotes one row to `launching`, and Postgres
+  serializes that pair with an advisory lock. SQLite's deferred transaction
+  reserved the writer only at the promoting UPDATE, so claimants racing on
+  distinct rows — a manual trigger overlapping the poller, or a second Gateway
+  process sharing the database file — all read the same stale count, all passed
+  the budget check, and the configured cap was exceeded. ([#5469])
+- **sandbox:** Stop AIO's `glob` from reporting an exactly-full result as
+  truncated. Its `include_dirs` branch returned as soon as it had collected
+  `max_results` matches, so a listing that held exactly that many — and no more
+  — came back flagged as cut off, and the tool told the model the result was
+  incomplete. That branch already holds the whole listing, so it now looks one
+  match past the cap before deciding, matching the sibling `include_dirs=False`
+  branch, which has always decided from the full list. This concerns the
+  filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
+  is a separate limit with its own one-line-past accounting, and the other
+  providers' filtered-match cap is unchanged.
+- **middleware:** Stop a guard that removes tool calls from breaking every later
+  turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
+  hard stops, subagent-limit truncation, and safety suppression cleared
+  `tool_calls` but left the provider's own tool-call blocks in the message
+  content. Anthropic and the Responses API resend those blocks, so the next
+  request carried a tool call with no result and the provider rejected it, and
+  a hard stop saved to the checkpoint kept failing on each new message. All
+  guards now remove the matching content blocks through one shared helper,
+  which also keeps a Responses call that clarification retains. ([#5447])
+- **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
+  their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
+  search's raw output and then filter it in Python (ignored directories such as
+  `node_modules`, the pattern or `glob` scope), but they reported `truncated`
+  only when `max_results` was reached. When the capped lines were all filtered
+  out, a search with real matches past the cap came back empty and complete.
+  The search now passes one line beyond its cap so a cut-off result is reported
+  as truncated, and the `glob` and `grep` tools say an empty truncated result is
+  incomplete instead of "No matches found". ([#5427])
+- **sandbox:** Stop host paths reaching the model when output joins them with
+  `:`, as `$PATH` and `$PYTHONPATH` do. The matched path ran on through the
+  rest of the list, so every later entry under the same root was left
+  unmasked; extra masking passes recovered one entry each, which hid the leak
+  for short lists. Masking now ends a matched path at `:`. A symlink inside a
+  mount whose target lies outside every mount is now shown by its mount path
+  instead of the target's host path in command output and `glob` results. ([#5418])
 - **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
   It compared only file names, so `src/*.js` matched every `.js` file in the
   tree. The glob now applies to the path relative to the search root, the same
@@ -1479,6 +1544,21 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Security
 
+- **skills:** Close gaps that let files skip SkillScan in the public skill
+  review gate. The review analyzer passed SkillScan only files it had decoded
+  as text, so executable binaries and nested archives were never checked; it
+  exempted every file anywhere under an `evals/fixtures/` directory; and a
+  duplicate archive member or a case-folded name silently overwrote an earlier
+  file before scanning. SkillScan now receives every file byte for byte, only
+  eval fixture `SKILL.md` samples stay exempt, and path collisions mark the
+  review incomplete. SkillScan also skipped code files containing a NUL or
+  non-UTF-8 byte, so one byte in a comment hid a reverse shell from the review
+  gate, and a NUL byte skipped static analysis at install. Such files now raise
+  `package-undecodable-script` and are still analyzed, so `CRITICAL` matches
+  keep blocking. SkillScan's Mach-O detection missed 32-bit little-endian and
+  fat variants that the installer blocks; the installer, export guard, and
+  SkillScan now share one code-file and executable-magic definition. Review
+  snapshots gain a `content_base64` field for binary files. ([#5431])
 - **prompt-injection:** New input-sanitization middleware defends against
   prompt-injection, forged framework tags in the input guardrail are blocked,
   and system context is injected as a `SystemMessage` for role isolation. ([#3662],
@@ -2823,4 +2903,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469
+

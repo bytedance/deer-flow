@@ -664,6 +664,63 @@ describe("human message internal context stripping", () => {
     expect(stripInternalMarkers(content)).toBe("Export me");
   });
 
+  test("stripInternalMarkers removes attributed project context blocks on export", () => {
+    const content =
+      '<project name="Roadmap">\nsecret instructions\n</project>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes documents blocks on export", () => {
+    const content =
+      '<documents count="2" shown="2">\n- id=abc | q3.pdf (2.1 MB, modified 2026-09-10)\n</documents>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers preserves fenced code that uses marker tag names", () => {
+    const content = [
+      "Here is my pom:",
+      "```xml",
+      "<project>",
+      "  <artifactId>demo</artifactId>",
+      "</project>",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
+  test("stripInternalMarkers preserves tilde-fenced and indented code spans", () => {
+    const tilde = ["~~~", '<documents count="1">', "</documents>", "~~~"].join(
+      "\n",
+    );
+    expect(stripInternalMarkers(tilde)).toBe(tilde);
+
+    // The leading text keeps ``trim()`` from eating the code's indentation.
+    const indented = [
+      "Pasted snippet:",
+      "",
+      "    <project>",
+      "    </project>",
+    ].join("\n");
+    expect(stripInternalMarkers(indented)).toBe(indented);
+  });
+
+  test("stripInternalMarkers still removes an injected block whose content contains a fence", () => {
+    const content = [
+      "<memory>",
+      "```",
+      "not a real fence owner",
+      "```",
+      "</memory>",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
   test("strips slash skill activation context from display content", () => {
     const content =
       "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";

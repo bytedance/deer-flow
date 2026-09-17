@@ -26,7 +26,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+)
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -48,6 +52,7 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.subagents.turn_budget import find_jumping_hooks, resolve_recursion_limit
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
@@ -791,6 +796,7 @@ class SubagentExecutor:
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
     ):
         """Initialize the executor.
@@ -841,6 +847,8 @@ class SubagentExecutor:
                 ``RunJournal`` itself.
             tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
                 promotion events. It follows the same isolated-loop boundary.
+            tool_progress_recorder: Optional loop-safe recorder for tool-progress
+                phase transitions. It follows the same isolated-loop boundary.
             context_snapshot: Optional immutable parent history captured by the
                 ordinary task tool at dispatch. Rendered as background data,
                 never as child execution evidence or inherited system authority.
@@ -894,6 +902,7 @@ class SubagentExecutor:
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
+        self.tool_progress_recorder = tool_progress_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -913,6 +922,12 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        # LangGraph super-step budget that buys ``config.max_turns`` turns,
+        # resolved in ``_create_agent`` once the middleware chain — and with it
+        # the compiled graph's per-turn node count — is known. Stays ``None``
+        # until then; ``_aexecute`` falls back to the raw turn count so a test
+        # double replacing ``_create_agent`` still produces a runnable config.
+        self._recursion_limit: int | None = None
         # What this subagent was assembled from, published to extension
         # observers at the end of ``_create_agent``. The prompt and skill set
         # are captured while ``_build_initial_state`` renders them because
@@ -984,6 +999,7 @@ class SubagentExecutor:
         # a list (not ``next(...)``) so every guard is checked and a later one
         # is picked up automatically.
         self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
+        self._recursion_limit = self._resolve_recursion_limit(middlewares)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -1004,6 +1020,44 @@ class SubagentExecutor:
             extensions=extensions if extensions is not None else self.extensions,
         )
         return agent
+
+    def _resolve_recursion_limit(self, middlewares: list[Any]) -> int:
+        """Translate ``max_turns`` into the super-step budget it actually means.
+
+        ``max_turns`` is the operator-facing policy ("how many times may this
+        agent think and act"), while LangGraph's ``recursion_limit`` counts
+        graph nodes. ``create_agent`` compiles one node per middleware
+        lifecycle hook, so the two differ by the depth of the assembled chain —
+        see ``turn_budget.py`` for the arithmetic. Resolving it here, from the
+        chain this subagent was actually built with, keeps the budget stable as
+        middlewares are added and lets a per-agent chain differ.
+        """
+        recursion_limit = resolve_recursion_limit(self.config.max_turns, middlewares)
+        logger.debug(
+            "[trace=%s] Subagent %s turn budget: max_turns=%s -> recursion_limit=%s (%d middlewares)",
+            self.trace_id,
+            self.config.name,
+            self.config.max_turns,
+            recursion_limit,
+            len(middlewares),
+        )
+        # A hook that declares ``can_jump_to`` — agent-level hooks included —
+        # can leave the straight path through the graph, spending super-steps
+        # the flat per-turn cost does not model, so the budget silently becomes
+        # a lower bound. No middleware in the subagent chain declares one today;
+        # say so loudly if that changes, rather than letting runs quietly cap
+        # short again.
+        jumping_hooks = find_jumping_hooks(middlewares)
+        if jumping_hooks:
+            logger.warning(
+                "[trace=%s] Subagent %s has jump-declaring middleware hooks (%s); recursion_limit=%s is a lower bound for max_turns=%s, so the run may cap early",
+                self.trace_id,
+                self.config.name,
+                ", ".join(f"{name}.{hook}" for name, hook in jumping_hooks),
+                recursion_limit,
+                self.config.max_turns,
+            )
+        return recursion_limit
 
     def _describe_assembly(
         self,
@@ -1442,7 +1496,10 @@ class SubagentExecutor:
             # namespace. Business consumers receive thread_id via ``context``
             # below instead.
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                # Super-steps, not turns: ``_create_agent`` (just above) scaled
+                # ``max_turns`` by the compiled chain's per-turn node count.
+                # Unset only when that method was replaced by a test double.
+                "recursion_limit": self._recursion_limit if self._recursion_limit is not None else self.config.max_turns,
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
@@ -1511,6 +1568,8 @@ class SubagentExecutor:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
             if self.tool_promotion_recorder is not None:
                 context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
+            if self.tool_progress_recorder is not None:
+                context[TOOL_PROGRESS_RECORDER_CONTEXT_KEY] = self.tool_progress_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1594,14 +1653,15 @@ class SubagentExecutor:
                 )
 
         except GraphRecursionError:
-            # ``recursion_limit`` on run_config == ``self.config.max_turns``
-            # (set above). Hitting it means the subagent exhausted its turn
-            # budget. Route into the additive ``stop_reason`` channel (#3875
-            # Phase 2) rather than a dedicated status enum (which would break v1
-            # contract consumers). If the run streamed usable partial work,
-            # surface it as ``completed``; otherwise ``failed``. Either way the
-            # lead can tell "out of budget" from "broken subagent" without
-            # parsing result text.
+            # ``recursion_limit`` on run_config is ``self.config.max_turns``
+            # scaled into super-steps (set above), so hitting it means the
+            # subagent exhausted its turn budget — report the turn count, which
+            # is the number the operator configured. Route into the additive
+            # ``stop_reason`` channel (#3875 Phase 2) rather than a dedicated
+            # status enum (which would break v1 contract consumers). If the run
+            # streamed usable partial work, surface it as ``completed``;
+            # otherwise ``failed``. Either way the lead can tell "out of budget"
+            # from "broken subagent" without parsing result text.
             #
             # Prefer a guard's stop reason if one already fired this run: a
             # token-budget / loop hard-stop strips tool_calls to force a final

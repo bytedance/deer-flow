@@ -479,6 +479,23 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # cannot be validated there and are rejected by the middleware.
             app.state.pat_repo = None
 
+        # Evidence readers are available to Gateway-lifetime extension services,
+        # so the configured event store must exist before those services start.
+        run_events_config = getattr(config, "run_events", None)
+        app.state.run_events_config = run_events_config
+        app.state.run_event_store = make_run_event_store(run_events_config)
+
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader
+
+        # Gateway-lifetime services are trusted operator extensions without a
+        # request principal. None deliberately binds this app-scoped reader to
+        # global, cross-user visibility; event content is not secret-redacted.
+        app.state.run_evidence_reader = StoreRunEvidenceReader(
+            app.state.run_store,
+            app.state.run_event_store,
+            user_id=None,
+        )
+
         # Services are app-scoped. Capture this app's immutable extension set
         # once and close over the same object for teardown; the process-wide
         # singleton may be replaced by another app/test before shutdown.
@@ -504,6 +521,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 extensions,
                 config,
                 sf,
+                run_evidence_reader=app.state.run_evidence_reader,
                 attempted_services=attempted_services,
             )
         )
@@ -513,7 +531,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
-            from deerflow.persistence.projects import ProjectRepository
+            from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -521,6 +539,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
             app.state.project_repo = ProjectRepository(sf)
+            app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
@@ -534,17 +553,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.mcp_task_repo = None
             app.state.project_repo = None
+            app.state.project_document_repo = None
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
-
-        # Run event store. The store and the matching ``run_events_config`` are
-        # both frozen at startup so ``get_run_context`` does not combine a
-        # freshly-reloaded ``AppConfig.run_events`` with a store still bound to
-        # the previous backend.
-        run_events_config = getattr(config, "run_events", None)
-        app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -652,6 +664,7 @@ get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_st
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 get_project_repo = _require("project_repo", "Projects")
+get_project_document_repo = _require("project_document_repo", "Projects")
 
 
 def get_store(request: Request):

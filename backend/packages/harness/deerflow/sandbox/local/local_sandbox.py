@@ -355,28 +355,40 @@ class LocalSandbox(Sandbox):
         normalized_path = path.replace("\\", "/")
         path_str = os.path.realpath(normalized_path)
 
+        container_path = self._container_path_for_local(path_str)
+        if container_path is None:
+            # A symlink under a mount can resolve outside every mount. Its own
+            # spelling still names a path inside the mount, so translate that
+            # rather than hand the model the link target's host path. ``normpath``
+            # keeps ``mount/../x`` from passing as inside the mount.
+            container_path = self._container_path_for_local(os.path.normpath(normalized_path))
+        if container_path is not None:
+            return container_path
+
+        # No mapping found, return original path
+        return path_str
+
+    def _container_path_for_local(self, local_path: str) -> str | None:
+        """Translate a native-separated host path under a mount, or return ``None``."""
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
             # ``Path.resolve()`` always renders with the native separator
-            # (backslash on Windows), regardless of the forward-slash
-            # normalization above, so the containment check must compare with
+            # (backslash on Windows), regardless of the caller's forward-slash
+            # normalization, so the containment check must compare with
             # ``os.sep`` here too -- mirroring ``_is_read_only_path`` -- instead
             # of a hardcoded "/". A hardcoded "/" can never match a
             # backslash-joined nested path on Windows, so every nested path
-            # silently fell through to the "no mapping found" branch below and
+            # silently fell through to the "no mapping found" fallback and
             # leaked the raw host path (real username, full directory tree).
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
+            if local_path == local_path_resolved or local_path.startswith(local_path_resolved + os.sep):
                 # Replace the local path prefix with container path. Container
                 # paths are always POSIX-style, so the extracted relative
                 # portion (native-separated on Windows) is normalized to
                 # forward slashes before being spliced in.
-                relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
-                resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
-                return resolved
-
-        # No mapping found, return original path
-        return path_str
+                relative = local_path[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
+                return f"{mapping.container_path}/{relative}" if relative else mapping.container_path
+        return None
 
     def _reverse_resolve_paths_in_output(self, output: str) -> str:
         """
@@ -511,7 +523,11 @@ class LocalSandbox(Sandbox):
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
-                args = [shell, "-NoProfile", "-Command", resolved_command]
+                # Pair PowerShell's output encoding with the pipe decoder.
+                # Console setters can fail without an attached console; guard
+                # them independently so setup errors do not pollute tool output.
+                utf8_preamble = "try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;"
+                args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
             else:
@@ -524,7 +540,10 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
+            if self._is_powershell(shell):
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+            else:
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
@@ -551,8 +570,10 @@ class LocalSandbox(Sandbox):
         args: list[str],
         timeout: float,
         env: dict[str, str] | None = None,
+        *,
+        encoding: str | None = None,
     ) -> tuple[str, str, int, bool]:
-        """Run a Windows command with bounded capture and process-tree timeout."""
+        """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
@@ -582,7 +603,8 @@ class LocalSandbox(Sandbox):
                     # The write fd may already be closed by the exception cleanup above.
                     pass
 
-        encoding = locale.getpreferredencoding(False)
+        if encoding is None:
+            encoding = locale.getpreferredencoding(False)
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(
             stdout_read_fd,
             "deerflow-bash-stdout-drain",

@@ -7,8 +7,8 @@ from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
 
 
-def _get_tavily_client() -> TavilyClient:
-    config = get_app_config().get_tool_config("web_search")
+def _get_tavily_client(tool_name: str = "web_search") -> TavilyClient:
+    config = get_app_config().get_tool_config(tool_name)
     api_key = None
     if config is not None and "api_key" in config.model_extra:
         api_key = config.model_extra.get("api_key")
@@ -56,7 +56,7 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    client = _get_tavily_client()
+    client = _get_tavily_client("web_fetch")
     res = client.extract([url])
     if "failed_results" in res and len(res["failed_results"]) > 0:
         return f"Error: {res['failed_results'][0]['error']}"

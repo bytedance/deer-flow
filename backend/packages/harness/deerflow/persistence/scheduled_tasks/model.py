@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -40,11 +41,36 @@ class ScheduledTaskRow(Base):
     )
 
 
+class ScheduledTaskRunStatus(StrEnum):
+    """Canonical status vocabulary for scheduled-task occurrences."""
+
+    QUEUED = "queued"
+    LAUNCHING = "launching"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    INTERRUPTED = "interrupted"
+
+
 # Status constants - shared between scheduled_tasks and scheduled_task_runs
 # to avoid circular import and ensure consistency.
 # Import these from deerflow.persistence.scheduled_tasks.model in both modules.
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-ACTIVE_RUN_STATUSES: frozenset[str] = frozenset({"queued", "launching", "running"})
+TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
+    {
+        ScheduledTaskRunStatus.SUCCESS,
+        ScheduledTaskRunStatus.FAILED,
+        ScheduledTaskRunStatus.SKIPPED,
+        ScheduledTaskRunStatus.INTERRUPTED,
+    }
+)
+ACTIVE_RUN_STATUSES: frozenset[str] = frozenset(
+    {
+        ScheduledTaskRunStatus.QUEUED,
+        ScheduledTaskRunStatus.LAUNCHING,
+        ScheduledTaskRunStatus.RUNNING,
+    }
+)
 
 # Parent ``once`` task status projected from a terminal occurrence status.
 # Shared by the completion path and both recovery paths so the mapping

@@ -1327,19 +1327,21 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     assert truncated is False
 
 
-def test_list_dir_raises_when_find_returns_no_entries() -> None:
+@pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+def test_list_dir_classifies_empty_failure(marker, error) -> None:
     class _EmptyBox:
         async def exec(self, *argv, env=None, timeout=None):
-            return types.SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+            return types.SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
 
     box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(error) as exc:
         box.list_dir("/mnt/user-data/workspace")
+    assert type(exc.value) is error
 
 
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
-    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    # 127 (no binary) must not look like a missing path.
     class _MissingBinaryBox:
         async def exec(self, *argv, env=None, timeout=None):
             return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
@@ -1427,6 +1429,26 @@ def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeyp
     found, _ = box.glob(str(tmp_path), "**/*.py")
     assert [os.path.basename(path) for path in found] == ["app.py"]
     assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
 
 
 @_RS_POSIX

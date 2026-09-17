@@ -32,7 +32,7 @@
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a
    later server preference. The
-   Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
+   Capability Center > Plugins MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
@@ -71,7 +71,7 @@
    fixed page size and an explicit load-more control; full results remain available
    only through JSONL export. The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
-   Settings > Integrations uses a local generation only to suppress stale React
+   Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.
@@ -101,6 +101,8 @@ Run duration is run-scoped UI metadata even though the compatibility field `addi
 The workspace-change card follows the same rule: it is resolved from `(threadId, runId)` alone, so every AI message of a run would render an identical copy. A run ends in more than one terminal assistant bubble whenever the model emits answer text that never gains a tool call, so `core/messages/workspace-change-anchor.ts` picks the run's last assistant bubble and `MessageListItem` renders the badge only for that anchor (#4555). Any future run-scoped display belongs in the same place — do not hang one off every message. The two anchor helpers deliberately differ in which group types they accept as a run's last position, because an anchor is only useful where the display is actually rendered: run duration is emitted by `MessageList` around every group, so it accepts any type, while the workspace-change card comes from `MessageListItem` and so restricts to `assistant`. Keep a new helper's candidate set matched to its own render site rather than unifying them.
 
 Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores only text plus the selected slash-skill name in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. `InputBox` waits for enabled skills before restoring a skill chip, degrades a missing/disabled skill back to editable slash text, and clears the stored draft through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
+
+Conversation references (`read_conversation`, opt-in on the backend) are attached from the composer. `ReferenceConversationsButton` (`components/workspace/conversation-references/`) renders only while `/api/features` reports `conversation_references.enabled`, opens a picker over the same `useThreads()` list the sidebar uses (the current thread excluded, capped at `max_references`), and shows removable chips in the composer header. On submit the thread IDs ride `InputBoxSubmitOptions.conversationReferences` → `SendMessageOptions.conversationReferences` → run `context.conversation_references`, which the Gateway consumes at admission; the LangGraph SDK drops unknown top-level body fields, so the top-level request field is not reachable from the web UI. `core/conversation-references` also writes display-only `additional_kwargs.conversation_references` (`{thread_id, title, agent_name?}`) on the visible human message so `message-list-item.tsx` can render read-only chips linking to the source — through `pathOfThread`, so custom-agent sources route to `/workspace/agents/{agent}/chats/{id}`; that metadata grants nothing. References are per message: they are not persisted with the draft, clear on send or thread switch, and regenerate/edit of a turn runs without them unless attached again.
 
 Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
 
@@ -145,6 +147,18 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Interaction Ownership
 
+- `src/components/workspace/model-picker-content.tsx` owns the compact model
+  list, favorite grouping, and the anchored non-modal picker shared by the main
+  composer and Side Chat. Each row keeps model selection and its inline
+  favorite star as sibling buttons. The picker deliberately follows the
+  pre-favorites two-line row density and does not add a search field. Favorites
+  are stored by
+  `core/models/favorites-store.ts` under a user-scoped browser key and only
+  reorder derived display arrays: never sort `useModels().models`, promote a
+  favorite to the default model, prune a temporarily unavailable favorite, or
+  merge the main and Side Chat selection callbacks. Keep favorite buttons out
+  of model-selection buttons; the two call sites continue to own their triggers
+  and their distinct mode/reasoning-effort transitions.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
 - `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.

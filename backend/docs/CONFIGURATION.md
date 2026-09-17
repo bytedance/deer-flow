@@ -2,6 +2,51 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Model request admission
+
+For request-per-minute limits, opt into pacing on each relevant `models[]`
+entry. For example, add this alongside its `name`, `use`, and `model` fields:
+
+```yaml
+request_admission:
+  requests_per_minute: 60
+  group: shared-provider-account
+  max_wait_seconds: 300
+  max_queue_size: 256
+```
+
+Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
+at least one second apart, even after idle periods. The first call can proceed
+immediately. Async waiting is cancellable; a cancelled or expired waiter spends
+no admission. Queue overflow and wait expiry fail locally before dispatch.
+The deadline covers admission waiting only, not the provider's response time.
+
+An explicit `group` shares the budget across model profiles using the same
+provider quota. Omit it for a separate budget per configured model name.
+All profiles in a group must have identical settings. The limiter is shared by
+factory-created model instances across threads and event loops, including
+lead agents, subagents and auxiliary models using the standard LangChain
+BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
+disabling or regrouping active policies; conflicting settings fail model
+construction instead of resetting a live budget.
+
+When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
+would bypass the admission hook. Agent middleware retries still work and each
+new attempt is paced. Calls outside that middleware no longer get SDK retries.
+Custom providers that bypass BaseChatModel admission hooks or perform hidden
+retries need their own integration. A caller-supplied `rate_limiter` cannot be
+combined with `request_admission`.
+
+This is **process-local RPM pacing**, not TPM accounting or a distributed quota
+service. Divide the provider allowance among Gateway workers/replicas and allow
+headroom for other applications. Provider token limits, external consumption,
+billing failures and permanent errors can still fail a task. Existing
+`llm_call.max_concurrent_calls` remains independent: when enabled, its slot is
+held while the underlying model waits for admission, so use shared groups and
+concurrency settings deliberately. Waiting contributes to model-call latency
+and remains subject to the enclosing run's timeout. This option is off by
+default and does not promise unlimited retries or eventual task completion.
+
 ## Config Versioning
 
 `config.example.yaml` contains a `config_version` field that tracks schema changes. When the example version is higher than your local `config.yaml`, the application emits a startup warning:
@@ -526,6 +571,16 @@ Custom agents must also permit the `conversation` tool group where they restrict
 groups. References are limited to owned threads and the current run; they do not
 enable history discovery, memory extraction or cross-user access. See the
 [request contract and limits](API.md#referencing-a-previous-conversation).
+Once the tool is listed, `GET /api/features` reports
+`conversation_references.enabled: true` and the per-run cap, so a client can
+show an entry point only where the tool exists; SDK clients that cannot add
+top-level request fields pass the list as `context.conversation_references`.
+
+Reader pages are sized to stay within the `tool_output` budget for
+`read_conversation` (12,000 serialized characters by default), so they are not
+externalized to `.tool-results`. To allow larger pages, raise
+`tool_output.tool_overrides.read_conversation`; a page still holds at most
+20,000 text characters.
 
 ### Sandbox
 
@@ -846,7 +901,7 @@ require supply-chain pinning.
 
 #### Sandbox container network exposure and hardening
 
-The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
+The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). On Docker Desktop, resolving `host.docker.internal` yields an internal VM gateway address that the host OS cannot bind; because Docker Desktop forwards `host.docker.internal` to host loopback, DeerFlow defaults to `127.0.0.1` for `host.docker.internal` on Desktop daemons. Custom non-loopback sandbox hosts continue to bind their resolved address. If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
 
 Local Docker sandbox containers are also hardened by default: all Linux capabilities are dropped (`--cap-drop=ALL`) except a five-capability compatibility allowlist — `CHOWN`, `FOWNER`, `SETUID`, `SETGID`, and `DAC_OVERRIDE` — while privilege escalation across exec stays blocked with `no-new-privileges` and CPU/memory/PID resources are bounded. `CHOWN`/`SETUID`/`SETGID` support the runtime user handoff and `DAC_OVERRIDE` supports the root nginx master's writes to gem-owned logs. `FOWNER` is specifically required by the newer AIO 1.11.x startup path (regression-tested against the recommended 1.11.0 image), which runs `chmod /run/user/1000` after capabilities are dropped. Images that do not perform that `chmod` do not need `FOWNER`; DeerFlow deliberately does not guess a smaller set from mutable tags, digests, or arbitrary custom images, so the default compatibility allowlist remains version-agnostic.
 
@@ -854,7 +909,7 @@ A custom image that is already fully initialized as a non-root user and needs no
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `DEER_FLOW_SANDBOX_BIND_HOST` | loopback / bridge gateway (see above) | Host interface for the sandbox `-p` publish. Must be an IP literal (bare or bracketed IPv6) or a hostname, which is resolved to an address first — Docker publish specs do not accept hostnames. `0.0.0.0` restores the legacy broad bind (risky). |
+| `DEER_FLOW_SANDBOX_BIND_HOST` | loopback (localhost or Docker Desktop with `host.docker.internal`) / host-gateway-ip / bridge gateway | Host interface for the sandbox `-p` publish. Must be an IP literal (bare or bracketed IPv6) or a hostname, which is resolved to an address first — Docker publish specs do not accept hostnames. `0.0.0.0` restores the legacy broad bind (risky). |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | on | The shipped AIO image's Chromium browser does not start under Docker's default seccomp profile (see the upstream agent-infra sandbox FAQ), so `seccomp=unconfined` remains the default. Set to `0` to run with the built-in profile — passed explicitly as `seccomp=builtin`, so a daemon configured with a different default cannot weaken the opt-out — and only for images verified to start and pass browser checks with it. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | on | Keeps the five-capability compatibility set (`CHOWN`/`FOWNER`/`SETUID`/`SETGID`/`DAC_OVERRIDE`). `FOWNER` specifically covers the newer AIO 1.11.x startup `chmod /run/user/1000` path (tested with 1.11.0); images without that step do not need `FOWNER`, but DeerFlow does not infer per-image capability subsets from tags/digests/custom images. Set to `0` only for images that need none of the five — the switch drops the entire set. |
 | `DEER_FLOW_SANDBOX_SECCOMP_PROFILE` | unset | Path to a custom seccomp profile (e.g. a restricted, Chromium-compatible one built from Docker's default plus the namespace syscalls Chromium needs). Takes precedence over the unconfined default. |
@@ -871,6 +926,38 @@ hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
 inside the client. This prevents an inherited proxy from returning a misleading
 502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
 continue to use the normal environment proxy configuration.
+
+### AIO shell-session capacity
+
+Each concurrently running native subagent uses one persistent AIO shell session.
+The semver AIO images from `1.9.3` through `1.11.0` default
+`MAX_SHELL_SESSIONS` to 10 and evict the oldest idle session when an eleventh is
+created. If `subagent_runtime.max_running` is greater than nine, DeerFlow sets
+the container limit to `max_running + 1`; the extra slot leaves room for the lead
+agent's shell. This applies to both locally created containers and provisioner
+Pods. Lower concurrency keeps the image's own default unchanged.
+
+The separate `bash.exec` API uses its own `AIO_BASH_MAX_SESSIONS` pool rather
+than `MAX_SHELL_SESSIONS`. DeerFlow nevertheless creates and closes an explicit
+transient bash session around every env-bearing command, so request-scoped
+secrets and completed command sessions are not retained.
+
+You may set `sandbox.environment.MAX_SHELL_SESSIONS` explicitly. It must be a
+positive integer at least as large as `subagent_runtime.max_running + 1`, or the
+provider fails at startup with the conflicting values. The setting is applied
+when a sandbox is created. Persisted local containers and provisioner Pods report
+their effective value; DeerFlow replaces one whose capacity is below the current
+requirement instead of reusing it. Reuse checks also apply when no explicit
+override is needed for new containers: a previously configured lower limit must
+still fit the current concurrency. The Gateway waits for existing ownership and
+the orphan recovery grace before replacing an incompatible sandbox. A create
+request that encounters a lower-capacity Pod returns HTTP 409 without deleting
+it; a later acquisition can discover and replace it through that same ownership
+check.
+
+If a Service survives deletion of its old Pod, a later create repairs the
+missing Pod. A failed capacity read other than a Pod-not-found response remains
+an error and does not authorize replacement.
 
 ### Building a Custom AIO Sandbox Image
 
