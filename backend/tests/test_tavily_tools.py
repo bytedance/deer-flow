@@ -95,3 +95,35 @@ def test_web_fetch_preserves_unsuccessful_extract_results(response, expected) ->
         output = web_fetch_tool.invoke({"url": "https://example.com/report"})
 
     assert output == expected
+
+
+def _config_with_tool_keys() -> MagicMock:
+    """App config where web_search and web_fetch carry different api keys."""
+    configs = {
+        "web_search": MagicMock(model_extra={"api_key": "search-key"}),
+        "web_fetch": MagicMock(model_extra={"api_key": "fetch-key"}),
+    }
+    app_config = MagicMock()
+    app_config.get_tool_config.side_effect = lambda name: configs.get(name)
+    return app_config
+
+
+def test_web_fetch_reads_its_own_api_key() -> None:
+    """web_fetch must use the web_fetch key, not web_search's (#5495)."""
+    extract_result = {"results": [{"url": "https://example.com/r", "raw_content": "x"}], "failed_results": []}
+    with patch("deerflow.community.tavily.tools.get_app_config", return_value=_config_with_tool_keys()):
+        with patch("deerflow.community.tavily.tools.TavilyClient") as mock_client_cls:
+            mock_client_cls.return_value.extract.return_value = extract_result
+            web_fetch_tool.invoke({"url": "https://example.com/r"})
+
+    mock_client_cls.assert_called_once_with(api_key="fetch-key")
+
+
+def test_web_search_keeps_reading_its_own_api_key() -> None:
+    """The search side of the split: it reads web_search's key (#5495)."""
+    with patch("deerflow.community.tavily.tools.get_app_config", return_value=_config_with_tool_keys()):
+        with patch("deerflow.community.tavily.tools.TavilyClient") as mock_client_cls:
+            mock_client_cls.return_value.search.return_value = _tavily_response()
+            web_search_tool.invoke({"query": "docs"})
+
+    mock_client_cls.assert_called_once_with(api_key="search-key")
