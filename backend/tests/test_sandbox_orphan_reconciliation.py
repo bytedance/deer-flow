@@ -1565,7 +1565,7 @@ def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
     shared = _make_shared_ownership_store(ttl_seconds=lease_ttl)
     worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
     worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
-    # A legal config: the schema bounds only renewal > 0 and multiplier >= 2.
+    # A legal memory-backed config can still use a short 150 ms derived TTL.
     worker_a._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.05, ttl_multiplier=3.0)
     info = SandboxInfo(
         sandbox_id="doomed1",
