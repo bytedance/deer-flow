@@ -97,7 +97,7 @@ async def test_0025_repairs_schema_skipped_by_the_0023_insertion(tmp_path):
         await close_engine()
 
 
-async def test_0025_downgrade_drops_clock_schema_and_reupgrade_restores(tmp_path):
+async def test_0025_downgrade_preserves_ancestor_schema_and_reupgrade_is_safe(tmp_path):
     url = f"sqlite+aiosqlite:///{tmp_path / 'downgrade.db'}"
     await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
     try:
@@ -108,10 +108,10 @@ async def test_0025_downgrade_drops_clock_schema_and_reupgrade_restores(tmp_path
         cfg = _get_alembic_config(engine)
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         has_table, has_column, _, _ = _table_and_column_state(tmp_path / "downgrade.db")
-        assert not has_table
-        assert not has_column
+        assert has_table
+        assert has_column
 
-        # Downgrade is guarded and idempotent: repeating it is a no-op.
+        # Repeating the downgrade remains a no-op.
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
 
         await asyncio.to_thread(command.upgrade, cfg, REVISION)

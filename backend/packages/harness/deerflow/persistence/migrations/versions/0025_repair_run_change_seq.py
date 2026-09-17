@@ -57,13 +57,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    from deerflow.persistence.migrations._helpers import safe_drop_column
-
-    indexes = {index["name"] for index in sa.inspect(op.get_bind()).get_indexes("runs")}
-    if "ix_runs_user_change_seq" in indexes:
-        op.drop_index("ix_runs_user_change_seq", table_name="runs")
-    if "ix_runs_change_seq" in indexes:
-        op.drop_index("ix_runs_change_seq", table_name="runs")
-    safe_drop_column("runs", "change_seq")
-    if "run_change_clock" in set(sa.inspect(op.get_bind()).get_table_names()):
-        op.drop_table("run_change_clock")
+    # This repair does not own the objects: ancestor 0023_run_change_seq does.
+    # 0024 still needs them, and dropping them would also erase durable cursor
+    # positions on healthy databases. The original 0023 downgrade owns removal.
+    pass

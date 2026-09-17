@@ -347,6 +347,11 @@ For persistent deployments, configure `database.backend` as `sqlite` or
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
 section, when present, overrides the first two for backward compatibility.
 
+Gateway startup automatically repairs the missing run-change schema affecting
+some existing databases (#5516). The repair preserves run history and existing
+change positions; downgrading the repair to its predecessor also retains the
+schema and positions required by that version.
+
 For lightweight single-process event persistence, `run_events.backend: jsonl`
 keeps Unicode message content intact, including line and paragraph separators.
 Existing valid JSONL records remain readable without rewriting the files.
