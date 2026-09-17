@@ -1073,6 +1073,14 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
+Tavily `web_search` also accepts optional `include_domains` and `exclude_domains`
+lists in its `config.yaml` tool entry to control search sources. Non-empty
+`include_domains` uses Tavily's `filter` mode to restrict results to those domains.
+These are deployment settings; the model still supplies only `query` and optional
+`time_range`. Omitted filters preserve the existing SDK request; an explicit
+empty list is forwarded and imposes no restriction of that kind. See the
+[tool configuration example](backend/docs/CONFIGURATION.md#tools).
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 Tavily search and fetch each read `api_key` from their own tool entry in

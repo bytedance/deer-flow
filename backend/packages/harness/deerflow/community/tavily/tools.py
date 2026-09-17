@@ -30,6 +30,12 @@ def web_search_tool(query: str, time_range: SearchTimeRange | None = None) -> st
 
     client = _get_tavily_client()
     search_kwargs: dict[str, object] = {"max_results": max_results}
+    if config is not None:
+        for key in ("include_domains", "exclude_domains"):
+            if key in config.model_extra:
+                search_kwargs[key] = config.model_extra[key]
+    if search_kwargs.get("include_domains"):
+        search_kwargs["include_domains_mode"] = "filter"
     if time_range is not None:
         search_kwargs["time_range"] = time_range
     res = client.search(query, **search_kwargs)
