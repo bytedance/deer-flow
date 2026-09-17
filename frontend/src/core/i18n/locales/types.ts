@@ -444,7 +444,6 @@ export interface Translations {
       previous: string;
       next: string;
       pageOnlyNotice: string;
-      sharedNotice: string;
       agentUnavailable: string;
       apply: string;
       historyAll: string;

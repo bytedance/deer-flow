@@ -486,7 +486,6 @@ export function KnowledgeScopeSelector({
         )}
         <div className="text-muted-foreground space-y-1 text-xs">
           <p>{t.knowledge.scope.pageOnlyNotice}</p>
-          <p>{t.knowledge.scope.sharedNotice}</p>
           {draftExceedsLimits && (
             <p className="text-destructive">
               {t.knowledge.scope.selectionInvalid}

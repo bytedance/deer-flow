@@ -403,7 +403,6 @@ export const zhCN: Translations = {
       previous: "上一页",
       next: "下一页",
       pageOnlyNotice: "选择仅在当前页面保留，刷新后恢复全部允许知识库。",
-      sharedNotice: "知识库由当前部署共享；此处选择只限制当前对话的检索范围。",
       agentUnavailable: "当前智能体未允许 knowledge 工具组。",
       apply: "应用",
       historyAll: "知识库：全部允许库",
