@@ -12,8 +12,9 @@ echo ""
 IMAGE=""
 CONFIGURED=1
 if [ -f "config.yaml" ]; then
-    # Look for uncommented image: field under the sandbox section
-    IMAGE=$(grep -A 20 "^sandbox:" config.yaml 2>/dev/null | grep "^  image:" | awk '{print $2}' | head -1 || true)
+    # Strip a leading UTF-8 BOM and CRLF line endings before matching.
+    # Bash expands the bytes so this works with both GNU and BSD sed.
+    IMAGE=$(sed $'1s/^\xef\xbb\xbf//;s/\r$//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{print $2}' | head -1 || true)
 fi
 
 if [ -z "$IMAGE" ]; then
