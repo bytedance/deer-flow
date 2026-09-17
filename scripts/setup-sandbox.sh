@@ -12,9 +12,9 @@ echo ""
 IMAGE=""
 CONFIGURED=1
 if [ -f "config.yaml" ]; then
-    # Strip a leading UTF-8 BOM before matching the sandbox section.
+    # Strip a leading UTF-8 BOM and CRLF line endings before matching.
     # Bash expands the bytes so this works with both GNU and BSD sed.
-    IMAGE=$(sed $'1s/^\xef\xbb\xbf//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{print $2}' | head -1 || true)
+    IMAGE=$(sed $'1s/^\xef\xbb\xbf//;s/\r$//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{print $2}' | head -1 || true)
 fi
 
 if [ -z "$IMAGE" ]; then

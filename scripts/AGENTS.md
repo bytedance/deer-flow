@@ -6,7 +6,7 @@ indentless lists are supported; nested option names and block-scalar text
 must not enable the browser extra. Keep the detector standard-library-only
 because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
-`setup-sandbox.sh` also strips only the leading BOM before selecting the image;
+`setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
 
 The root `PORT` value configures Docker's published nginx ingress only; local
