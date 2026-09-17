@@ -455,6 +455,37 @@ class TestBeforeModelCapture:
         assert "do NOT delegate again" not in data
         assert "[cancelled] research auth" in data
 
+    def test_new_user_turn_keeps_in_progress_delegation_without_run_id(self):
+        """Ledger entries written before delegations carried a run_id can't be tied to a run, so they stay as they are."""
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "legacy-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            HumanMessage(content="please continue", additional_kwargs={"run_id": "run-new"}),
+        ]
+        existing = [
+            {
+                "id": "legacy-call",
+                "description": "research auth",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
     def test_new_user_turn_keeps_earlier_delegation_that_has_a_result(self):
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-new"})
