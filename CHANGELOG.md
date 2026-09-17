@@ -941,6 +941,19 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **nginx:** Extend the 600-second read timeout to the two remaining locations
+  whose routes wait on the Gateway, both left on nginx's 60-second default by
+  the thread-route fix. Behind the `/api/` catch-all, the stateless
+  `POST /api/runs/wait` blocks on the same run-completion wait and cancels its
+  run when the client disconnects, so an API consumer waiting on a run longer
+  than 60 seconds got a 504 *and* a cancelled run, and the composer's
+  `POST /api/input-polish` waits for a one-shot model call. Behind
+  `/api/skills`, installing a `.skill` archive runs one LLM security scan per
+  file in it, and a custom-skill edit or rollback runs one more; none of them
+  sets its own timeout, and only the sibling `/api/skills/install/upload`
+  endpoint had been given the longer timeout, so the same install through
+  `POST /api/skills/install` failed at 60 seconds. Applied to the Docker,
+  local, and Helm configs.
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
