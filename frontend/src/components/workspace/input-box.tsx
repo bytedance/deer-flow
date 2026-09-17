@@ -141,6 +141,7 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  filterSkillsForAgent,
   getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
@@ -309,6 +310,8 @@ export function InputBox({
   onSubmit,
   onStop,
   canStopStreaming = true,
+  agentSkillNames,
+  agentSkillsLoading = false,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -331,6 +334,8 @@ export function InputBox({
   threadId: string;
   draftThreadId?: string;
   draftAgentName?: string | null;
+  agentSkillNames?: string[] | null;
+  agentSkillsLoading?: boolean;
   /**
    * The active custom agent's configured default model, if any. Used as the
    * auto-selection fallback so an agent chat honors the agent's own default
@@ -661,12 +666,19 @@ export function InputBox({
       }),
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
+  const agentScopedSkills = useMemo(
+    () =>
+      agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
+    [agentSkillNames, agentSkillsLoading, skills],
+  );
   const enabledSkillNames = useMemo(
     () =>
       new Set(
-        skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+        agentScopedSkills
+          .filter((skill) => skill.enabled)
+          .map((skill) => skill.name),
       ),
-    [skills],
+    [agentScopedSkills],
   );
   const cancelDraftSaveTimer = useCallback(() => {
     if (draftSaveTimerRef.current === null) {
@@ -772,7 +784,7 @@ export function InputBox({
   }, [flushLatestDraft]);
 
   useEffect(() => {
-    if (skillsLoading || hydratedDraftKey === draftKey) {
+    if (skillsLoading || agentSkillsLoading || hydratedDraftKey === draftKey) {
       return;
     }
 
@@ -791,7 +803,7 @@ export function InputBox({
     const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
     setTextInput(resolvedDraft.text);
     const restoredSkill = resolvedDraft.skillName
-      ? skills.find(
+      ? agentScopedSkills.find(
           (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
         )
       : undefined;
@@ -811,7 +823,8 @@ export function InputBox({
     hydratedDraftKey,
     initialValue,
     setTextInput,
-    skills,
+    agentScopedSkills,
+    agentSkillsLoading,
     skillsLoading,
     textInput.value,
   ]);
@@ -1429,7 +1442,7 @@ export function InputBox({
       return [];
     }
     const matches = getMatchingSkillSuggestions(
-      skills,
+      agentScopedSkills,
       slashSkillQuery,
       builtinSlashCommands,
     );
@@ -1442,7 +1455,12 @@ export function InputBox({
     return selectedSlashSkill
       ? matches.filter(({ kind }) => kind === "skill")
       : matches;
-  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
+  }, [
+    agentScopedSkills,
+    builtinSlashCommands,
+    selectedSlashSkill,
+    slashSkillQuery,
+  ]);
   // A selected skill does not close the catalog: `/` reopens it so a skill can
   // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =

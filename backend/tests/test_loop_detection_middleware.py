@@ -196,6 +196,87 @@ class TestHashToolCalls:
         assert _hash_tool_calls([a]) != _hash_tool_calls([b])
 
 
+class TestReadFileRangeKey:
+    """``read_file`` keys must separate paging progress from re-reading.
+
+    Line ranges used to be quantized into 200-line buckets, which erased the
+    offset inside a bucket: every read shorter than 200 lines collapsed onto its
+    neighbours, so paging one file in 40-line chunks looked like five identical
+    calls and tripped the hard stop — on reads ``read_file``'s own truncation
+    notice tells the model to make.
+    """
+
+    @staticmethod
+    def _read_call(path="/w/app.py", **range_args):
+        return {"name": "read_file", "id": "call_read", "args": {"path": path, **range_args}}
+
+    def test_adjacent_pages_are_distinct_calls(self):
+        pages = [self._read_call(start_line=start, end_line=start + 39) for start in (1, 41, 81, 121, 161)]
+
+        hashes = {_hash_tool_calls([page]) for page in pages}
+
+        assert len(hashes) == len(pages)
+
+    def test_paging_through_a_file_does_not_hard_stop(self):
+        """Regression: five sequential 40-line reads used to force a final answer."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for start in range(1, 401, 40):
+            decision = mw._apply(_make_state(tool_calls=[self._read_call(start_line=start, end_line=start + 39)]), runtime)
+            assert decision is None, f"read of lines {start}-{start + 39} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_repeating_one_range_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [self._read_call(start_line=1, end_line=40)]
+
+        for _ in range(4):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        hard_stop = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert hard_stop is not None
+        assert hard_stop["messages"][0].tool_calls == []
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_rereading_the_same_page_counts_even_between_new_pages(self):
+        """Interleaving fresh pages must not hide a repeated read: the window counts by key."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=3)
+        runtime = _make_runtime()
+        repeated = [self._read_call(start_line=1, end_line=40)]
+
+        assert mw._apply(_make_state(tool_calls=repeated), runtime) is None
+        assert mw._apply(_make_state(tool_calls=[self._read_call(start_line=41, end_line=80)]), runtime) is None
+        assert mw._apply(_make_state(tool_calls=repeated), runtime) is None
+        assert mw._apply(_make_state(tool_calls=[self._read_call(start_line=81, end_line=120)]), runtime) is None
+
+        assert mw._apply(_make_state(tool_calls=repeated), runtime) is not None
+
+    def test_omitted_end_line_matches_a_bare_read_of_the_same_file(self):
+        """Both read to the last line, so they are one read written two ways."""
+        open_ended = self._read_call(start_line=1)
+        bare = self._read_call()
+
+        assert _hash_tool_calls([open_ended]) == _hash_tool_calls([bare])
+
+    def test_omitted_end_line_is_not_a_single_line_read(self):
+        open_ended = self._read_call(start_line=10)
+        single_line = self._read_call(start_line=10, end_line=10)
+
+        assert _hash_tool_calls([open_ended]) != _hash_tool_calls([single_line])
+
+    def test_line_bounds_are_clamped_to_the_first_line(self):
+        assert _hash_tool_calls([self._read_call(start_line=0, end_line=40)]) == _hash_tool_calls([self._read_call(start_line=1, end_line=40)])
+
+    def test_unparsable_end_line_reads_as_open_ended(self):
+        """The tool rejects such a call anyway; the key must stay stable, not crash."""
+        assert _hash_tool_calls([self._read_call(start_line=5, end_line="oops")]) == _hash_tool_calls([self._read_call(start_line=5)])
+
+    def test_different_paths_stay_distinct(self):
+        assert _hash_tool_calls([self._read_call(path="/w/a.py", start_line=1, end_line=40)]) != _hash_tool_calls([self._read_call(path="/w/b.py", start_line=1, end_line=40)])
+
+
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):
         mw = LoopDetectionMiddleware()
