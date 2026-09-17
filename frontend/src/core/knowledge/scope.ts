@@ -141,10 +141,7 @@ export function buildKnowledgeScopeSnapshot(
     NonNullable<KnowledgeScopeSnapshot["display"]>["datasets"]
   > = [];
   for (const dataset of datasets.slice(0, MAX_DISPLAY_DATASETS)) {
-    if (
-      !dataset.name.trim() ||
-      codePointLength(dataset.name) > MAX_NAME_LENGTH
-    )
+    if (!dataset.name.trim() || codePointLength(dataset.name) > MAX_NAME_LENGTH)
       continue;
     const entry: (typeof displayDatasets)[number] = {
       id: dataset.id,
@@ -260,12 +257,10 @@ export function readKnowledgeScopeSnapshot(
           !filter ||
           typeof filter !== "object" ||
           typeof (filter as Record<string, unknown>).dataset_id !== "string" ||
-          !Array.isArray(
-            (filter as Record<string, unknown>).document_ids,
-          ) ||
-          (
-            (filter as Record<string, unknown>).document_ids as unknown[]
-          ).some((id) => typeof id !== "string"),
+          !Array.isArray((filter as Record<string, unknown>).document_ids) ||
+          ((filter as Record<string, unknown>).document_ids as unknown[]).some(
+            (id) => typeof id !== "string",
+          ),
       ))
   ) {
     return null;

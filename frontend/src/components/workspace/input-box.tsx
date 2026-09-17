@@ -344,7 +344,7 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
-  /** Optional custom-agent-only control rendered directly after mode. */
+  /** Optional knowledge-scope control rendered directly after mode. */
   knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
   onContextChange?: (

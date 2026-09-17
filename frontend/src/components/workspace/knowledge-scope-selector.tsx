@@ -336,7 +336,7 @@ export function KnowledgeScopeSelector({
       aria-pressed={active}
       className={cn(
         "text-muted-foreground",
-        active && "text-foreground hover:bg-transparent hover:text-foreground",
+        active && "text-foreground hover:text-foreground hover:bg-transparent",
       )}
       data-testid="knowledge-scope-trigger"
       disabled={disabled || Boolean(unavailableReason)}

@@ -1,10 +1,10 @@
 "use client";
 
 import {
-  BlocksIcon,
   BotIcon,
   CalendarClock,
   MessagesSquare,
+  BlocksIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
