@@ -189,6 +189,22 @@ it("keeps pre-clarification answers stable through hidden replies, reconnect, an
         .filter((item) => item.id === "plan"),
     ).toHaveLength(1);
   }
+  expect(
+    running
+      .find((group) => group.id === "ask")
+      ?.messages.map((item) => item.id),
+  ).toEqual(["ask", "request"]);
+  expect(running.find((group) => group.id === "plan")).toBe(
+    waiting.find((group) => group.id === "plan"),
+  );
+  const nextVisibleTurn = [
+    ...continued,
+    message("human", "followup", "Check status"),
+    message("ai", "status", "Checking"),
+  ];
+  expect(
+    deriveStableMessageGroups(nextVisibleTurn, true, running, true),
+  ).toEqual(getMessageGroups(nextVisibleTurn, { isCurrentTurnLoading: true }));
   expect(running).toEqual(reconnect);
   expect(running.find((group) => group.id === "next")?.type).toBe(
     "assistant:processing",

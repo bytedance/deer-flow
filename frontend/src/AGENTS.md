@@ -168,3 +168,8 @@ messages after the last visible human as unresolved once a clarification result
 has arrived. The processing renderer keeps tool-calling messages intact for
 association and usage accounting, but renders text accompanying
 `ask_clarification` outside the execution panel (including mixed tool calls).
+
+`findCurrentTurnStartIndex` owns the boundary rule for both full and incremental
+message grouping. Incremental prefix/tail splitting applies only at human
+boundaries; clarification results also belong to the preceding processing group,
+so derive the full grouping and stabilize references at clarification boundaries.
