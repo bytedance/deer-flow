@@ -4,8 +4,9 @@ Builds the ``describe_skill`` tool as a closure over a :class:`SkillCatalog`.
 The tool returns structured metadata (description, allowed tools, file location)
 so the LLM can decide whether to ``read_file`` the full SKILL.md.
 
-Mirrors ``build_tool_search_tool`` from ``tool_search.py``: same query syntax,
-same ``Command`` + ``ToolMessage`` return shape, same fail-safe degradation.
+Shares query forms, ``Command`` + ``ToolMessage`` return shape, and fail-safe
+degradation with ``build_tool_search_tool`` from ``tool_search.py``. Skill
+queries intentionally rank literal intent terms rather than matching regexes.
 """
 
 from __future__ import annotations
