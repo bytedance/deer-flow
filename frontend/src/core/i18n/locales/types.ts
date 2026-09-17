@@ -443,7 +443,6 @@ export interface Translations {
       selectionInvalid: string;
       previous: string;
       next: string;
-      pageOnlyNotice: string;
       agentUnavailable: string;
       apply: string;
       historyAll: string;

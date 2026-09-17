@@ -484,14 +484,11 @@ export function KnowledgeScopeSelector({
             </ScrollArea>
           </div>
         )}
-        <div className="text-muted-foreground space-y-1 text-xs">
-          <p>{t.knowledge.scope.pageOnlyNotice}</p>
-          {draftExceedsLimits && (
-            <p className="text-destructive">
-              {t.knowledge.scope.selectionInvalid}
-            </p>
-          )}
-        </div>
+        {draftExceedsLimits && (
+          <p className="text-destructive text-xs">
+            {t.knowledge.scope.selectionInvalid}
+          </p>
+        )}
         <DialogFooter>
           <Button
             type="button"

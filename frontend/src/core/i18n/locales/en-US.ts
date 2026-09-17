@@ -431,8 +431,6 @@ export const enUS: Translations = {
       selectionInvalid: "This selection exceeds the supported size limits.",
       previous: "Previous",
       next: "Next",
-      pageOnlyNotice:
-        "This selection is kept only on the current page. Refreshing resets it to all allowed knowledge bases.",
       agentUnavailable: "This agent does not allow the knowledge tool group.",
       apply: "Apply",
       historyAll: "Knowledge: all allowed bases",

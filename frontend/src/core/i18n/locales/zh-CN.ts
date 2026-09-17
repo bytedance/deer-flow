@@ -402,7 +402,6 @@ export const zhCN: Translations = {
       selectionInvalid: "当前选择超出支持的数量或大小限制。",
       previous: "上一页",
       next: "下一页",
-      pageOnlyNotice: "选择仅在当前页面保留，刷新后恢复全部允许知识库。",
       agentUnavailable: "当前智能体未允许 knowledge 工具组。",
       apply: "应用",
       historyAll: "知识库：全部允许库",
