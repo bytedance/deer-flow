@@ -313,7 +313,7 @@ async def _filter_visible_skills(
     "/skills",
     response_model=SkillsListResponse,
     summary="List All Skills",
-    description="Retrieve a list of all available skills from both public and custom directories.",
+    description=("Retrieve a list of all available skills from both public and custom directories. When authorization is enabled, only skills visible to the caller's role are returned."),
 )
 async def list_skills(request: Request, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     """List all skills visible to the caller.
@@ -428,7 +428,12 @@ async def reload_skills(request: Request) -> SkillReloadResponse:
     )
 
 
-@router.get("/skills/custom", response_model=SkillsListResponse, summary="List Custom Skills")
+@router.get(
+    "/skills/custom",
+    response_model=SkillsListResponse,
+    summary="List Custom Skills",
+    description=("Retrieve the caller's user-owned custom skills. When authorization is enabled, only skills visible to the caller's role are returned."),
+)
 async def list_custom_skills(request: Request, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     """List only user-owned custom skills (SkillCategory.CUSTOM).
 
@@ -662,7 +667,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Get Skill Details",
-    description="Retrieve detailed information about a specific skill by its name.",
+    description=("Retrieve detailed information about a specific skill by its name. When authorization is enabled, a skill hidden from the caller's role returns 404, indistinguishable from a missing skill."),
 )
 async def get_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
