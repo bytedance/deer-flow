@@ -142,15 +142,21 @@ class DbRunEventStore(RunEventStore):
         return ids
 
     @staticmethod
-    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+    async def _acquire_thread_mutation_fence(session: AsyncSession, thread_id: str) -> None:
+        """Take the cross-process thread mutation fence, if the dialect has one.
 
         PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
-        results are not lockable rows. As a release-safe workaround, take a
-        transaction-level advisory lock keyed by thread_id before reading the
-        aggregate. Other dialects keep the existing row-locking statement.
+        results are not lockable rows, so it serializes a thread's mutations with
+        a transaction-level advisory lock keyed by ``thread_id``. This is the
+        database half of the contract whose in-process half is
+        ``_get_write_lock()``: every thread mutation — ``put``, ``put_batch``,
+        ``put_if_absent`` and both deletions — takes this fence before touching
+        rows, so an admitted writer can never land a row between a deletion's
+        count and its commit.
+
+        Dialects without a cross-process fence (SQLite) rely on the in-process
+        per-thread lock alone, so this is a no-op there.
         """
-        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
         bind = session.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
@@ -159,6 +165,22 @@ class DbRunEventStore(RunEventStore):
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
                 {"thread_id": thread_id},
             )
+
+    @staticmethod
+    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+        """Return the current max seq while serializing writers per thread.
+
+        Takes the shared thread mutation fence before reading the aggregate, so
+        the read is ordered against every other mutation of the same thread.
+        Other dialects keep the existing row-locking statement.
+        """
+        await DbRunEventStore._acquire_thread_mutation_fence(session, thread_id)
+
+        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        bind = session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "postgresql":
             return await session.scalar(stmt)
 
         return await session.scalar(stmt.with_for_update())
@@ -487,16 +509,26 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete every event of *thread_id* inside the thread mutation fence.
+
+        Deletion takes the same critical section as the writers — the in-process
+        per-thread lock plus, on PostgreSQL, the transaction advisory lock — so a
+        writer admitted before this call can no longer land a row between the
+        count below and the commit, which would resurrect a deleted thread. The
+        JSONL store serializes deletion the same way (``_run_mutation``).
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_thread")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
             # Retire the live-thread pin, but never remove the weak registry
             # entry directly. asyncio.Lock.release() clears ``locked()`` before
             # a queued waiter resumes, so an unlocked check can observe the
@@ -505,7 +537,7 @@ class DbRunEventStore(RunEventStore):
             # later caller therefore resolves that same lock instead of racing
             # it with a fresh one.
             self._write_lock_pins.pop(thread_id, None)
-            return count
+        return count
 
     async def delete_by_run(
         self,
@@ -514,14 +546,21 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete one run's events inside the thread mutation fence.
+
+        Shares ``delete_by_thread``'s critical section; deleting a single run
+        leaves the thread alive, so the write-lock pin is deliberately kept.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+        return count
