@@ -416,7 +416,7 @@ start() {
     echo ""
 }
 
-# View Docker development logs
+# View Docker logs (development or production)
 logs() {
     local service=""
 
@@ -452,8 +452,28 @@ logs() {
             exit 1
             ;;
     esac
-    
-    cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
+
+    local target_compose_cmd="$COMPOSE_CMD"
+    local dev_containers
+    dev_containers=$(cd "$DOCKER_DIR" && $COMPOSE_CMD ps -q 2>/dev/null || true)
+    if [ -z "$dev_containers" ]; then
+        # When started via 'make up' (scripts/deploy.sh), services run under project
+        # 'deer-flow' using docker-compose.yaml instead of 'deer-flow-dev'.
+        local prod_file="docker-compose.yaml"
+        if [ -f "$DOCKER_DIR/$prod_file" ]; then
+            local prod_cmd="${COMPOSE_BIN[*]} -p deer-flow -f $prod_file"
+            if [ -f "$PROJECT_ROOT/.env" ]; then
+                prod_cmd="${COMPOSE_BIN[*]} --env-file $PROJECT_ROOT/.env -p deer-flow -f $prod_file"
+            fi
+            local prod_containers
+            prod_containers=$(cd "$DOCKER_DIR" && $prod_cmd ps -q 2>/dev/null || true)
+            if [ -n "$prod_containers" ]; then
+                target_compose_cmd="$prod_cmd"
+            fi
+        fi
+    fi
+
+    cd "$DOCKER_DIR" && $target_compose_cmd logs -f $service
 }
 
 # Stop Docker development environment
@@ -493,7 +513,7 @@ help() {
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
     echo "  restart           - Restart all running Docker services"
-    echo "  logs [option] - View Docker development logs"
+    echo "  logs [option] - View Docker logs"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
