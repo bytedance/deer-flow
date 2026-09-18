@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -36,6 +37,7 @@ from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
@@ -67,6 +69,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+_STREAM_CLOSE_SLOW_WARNING_SECONDS = 10.0
 # Kept as wire keys here instead of importing ``deerflow.sandbox`` at module
 # load: executor tests and extension embedders replace that package while
 # breaking agent/tool import cycles.
@@ -1587,41 +1590,77 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                # A yielded values chunk is already executed state.  Retain it
-                # before observing cooperative cancellation so terminal receipt
-                # harvesting includes a tool result that completed while the
-                # cancellation request was in flight.
-                final_state = chunk
-                result.update_tool_receipts(terminal_receipts())
-                result.update_bash_executions(current_bash_executions())
+            cancelled_during_stream = False
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            try:
+                async for chunk in stream:
+                    # A yielded values chunk is already executed state.  Retain it
+                    # before observing cooperative cancellation so terminal receipt
+                    # harvesting includes a tool result that completed while the
+                    # cancellation request was in flight.
+                    final_state = chunk
+                    result.update_tool_receipts(terminal_receipts())
+                    result.update_bash_executions(current_bash_executions())
 
-                # Cooperative cancellation: check if parent requested stop.
-                # Note: cancellation is only detected at astream iteration boundaries,
-                # so long-running tool calls within a single iteration will not be
-                # interrupted until the next chunk is yielded.
-                if result.cancel_event.is_set():
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    result.try_set_terminal(
-                        SubagentStatus.CANCELLED,
-                        error="Cancelled by user",
-                        token_usage_records=collector.snapshot_records(),
-                        tool_receipts=terminal_receipts(),
+                    # Cooperative cancellation: check if parent requested stop.
+                    # Note: cancellation is only detected at astream iteration boundaries,
+                    # so long-running tool calls within a single iteration will not be
+                    # interrupted until the next chunk is yielded.
+                    if result.cancel_event.is_set():
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                        cancelled_during_stream = True
+                        break
+
+                    result.update_token_usage_records(collector.snapshot_records())
+
+                    # Capture every step message (assistant turns AND tool outputs)
+                    # appended since the last chunk. A single super-step can append
+                    # several ToolMessages when the model emits multiple tool calls in
+                    # one turn, so capturing only messages[-1] would drop all but the
+                    # last output (#3779). Dedup/serialization live in capture_step_message.
+                    messages = chunk.get("messages", [])
+                    previous_count = len(ai_messages)
+                    processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                    if len(ai_messages) > previous_count:
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            finally:
+                active_error = sys.exception()
+                cancel_requested = cancelled_during_stream or result.cancel_event.is_set()
+                slow_close_warning = asyncio.get_running_loop().call_later(
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    logger.warning,
+                    "[trace=%s] Subagent %s stream cleanup for execution %s is still running after %.1fs; cooperative terminalization and sandbox resource release have not occurred",
+                    self.trace_id,
+                    self.config.name,
+                    result.task_id,
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    context=Context(),
+                )
+                try:
+                    await close_agent_stream(stream)
+                except Exception:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                    if active_error is None and not cancel_requested:
+                        raise
+                    logger.warning(
+                        "[trace=%s] Could not close interrupted subagent stream %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
                     )
-                    return result
+                else:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                finally:
+                    slow_close_warning.cancel()
 
-                result.update_token_usage_records(collector.snapshot_records())
-
-                # Capture every step message (assistant turns AND tool outputs)
-                # appended since the last chunk. A single super-step can append
-                # several ToolMessages when the model emits multiple tool calls in
-                # one turn, so capturing only messages[-1] would drop all but the
-                # last output (#3779). Dedup/serialization live in capture_step_message.
-                messages = chunk.get("messages", [])
-                previous_count = len(ai_messages)
-                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
-                if len(ai_messages) > previous_count:
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            if cancel_requested:
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                    tool_receipts=terminal_receipts(),
+                )
+                return result
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
