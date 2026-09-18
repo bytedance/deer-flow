@@ -1249,6 +1249,8 @@ The Web UI reports completed task time once per run. This is total wall-clock ti
 
 While a response streams, reasoning-only messages stay in the processing panel, including Anthropic thinking blocks. Once answer content arrives alongside reasoning, it appears in an assistant bubble.
 
+Literal `<think>` tags in fenced, indented, or inline code remain part of the answer and its copied text, rather than being moved into the reasoning disclosure. Unfinished code spans are preserved while streaming.
+
 In the Web UI, the latest completed user turn can also be edited and rerun from the message toolbar. DeerFlow restores the conversation checkpoint before that user message, submits the edited text as a new user message, and hides the superseded turn once the replay is in progress or succeeds. This is a conversation-state replay only: files, memory updates, and external tool side effects are not undone.
 
 Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.

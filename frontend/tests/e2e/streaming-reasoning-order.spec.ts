@@ -13,6 +13,44 @@ const REASONING_TEXT =
   "The user asked who I am, so I will list the core capabilities.";
 const ANSWER_TEXT = "I am DeerFlow, an open-source super agent.";
 
+for (const literal of ["<think>sample reasoning</think>", "<think>"]) {
+  test(`preserves literal code ${literal} and its following explanation`, async ({
+    page,
+  }, testInfo) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "Literal reasoning tags in code",
+          messages: [
+            {
+              type: "human",
+              id: "literal-human",
+              content: "Show a reasoning-tag example.",
+            },
+            {
+              type: "ai",
+              id: "literal-ai",
+              content: `Example:\n\n\`\`\`xml\n${literal}\n\`\`\`\n\nThis is literal code, not model reasoning.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(
+      page.locator("pre").filter({ hasText: literal }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("This is literal code, not model reasoning."),
+    ).toBeVisible();
+    await expect(page.getByText("Reasoning", { exact: true })).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("literal-think-code.png"),
+    });
+  });
+}
+
 const INITIAL_MESSAGES = [
   {
     type: "human",
