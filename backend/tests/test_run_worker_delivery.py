@@ -736,3 +736,99 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
+
+
+def _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt):
+    """Force the worker to park inside delivery-receipt persistence."""
+
+    async def blocking_receipt(*args, **kwargs):
+        receipt_started.set()
+        await release_receipt.wait()
+        return True
+
+    monkeypatch.setattr(worker_module, "_persist_delivery_receipt", blocking_receipt)
+
+
+def _start_worker(bridge, run_manager, record, store):
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    return asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=store),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_worker_cancellation_during_delivery_receipt_closes_terminal_lifecycle(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalization-cancel")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    worker.cancel("first finalization cancellation")
+    await asyncio.sleep(0)
+
+    # The owned terminal lifecycle must still be alive.
+    assert not worker.done()
+
+    release_receipt.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await worker
+
+    assert raised.value.args == ("first finalization cancellation",)
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_worker_repeated_cancellation_during_delivery_receipt_keeps_lifecycle_owner(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalization-cancel-repeated")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    worker.cancel("first finalization cancellation")
+    await asyncio.sleep(0)
+
+    worker.cancel("second finalization cancellation")
+    await asyncio.sleep(0)
+
+    # Repeated cancellation must not cancel or replace the lifecycle owner.
+    assert not worker.done()
+
+    release_receipt.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await worker
+
+    assert raised.value.args == ("first finalization cancellation",)
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
