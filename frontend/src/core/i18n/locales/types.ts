@@ -6,6 +6,45 @@ export interface Translations {
     localName: string;
   };
 
+  capabilities: {
+    integrationSkills: string;
+    sharedSkills: string;
+    title: string;
+    description: string;
+    plugins: string;
+    skills: string;
+    searchPlugins: string;
+    searchSkills: string;
+    allPlugins: string;
+    installed: string;
+    enabled: string;
+    disabled: string;
+    configure: string;
+    details: string;
+    addPlugin: string;
+    builtin: string;
+    community: string;
+    custom: string;
+    allSkills: string;
+    availablePlugins: string;
+    availableSkills: string;
+    pluginHint: string;
+    skillHint: string;
+    noResults: string;
+    larkName: string;
+    larkDescription: string;
+    larkTag: string;
+    connect: string;
+    notInstalled: string;
+    mcpDescription: string;
+    mcpLabel: string;
+    pluginSettings: string;
+    communityTitle: string;
+    communityDescription: string;
+    skillEnabled: string;
+    manage: string;
+  };
+
   // Common
   common: {
     home: string;
@@ -20,6 +59,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
     artifacts: string;
@@ -27,6 +67,7 @@ export interface Translations {
     custom: string;
     notAvailableInDemoMode: string;
     loading: string;
+    error: string;
     version: string;
     lastUpdated: string;
     code: string;
@@ -102,6 +143,44 @@ export interface Translations {
     loadFullFile: string;
     loadingFullFile: string;
     previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
+  };
+
+  artifactTable: {
+    title: string;
+    header: string;
+    column: (index: number) => string;
+    total: (count: number) => string;
+    sample: (count: number) => string;
+    range: (start: number, end: number, limited: boolean) => string;
+    columnsLimited: string;
+    uneven: string;
+    empty: string;
+    incomplete: string;
+    failed: string;
+    retry: string;
+    previous: string;
+    next: string;
+    cell: (row: number, column: number) => string;
+    cellValue: string;
+    missing: string;
+    savedVersion: string;
+  };
+
+  artifactArchive: {
+    downloadCurrent: (count: number) => string;
+    currentVersionNotice: string;
+    downloadFailed: string;
+  };
+
+  modelPicker: {
+    title: string;
+    favorites: string;
+    otherModels: string;
+    noModels: string;
+    favoriteModel: (displayName: string, name: string) => string;
+    sessionOnly: string;
   };
 
   // Citations
@@ -139,6 +218,13 @@ export interface Translations {
     disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
+    referenceConversations: string;
+    referenceConversationsSearch: string;
+    referenceConversationsEmpty: string;
+    referenceConversationsLimit: (max: number) => string;
+    referenceConversationsRemove: (title: string) => string;
+    referencedConversations: string;
+    removeProjectAttachment: string;
     inputPolish: string;
     inputPolishing: string;
     inputPolishNoChanges: string;
@@ -175,7 +261,6 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
-    searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
@@ -215,6 +300,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    stopStreamingUnavailable: string;
   };
 
   // Sidebar
@@ -227,6 +313,108 @@ export interface Translations {
     scheduledTasks: string;
     agentsDisabledTooltip: string;
     channels: string;
+  };
+  // Sidebar projects section
+  projects: {
+    title: string;
+    newProject: string;
+    namePlaceholder: string;
+    moveToProject: string;
+    moveToProjectHint: string;
+    removeFromProject: string;
+    archive: string;
+    restore: string;
+    deleteProject: string;
+    deleteProjectConfirm: string;
+    archived: string;
+    empty: string;
+    newChat: string;
+    // Runtime states and actions
+    create: string;
+    createFailed: string;
+    moveFailed: string;
+    archiveFailed: string;
+    restoreFailed: string;
+    deleteFailed: string;
+    switchToGrouped: string;
+    switchToFlat: string;
+    // Project page
+    threads: string;
+    threadsLoadFailed: string;
+    untitled: string;
+    settings: string;
+    notFound: string;
+    projectUnavailable: string;
+    // Project page — Documents / Instructions tabs (Phase 2)
+    documents: string;
+    documentsEmptyTitle: string;
+    documentsEmptyHint: string;
+    instructions: string;
+    instructionsPlaceholder: string;
+    instructionsByteCount: (used: number, max: number) => string;
+    instructionsTooLong: (max: number) => string;
+    instructionsSaved: string;
+    instructionsSaveFailed: string;
+    // Project page — Documents tab shelf (Phase 2 Slice E)
+    documentsShelf: string;
+    documentsShelfHint: string;
+    uploadDocuments: string;
+    uploadingDocuments: string;
+    uploadDocumentFailed: string;
+    documentFromThread: (threadName: string, kind: string) => string;
+    documentKindUpload: string;
+    documentKindOutput: string;
+    attachToThread: string;
+    attachDialogTitle: string;
+    attachDialogHint: string;
+    attachNoThreads: string;
+    attachFailed: string;
+    attachedToThread: (name: string) => string;
+    moveDocumentToTrash: string;
+    moveDocumentToTrashTitle: string;
+    moveDocumentToTrashConfirm: (name: string, days: number) => string;
+    deleteDocumentFailed: string;
+    contentMissing: string;
+    previewUnsupported: string;
+    archivedDocumentsBanner: string;
+    conversationFiles: string;
+    conversationFilesEmpty: string;
+    threadFilesTruncated: (count: number) => string;
+    threadFilesBrowseInThread: string;
+    saveToProject: string;
+    saveToProjectFailed: string;
+    savedToProject: (name: string) => string;
+    shelfNameLabel: string;
+    viewTrash: string;
+    documentsLoadFailed: string;
+    threadFilesLoadFailed: string;
+    interimMemoryNotice: string;
+  };
+
+  // Trash view (Projects Phase 2)
+  trash: {
+    title: string;
+    empty: string;
+    loadFailed: string;
+    retry: string;
+    originProject: (projectName: string) => string;
+    unknownProject: string;
+    retentionLeft: (days: number) => string;
+    restore: string;
+    restoreFailed: string;
+    restoredToast: (name: string) => string;
+    restoreMergedToast: (name: string) => string;
+    restoreConflict: string;
+    restorePickProjectTitle: string;
+    restorePickProjectHint: string;
+    deletePermanently: string;
+    deletePermanentlyTitle: string;
+    deletePermanentlyConfirm: (name: string) => string;
+    purgeFailed: string;
+    emptyTrash: string;
+    emptyTrashTitle: string;
+    emptyTrashConfirm: (count: number) => string;
+    emptyTrashFailed: string;
   };
 
   // Thread-scoped MCP background tasks
@@ -267,9 +455,39 @@ export interface Translations {
     };
   };
 
+  subagentBatches: {
+    label: string;
+    title: string;
+    description: string;
+    workerUnavailable: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    active: string;
+    recent: string;
+    pause: string;
+    resume: string;
+    cancel: string;
+    retryItem: string;
+    exportResults: string;
+    viewItems: string;
+    hideItems: string;
+    itemsFailed: string;
+    progress: (completed: number, total: number) => string;
+    limits: (live: number, running: number) => string;
+    status: {
+      queued: string;
+      running: string;
+      paused: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
   // Scheduled tasks
   scheduledTasks: {
-    scheduleType: { cron: string; once: string };
+    scheduleType: { cron: string; once: string; interval: string };
     preset: {
       label: string;
       hourly: string;
@@ -286,7 +504,13 @@ export interface Translations {
       cron: string;
       cronPlaceholder: string;
       runAt: string;
+      invalidRunAt: string;
       timezone: string;
+      intervalAmount: string;
+      intervalUnitSeconds: string;
+      intervalUnitMinutes: string;
+      intervalUnitHours: string;
+      intervalMinHint: string;
     };
     weekdays: {
       mon: string;
@@ -303,6 +527,8 @@ export interface Translations {
       title: string;
       taskTitle: string;
       prompt: string;
+      agent: string;
+      leadAgent: string;
       submit: string;
       fillRequired: string;
     };
@@ -313,6 +539,7 @@ export interface Translations {
       reuseNoticeTitle: string;
       reuseNoticeDescription: string;
     };
+    search: { placeholder: string; clear: string; noResults: string };
     filters: {
       allStatuses: string;
       enabled: string;
@@ -322,9 +549,11 @@ export interface Translations {
       allTypes: string;
       cron: string;
       once: string;
+      interval: string;
     };
     detail: {
       contextMode: string;
+      agent: string;
       thread: string;
       lastThread: string;
       schedule: string;
@@ -345,6 +574,8 @@ export interface Translations {
       pause: string;
       resume: string;
       trigger: string;
+      duplicate: string;
+      duplicateTitleSuffix: string;
       delete: string;
     };
     deleteConfirm: string;
@@ -368,6 +599,17 @@ export interface Translations {
       completed: string;
       failed: string;
       cancelled: string;
+    };
+    history: {
+      navigation: string;
+      newer: string;
+      older: string;
+      latest: string;
+      page: string;
+      paused: string;
+      loading: string;
+      loadFailed: string;
+      retry: string;
     };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
@@ -427,6 +669,9 @@ export interface Translations {
     backToGallery: string;
     settings: string;
     settingsTitle: string;
+    settingsDisplayName: string;
+    settingsDisplayNameTooLong: string;
+    settingsDisplayNameHint: string;
     settingsDescription: string;
     settingsModel: string;
     settingsModelDefault: string;
@@ -474,11 +719,31 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    outlineLabel: string;
+    outlineAttachmentFallback: string;
   };
 
   // Chats
   chats: {
+    deleteChat: string;
+    deleteConfirm: (title: string) => string;
+    deleteFailed: string;
+    noActiveChats: string;
+    activeChats: string;
+    archivedChats: string;
+    archiveChat: string;
+    restoreChat: string;
+    archiveSuccess: string;
+    restoreSuccess: string;
+    archiveFailed: string;
+    archiveDescription: string;
+    undoArchive: string;
+    noArchivedChats: string;
+    noMatchingChats: string;
+    loadChatsFailed: string;
+    retryLoadChats: string;
     searchChats: string;
+    branchLabel: (title: string, parentTitle: string) => string;
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
@@ -546,6 +811,15 @@ export interface Translations {
 
   // Tool calls
   toolCalls: {
+    details: string;
+    toolName: string;
+    callId: string;
+    input: string;
+    result: string;
+    error: string;
+    noResult: string;
+    emptyResult: string;
+    truncated: string;
     moreSteps: (count: number) => string;
     lessSteps: string;
     executeCommand: string;
@@ -671,11 +945,8 @@ export interface Translations {
       account: string;
       appearance: string;
       channels: string;
-      integrations: string;
       memory: string;
-      tools: string;
       subagents: string;
-      skills: string;
       notification: string;
       about: string;
     };
@@ -765,10 +1036,25 @@ export interface Translations {
       languageDescription: string;
     };
     tools: {
-      title: string;
-      description: string;
       adminRequired: string;
       empty: string;
+      addServer: string;
+      addServerDescription: string;
+      addServerPlaceholder: string;
+      serverDefinitionLabel: string;
+      definitionEmpty: string;
+      definitionInvalidJson: string;
+      definitionRootNotObject: string;
+      definitionNoServers: string;
+      definitionServerNotObject: string;
+      editServer: string;
+      editServerDescription: string;
+      editSingleServer: string;
+      editServerNameMismatch: string;
+      serverAlreadyExists: string;
+      removeServer: string;
+      removeServerDescription: string;
+      unnamedServer: string;
     };
     subagents: {
       title: string;
@@ -927,14 +1213,49 @@ export interface Translations {
       };
     };
     skills: {
-      title: string;
-      description: string;
+      exportPrevious: string;
+      exportNotices: Record<string, string>;
+      exportSkill: string;
+      exportTitle: string;
+      exportDescription: string;
+      exportLoading: string;
+      exportFiles: string;
+      exportDirectories: string;
+      exportSize: string;
+      exportContents: string;
+      exportMore: string;
+      exportRequirements: string;
+      exportCompatibility: string;
+      exportTools: string;
+      exportSecrets: string;
+      exportOptional: string;
+      exportRequired: string;
+      exportUndeclared: string;
+      exportScope: string;
+      exportWarnings: string;
+      exportWarningDescription: string;
+      exportBlocked: string;
+      exportDownload: string;
+      exportDownloading: string;
+      exportHandedOff: string;
+      exportChanged: string;
+      exportRefresh: string;
+      exportFailed: string;
+      exportBusy: string;
+      exportTimeout: string;
+      exportLimit: string;
+      exportNotFound: string;
       createSkill: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      installFromFile: string;
+      installingArchive: string;
+      invalidArchive: string;
+      archiveTooLarge: string;
+      installFailed: string;
     };
     notification: {
       title: string;

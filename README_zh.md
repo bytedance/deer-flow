@@ -71,11 +71,14 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
+    - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [项目 (Projects)](#项目-projects)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+    - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
@@ -171,6 +174,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
+
+   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
@@ -302,6 +307,41 @@ make down   # 停止并移除容器
    ```
 
 5. **访问地址**：http://localhost:2026
+
+#### LangGraph Studio（可选）
+
+默认的 `make dev` 拓扑使用 DeerFlow 内嵌于 Gateway 的运行时，无需 LangGraph Studio。
+如需用独立开发服务器检查和测试已注册的 lead-agent 图，请在 `backend/` 目录下运行
+以下命令，以便 CLI 发现 `langgraph.json`：
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+该命令会打印本地 API 与 Studio UI 地址。这个内存态服务器仅用于开发与测试；
+该标志允许 DeerFlow 在处理本地 Studio 请求时执行同步的配置加载与图工厂初始化，
+不能当作生产服务器设置使用。本地 Studio 的认证会自动处理，连接无需自定义请求头。
+生产负载请使用 DeerFlow 文档中的生产启动模式或受支持的 LangSmith 部署。在这种
+独立模式下，assistant 的归属与来源由服务器管理：Studio 可以发现已注册的图及其
+创建的 assistants，正常的 assistant 版本选择依然可用。在锁定态本地运行时加载其
+持久化开发存储之前，DeerFlow 会修复历史遗留的 assistant 行与版本历史，防止历史
+客户端元数据恢复服务器权限，或被运行时的启动清理流程丢弃。请用 `uv sync` 保持
+后端依赖同步；该兼容路径依赖已声明的 LangGraph 运行时版本，若持久化存储契约
+与预期不再匹配会记录警告。文档中的命令使用 LangGraph 基于文件的自定义应用加载器，
+DeerFlow 的回归测试也直接覆盖了它。
+
+对通过 LangGraph Studio 或直连 LangGraph Server 调用 `backend/langgraph.json`
+的工作流，DeerFlow 会消费该运行时发布的已认证身份，并将其用于 custom-agent
+配置/SOUL、用户技能与技能策略、上传、线程数据以及记忆读写。这使经过认证的运行
+不会落入共享的 `default` 文件系统桶，且服务器管理的身份优先于普通客户端提供的
+`user_id` 值。诸如邮箱地址之类的外部身份会在访问 DeerFlow 存储前，被映射为稳定、
+抗碰撞且目录安全的用户 ID。默认的 DeerFlow 服务拓扑仍是上文描述的 Gateway 内嵌
+运行时。
+
+Gateway 运行时会自动强制对 `/mnt/user-data/outputs` 下创建或修改的产物执行原生交付：`present_files` 必须至少展示一个由当前运行产出的输出，且终止时的 `run.delivery` 回执必须被持久化记录。虚拟产物路径会在产出该输出的同一已认证用户与线程范围内解析，然后再校验输出目录边界。未产出产物文件的运行保持普通对话行为。
+
+DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供：原生客户端可以继续订阅 `stream_mode="custom"`，基于回调的集成则可以从 `astream_events(version="v2")` 以 `on_custom_event` 记录的形式消费相同载荷。回调事件名与载荷的 `type` 字段一致。
 
 ### 进阶配置
 #### Sandbox 模式
@@ -502,6 +542,29 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
 
+#### 请求链路关联
+
+每个 Gateway HTTP 响应都携带 `X-Trace-Id` 响应头。若调用方传入了入站 `X-Trace-Id` 则继承之，否则自动生成，代理或上游服务可以借此跨服务固定同一个 id。该行为无需配置，也无法关闭。
+
+同一 id 会附着在生命周期超出 HTTP 响应的工作上：分离出的运行任务、它委派的 subagent，以及后台记忆更新线程。它以 `deerflow_trace_id` 的形式记录在 run 记录上（runs API 可见）、thread 的 checkpoint 元数据中，以及 Langfuse 追踪里。定时任务、MCP 任务通知运行和 IM 渠道消息不经 HTTP 启动，会为每次出现自行铸造一个 id。
+
+仅当增强日志开启时，日志记录才会携带该 id：
+
+```yaml
+logging:
+  enhance:
+    enabled: true   # 将 trace_id 打印进日志记录
+    format: text    # 或 json
+```
+
+该开关默认关闭，因为开启会改变日志格式。`logging` 配置需要重启才能生效，所以请编辑 `config.yaml` 并重启 Gateway。该设置只影响日志输出——id、响应头和运行元数据不受影响。
+
+`deerflow_trace_id` 是 DeerFlow 的链路关联 id：它不是 run id，也不是 provider 的原生追踪 id，同样不是查询键——没有任何逻辑用它反查 thread 或 run；它只用于关联日志行。在 run 请求的 `metadata` 或 `config.context` 中传入的 `deerflow_trace_id` 会被忽略并覆盖，因此响应头、日志和持久化的运行记录永远不会相互矛盾。要固定关联 id，请发送 `X-Trace-Id` 请求头。
+
+Gateway 的运行历史还会为每次运行记录一条终止时的 `run.delivery` 回执，包括零产出与崩溃恢复的运行。正常执行时，该回执会在持久化终止运行状态之前写入。孤儿恢复会先原子地认领过期租约，再幂等地回填回执，因此过期的恢复扫描不会覆盖仍在运行的详细交付事实。在事件存储中断期间，回执持久化保持尽力而为。对 checkpoint 预检失败（或在等待前序 finalization 时被取消）的运行，保持既有的完成数据行为：它们会收到零交付回执，但不会用空快照覆盖 RunStore 的完成字段。
+
+当 `tool_progress.enabled` 为 true 时，同一份运行事件历史还会记录结果质量防护器的阶段变化。它也会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
+
 #### LangSmith 链路追踪
 
 DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
@@ -536,7 +599,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
 - `trace_name` = assistant id（默认为 `lead-agent`）
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
-- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，始终与同一请求返回的 `X-Trace-Id` 响应头一致（`logging.enhance.enabled` 只控制该 id 是否打印到日志中）
 
 这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
 
@@ -576,7 +639,7 @@ Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索�
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
-Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
+Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。自动继承的分叉标题会使用下一个空闲的数字后缀（`标题 (2)`、`标题 (3)`……）；显式指定或手动重命名得到的同名后缀也会占号，即使它没有生成序号 metadata，后续自动分叉也不会与它重名。API 调用方显式提供的标题保持不变；重命名会清除旧的生成序号，因此从新标题继续自动分叉时会重新从 `(2)` 开始。最近对话列表还会把已加载的分叉直接排列在已加载的父对话下方，并显示低干扰的树形连接线。父对话尚未加载、谱系数据错误或成环、父子置顶状态不一致时，分叉会安全地保留在顶层，不会被隐藏或跨越置顶边界移动。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
 
 ```text
 # sandbox 容器内的路径
@@ -621,6 +684,12 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
 
 Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 时，麦克风按钮会把语音转写为本地草稿；DeerFlow 只接收转写后的文本，音频处理交由浏览器或操作系统语音识别服务按其环境策略完成。用户可以在发送前继续检查和编辑文本。
+
+### 会话归档
+
+在侧栏最近会话的菜单中点击「归档」，可以隐藏已完成的会话，同时保留消息、文件和原链接。成功提示提供「撤销」。在「对话 → 已归档」中查看并逐条恢复；已打开的归档会话也会在顶部显示恢复入口。搜索匹配已加载会话的标题，较早记录可通过「加载更多」查找。
+
+归档与恢复保留会话原有的活动时间和置顶状态。归档不会停止运行中的任务或暂停定时任务，新消息也不会自动恢复会话。需要移除会话及其文件时，使用原有的删除操作。
 
 ### Session Goals
 
@@ -667,6 +736,24 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 ├── workspace/        ← agents 的工作目录
 └── outputs/          ← 最终交付物
 ```
+
+### Agentic Browser Control
+
+读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
+
+每次操作都会返回页面可交互元素的最新快照，每个元素用稳定的 `[ref]` 编号寻址，因此 agent 基于刚观察到的内容行动，而不是猜测选择器。出站 URL 默认会经过 SSRF 筛查。该能力由 Playwright 提供，作为 optional extra 发布，以保持核心安装精简：
+
+```bash
+cd backend
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+然后在 `config.yaml` 中取消注释 `group: browser` 工具项（`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_get_text`、`browser_back`、`browser_screenshot`、`browser_close`）。`make dev` / Docker 启动时如果检测到已启用 `browser_navigate`，会在依赖同步时保留 `browser` extra。如果配置了 browser control 但缺少 Playwright，Gateway 会启动失败；`/api/features` 也会在后端无法提供该能力时隐藏 Browser UI。除本地、受信任的调试外，请保持 `headless: true` 和 `allow_private_addresses: false`。通过 `cdp_url` 连接到已有 Chrome 时，DeerFlow 无法强制执行子资源和重定向的 SSRF 防护，因此会 fail closed，除非显式设置 `allow_unguarded_cdp: true` 确认该风险；仅用于受信任的本地浏览器。Browser session 是进程本地的；启用该工具组时请保持 `GATEWAY_WORKERS=1`，因为普通 uvicorn worker 调度不提供 thread affinity。
+
+已有的、非 mock 的 Custom Agent 对话会在 browser control 可用、且该 agent 未限制 `tool_groups` 或已包含 `browser` 组时，展示同样的 Browser Live 控件。如果显式 allowlist 里没有 `browser`，这些控件会保持隐藏。
+
+workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画面，每个显示刷新只保留最新的待处理帧，并回收被替换的 object URL。Gateway 控制消息仍是 JSON；未请求二进制能力的客户端继续使用旧的 JSON/base64 帧协议。
 
 ### Context Engineering
 
@@ -722,6 +809,39 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
+## 项目 (Projects)
+
+项目把相关会话组织在同一个名称、共享指令和文档架之下。
+
+会话在创建时（选择了某个项目）或之后通过移动菜单加入项目。运行不会修改归属关系：发送消息不会把会话指派或改派到任何项目。把会话移出项目后，它会保持未归属状态，直到再次被显式移动。
+
+移动会话会同时刷新会话顶部的归属信息和项目列表，即使还有较早的元数据请求尚未返回。
+
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018  rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018 rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+### 项目指令 (Project instructions)
+
+每个项目可以保存一段自由文本指令——适用于项目内所有会话的背景、约定和约束——在项目页的 Instructions 标签页编辑，并带有实时字节计数。成员线程每次发起运行时，Gateway 会一次性固定（pin）项目当前状态，把指令渲染成一个有界的、仅在本次请求内有效的 `<project>` 块：它不会进入系统提示词，也不会写入持久化历史；每次新运行都会读到最新保存的指令。指令长度上限为 `projects.instructions_max_bytes`（按 UTF-8 字节计，默认 8192，可配范围 256–262144），多字节字符按其 UTF-8 字节长度计数。超限的指令会在写入时被 `422` 拒绝，绝不会被静默截断。
+
+### 文档架 (Document shelf)
+
+每个项目都有一个文档架，用于存放整个项目共享的文件，在项目页的 Documents 区域管理：
+
+- **上传**文件（按钮或拖拽，每次请求一个文件）。大小限制复用 `uploads.max_file_size`（默认 50 MiB）；重复上传相同内容会返回已有条目，而不是产生重复。
+- **列出**条目，包含名称、大小、修改时间和来源徽标（直接上传 vs. 从会话保存），并可预览或下载任意条目。
+- **从会话文件保存到项目**：文档架下方只读的会话文件浏览器按 thread 分组列出成员会话的上传与输出文件，每个条目都带 Save to project 操作。
+- **附加到会话（Attach to thread）**：把文档架文件复制到某个会话的上传目录，走与常规上传相同的接入管线，让该会话可以直接使用。
+
+成员线程的运行还会收到一个按运行渲染的有界 `<documents>` 索引（由固定快照生成，受 `projects.shelf_index_max_entries` 和 `projects.shelf_index_max_bytes` 限制），agent 也可以通过 `list_project_documents` 和 `read_project_document` 工具分页浏览文档架并读取文档。
+
+### 归档读取语义 (Archive read semantics)
+
+归档项目会冻结写入，但保留读取。归档项目中的会话仍可运行，仍会收到项目指令和文档架索引；文档架也保持完全可读：列表、预览/下载、会话文件浏览器和附加到会话都继续可用。上传、保存到项目、把单个文档架文件移入回收站都要求项目处于活跃状态，回收站中的文档也不能恢复到已归档的项目。删除已归档项目仍然允许，并会把它的整个文档架移入回收站。
+
+### 回收站 (Trash)
+
+删除文档架文档会把它移入回收站而不是直接抹除：条目保留其字节内容和来源项目快照，保留期为 `projects.trash_retention_days`（默认 30 天），之后保留期清理才可能将其永久清除。`/workspace/trash` 页面——可从项目页 Documents 区域和侧边栏 Projects 标题进入——列出回收站中的文档及其来源项目和剩余保留天数，提供逐条 Restore（恢复）和 Delete permanently（永久删除）操作，以及清空回收站（Empty trash，立即永久删除回收站中的全部条目，无需等到保留期结束；保留期只决定单条记录在被保留期清理回收前最多能停留多久）。恢复会把文档放回其来源项目；来源项目已删除或已归档时，可以选择一个目标项目；如果目标项目中已有内容完全相同的活跃文件，两个条目会合并。删除项目会在同一步骤中把它的整个文档架移入回收站。
+
 ## 定时任务 (Scheduled Tasks)
 
 DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
@@ -729,22 +849,53 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 当前 MVP 能力：
 
 - 在 `/workspace/scheduled-tasks` 管理任务
+- 支持按任务标题或提示词搜索，可与状态、类型筛选及当前会话范围组合使用
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
-- 支持 `once` 和 `cron` 两种调度方式
+- 每个任务可以固定使用 `lead_agent`（默认）或当前用户已有的自定义 agent；未知名字会被拒绝
+- 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
+- 支持 `once`、`cron` 和 `interval` 三种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
+
+**通过 API 筛选执行历史**
+
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+
+筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 
 - 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
 - 没有渠道或 GitHub 分发目标
-- 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
+
+后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 通过 API 预览 cron 执行时间
+
+已认证且具有 `threads:read` 权限的客户端，可在创建任务前调用 `POST /api/scheduled-tasks/preview-cron`：
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+响应包含规范化的 `cron`、`timezone`、生效的 UTC `start_at`，以及 `occurrences` 列表中的 UTC `run_at` 和带偏移量的 `local_time`。此例的首次执行时间为 `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`。
+
+`count` 为 1–10 的整数，默认 5。`start_at` 必须带时区，省略时只读取一次服务器当前时间。cron 沿用调度器的五字段语法，最长 256 字符；时区名称最长 128 字符。输入无效或无法计算所需未来时间时返回 422。预览沿用实际调度器的夏令时语义，不创建任务、thread 或 run，也不预留执行资源。此能力目前通过 API 提供，workspace 表单尚未展示这些时间。
+
+### 升级说明
+
+- 升级 `GATEWAY_WORKERS > 1` 且 `scheduler.enabled: true` 的部署前，要么只在一个 Gateway worker 上启用调度器，要么配置 `scheduler.multi_instance: true`，并同时使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`。升级后的 Gateway 会在启动时拒绝这种不安全组合，而不是静默启动。
+- 多实例模式下，`scheduler.max_concurrent_runs` 是集群级执行上限，而不是每个 Pod 各自一份。它计入 `launching` 和 `running` 的定时执行，因此容量不会随副本数倍增；持久化等待行仍在上限之外。
+- `scheduler.multi_instance` 以及相关的 scheduler、ownership、run-event 设置都只在启动时生效。变更需要协调重启所有 Gateway Pod；只改 ConfigMap 不会启用多实例恢复。
 
 ## 终端工作台 (TUI)
 
@@ -781,6 +932,16 @@ DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关�
 
 - **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
 - **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+
+### Gateway 管理员权限等同于代码执行
+
+管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会把可执行命令限制在一个允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+
+### 部署默认值
+
+Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。
+
+**请在主机变为可访问之前完成首次初始化设置。** 全新实例尚未创建任何账号，因此对于任何非仅回环访问的部署，请在启动后立即通过 `/setup` 创建管理员账号。
 
 ### 安全使用建议
 

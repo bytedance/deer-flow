@@ -443,6 +443,14 @@ html.dark .shiki span {
     background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
     border-radius: 999px;
   }
+
+  :is(button, [role="button"]):not(
+    :disabled,
+    [aria-disabled="true"],
+    [data-disabled="true"]
+  ) {
+    cursor: pointer;
+  }
 }
 
 :root {
@@ -450,4 +458,17 @@ html.dark .shiki span {
   --container-width-sm: calc(var(--spacing) * 144);
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
+}
+
+@layer utilities {
+  :is(
+    [data-slot="dropdown-menu-item"],
+    [data-slot="dropdown-menu-checkbox-item"],
+    [data-slot="dropdown-menu-radio-item"],
+    [data-slot="dropdown-menu-sub-trigger"],
+    [data-slot="command-item"]
+  ):not(:disabled, [aria-disabled="true"], [data-disabled="true"]) {
+    /* Override this registry rule with an important utility, e.g. cursor-default!. */
+    cursor: pointer;
+  }
 }

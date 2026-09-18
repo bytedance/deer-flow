@@ -754,11 +754,11 @@ def format_conversation_for_update(messages: list[Any]) -> str:
                         text_parts.append(text_val)
             content = " ".join(text_parts) if text_parts else str(content)
 
-        # Strip uploaded_files tags from human messages to avoid persisting
+        # Strip the upload-context tag from human messages to avoid persisting
         # ephemeral file path info into long-term memory.  Skip the turn entirely
         # when nothing remains after stripping (upload-only message).
         if role == "human":
-            content = re.sub(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*", "", str(content)).strip()
+            content = re.sub(r"<current_uploads>[\s\S]*?</current_uploads>\n*", "", str(content)).strip()
             if not content:
                 continue
 

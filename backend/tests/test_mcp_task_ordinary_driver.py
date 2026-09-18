@@ -74,6 +74,9 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
             "arguments": {"topic": "MCP"},
             "user_id": "user-1",
             "thread_id": "thread-1",
+            # Submit is the one durable-task call awaited inside the Agent run,
+            # so it is the only one that may carry request-scoped credentials.
+            "request_scoped_headers": True,
         }
     ]
 

@@ -1,16 +1,19 @@
 "use client";
 
+import { ArchiveRestore } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ThreadChannelBadge,
   ThreadChannelIcon,
 } from "@/components/workspace/thread-channel-source";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
+import { useThreadArchiveAction } from "@/components/workspace/use-thread-archive-action";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -25,15 +28,23 @@ import {
   titleOfThread,
 } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
+import { env } from "@/env";
 
 export default function ChatsPage() {
   const { t } = useI18n();
+  const [view, setView] = useState("active");
+  const archived = view === "archived";
+  const staticWebsite = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const archiveAction = useThreadArchiveAction();
   const {
     data: infiniteThreads,
+    isLoading,
+    isError,
+    refetch,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useInfiniteThreads();
+  } = useInfiniteThreads({ archived: staticWebsite ? undefined : archived });
   const threadListModel = useMemo(
     () => buildThreadListModel(infiniteThreads?.pages ?? []),
     [infiniteThreads?.pages],
@@ -73,14 +84,26 @@ export default function ChatsPage() {
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isSearching]);
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isSearching, view]);
 
   return (
     <WorkspaceContainer>
       <WorkspaceHeader></WorkspaceHeader>
       <WorkspaceBody>
-        <div className="flex size-full flex-col">
-          <header className="flex shrink-0 items-center justify-center pt-8">
+        <Tabs
+          value={view}
+          onValueChange={setView}
+          className="flex size-full flex-col"
+        >
+          <header className="mx-auto flex w-full max-w-(--container-width-md) shrink-0 flex-col gap-3 pt-8">
+            {!staticWebsite && (
+              <TabsList aria-label={t.pages.chats}>
+                <TabsTrigger value="active">{t.chats.activeChats}</TabsTrigger>
+                <TabsTrigger value="archived">
+                  {t.chats.archivedChats}
+                </TabsTrigger>
+              </TabsList>
+            )}
             <Input
               type="search"
               className="h-12 w-full max-w-(--container-width-md) text-xl"
@@ -90,64 +113,111 @@ export default function ChatsPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </header>
-          <main className="min-h-0 flex-1">
-            <ScrollArea className="size-full py-4">
-              <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
-                <VirtualThreadList
-                  estimateSize={76}
-                  items={filteredThreads}
-                  scrollParentSelector='[data-slot="scroll-area-viewport"]'
-                  renderItem={(thread) => {
-                    const channelSource = channelSourceOfThread(thread);
-                    return (
-                      <Link key={thread.thread_id} href={pathOfThread(thread)}>
-                        <div className="flex flex-col gap-2 border-b p-4">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <ThreadChannelIcon source={channelSource} />
-                            <div className="min-w-0 flex-1 truncate">
-                              {titleOfThread(thread)}
+          <TabsContent value={view} className="min-h-0 flex-1">
+            <main className="h-full">
+              <ScrollArea className="size-full py-4">
+                <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
+                  {isError && (
+                    <div role="alert" className="p-4 text-center">
+                      <p>{t.chats.loadChatsFailed}</p>
+                      <Button variant="outline" onClick={() => void refetch()}>
+                        {t.chats.retryLoadChats}
+                      </Button>
+                    </div>
+                  )}
+                  {!isLoading && !isError && filteredThreads.length === 0 && (
+                    <p
+                      role="status"
+                      className="text-muted-foreground p-8 text-center"
+                    >
+                      {isSearching
+                        ? t.chats.noMatchingChats
+                        : archived
+                          ? t.chats.noArchivedChats
+                          : t.chats.noActiveChats}
+                    </p>
+                  )}
+                  <VirtualThreadList
+                    estimateSize={76}
+                    items={filteredThreads}
+                    scrollParentSelector='[data-slot="scroll-area-viewport"]'
+                    renderItem={(thread) => {
+                      const channelSource = channelSourceOfThread(thread);
+                      return (
+                        <div
+                          key={thread.thread_id}
+                          className="flex items-center gap-2 border-b"
+                        >
+                          <Link
+                            className="min-w-0 flex-1"
+                            href={pathOfThread(thread)}
+                          >
+                            <div className="flex flex-col gap-2 p-4">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <ThreadChannelIcon source={channelSource} />
+                                <div className="min-w-0 flex-1 truncate">
+                                  {titleOfThread(thread)}
+                                </div>
+                                <ThreadChannelBadge
+                                  source={channelSource}
+                                  className="hidden sm:inline-flex"
+                                />
+                              </div>
+                              {thread.updated_at && (
+                                <div className="text-muted-foreground text-sm">
+                                  {formatTimeAgo(thread.updated_at)}
+                                </div>
+                              )}
                             </div>
-                            <ThreadChannelBadge
-                              source={channelSource}
-                              className="hidden sm:inline-flex"
-                            />
-                          </div>
-                          {thread.updated_at && (
-                            <div className="text-muted-foreground text-sm">
-                              {formatTimeAgo(thread.updated_at)}
-                            </div>
+                          </Link>
+                          {archived && (
+                            <Button
+                              className="mr-4 shrink-0"
+                              variant="outline"
+                              size="sm"
+                              disabled={archiveAction.isPending}
+                              onClick={() =>
+                                archiveAction.setArchived(
+                                  thread.thread_id,
+                                  false,
+                                )
+                              }
+                            >
+                              <ArchiveRestore className="size-4" />
+                              {t.chats.restoreChat}
+                            </Button>
                           )}
                         </div>
-                      </Link>
-                    );
-                  }}
-                />
-                {hasNextPage && !isSearching && (
-                  <div
-                    ref={sentinelRef}
-                    aria-hidden="true"
-                    className="h-px w-full"
-                    data-testid="chats-page-sentinel"
+                      );
+                    }}
                   />
-                )}
-                {hasNextPage && isSearching && (
-                  <div className="flex justify-center p-4">
-                    <Button
-                      variant="outline"
-                      onClick={() => void fetchNextPage()}
-                      disabled={isFetchingNextPage}
-                      data-testid="chats-page-load-more"
-                    >
-                      {isFetchingNextPage
-                        ? t.chats.loadingMore
-                        : t.chats.loadMoreToSearch}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </ScrollArea>
-          </main>
-        </div>
+                  {hasNextPage && !isSearching && (
+                    <div
+                      ref={sentinelRef}
+                      aria-hidden="true"
+                      className="h-px w-full"
+                      data-testid="chats-page-sentinel"
+                    />
+                  )}
+                  {hasNextPage && isSearching && (
+                    <div className="flex justify-center p-4">
+                      <Button
+                        variant="outline"
+                        onClick={() => void fetchNextPage()}
+                        disabled={isFetchingNextPage}
+                        data-testid="chats-page-load-more"
+                      >
+                        {isFetchingNextPage
+                          ? t.chats.loadingMore
+                          : t.chats.loadMoreToSearch}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+            </main>
+          </TabsContent>
+        </Tabs>
       </WorkspaceBody>
     </WorkspaceContainer>
   );

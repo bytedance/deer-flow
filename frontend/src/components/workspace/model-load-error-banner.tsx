@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,17 @@ export function ModelLoadErrorBanner({
   const [isRetrying, setIsRetrying] = useState(false);
   // Observe the shared query without starting it. Model consumers remain in
   // charge of loading; this single observer only centralizes their feedback.
-  const { error, refetch } = useModels({ enabled: false });
+  const { error, isFetching, refetch } = useModels({ enabled: false });
+  const visibleErrorRef = useRef<Error | null>(null);
+
+  // TanStack clears an empty query's error while another observer refetches.
+  // Keep the banner stable until that shared request either succeeds or fails.
+  if (error) {
+    visibleErrorRef.current = error;
+  } else if (!isFetching) {
+    visibleErrorRef.current = null;
+  }
+  const visibleError = error ?? visibleErrorRef.current;
 
   const retry = async () => {
     setIsRetrying(true);
@@ -38,8 +48,8 @@ export function ModelLoadErrorBanner({
   // Rendering a model-specific warning during navigation would be duplicate
   // and misleading feedback.
   if (
-    (!error && !isRetrying) ||
-    error instanceof UnauthorizedError ||
+    (!visibleError && !isRetrying) ||
+    visibleError instanceof UnauthorizedError ||
     shouldShowOfflineBanner(user, gatewayUnavailable)
   ) {
     return null;

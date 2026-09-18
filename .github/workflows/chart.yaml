@@ -22,6 +22,7 @@ on:
       - ".github/workflows/chart.yaml"
       - "scripts/check_config_version.sh"
       - "scripts/check_chart_sandbox_service.sh"
+      - "scripts/check_chart_skill_upload_size.sh"
 
 jobs:
   validate-chart:
@@ -48,6 +49,11 @@ jobs:
       # emits both. Guards the #3929 default flip against regressions.
       - name: Validate sandbox Service-type gating
         run: bash scripts/check_chart_sandbox_service.sh
+
+      # Keep the rendered Ingress aligned with the Gateway's .skill upload
+      # size, streaming, and long-running validation requirements.
+      - name: Validate skill upload ingress policy
+        run: bash scripts/check_chart_skill_upload_size.sh
 
       # The chart's `config:` block embeds a config_version that must not fall
       # behind config.example.yaml. A stale version is silent in-cluster (the

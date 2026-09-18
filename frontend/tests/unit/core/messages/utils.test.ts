@@ -724,9 +724,12 @@ describe("isHiddenFromUIMessage", () => {
 });
 
 describe("human message internal context stripping", () => {
-  test("strips uploaded file context from copy data", () => {
+  test("strips legacy uploaded_files context from copy data", () => {
+    // Display-only backward compatibility (#4212): pre-#4174 history still
+    // carries <uploaded_files> blocks, which copy data must strip rather
+    // than leak as raw XML with server-side paths.
     const message = {
-      id: "human-with-upload",
+      id: "human-with-legacy-upload",
       type: "human",
       content:
         "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper",
@@ -797,6 +800,63 @@ describe("human message internal context stripping", () => {
   test("stripInternalMarkers removes current_uploads blocks on export", () => {
     const content =
       "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes attributed project context blocks on export", () => {
+    const content =
+      '<project name="Roadmap">\nsecret instructions\n</project>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes documents blocks on export", () => {
+    const content =
+      '<documents count="2" shown="2">\n- id=abc | q3.pdf (2.1 MB, modified 2026-09-10)\n</documents>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers preserves fenced code that uses marker tag names", () => {
+    const content = [
+      "Here is my pom:",
+      "```xml",
+      "<project>",
+      "  <artifactId>demo</artifactId>",
+      "</project>",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
+  test("stripInternalMarkers preserves tilde-fenced and indented code spans", () => {
+    const tilde = ["~~~", '<documents count="1">', "</documents>", "~~~"].join(
+      "\n",
+    );
+    expect(stripInternalMarkers(tilde)).toBe(tilde);
+
+    // The leading text keeps ``trim()`` from eating the code's indentation.
+    const indented = [
+      "Pasted snippet:",
+      "",
+      "    <project>",
+      "    </project>",
+    ].join("\n");
+    expect(stripInternalMarkers(indented)).toBe(indented);
+  });
+
+  test("stripInternalMarkers still removes an injected block whose content contains a fence", () => {
+    const content = [
+      "<memory>",
+      "```",
+      "not a real fence owner",
+      "```",
+      "</memory>",
+      "Export me",
+    ].join("\n");
 
     expect(stripInternalMarkers(content)).toBe("Export me");
   });
@@ -893,6 +953,57 @@ test("falls back to reasoning for a reasoning-only assistant turn's copy data", 
   ] as Message[];
 
   expect(getAssistantTurnCopyData(messages)).toBe("the actual reasoning");
+});
+
+test("settled copy data is derived once per messages array reference (#5094)", () => {
+  // Settled group arrays keep their identity across streaming chunks, and the
+  // copy button re-renders per chunk. Reading `content` through a getter
+  // proves the second settled call is served from the array-reference cache
+  // instead of re-running the O(turn bytes) extraction.
+  let contentReads = 0;
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    get content() {
+      contentReads += 1;
+      return "Final answer";
+    },
+  } as unknown as Message;
+  const messages = [message];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  const readsAfterFirstCall = contentReads;
+  expect(readsAfterFirstCall).toBeGreaterThan(0);
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  expect(contentReads).toBe(readsAfterFirstCall);
+});
+
+test("copy-data cache does not leak across array references", () => {
+  const first = [
+    { id: "ai-1", type: "ai", content: "first answer" },
+  ] as Message[];
+  const second = [
+    { id: "ai-2", type: "ai", content: "second answer" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(first)).toBe("first answer");
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+  // The streaming short-circuit stays ahead of the cache.
+  expect(getAssistantTurnCopyData(second, { isStreaming: true })).toBeNull();
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+});
+
+test("null copy data is not cached for a reference", () => {
+  // A turn with no copyable AI text must keep recomputing (and stay null)
+  // rather than a cached null hiding a later value — the same array can be
+  // re-used once messages are appended to a rebuilt group.
+  const messages = [
+    { id: "human-1", type: "human", content: "hi" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
 });
 
 test("marks the latest assistant message as streaming", () => {
@@ -1510,5 +1621,67 @@ describe("orphan tool messages", () => {
     const t1b = allMessages.find((m) => m.id === "t-1b");
     expect(t1b).toBeDefined();
     expect(t1b?.type).toBe("tool");
+  });
+});
+
+describe("clarification run boundaries", () => {
+  const beforeReply = [
+    { id: "human", type: "human", content: "Plan the deployment" },
+    { id: "plan", type: "ai", content: "The completed deployment plan." },
+    {
+      id: "ask",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call",
+      content: "Which environment?",
+    },
+  ] as Message[];
+
+  test("keeps completed text outside processing when the request arrives and during hidden-reply continuation", () => {
+    const reply = {
+      id: "reply",
+      type: "human",
+      content: "staging",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const continuation = {
+      id: "next",
+      type: "ai",
+      content: "Deploying now.",
+    } as Message;
+    for (const messages of [
+      beforeReply,
+      [...beforeReply, reply, continuation],
+    ]) {
+      const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+      expect(groups.find((group) => group.id === "plan")?.type).toBe(
+        "assistant",
+      );
+      expect(groups.filter((group) => group.type === "human")).toHaveLength(1);
+    }
+    const groups = getMessageGroups([...beforeReply, reply, continuation], {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups.find((group) => group.id === "next")?.type).toBe(
+      "assistant:processing",
+    );
+    expect(
+      getMessageGroups([...beforeReply, reply, continuation]).find(
+        (group) => group.id === "next",
+      )?.type,
+    ).toBe("assistant");
+  });
+
+  test("recognizes a clarification boundary without a loaded visible human message", () => {
+    const groups = getMessageGroups(beforeReply.slice(1), {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups[0]?.type).toBe("assistant");
   });
 });

@@ -201,7 +201,8 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         new_content = self._append_user_message(message.content, explanation)
 
         # clone_ai_message_with_tool_calls handles structured tool_calls,
-        # raw additional_kwargs.tool_calls, and function_call in one shot.
+        # raw additional_kwargs.tool_calls, function_call, and provider
+        # tool-call content blocks in one shot.
         # It only rewrites finish_reason when the old value was "tool_calls",
         # which is not our case — content_filter / refusal / SAFETY stay put
         # so downstream SSE / converters keep seeing the real provider reason.

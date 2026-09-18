@@ -12,6 +12,8 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -90,6 +92,10 @@ def format_execution(execution: Any) -> str:
 
 class OpenSandboxSandbox(Sandbox):
     """Wrap one live ``opensandbox.sync.SandboxSync`` instance."""
+
+    #: Every call is a fresh ``run_command`` execution — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
 
     def __init__(
         self,
@@ -250,8 +256,10 @@ class OpenSandboxSandbox(Sandbox):
         if exit_code is None:
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"
-        if exit_code != 0 and not output:
-            output = f"Command exited with code {exit_code}"
+        if exit_code != 0:
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
         return output if output else "(no output)"
 
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
@@ -318,8 +326,16 @@ class OpenSandboxSandbox(Sandbox):
         if depth < 0:
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
-        execution = self._run(f"find {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in execution_stdout(execution).splitlines() if line.strip()]
+        execution = self._run(remote_list_dir_command(resolved, depth))
+        error = getattr(execution, "error", None)
+        if error is not None:
+            detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
+            raise OSError(f"Failed to list_dir {resolved}: {detail}")
+        return parse_remote_list_dir_output(
+            execution_stdout(execution),
+            resolved,
+            pipeline_exit_code=getattr(execution, "exit_code", None),
+        )
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if max_results <= 0:
@@ -328,13 +344,17 @@ class OpenSandboxSandbox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {entry_type}" for entry_type in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        execution = self._run(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in execution_stdout(execution).splitlines():
-            entry = entry.strip()
+        for entry in output.text.splitlines():
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path(entry):
                 continue
             relative = entry[len(root) :].lstrip("/")
@@ -342,7 +362,7 @@ class OpenSandboxSandbox(Sandbox):
                 matches.append(entry)
                 if len(matches) >= max_results:
                     return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def grep(
         self,
@@ -373,14 +393,18 @@ class OpenSandboxSandbox(Sandbox):
         arguments = f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
         primary = "grep " + " ".join(flags) + arguments
         fallback = "grep " + " ".join(portable_flags) + arguments
-        command = f'{{ {primary}; status=$?; [ "$status" -eq 2 ] && {fallback}; }} | head -{hard_limit}'
-        execution = self._run(command)
+        # Retry without --include/-m only when the primary grep errors (BusyBox
+        # lacks them). Keep the primary's status otherwise, so a missing grep
+        # (127) is not reported as "no matches" (#5376).
+        search = f'{primary}; status=$?; if [ "$status" -eq 2 ]; then {fallback}; status=$?; fi; (exit "$status")'
+        execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="grep", limit=hard_limit)
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
-        for raw in execution_stdout(execution).splitlines():
+        for raw in output.text.splitlines():
             try:
                 file_path, line_number_text, line = raw.split(":", 2)
                 line_number = int(line_number_text)
@@ -401,7 +425,7 @@ class OpenSandboxSandbox(Sandbox):
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line)))
             if len(matches) >= max_results:
                 return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def ping(self, timeout: float = 10) -> bool:
         if self.is_closed:

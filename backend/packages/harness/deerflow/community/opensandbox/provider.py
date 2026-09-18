@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import atexit
-import hashlib
 import ipaddress
 import logging
 import os
@@ -11,10 +10,13 @@ import threading
 import time
 import uuid
 from datetime import timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from deerflow.config import get_app_config
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -78,7 +80,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._sandboxes: dict[str, OpenSandboxSandbox] = {}
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[OpenSandboxSandbox, float]] = {}
-        self._acquire_locks: dict[str, threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="opensandbox-acquire-wait")
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
@@ -167,19 +169,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
     @staticmethod
     def _sandbox_id(thread_id: str, user_id: str) -> str:
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str | None) -> tuple[str, str]:
         return (user_id or "", thread_id)
-
-    def _lock_for_sandbox(self, sandbox_id: str) -> threading.Lock:
-        with self._lock:
-            lock = self._acquire_locks.get(sandbox_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._acquire_locks[sandbox_id] = lock
-            return lock
 
     def _start_idle_checker(self) -> None:
         if self._config["idle_timeout"] <= 0:
@@ -231,45 +225,60 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id or "")
-        with self._lock_for_sandbox(sandbox_id):
-            with self._lock:
-                existing = self._thread_sandboxes.get(key)
-                active = self._sandboxes.get(existing) if existing is not None else None
-            if existing is not None and active is not None:
-                try:
-                    active.renew()
-                    return existing
-                except Exception:
-                    # A terminal renewal failure invokes _invalidate_sandbox,
-                    # which removes and closes this exact client. Rebuild in the
-                    # same acquire; transient errors leave the registry intact
-                    # and must remain visible to the caller.
-                    with self._lock:
-                        invalidated = self._sandboxes.get(existing) is not active and existing not in self._warm_pool
-                        shutting_down = self._shutdown_called
-                    if not invalidated or not active.is_closed or shutting_down:
-                        raise
-                    logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
-            reclaimed = self._reclaim_warm_pool(sandbox_id)
-            if reclaimed is not None:
+        with self._acquire_serializer.hold(sandbox_id):
+            return self._acquire_scope_locked(key, sandbox_id, thread_id=thread_id, user_id=user_id)
+
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        """Acquire without blocking the event loop.
+
+        The entire synchronous acquire (serializer wait + body) runs on the
+        serializer's dedicated executor — never the default executor. A
+        cancelled awaiter abandons the worker thread, which runs to
+        completion and releases the hold itself, so a retry serializes
+        behind it instead of overlapping the abandoned body.
+        """
+        acquire = partial(self.acquire, thread_id, user_id=user_id)
+        return await self._acquire_serializer.run_on_executor(acquire)
+
+    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
+        with self._lock:
+            existing = self._thread_sandboxes.get(key)
+            active = self._sandboxes.get(existing) if existing is not None else None
+        if existing is not None and active is not None:
+            try:
+                active.renew()
+                return existing
+            except Exception:
+                # A terminal renewal failure invokes _invalidate_sandbox,
+                # which removes and closes this exact client. Rebuild in the
+                # same acquire; transient errors leave the registry intact
+                # and must remain visible to the caller.
                 with self._lock:
-                    if self._shutdown_called:
-                        raise RuntimeError("OpenSandboxProvider shut down during acquire")
-                    if reclaimed in self._sandboxes:
-                        self._thread_sandboxes[key] = reclaimed
-                        return reclaimed
-            sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+                    invalidated = self._sandboxes.get(existing) is not active and existing not in self._warm_pool
+                    shutting_down = self._shutdown_called
+                if not invalidated or not active.is_closed or shutting_down:
+                    raise
+                logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
+        reclaimed = self._reclaim_warm_pool(sandbox_id)
+        if reclaimed is not None:
             with self._lock:
                 if self._shutdown_called:
-                    destroy_after_unlock = True
-                else:
-                    self._sandboxes[sandbox_id] = sandbox
-                    self._thread_sandboxes[key] = sandbox_id
-                    destroy_after_unlock = False
-            if destroy_after_unlock:
-                self._destroy_quietly(sandbox, context="created during shutdown")
-                raise RuntimeError("OpenSandboxProvider shut down during acquire")
-            return sandbox_id
+                    raise RuntimeError("OpenSandboxProvider shut down during acquire")
+                if reclaimed in self._sandboxes:
+                    self._thread_sandboxes[key] = reclaimed
+                    return reclaimed
+        sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+        with self._lock:
+            if self._shutdown_called:
+                destroy_after_unlock = True
+            else:
+                self._sandboxes[sandbox_id] = sandbox
+                self._thread_sandboxes[key] = sandbox_id
+                destroy_after_unlock = False
+        if destroy_after_unlock:
+            self._destroy_quietly(sandbox, context="created during shutdown")
+            raise RuntimeError("OpenSandboxProvider shut down during acquire")
+        return sandbox_id
 
     def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> OpenSandboxSandbox:
         replicas, total = self._replica_count()
@@ -368,7 +377,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
             self._sandboxes.clear()
             self._thread_sandboxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -381,7 +390,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             self._sandboxes.clear()
             self._warm_pool.clear()
             self._thread_sandboxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
         for sandbox in sandboxes:
             self._destroy_quietly(sandbox, context="shutdown")
 

@@ -94,6 +94,52 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("shows the conversation outline only at the long-chat threshold", async ({
+    page,
+  }) => {
+    const turns = (count: number, prefix: string) =>
+      Array.from({ length: count }, (_, turn) => [
+        {
+          type: "human",
+          id: `${prefix}-human-${turn}`,
+          content: `${prefix} question ${turn}`,
+        },
+        {
+          type: "ai",
+          id: `${prefix}-ai-${turn}`,
+          content: `${prefix} answer ${turn}`,
+        },
+      ]).flat();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Four turns",
+          messages: turns(4, "Short"),
+        },
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Five turns",
+          messages: turns(5, "Long"),
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Short answer 3")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("conversation-outline-trigger")).toBeHidden();
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText("Long answer 4")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      page.getByTestId("conversation-outline-trigger"),
+    ).toBeVisible();
+  });
+
   test("keeps a thousand-turn history DOM bounded while preserving navigation", async ({
     page,
   }) => {
@@ -126,20 +172,47 @@ test.describe("Thread history", () => {
     });
 
     const conversation = page.getByRole("log");
-    const scroller = conversation.locator(":scope > div").first();
     await expect
       .poll(() => conversation.locator("[data-index]").count())
       .toBeLessThan(60);
 
-    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
-    await scroller.evaluate((element) => {
-      element.scrollTop = 0;
-      element.dispatchEvent(new Event("scroll"));
+    const outlineTrigger = page.getByTestId("conversation-outline-trigger");
+    await expect(outlineTrigger).toBeVisible();
+    await outlineTrigger.click();
+    const outlineMenu = page.getByTestId("conversation-outline-menu");
+    await outlineMenu
+      .getByText("Long history question 0", { exact: true })
+      .click();
+
+    const targetQuestion = conversation.getByText("Long history question 0", {
+      exact: true,
     });
-    await expect(page.getByText("Long history question 0")).toBeVisible({
-      timeout: 15_000,
+    const targetAnswer = conversation.getByText("Long history answer 0", {
+      exact: true,
     });
+    await expect(targetQuestion).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(async () => {
+        const questionBox = await targetQuestion.boundingBox();
+        const conversationBox = await conversation.boundingBox();
+        if (!questionBox || !conversationBox) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return questionBox.y - conversationBox.y;
+      })
+      .toBeLessThan(200);
+    const questionBox = await targetQuestion.boundingBox();
+    const answerBox = await targetAnswer.boundingBox();
+    expect(questionBox).not.toBeNull();
+    expect(answerBox).not.toBeNull();
+    expect(questionBox!.y).toBeLessThan(answerBox!.y);
     expect(await conversation.locator("[data-index]").count()).toBeLessThan(60);
+
+    await expect(
+      outlineMenu
+        .getByText("Long history question 0", { exact: true })
+        .locator(".."),
+    ).toHaveAttribute("aria-current", "location");
   });
 
   test("keeps rendered messages ordered when the latest history page advances", async ({
@@ -460,6 +533,10 @@ test.describe("Thread history", () => {
     await inactiveThreadItem.hover();
     await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
 
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
     await expect(
@@ -612,12 +689,13 @@ test.describe("Thread history", () => {
     await expect(textarea).toBeVisible();
   });
 
-  test("deleting the active newly created chat returns to the new chat screen", async ({
+  test("retrying deletion of the active newly created chat returns to the new chat screen", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
+    let cleanupAttempts = 0;
     await page.route(/\/api\/threads\/[^/]+$/, (route) => {
-      if (route.request().method() === "DELETE") {
+      if (route.request().method() === "DELETE" && ++cleanupAttempts === 1) {
         return route.fulfill({
           status: 500,
           contentType: "application/json",
@@ -649,6 +727,25 @@ test.describe("Thread history", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+
+    // Remote deletion succeeded, but local cleanup failed. Keep the dialog
+    // and streamed content until the user retries the remaining cleanup.
+    await expect(
+      page.getByText("Local cleanup failed", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    expect(cleanupAttempts).toBe(2);
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
     await expect(page.getByText("Previous question")).toHaveCount(0);

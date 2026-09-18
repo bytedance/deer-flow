@@ -14,10 +14,7 @@ import inspect
 import json
 import logging
 import os
-import threading
-import weakref
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -26,6 +23,7 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
@@ -56,30 +54,16 @@ _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
 
-_goal_locks_guard = threading.Lock()
-_goal_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_goal_locks = AsyncKeyedLockTable[str]()
 
 
 class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
 
 
-@asynccontextmanager
-async def goal_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize goal read-modify-write sequences within the current event loop."""
-    loop = asyncio.get_running_loop()
-    with _goal_locks_guard:
-        locks = _goal_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _goal_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _goal_locks.hold(thread_id)
 
 
 class GoalCommand(NamedTuple):

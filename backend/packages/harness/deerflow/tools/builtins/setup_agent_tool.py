@@ -58,11 +58,19 @@ def setup_agent(
             # this is an upsert.
             user_id = resolve_runtime_user_id(runtime)
             config_data: dict = {"name": agent_name}
+            store = get_agent_store()
+            try:
+                existing = store.get(agent_name, user_id=user_id)
+            except FileNotFoundError:
+                pass  # First bootstrap has no user-authored label to preserve.
+            else:
+                if existing.display_name is not None:
+                    config_data["display_name"] = existing.display_name
             if description:
                 config_data["description"] = description
             if skills is not None:
                 config_data["skills"] = skills
-            get_agent_store().update(agent_name, config_data, soul, user_id=user_id)
+            store.update(agent_name, config_data, soul, user_id=user_id)
         else:
             # Default agent (no agent_name): SOUL.md lives at the global base
             # dir. It is not a custom-agent record, so it stays file-based

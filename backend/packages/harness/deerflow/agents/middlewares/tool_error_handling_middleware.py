@@ -133,7 +133,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return normalize_tool_result(
+            self._maybe_stamp(result, request),
+            tool_call_id=str(request.tool_call.get("id") or ""),
+        )
 
     @override
     async def awrap_tool_call(
@@ -149,7 +152,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return normalize_tool_result(
+            self._maybe_stamp(result, request),
+            tool_call_id=str(request.tool_call.get("id") or ""),
+        )
 
 
 def _build_runtime_middlewares(
@@ -161,6 +167,8 @@ def _build_runtime_middlewares(
     receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -193,7 +201,13 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
         thread_hooks.append(UploadsMiddleware())
-    thread_hooks.append(SandboxMiddleware(lazy_init=lazy_init))
+    thread_hooks.append(
+        SandboxMiddleware(
+            lazy_init=lazy_init,
+            available_skills=available_skills,
+            owns_agent_skill_projection=owns_agent_skill_projection,
+        )
+    )
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -274,11 +288,13 @@ def _build_runtime_middlewares(
     # the model hasn't read in their current version.  It must sit outside ToolProgress
     # and ToolErrorHandling so that a blocked write returns immediately without consuming
     # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
-    # ToolMessage itself so downstream callers receive a well-formed result.
+    # ToolMessage itself so downstream callers receive a well-formed result, and its
+    # wrap_model_call elides the dead payload of blocked calls from model-bound
+    # requests (config-gated, state untouched).
     if app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
-        tail.append(ReadBeforeWriteMiddleware())
+        tail.append(ReadBeforeWriteMiddleware(config=app_config.read_before_write))
 
     # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
     # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
@@ -307,6 +323,8 @@ def build_lead_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     deferred_setup: "DeferredToolSetup | None" = None,
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -318,6 +336,8 @@ def build_lead_runtime_middlewares(
         # results (default "delegation_only"); stamping stays always-on.
         receipts_render_mode=app_config.verification.receipts_render_mode,
         authorization_provider=authorization_provider,
+        available_skills=available_skills,
+        owns_agent_skill_projection=owns_agent_skill_projection,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -355,6 +375,7 @@ def build_subagent_runtime_middlewares(
         receipts_render_mode="always",
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        owns_agent_skill_projection=False,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
@@ -373,6 +394,10 @@ def build_subagent_runtime_middlewares(
             slash_source_owner_token=slash_source_owner_token,
         )
     )
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
     middlewares.append(
         SkillToolPolicyMiddleware(
             available_skills=available_skills,
@@ -522,6 +547,7 @@ def build_subagent_runtime_middlewares(
     summarization_middleware = create_summarization_middleware(
         app_config=app_config,
         skip_memory_flush=True,
+        archive_task_history=False,
         # The subagent's resolved model is the source of truth for null-model
         # summarization: the subagent context/configurable does not carry the child
         # model (it inherits the parent's), so passing it directly is what makes a

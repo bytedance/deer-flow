@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import deerflow.persistence.models  # noqa: F401
 from deerflow.persistence.base import Base
-from deerflow.persistence.bootstrap import bootstrap_schema
+from deerflow.persistence.bootstrap import _get_head_revision, bootstrap_schema
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,7 +55,9 @@ async def test_migration_interrupts_legacy_queue_and_adds_claim_fields(tmp_path:
             legacy_run = (await conn.execute(sa.text("SELECT status, error, finished_at FROM scheduled_task_runs WHERE id = 'run-legacy-queued'"))).one()
             index_sql = await conn.scalar(sa.text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_scheduled_task_run_active'"))
 
-        assert version == "0015_scheduled_task_enqueue"
+        # Bootstrap always advances to the repository head after exercising
+        # the 0015 migration behavior below.
+        assert version == _get_head_revision()
         assert {"lease_owner", "lease_expires_at", "attempt_count"} <= columns.keys()
         assert columns["attempt_count"]["nullable"] is False
         assert overlap_policy == "enqueue"

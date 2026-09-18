@@ -119,12 +119,23 @@ secrets:
   # add channel tokens, search keys, etc. as needed
 ```
 
+The default ingress annotations permit a 100 MiB local `.skill` archive plus
+multipart framing, stream request bodies without ingress buffering, and allow
+up to 600 seconds for a response, which the API requests that wait on a model
+call or a whole run all need — skill install and custom-skill edits (each file
+is scanned by an LLM), `/api/threads/{id}/compact`, `/api/input-polish`, and
+`/api/runs/wait`. If you replace `ingress.annotations`, preserve equivalent
+size, streaming, and response-timeout settings for your ingress controller, or
+local skill uploads may fail before DeerFlow completes the installation and
+those requests may time out while Gateway is still working — for
+`/api/runs/wait` the disconnect also cancels the run.
+
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 35
+  config_version: 45
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI

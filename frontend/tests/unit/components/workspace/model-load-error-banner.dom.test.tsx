@@ -76,7 +76,7 @@ afterEach(() => {
 function createWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
+      queries: { retry: false, retryDelay: 0 },
     },
   });
 
@@ -105,9 +105,38 @@ describe("ModelLoadErrorBanner", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("limits automatic model loading retries before surfacing the error", async () => {
+    mockedLoadModels.mockRejectedValue(new Error("Gateway returned 503"));
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retryDelay: 0 },
+      },
+    });
+
+    function RetryPolicyWrapper({ children }: PropsWithChildren) {
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+    }
+
+    render(
+      <>
+        <ModelLoadErrorBanner />
+        <ModelConsumer />
+      </>,
+      { wrapper: RetryPolicyWrapper },
+    );
+
+    expect(await screen.findByRole("alert")).not.toBeNull();
+    expect(mockedLoadModels).toHaveBeenCalledTimes(2);
+  });
+
   it("shows one actionable error for all model consumers and clears after retry", async () => {
     const retryResult = createDeferred<ModelsResponse>();
     mockedLoadModels
+      .mockRejectedValueOnce(new Error("Gateway returned 503"))
       .mockRejectedValueOnce(new Error("Gateway returned 503"))
       .mockImplementationOnce(() => retryResult.promise);
     const { QueryWrapper } = createWrapper();
@@ -125,7 +154,7 @@ describe("ModelLoadErrorBanner", () => {
     expect(alert.textContent).toContain("Models couldn't be loaded");
     expect(alert.textContent).not.toContain("Gateway returned 503");
     expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(mockedLoadModels).toHaveBeenCalledTimes(1);
+    expect(mockedLoadModels).toHaveBeenCalledTimes(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
@@ -142,7 +171,7 @@ describe("ModelLoadErrorBanner", () => {
     await waitFor(() => {
       expect(screen.queryByRole("alert")).toBeNull();
     });
-    expect(mockedLoadModels).toHaveBeenCalledTimes(2);
+    expect(mockedLoadModels).toHaveBeenCalledTimes(3);
   });
 
   it("does not duplicate the login redirect with a model warning", async () => {
@@ -160,12 +189,13 @@ describe("ModelLoadErrorBanner", () => {
     await waitFor(() => {
       expect(queryClient.getQueryState(MODELS_QUERY_KEY)?.status).toBe("error");
     });
+    expect(mockedLoadModels).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("suppresses a model symptom only while the gateway banner is visible", async () => {
     mockedUseAuth.mockReturnValue(createAuthState(null));
-    mockedLoadModels.mockRejectedValueOnce(new Error("Gateway returned 503"));
+    mockedLoadModels.mockRejectedValue(new Error("Gateway returned 503"));
     const { queryClient, QueryWrapper } = createWrapper();
 
     const renderView = () => (
@@ -187,9 +217,10 @@ describe("ModelLoadErrorBanner", () => {
     expect(await screen.findByRole("alert")).not.toBeNull();
   });
 
-  it("does not show manual retry progress for a shared background refetch", async () => {
+  it("keeps the error visible without showing manual retry progress during a shared refetch", async () => {
     const backgroundResult = createDeferred<ModelsResponse>();
     mockedLoadModels
+      .mockRejectedValueOnce(new Error("Gateway returned 503"))
       .mockRejectedValueOnce(new Error("Gateway returned 503"))
       .mockImplementationOnce(() => backgroundResult.promise);
     const { queryClient, QueryWrapper } = createWrapper();
@@ -207,9 +238,10 @@ describe("ModelLoadErrorBanner", () => {
       queryKey: MODELS_QUERY_KEY,
     });
     await waitFor(() => {
-      expect(mockedLoadModels).toHaveBeenCalledTimes(2);
+      expect(mockedLoadModels).toHaveBeenCalledTimes(3);
     });
 
+    expect(screen.getByRole("alert")).not.toBeNull();
     expect(screen.queryByRole("button", { name: "Retrying…" })).toBeNull();
 
     backgroundResult.resolve({

@@ -5,10 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 
@@ -97,14 +98,41 @@ def test_wrap_model_call_injects_hidden_ledger():
     request.override = lambda messages: SimpleNamespace(messages=messages)
     captured = {}
 
+    response_message = AIMessage(content="done [r1]")
+
     def handler(req):
         captured["messages"] = req.messages
-        return MagicMock()
+        return ModelResponse(result=[response_message])
 
     middleware.wrap_model_call(request, handler)
     ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui")]
     assert len(ledger_messages) == 1
     assert "r1" in ledger_messages[0].content and "bash" in ledger_messages[0].content
+    assert response_message.additional_kwargs[TOOL_RECEIPT_LEDGER_KEY][0]["tool_call_id"] == "tc-1"
+
+
+def test_wrap_model_call_snapshots_only_receipts_rendered_within_budget():
+    middleware = ToolReceiptMiddleware()
+    request = MagicMock()
+    request.messages = [HumanMessage(content="go"), *[_stamped_message() for _ in range(30)]]
+    request.override = lambda messages: SimpleNamespace(messages=messages)
+    captured = {}
+    response_message = AIMessage(content="done")
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return ModelResponse(result=[response_message])
+
+    middleware.wrap_model_call(request, handler)
+
+    ledger_message = next(m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui"))
+    snapshot = response_message.additional_kwargs[TOOL_RECEIPT_LEDGER_KEY]
+    assert snapshot
+    assert snapshot[0]["id"] != "r1"
+    assert snapshot[-1]["id"] == "r30"
+    assert all(f"[{receipt['id']}]" in ledger_message.content for receipt in snapshot)
+    assert "[r1]" not in ledger_message.content
+    assert "older receipts omitted" in ledger_message.content
 
 
 def test_wrap_model_call_no_receipts_no_injection():
@@ -119,6 +147,18 @@ def test_wrap_model_call_no_receipts_no_injection():
 
     middleware.wrap_model_call(request, handler)
     assert seen["request"] is request  # untouched passthrough
+
+
+def test_wrap_model_call_stamps_extended_response_ledger():
+    middleware = ToolReceiptMiddleware()
+    request = MagicMock()
+    request.messages = [HumanMessage(content="go"), _stamped_message()]
+    request.override = lambda messages: SimpleNamespace(messages=messages)
+    response_message = AIMessage(content="done [r1]")
+    response = ExtendedModelResponse(model_response=ModelResponse(result=[response_message]))
+
+    assert middleware.wrap_model_call(request, lambda req: response) is response
+    assert response_message.additional_kwargs[TOOL_RECEIPT_LEDGER_KEY][0]["id"] == "r1"
 
 
 def _delegation_only_request(messages: list) -> MagicMock:

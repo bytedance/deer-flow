@@ -454,16 +454,39 @@ class DeerMem(MemoryManager):
     # NotImplementedError) -- they are dead contract (zero callers; /memory/export
     # routes via get_memory), so DeerMem no longer repeats the raise.
 
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Drop pending debounce-queue contexts for a deleted or cleared scope.
+
+        ``user_id=None`` matches the legacy no-user storage root only (same as
+        ``clear_memory`` / ``clear_*_memory_data``), not every queued user.
+        """
+        if agent_name is None:
+            return self._queue.cancel_by_agent(user_id=user_id, all_agents=True)
+        return self._queue.cancel_by_agent(
+            _resolve_agent_name(agent_name),
+            user_id=user_id,
+            all_agents=False,
+        )
+
     def clear_memory(
         self,
         *,
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        # Cancel same-scope pending extraction before and after clearing so a
+        # stale debounce timer cannot rewrite facts during/after the clear.
+        self.cancel_by_agent(agent_name, user_id=user_id)
         if agent_name is None:
             memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
         else:
             memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        self.cancel_by_agent(agent_name, user_id=user_id)
         return _compat_document(memory_data)
 
     def import_memory(

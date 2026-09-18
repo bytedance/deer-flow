@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class OAuthTokenManager:
 
         token = self._tokens.get(server_name)
         if token and not self._is_expiring(token, oauth):
-            return f"{token.token_type} {token.access_token}"
+            return self._authorization_value(token, server_name)
 
         lock = self._locks[server_name]
         # Acquire the OS-level lock off-thread so a blocking wait never blocks this
@@ -101,14 +102,44 @@ class OAuthTokenManager:
         try:
             token = self._tokens.get(server_name)
             if token and not self._is_expiring(token, oauth):
-                return f"{token.token_type} {token.access_token}"
+                return self._authorization_value(token, server_name)
 
             fresh = await self._fetch_token(oauth)
             self._tokens[server_name] = fresh
             logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
-            return f"{fresh.token_type} {fresh.access_token}"
+            return self._authorization_value(fresh, server_name)
         finally:
             lock.release()
+
+    @staticmethod
+    def _authorization_value(token: _OAuthToken, server_name: str) -> str:
+        """Render the Authorization value, refusing one the transport would echo.
+
+        The token endpoint's response is not this process's to control: an
+        ``access_token`` or ``token_type`` carrying a newline reaches h11, which
+        raises with the full value in the message, and
+        ``ToolErrorHandlingMiddleware`` copies that message into a
+        model-visible ToolMessage. Failing closed here keeps the token out of
+        the prompt, the checkpoint, and traces, at the one boundary every caller
+        goes through -- the tool interceptor, the initial discovery headers, and
+        the durable task path all read their value from here. A token outside
+        ASCII fails earlier, inside httpx, with only the offending character in
+        the message; that one is refused for a deliverable error rather than for
+        secrecy.
+
+        The rendered value is what gets checked, not the two fields separately,
+        because the rendered value is what the transport sees. An
+        ``access_token`` of ``" abc"`` is legal once it sits after ``Bearer ``
+        even though the field on its own carries leading whitespace, and
+        rejecting it would deny a token the server would have accepted.
+        """
+        value = f"{token.token_type} {token.access_token}"
+        reason = illegal_header_value_reason(value)
+        if reason is not None:
+            # Names the server and the reason, never the token: this message
+            # travels to the model on the interceptor path.
+            raise ValueError(f"OAuth token for MCP server '{server_name}' cannot be sent as an HTTP header value: the Authorization value {reason}. Check what the token endpoint returned for this server.")
+        return value
 
     @staticmethod
     def _is_expiring(token: _OAuthToken, oauth: McpOAuthConfig) -> bool:
@@ -188,13 +219,21 @@ def build_oauth_tool_interceptor(
     if not token_manager.has_oauth_servers():
         return None
 
+    # The servers' static header spellings, so the injected token replaces a
+    # static header spelled 'authorization' at the adapter's case-sensitive
+    # connection merge instead of riding alongside it (see ``mcp/headers.py``).
+    spellings_by_server = {server_name: header_spellings(server_config.headers) for server_name, server_config in extensions_config.get_enabled_mcp_servers().items()}
+
     async def oauth_interceptor(request: Any, handler: Any) -> Any:
         header = await token_manager.get_authorization_header(request.server_name)
         if not header:
             return await handler(request)
 
-        updated_headers = dict(request.headers or {})
-        updated_headers["Authorization"] = header
+        updated_headers = apply_header_overrides(
+            request.headers,
+            {"Authorization": header},
+            spellings=spellings_by_server.get(request.server_name),
+        )
         return await handler(request.override(headers=updated_headers))
 
     return oauth_interceptor

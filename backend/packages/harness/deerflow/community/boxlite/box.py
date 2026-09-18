@@ -25,6 +25,8 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -56,6 +58,10 @@ class BoxliteBox(Sandbox):
         default_env: Static environment merged into every command, overridden by
             per-call ``env`` (request-scoped secrets).
     """
+
+    #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
 
     TERMINAL_ERROR_MARKERS = (
         "vsock",
@@ -199,8 +205,10 @@ class BoxliteBox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
@@ -284,8 +292,8 @@ class BoxliteBox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        return parse_remote_list_dir_output(r.stdout, resolved, pipeline_exit_code=r.exit_code)
 
     def glob(
         self,
@@ -299,13 +307,17 @@ class BoxliteBox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {t}" for t in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        r = self._sh(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in (r.stdout or "").splitlines():
-            entry = entry.strip()
+        for entry in output.text.splitlines():
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
             if should_ignore_path(entry):
@@ -317,7 +329,7 @@ class BoxliteBox(Sandbox):
                 matches.append(entry)
                 if len(matches) >= max_results:
                     return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def grep(
         self,
@@ -345,13 +357,16 @@ class BoxliteBox(Sandbox):
             flags.append("-i")
         flags.append("-F" if literal else "-E")
         total_cap = max(max_results * 4, max_results + 50)
-        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
-        r = self._sh(cmd)
+        search = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=total_cap))
+        # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="grep", limit=total_cap)
 
-        include = glob.split("/")[-1] if glob else None
+        root = resolved.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
-        truncated = False
-        for raw in (r.stdout or "").splitlines():
+        truncated = output.truncated
+        for raw in output.text.splitlines():
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:
@@ -362,8 +377,15 @@ class BoxliteBox(Sandbox):
                 continue
             if should_ignore_path(file_path):
                 continue
-            if include and not path_matches(include, posixpath.basename(file_path)):
-                continue
+            if glob is not None:
+                # Match the caller's real directory scope: a pattern like
+                # "src/*.js" must not broaden to every *.js in the tree. Same
+                # helper, same relative-to-root semantics as glob() above.
+                if file_path != root and not file_path.startswith(root_prefix):
+                    continue
+                rel_path = posixpath.basename(file_path) if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
+                    continue
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line_text)))
             if len(matches) >= max_results:
                 truncated = True

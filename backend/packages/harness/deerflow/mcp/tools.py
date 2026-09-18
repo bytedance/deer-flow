@@ -9,7 +9,8 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
@@ -18,9 +19,10 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig,
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -53,7 +55,15 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
 # user-data tree, so an over-eager match is harmless (left untouched).
-_LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+")
+_LOCAL_PATH_IN_TEXT_RE = re.compile(
+    r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
+    r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
+    # Windows drive-qualified absolute path; the lookbehind keeps a word
+    # character before the colon (file:/…, id:/…) on the earlier alternatives
+    r"|(?<![\w.-])[A-Za-z]:[\\/][^\s'\"<>|*?]+"
+    # path relative to the server cwd (Windows servers print "\" separators)
+    r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
+)
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -76,7 +86,27 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     except ValueError:
         return None
     if parsed.scheme == "file":
-        raw = unquote(parsed.path)
+        # url2pathname converts the "/C:/..." form a file URI's path takes on
+        # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
+        # It already percent-decodes, so no extra unquote here, and it can
+        # reject odd Windows spellings with OSError — leave those untouched.
+        netloc = parsed.netloc
+        if netloc and netloc.lower() != "localhost":
+            # Some Windows tools emit file://C:/… (two slashes): the drive
+            # lands in the URI authority. Any other host is not a local file.
+            if len(netloc) != 2 or not netloc[0].isalpha() or netloc[1] != ":":
+                return None
+            url_path = f"/{netloc}{parsed.path}"
+        else:
+            url_path = parsed.path
+        try:
+            raw = url2pathname(url_path)
+        except OSError:
+            return None
+    elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():
+        # urlparse reads a Windows drive prefix ("C:\...") as the URI scheme;
+        # the original string is a bare local path, not a remote URI.
+        raw = uri
     elif parsed.scheme == "":
         raw = uri
     else:
@@ -247,7 +277,10 @@ def _rewrite_unique_bare_filenames(
         # Do not rewrite inside longer paths/words. A final sentence period is
         # allowed, but ".bak" or another path segment is not.
         pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
-        rewritten_text, count = pattern.subn(unique[name], rewritten)
+        # A callable replacement, not a template: the virtual path is built from
+        # the real file's relative path, where a backslash is an ordinary
+        # character, so it must never be read as a regex escape.
+        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
@@ -556,10 +589,14 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await session.call_tool(
-                    request.name,
-                    request.args,
-                    **kwargs,
+                return await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=request.name,
+                    arguments=request.args,
+                    call_kwargs=kwargs,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -572,10 +609,14 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await session.call_tool(
-                original_name,
-                arguments,
-                **call_kwargs,
+            call_tool_result = await call_pooled_session_tool(
+                session,
+                pool,
+                server_name=server_name,
+                scope_key=scope_key,
+                tool_name=original_name,
+                arguments=arguments,
+                call_kwargs=call_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -771,9 +812,12 @@ async def get_mcp_tools() -> list[BaseTool]:
             if server_name not in servers_config:
                 continue
             if servers_config[server_name].get("transport") in ("sse", "http"):
-                existing_headers = dict(servers_config[server_name].get("headers", {}))
-                existing_headers["Authorization"] = auth_header
-                servers_config[server_name]["headers"] = existing_headers
+                # Case-insensitive write: a static header spelled 'authorization'
+                # must be replaced, not joined on the wire by a second field.
+                servers_config[server_name]["headers"] = apply_header_overrides(
+                    servers_config[server_name].get("headers", {}),
+                    {"Authorization": auth_header},
+                )
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,

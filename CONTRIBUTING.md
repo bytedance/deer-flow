@@ -335,9 +335,12 @@ before review.
 ## Testing
 
 ```bash
-# Backend tests (offline by default; excludes live external-API tests)
+# Default backend tests (excludes live and blocking-I/O tests)
 cd backend
 make test
+
+# Strict blocking-I/O tests
+make test-blocking-io
 
 # Live DeerFlowClient integration tests (explicit opt-in)
 # Requires a valid root config.yaml and API credentials.

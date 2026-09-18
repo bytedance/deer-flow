@@ -342,6 +342,18 @@ def test_update_agent_preserves_github_block_on_description_change(tmp_path, pat
     assert cfg["github"] == github_block
 
 
+def test_update_agent_preserves_display_name_on_description_change(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path)
+    config_path = agent_dir / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["display_name"] = "代码审查助手"
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    update_agent.func(runtime=_runtime(), description="refined desc")
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["display_name"] == "代码审查助手"
+    assert updated["name"] == "test-agent"
+
+
 def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, patched_paths):
     """UI/API-owned model behavior must survive agent self-edits.
 

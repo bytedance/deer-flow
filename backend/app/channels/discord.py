@@ -19,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
+# Bound for outbound work scheduled onto the Discord client's event loop.
+# Discord API calls normally return in well under a second; anything still
+# pending after this is a dead or wedged client, not a slow response.
+DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
+
+# File uploads carry an unbounded-size payload with no per-channel size cap
+# (unlike Feishu/Telegram's send_file limits), so they get their own, larger
+# bound: a 50 MB artifact over a ~5 Mbps uplink takes ~80 s to push, and a
+# large 429 retry-after inside discord.py can extend that further. Cancelling
+# a healthy upload mid-transfer would report it as failed, so the bound here
+# only exists to convert a wedged client into a logged failure.
+DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
+
 
 class DiscordChannel(Channel):
     """Discord bot channel.
@@ -58,6 +71,12 @@ class DiscordChannel(Channel):
         # Lock protecting _active_threads and the JSON file from concurrent access.
         # _run_client (Discord loop thread) and the main thread both read/write.
         self._thread_store_lock = threading.Lock()
+        # Set once _load_active_threads() has run: the in-memory map is then a
+        # faithful view of the file, so stop() may flush it. It stays False when
+        # start() bails before the load (missing bot_token, discord import
+        # error) — ChannelService then stops the instance, and an ungated flush
+        # would overwrite the persisted mappings with an empty snapshot (#2897).
+        self._thread_store_loaded = False
         store = config.get("channel_store")
         if store is not None:
             self._thread_store_path = store._path.parent / "discord_threads.json"
@@ -66,6 +85,15 @@ class DiscordChannel(Channel):
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
+
+        # Strong references for this channel's in-flight ack-reaction tasks.
+        # The event loop keeps only weak references to scheduled tasks, so a
+        # bare ``asyncio.create_task`` could be garbage-collected mid-flight
+        # and silently drop the acknowledgment reaction (same retention
+        # pattern as the deferred subagent cleanup in #4928). Instance-level
+        # on purpose, matching ``_typing_tasks``: one channel's shutdown must
+        # not cancel another instance's in-flight reactions.
+        self._ack_reaction_tasks: set[asyncio.Task[None]] = set()
 
         self._client = None
         self._thread: threading.Thread | None = None
@@ -118,17 +146,24 @@ class DiscordChannel(Channel):
             try:
                 if not self._thread_store_path.exists():
                     logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
-                    return
-                data = json.loads(self._thread_store_path.read_text())
-                self._active_threads.clear()
-                self._active_thread_ids.clear()
-                for channel_id, thread_id in data.items():
-                    self._active_threads[channel_id] = thread_id
-                    self._active_thread_ids.add(thread_id)
-                if self._active_threads:
-                    logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+                else:
+                    data = json.loads(self._thread_store_path.read_text())
+                    self._active_threads.clear()
+                    self._active_thread_ids.clear()
+                    for channel_id, thread_id in data.items():
+                        self._active_threads[channel_id] = thread_id
+                        self._active_thread_ids.add(thread_id)
+                    if self._active_threads:
+                        logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
             except Exception:
                 logger.exception("[Discord] failed to load thread mappings")
+                return
+            # The in-memory map is now a superset of the on-disk store (empty
+            # when the file is absent), so stop() may safely flush it. Until
+            # this point — a start() that bailed on a missing bot_token or a
+            # discord import error, which ChannelService then stops — the map is
+            # empty and flushing would clobber the file with {}.
+            self._thread_store_loaded = True
 
     def _record_thread_mapping(self, channel_id: str, thread_id: str) -> None:
         """Synchronously update the in-memory channel->thread mapping and its reverse-lookup set.
@@ -174,28 +209,43 @@ class DiscordChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
 
+        # Best-effort durability: flush in-memory thread mappings so the most
+        # recent channel->thread mapping survives a hard shutdown (process
+        # killed between a thread creation and its background persistence
+        # write). The create path already persists off the event loop after
+        # each new thread, so this is a safety net, not the primary write path.
+        # Gated on _thread_store_loaded: a stop() taken before the initial load
+        # has an empty in-memory map, and flushing it would overwrite the file
+        # with {} — the #2897 data loss this PR exists to prevent.
+        if self._thread_store_loaded:
+            try:
+                await asyncio.to_thread(self._persist_thread_mappings)
+            except Exception:
+                logger.warning("[Discord] failed to flush thread mappings during shutdown")
+
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()
         if discord_loop is None or discord_loop is current_loop:
-            await self._cancel_typing_tasks()
+            await self._cancel_ephemeral_tasks()
         elif discord_loop.is_running():
-            # Serialize cleanup with _start_typing() on the owning loop.  The
+            # Serialize cleanup with _start_typing()/_schedule_ack_reaction()
+            # on the owning loop.  The
             # loop may exit between is_running() and scheduling, so neither
             # scheduling nor waiting is allowed to block the rest of stop().
-            cleanup_coro = self._cancel_typing_tasks()
+            cleanup_coro = self._cancel_ephemeral_tasks()
             try:
                 cleanup_future = asyncio.run_coroutine_threadsafe(cleanup_coro, discord_loop)
             except RuntimeError:
                 cleanup_coro.close()
-                logger.warning("[Discord] event loop stopped before typing-task cleanup could be scheduled")
+                logger.warning("[Discord] event loop stopped before ephemeral-task cleanup could be scheduled")
             else:
                 try:
                     await asyncio.wait_for(asyncio.wrap_future(cleanup_future), timeout=10)
                 except TimeoutError:
                     cleanup_future.cancel()
-                    logger.warning("[Discord] typing-task cleanup timed out after 10s")
+                    logger.warning("[Discord] ephemeral-task cleanup timed out after 10s")
                 except Exception:
-                    logger.exception("[Discord] error while cleaning up typing tasks")
+                    logger.exception("[Discord] error while cleaning up ephemeral tasks")
 
         if self._client and discord_loop and discord_loop.is_running():
             close_coro = self._client.close()
@@ -222,17 +272,53 @@ class DiscordChannel(Channel):
         # discard the stale references here; awaiting them from this loop would
         # raise a cross-loop RuntimeError.
         if discord_loop and discord_loop is not current_loop and not discord_loop.is_running():
-            self._discard_typing_tasks()
+            self._discard_ephemeral_tasks()
 
         self._client = None
         self._discord_loop = None
         self._discord_module = None
         logger.info("Discord channel stopped")
 
+    @property
+    def is_running(self) -> bool:
+        """Running means the client thread is still alive, not just started.
+
+        ``_run_client`` exits when discord.py gives up for good (invalidated
+        token, unrecoverable close) while ``_running`` stays True, so the base
+        flag alone would keep reporting a healthy channel forever. Mirrors
+        ``FeishuChannel.is_running`` so ``ChannelService.ensure_channel_ready``
+        can restart the channel after its client thread dies.
+        """
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
+    async def _run_on_discord_loop(self, coro, *, timeout: float = DISCORD_OUTBOUND_TIMEOUT_SECONDS):
+        """Schedule *coro* on the Discord loop and await it with a bound.
+
+        The Discord client runs on a dedicated thread whose loop is stopped but
+        not closed when the client dies, so ``call_soon_threadsafe`` keeps
+        queueing callbacks that never run and an unbounded ``wrap_future``
+        await would hang a ChannelManager worker forever. ``stop()`` already
+        bounds its identical cross-loop awaits with ``wait_for``; this extends
+        that pattern to the outbound path. Failing fast when the loop is
+        missing or not running turns a dead client into a logged send failure
+        instead of a wedged worker.
+        """
+        loop = self._discord_loop
+        if loop is None or not loop.is_running():
+            coro.close()
+            raise RuntimeError("Discord client event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
     async def send(self, msg: OutboundMessage) -> None:
         # Stop typing indicator once we're sending the response
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -241,12 +327,10 @@ class DiscordChannel(Channel):
 
         text = msg.text or ""
         for chunk in self._split_text(text):
-            send_future = asyncio.run_coroutine_threadsafe(target.send(chunk), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(chunk))
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -264,8 +348,7 @@ class DiscordChannel(Channel):
             # success and failure paths.
             data = await asyncio.to_thread(self._read_attachment_bytes, str(attachment.actual_path))
             file = self._discord_module.File(io.BytesIO(data), filename=attachment.filename)
-            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(file=file), timeout=DISCORD_UPLOAD_TIMEOUT_SECONDS)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -315,6 +398,36 @@ class DiscordChannel(Channel):
                 )
         self._typing_tasks.clear()
 
+    async def _cancel_ack_reaction_tasks(self) -> None:
+        """Cancel in-flight ack reactions so stop() does not strand them.
+
+        A task interrupted mid-HTTP-call would otherwise stay in the
+        retention set forever, pinning this channel instance and the discord
+        Message object graph after shutdown.
+        """
+        pending = [task for task in self._ack_reaction_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _discard_ack_reaction_tasks(self) -> None:
+        """Forget stale ack-reaction tasks after the owning loop stopped."""
+        for task in list(self._ack_reaction_tasks):
+            if not task.done():
+                logger.warning("[Discord] discarding pending ack-reaction task for stopped loop")
+        self._ack_reaction_tasks.clear()
+
+    async def _cancel_ephemeral_tasks(self) -> None:
+        """Cancel typing indicators and in-flight ack reactions together."""
+        await self._cancel_typing_tasks()
+        await self._cancel_ack_reaction_tasks()
+
+    def _discard_ephemeral_tasks(self) -> None:
+        """Forget stale typing and ack-reaction tasks (stopped-loop fallback)."""
+        self._discard_typing_tasks()
+        self._discard_ack_reaction_tasks()
+
     async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
         target_id = thread_ts or chat_id
@@ -329,6 +442,25 @@ class DiscordChannel(Channel):
             await message.add_reaction("✅")
         except Exception:
             logger.debug("[Discord] failed to add reaction to message %s", message.id, exc_info=True)
+
+    def _on_ack_reaction_task_done(self, task: asyncio.Task[None]) -> None:
+        self._ack_reaction_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[Discord] ack reaction task failed: %s", exc)
+
+    def _schedule_ack_reaction(self, message) -> asyncio.Task[None]:
+        """Schedule the ack reaction with a strong task reference.
+
+        The delayed HTTP call must survive until completion; see
+        ``_ack_reaction_tasks`` for why a bare ``create_task`` is unsafe here.
+        """
+        task = asyncio.create_task(self._add_reaction(message))
+        self._ack_reaction_tasks.add(task)
+        task.add_done_callback(self._on_ack_reaction_task_done)
+        return task
 
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
@@ -450,7 +582,7 @@ class DiscordChannel(Channel):
                     # Start typing indicator in the thread
                     if typing_target:
                         await self._start_typing(typing_target, chat_id, thread_id)
-                    asyncio.create_task(self._add_reaction(message))
+                    self._schedule_ack_reaction(message)
                     return
 
                 # Thread not tracked (orphaned) — create new thread and handle below
@@ -561,7 +693,7 @@ class DiscordChannel(Channel):
             # Start typing/reaction only after bounded admission succeeds.
             if typing_target:
                 await self._start_typing(typing_target, chat_id, thread_id)
-            asyncio.create_task(self._add_reaction(message))
+            self._schedule_ack_reaction(message)
         finally:
             if not reservation_transferred:
                 reservation.release()
@@ -642,9 +774,9 @@ class DiscordChannel(Channel):
                 logger.exception("Discord client error")
         finally:
             try:
-                self._discord_loop.run_until_complete(self._cancel_typing_tasks())
+                self._discord_loop.run_until_complete(self._cancel_ephemeral_tasks())
             except Exception:
-                logger.exception("Error while cleaning up Discord typing tasks")
+                logger.exception("Error while cleaning up Discord ephemeral tasks")
             try:
                 if self._client and not self._client.is_closed():
                     self._discord_loop.run_until_complete(self._client.close())
@@ -714,9 +846,8 @@ class DiscordChannel(Channel):
         except (TypeError, ValueError):
             return None
 
-        get_future = asyncio.run_coroutine_threadsafe(self._fetch_channel(target_id), self._discord_loop)
         try:
-            return await asyncio.wrap_future(get_future)
+            return await self._run_on_discord_loop(self._fetch_channel(target_id))
         except Exception:
             logger.exception("[Discord] failed to resolve target id=%s", raw_id)
             return None

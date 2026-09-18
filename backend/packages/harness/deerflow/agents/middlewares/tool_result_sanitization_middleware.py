@@ -16,9 +16,11 @@ network tools, so a fetched ``<system-reminder>`` is escaped to
 deliberately targets only the remote-content tools: local tool output (bash,
 file reads) is left untouched so legitimate code/log content is never mangled.
 
-Scope note: matching is a name-based allowlist, so MCP-provided remote-content
-tools registered under other names are not yet covered — see
-``_REMOTE_CONTENT_TOOL_NAMES``.
+Scope: the built-in network tools are matched by name
+(``_REMOTE_CONTENT_TOOL_NAMES``), and MCP-sourced tools are matched by their
+``deerflow_mcp`` metadata tag (third-party remote code, untrusted by default).
+Local tool output (bash, file reads) is left untouched so legitimate code/log
+content is never mangled.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
+from deerflow.tools.mcp_metadata import is_mcp_tool
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +48,12 @@ logger = logging.getLogger(__name__)
 # surfaces the target site's response-status text (``X-Response-Status``, a
 # free-form reason phrase controlled by whatever server is being captured) into
 # its result message, so it is untrusted remote content too and belongs here.
-#
-# Known limitation: the gate is name-based. An MCP server may expose a
-# remote-content tool under an arbitrary name (e.g. ``fetch_url`` /
-# ``scrape_page``); its results are equally untrusted but are NOT matched here,
-# so they reach the model unneutralized. A name heuristic (matching
-# fetch/search/crawl substrings) is intentionally avoided because it would also
-# mangle legitimate *local* tool output (e.g. a ``file_search`` result). Robust
-# MCP coverage should tag remote-content tools via metadata at registration
-# rather than by name; tracked as a follow-up.
+# The gate is name-based for the first-party web tools; MCP-sourced tools are
+# covered by their ``deerflow_mcp`` metadata tag instead (every MCP server is
+# third-party remote code, so its results are untrusted regardless of what the
+# tool is named). A name heuristic for MCP tools (matching fetch/search/crawl
+# substrings) is intentionally avoided because it would also mangle legitimate
+# *local* tool output (e.g. a ``file_search`` result).
 _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "web_fetch",
@@ -127,15 +127,17 @@ class ToolResultSanitizationMiddleware(AgentMiddleware[AgentState]):
     is returned unchanged. Mirrors the user-input guardrail so untrusted remote
     content and untrusted user input receive the same structural neutralization.
 
-    Scope is a name-based allowlist (``_REMOTE_CONTENT_TOOL_NAMES``): it reliably
-    covers the built-in web tools without false positives on local tools. It does
-    NOT cover MCP-provided remote-content tools registered under other names —
-    see the note on ``_REMOTE_CONTENT_TOOL_NAMES`` for why a name heuristic is
-    avoided and the metadata-tagging follow-up.
+    Scope: the built-in web tools are covered by name (``_REMOTE_CONTENT_TOOL_NAMES``),
+    and every MCP-sourced tool is covered via its ``deerflow_mcp`` metadata tag —
+    an MCP server is third-party remote code, so its results are untrusted by
+    default. Neutralization only touches structural control tokens, so benign MCP
+    content passes through unchanged.
     """
 
     def _should_sanitize(self, request: ToolCallRequest) -> bool:
-        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES
+        if request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES:
+            return True
+        return is_mcp_tool(getattr(request, "tool", None))
 
     @override
     def wrap_tool_call(

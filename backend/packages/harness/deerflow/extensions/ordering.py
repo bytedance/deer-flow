@@ -78,12 +78,19 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     """
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
     from deerflow.guardrails.middleware import GuardrailMiddleware
 
     return (
+        OrderingConstraint(
+            outer=DeferredToolPromotionAuditMiddleware,
+            inner=SkillToolPolicyMiddleware,
+            reason=("DeferredToolPromotionAuditMiddleware must observe the policy-filtered tool_search Command so denied schemas are never reported as effective promotions"),
+        ),
         OrderingConstraint(
             outer=ToolProgressMiddleware,
             inner=ToolErrorHandlingMiddleware,

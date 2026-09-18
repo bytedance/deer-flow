@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
+from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,24 @@ class ScheduledTaskService:
         *,
         now: datetime,
     ) -> dict[str, Any]:
+        """Turn one queued occurrence into a live run under its own trace scope.
+
+        The poller is a non-HTTP entry point, so no ``TraceMiddleware`` has
+        bound anything: each occurrence opens its own scope rather than
+        sharing one id across a whole poll cycle. A manual trigger arrives
+        inside a Gateway request and keeps that request's trace instead, so
+        the launched run stays correlated with the call that asked for it.
+        """
+        with ensure_trace_context():
+            return await self._launch_queued_occurrence(task, queued, now=now)
+
+    async def _launch_queued_occurrence(
+        self,
+        task: dict[str, Any],
+        queued: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
         task_run_id = queued["id"]
         execution_thread_id = queued["thread_id"]
         trigger = queued["trigger"]
@@ -280,6 +299,7 @@ class ScheduledTaskService:
                 last_thread_id=launched_thread_id,
                 last_error=None,
                 increment_run_count=True,
+                task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
                 # completion hook may have already finalized a `once` task.
                 protect_terminal=True,
@@ -349,6 +369,7 @@ class ScheduledTaskService:
                         # The transient itself is logged above.
                         last_error=None,
                         increment_run_count=True,
+                        task_run_id=task_run_id,
                         protect_terminal=True,
                     )
                 except Exception:
@@ -519,30 +540,15 @@ class ScheduledTaskService:
         if terminal_status is None:
             return
 
-        await self._task_run_repo.update_status(
-            task_run_id,
-            status=terminal_status,
+        await self._task_repo.complete_run(
+            task_id,
+            user_id=user_id,
+            task_run_id=task_run_id,
             run_id=record.run_id,
+            status=terminal_status,
             error=error,
             finished_at=datetime.now(UTC),
         )
-
-        task = await self._task_repo.get(task_id, user_id=user_id)
-        if task is None:
-            return
-
-        updates: dict[str, Any] = {"last_error": error}
-        if task["schedule_type"] == "once":
-            # The single occurrence is consumed either way (the run did launch,
-            # so re-arming risks duplicate side effects), but an interrupt ends
-            # as "cancelled", not "failed".
-            if terminal_status == "success":
-                updates["status"] = "completed"
-            elif terminal_status == "interrupted":
-                updates["status"] = "cancelled"
-            else:
-                updates["status"] = "failed"
-        await self._task_repo.update(task_id, user_id=user_id, updates=updates)
 
     async def start(self) -> None:
         if self._task is not None:
@@ -552,21 +558,28 @@ class ScheduledTaskService:
             await self._reconcile_active_state(now=datetime.now(UTC))
             self._skip_next_lease_reconciliation = True
         else:
+            # This destructive sweep is safe only while Gateway lifespan awaits
+            # start(): no request or poll admission can create a run owned by
+            # this process yet. Complete occurrence -> parent recovery before
+            # returning; moving either pass into run_once() can interrupt live
+            # work or race manual admission.
             try:
                 stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
                 if stale:
                     logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
             except Exception:
                 logger.exception("Failed to sweep stale scheduled task runs at startup")
+                raise
             try:
                 # The run rows above are only half the story: a launched `once`
                 # task is parked in "running" until the (now dead) completion hook
-                # would have finalized it, so reconcile the parent rows too.
+                # would have finalized it.
                 stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
                 if stuck:
-                    logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
+                    logger.warning("Reconciled %d stuck once task(s) after restart", stuck)
             except Exception:
                 logger.exception("Failed to reconcile stuck once tasks at startup")
+                raise
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
@@ -589,7 +602,7 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stuck:
-                logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
+                logger.warning("Reconciled %d stuck once task(s) after lease reconciliation", stuck)
         except Exception:
             logger.exception("Failed to reconcile once tasks with leases")
 

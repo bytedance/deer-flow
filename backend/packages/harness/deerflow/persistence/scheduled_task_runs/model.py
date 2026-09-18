@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -13,6 +13,10 @@ class ScheduledTaskRunRow(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), index=True)
+    # NULL identifies legacy history or direct inserts without a parent task.
+    occurrence_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # New occurrences start False; NULL preserves unknown legacy accounting.
+    launch_accounted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -27,6 +31,7 @@ class ScheduledTaskRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     __table_args__ = (
+        Index("uq_scheduled_task_run_occurrence_seq", "task_id", "occurrence_seq", unique=True),
         # At most one non-terminal (queued/launching/running) occurrence per
         # task. Queued occurrences are deliberately durable; ``launching`` is
         # a short lease-fenced claim used so multiple gateway instances cannot

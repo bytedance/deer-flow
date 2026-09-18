@@ -11,8 +11,11 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
+from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
+from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
+from deerflow.subagents.capacity import configured_subagent_max_running
 
 router = APIRouter(prefix="/api", tags=["features"])
 
@@ -35,12 +38,30 @@ class McpTasksFeature(BaseModel):
     enabled: bool = Field(..., description="Whether durable MCP task APIs and UI are available")
 
 
+class SubagentBatchesFeature(BaseModel):
+    """Persistence, worker, and process capacity for native-subagent batches."""
+
+    enabled: bool = Field(..., description="Compatibility alias for worker_running")
+    repository_available: bool = Field(..., description="Whether durable batch history APIs are available")
+    worker_running: bool = Field(..., description="Whether this Gateway process is executing durable batch work")
+    max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
+
+
+class ConversationReferencesFeature(BaseModel):
+    """Availability of explicit conversation references on run requests."""
+
+    enabled: bool = Field(..., description="Whether the opt-in read_conversation tool is configured, so run requests may carry conversation_references")
+    max_references: int = Field(..., description="Maximum conversation references accepted on one run request")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
+    subagent_batches: SubagentBatchesFeature
+    conversation_references: ConversationReferencesFeature
 
 
 @router.get(
@@ -52,6 +73,7 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
+    subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
@@ -59,4 +81,20 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         # capability that actually started rather than a hot-reloaded config
         # value that would require a Gateway restart to take effect.
         mcp_tasks=McpTasksFeature(enabled=bool(getattr(request.app.state, "mcp_tasks_available", False))),
+        subagent_batches=SubagentBatchesFeature(
+            # Keep the historical `enabled` field as a compatibility alias
+            # while exposing read persistence independently from execution.
+            # A stopped/disabled worker must not hide durable history/export.
+            enabled=subagent_batch_worker_running,
+            repository_available=getattr(request.app.state, "subagent_batch_repo", None) is not None,
+            worker_running=subagent_batch_worker_running,
+            max_running=configured_subagent_max_running(),
+        ),
+        # Same predicate as run admission (``prepare_conversation_reader``), read
+        # through ``get_config`` so enabling the tool in config.yaml shows up
+        # without a restart. A UI with no entry point still needs no change here.
+        conversation_references=ConversationReferencesFeature(
+            enabled=conversation_references_enabled(config),
+            max_references=MAX_CONVERSATION_REFERENCES,
+        ),
     )

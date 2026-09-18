@@ -31,24 +31,21 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
-to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
-other `/api/*` go straight to the Gateway REST routers. See
-[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
-It compresses HTML and configured textual assets, while deliberately leaving SSE,
-fonts, images, audio, and video uncompressed at the proxy layer.
+Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
+`/api/langgraph/*` onto the Gateway's native routes, and serves the frontend — see
+[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail. It compresses
+HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
+video uncompressed at the proxy layer.
 
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
-— **loopback by default**, matching the README's documented deployment model. A bare
-`"${PORT}:2026"` binds `0.0.0.0`, which does not.
-The root `PORT` value is Docker ingress configuration only; local orchestration pins
-Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
-Nginx itself listens `default_server` on IPv4+IPv6 and the
-Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
-internal; the published nginx port is the entire external surface, and the Gateway's
-`8001` is deliberately not published. Any new published port needs an explicit bind
-address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
-in both compose files.
+— **loopback by default**, matching the README's documented deployment model; a bare
+`"${PORT}:2026"` binds `0.0.0.0`, which does not. The root `PORT` value is Docker ingress
+configuration only; local orchestration pins Next.js to `3000` so loading `.env` cannot
+make `make dev` wait on the wrong port. Nginx listening `default_server` on IPv4+IPv6 and
+the Gateway binding `0.0.0.0:8001` are container-internal on purpose: the published nginx
+port is the entire external surface. Any new published port needs an explicit bind
+address; `backend/tests/test_compose_default_bind_host.py` pins this for every service in
+both compose files.
 
 ## Repository Map
 
@@ -80,7 +77,7 @@ Third-party extensions are loaded from a top-level `plugins:` list in `config.ya
 kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
 middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
 routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
-five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
+five. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
 `make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
 hooks and extension code execute with Gateway privileges, so only trusted operator sources
 belong in this path. The manager transaction, accepted source forms, lock discipline, and
@@ -100,12 +97,21 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. An entry may also preapprove
+  future full-file SHA-256 values, effective only once the manifest change lands
+  in the trusted base — so relying on a waiver takes two merges: the manifest
+  first, the skill change after, then promote the consumed hash to `file_sha256`
+  in a follow-up cleanup.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+- Scheduled background runs are intentionally non-interactive: the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. That key, `disable_clarification`, and `github_token` are honored only for internally-authenticated callers; client-supplied copies are dropped from both `body.context` and `body.config`.
 - Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
-- Scheduled launches use `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`). The value is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
 
 ## Commands: Root vs. Module
 
@@ -119,12 +125,13 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
 make extension-list                # List configured Python extensions
 make extension-enable NAME=...     # Enable an installed extension (restart required)
 make extension-disable NAME=...    # Disable without uninstalling (restart required)
 make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized)
+make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
@@ -146,12 +153,13 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
+cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
@@ -159,7 +167,10 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
+`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
+to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
+Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
@@ -188,7 +199,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
   errors surface in the browser console at `localhost:3000`; backend tracebacks appear
   in the Gateway terminal.
 
@@ -215,6 +226,9 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
+  Python utilities that read or write them must pass `encoding="utf-8"` rather than
+  relying on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs

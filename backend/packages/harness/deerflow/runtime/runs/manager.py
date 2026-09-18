@@ -16,12 +16,18 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility, RunIdempotencyConflict
+from .store.base import (
+    EditReplayVisibility,
+    RunIdempotencyConflict,
+    normalize_run_created_at_iso,
+    run_is_before_cursor,
+    run_sort_key,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -55,6 +61,29 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _resolve_record_user_id(user_id: str | None) -> str | None:
+    """Fill an omitted run owner from the ambient user, as the SQL store does.
+
+    The SQL store stamps ``user_id=None`` with the request user, so a local
+    record left at ``None`` disagrees with its own durable row: owner-scoped
+    reads skip it and idempotent reuse rejects it as another user's run.
+    Resolving here gives every store the same owner. Without a user in context
+    the owner stays ``None``.
+    """
+    if user_id is not None:
+        return user_id
+    user = get_current_user()
+    return str(user.id) if user is not None else None
+
+
+def _cursor_part(value: str | None) -> str | None:
+    """Treat missing/blank cursor fields as absent so a one-sided empty string fails."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _is_unique_violation(exc: BaseException) -> bool:
@@ -438,6 +467,10 @@ class RunManager:
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
         """Build a read-only runtime record from a serialized store row.
 
+        The result is a detached ``store_only`` snapshot. Never register it in
+        ``_runs``: only the owning worker's task lifecycle updates and removes
+        local records, so a registered snapshot would never leave.
+
         NULL status/on_disconnect columns (e.g. from rows written before those
         columns were added) default to ``pending`` and ``cancel`` respectively.
         """
@@ -549,6 +582,26 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
+    async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
+        """Persist final fields while the durable row is deliberately active."""
+        should_persist = False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None and not record.ownership_lost:
+                should_persist = record.status not in (RunStatus.pending, RunStatus.running)
+                if should_persist:
+                    for key, value in kwargs.items():
+                        if hasattr(record, key) and value is not None:
+                            setattr(record, key, value)
+                    record.updated_at = _now_iso()
+        if should_persist and self._store is not None:
+            try:
+                # The local status is already staged as terminal, but the store
+                # row intentionally remains running until checkpoint finalization.
+                await self._store.update_run_progress(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
+
     async def create(
         self,
         thread_id: str,
@@ -571,6 +624,7 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        user_id = _resolve_record_user_id(user_id)
         lease_expires_at = self._compute_lease_expires_at()
         record = RunRecord(
             run_id=run_id,
@@ -666,22 +720,58 @@ class RunManager:
             raise_on_store_error=raise_on_store_error,
         )
 
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+    async def list_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
+    ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
         In-memory runs take precedence only when the same ``run_id`` exists in both
         memory and the backing store. The merged result is then sorted newest-first
-        by ``created_at`` and trimmed to ``limit`` (default 100).
+        by ``(created_at, run_id)`` and trimmed to ``limit`` (default 100).
+        Optional ``before_created_at`` + ``before_run_id`` is a keyset cursor for
+        walking older pages; both must be provided together.
 
         Args:
             thread_id: The thread ID to filter by.
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
+            before_created_at: ISO timestamp of the last run on the previous page.
+            before_run_id: Run id of the last run on the previous page.
         """
+        before_created_at = _cursor_part(before_created_at)
+        before_run_id = _cursor_part(before_run_id)
+        if (before_created_at is None) != (before_run_id is None):
+            raise ValueError("before_created_at and before_run_id must be provided together")
+        if before_created_at is not None:
+            try:
+                before_created_at = normalize_run_created_at_iso(before_created_at)
+                datetime.fromisoformat(before_created_at)
+            except ValueError:
+                raise ValueError("before_created_at must be an ISO-8601 timestamp") from None
+
+        def _page(records: list[RunRecord]) -> list[RunRecord]:
+            return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
+
         async with self._lock:
-            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run]
+            memory_records = [
+                record
+                for record in self._thread_records_locked(thread_id)
+                if record.operation_kind == ThreadOperationKind.run
+                and run_is_before_cursor(
+                    record.created_at,
+                    record.run_id,
+                    before_created_at=before_created_at,
+                    before_run_id=before_run_id,
+                )
+            ]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         records_by_id = {record.run_id: record for record in memory_records}
         # Query enough rows to cover both the requested page and every possible
         # in-memory/store duplicate. Local records can be older than persisted
@@ -689,11 +779,15 @@ class RunManager:
         # newest run before the merge; querying only ``limit`` can still lose a
         # distinct row when that page is occupied by duplicate local records.
         store_limit = limit + len(memory_records)
+        store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
+        if before_created_at is not None and before_run_id is not None:
+            store_kwargs["before_created_at"] = before_created_at
+            store_kwargs["before_run_id"] = before_run_id
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         for row in rows:
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
@@ -701,7 +795,7 @@ class RunManager:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
+        return _page(list(records_by_id.values()))
 
     async def list_successful_regenerate_sources(
         self,
@@ -1503,6 +1597,8 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        # Resolve before the idempotency checks below compare it with stored rows.
+        user_id = _resolve_record_user_id(user_id)
 
         _supported_strategies = ("reject", "interrupt", "rollback")
         if multitask_strategy not in _supported_strategies:
@@ -1542,16 +1638,18 @@ class RunManager:
                     return existing
 
             def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                # A locally held record for this key already returned above, so
+                # the conflicting row belongs to a peer or to a run this worker
+                # has cleaned up. Return a store-only handle without registering
+                # it: nothing here finalizes or cleans up that record, so a
+                # registered copy would keep its admission-time status, reject
+                # later admissions for the thread, and shadow the durable row
+                # for get(), cancel(), and orphan reconciliation.
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
-                current = self._runs.get(existing.run_id)
-                if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
-                    current = existing
-                current.idempotency_reused = True
-                return current
+                existing.idempotency_reused = True
+                return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
@@ -1852,7 +1950,16 @@ class RunManager:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
+        """Remove a run record after an optional delay.
+
+        Eviction is only safe when a ``RunStore`` backs this manager: history
+        then stays readable through the store fallback in ``get()`` /
+        ``list_by_thread()``. Without one, dropping the record would erase the
+        run's history entirely, so a store-less manager keeps the previous
+        retain-forever behaviour and this returns immediately.
+        """
+        if self._store is None:
+            return
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:

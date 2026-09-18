@@ -12,7 +12,7 @@ import {
 import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
-import { sanitizeRunStreamOptions } from "./stream-mode";
+import { forceChatRunStreamOptions } from "./stream-mode";
 
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
@@ -75,8 +75,8 @@ export type StreamReplayGapData = {
   code: "stream_replay_gap";
   run_id: string;
   requested_event_id: string | null;
-  earliest_available_event_id: string;
-  latest_available_event_id: string;
+  earliest_available_event_id: string | null;
+  latest_available_event_id: string | null;
   recovery: "reload_durable_state";
 };
 
@@ -86,6 +86,101 @@ type StreamPart = {
   data: unknown;
 };
 
+type ReconnectInputSnapshot = Record<string, unknown> & {
+  messages: unknown[];
+};
+
+function streamOptionSignal(options: unknown): AbortSignal | undefined {
+  if (typeof AbortSignal === "undefined") {
+    return undefined;
+  }
+  if (options instanceof AbortSignal) {
+    return options;
+  }
+  if (typeof options !== "object" || options === null) {
+    return undefined;
+  }
+  const signal = Reflect.get(options, "signal");
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
+/**
+ * Recover the submitted input before replaying an active run. The incremental
+ * chat stream intentionally omits `values`, so a page reload can otherwise
+ * receive the run's AI/tool chunks before its human message has reached the
+ * durable history feed. `runs.get` retains the original graph input in
+ * `kwargs.input`; merge it into the latest durable values for one synthetic
+ * snapshot. Any read failure is deliberately ignored so reconnect semantics
+ * remain unchanged for deployments without run metadata.
+ */
+async function loadReconnectInputSnapshot(
+  client: LangGraphClient,
+  threadId: string,
+  runId: string,
+  run?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>,
+  durableValues?: unknown,
+  signal?: AbortSignal,
+): Promise<ReconnectInputSnapshot | undefined> {
+  try {
+    const resolvedRun =
+      run ?? (await client.runs.get(threadId, runId, { signal }));
+    const runKwargs = Reflect.get(resolvedRun, "kwargs");
+    const input =
+      typeof runKwargs === "object" && runKwargs !== null
+        ? Reflect.get(runKwargs, "input")
+        : undefined;
+    const inputMessages =
+      typeof input === "object" && input !== null
+        ? Reflect.get(input, "messages")
+        : undefined;
+    if (!Array.isArray(inputMessages) || inputMessages.length === 0) {
+      return undefined;
+    }
+
+    const resolvedDurableValues =
+      durableValues ??
+      (await client.threads.getState(threadId, undefined, { signal })).values;
+    const normalizedDurableValues =
+      typeof resolvedDurableValues === "object" &&
+      resolvedDurableValues !== null
+        ? resolvedDurableValues
+        : {};
+    const durableMessages = Array.isArray(
+      Reflect.get(normalizedDurableValues, "messages"),
+    )
+      ? (Reflect.get(normalizedDurableValues, "messages") as unknown[])
+      : [];
+    const seenIds = new Set(
+      durableMessages.flatMap((message) => {
+        const id =
+          typeof message === "object" && message !== null
+            ? Reflect.get(message, "id")
+            : undefined;
+        return typeof id === "string" && id.length > 0 ? [id] : [];
+      }),
+    );
+    const messages = [
+      ...durableMessages,
+      ...inputMessages.filter((message) => {
+        const id =
+          typeof message === "object" && message !== null
+            ? Reflect.get(message, "id")
+            : undefined;
+        if (typeof id !== "string" || id.length === 0) return true;
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      }),
+    ];
+    return { ...normalizedDurableValues, messages } as ReconnectInputSnapshot;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    return undefined;
+  }
+}
+
 export class StreamReplayGapError extends Error {
   constructor(
     readonly gap: StreamReplayGapData,
@@ -93,7 +188,7 @@ export class StreamReplayGapError extends Error {
     readonly recoveryCause?: unknown,
   ) {
     super(
-      `Unable to recover SSE history after ${recoveryAttempts} attempts (requested ${gap.requested_event_id ?? "initial stream"}, earliest ${gap.earliest_available_event_id})`,
+      `Unable to recover SSE history after ${recoveryAttempts} attempts (requested ${gap.requested_event_id ?? "initial stream"}, earliest ${gap.earliest_available_event_id ?? "none"})`,
     );
     this.name = "StreamReplayGapError";
   }
@@ -106,12 +201,16 @@ function parseStreamReplayGap(data: unknown): StreamReplayGapData {
 
   const value = data as Record<string, unknown>;
   const requestedEventId = value.requested_event_id;
+  const earliestAvailableEventId = value.earliest_available_event_id;
+  const latestAvailableEventId = value.latest_available_event_id;
   if (
     value.code !== "stream_replay_gap" ||
     typeof value.run_id !== "string" ||
     (requestedEventId !== null && typeof requestedEventId !== "string") ||
-    typeof value.earliest_available_event_id !== "string" ||
-    typeof value.latest_available_event_id !== "string" ||
+    (earliestAvailableEventId !== null &&
+      typeof earliestAvailableEventId !== "string") ||
+    (latestAvailableEventId !== null &&
+      typeof latestAvailableEventId !== "string") ||
     value.recovery !== "reload_durable_state"
   ) {
     throw new Error("Invalid stream replay gap payload.");
@@ -180,26 +279,25 @@ export function isRunNotCancellableError(error: unknown): boolean {
 }
 
 /**
- * Preflight a reconnect: if the run already reached a terminal state, there is
- * nothing to rejoin. Returns ``true`` when the caller should skip the
- * underlying ``joinStream`` so the SDK's ``onSuccess`` path runs and
- * ``isLoading`` flips back to false — instead of blocking forever on a drained
- * stream bridge.
+ * Preflight a reconnect and return the run record when it can be read. A
+ * missing record or failed request returns ``undefined`` so a legitimately
+ * active reconnect falls back to the original join and the terminal-state
+ * check remains owned by the caller.
  *
  * Any error (404 for an evicted record, network blip, auth hiccup, …) falls
  * back to the original join so a legitimately active reconnect is never
  * silently suppressed.
  */
-async function shouldSkipReconnect(
+async function getReconnectRun(
   client: LangGraphClient,
   threadId: string,
   runId: string,
-): Promise<boolean> {
+  signal?: AbortSignal,
+): Promise<Awaited<ReturnType<LangGraphClient["runs"]["get"]>> | undefined> {
   try {
-    const run = await client.runs.get(threadId, runId);
-    return TERMINAL_RUN_STATUSES.has(run.status);
+    return await client.runs.get(threadId, runId, { signal });
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -239,12 +337,16 @@ async function* recoverStreamReplayGaps({
   expectedRunId,
   initialStream,
   resume,
+  signal,
+  reconnectRun,
 }: {
   client: LangGraphClient;
   threadId: string | null | undefined;
   expectedRunId: () => string | undefined;
   initialStream: AsyncIterable<StreamPart>;
-  resume: (runId: string, lastEventId: string) => AsyncIterable<StreamPart>;
+  resume: (runId: string, lastEventId?: string) => AsyncIterable<StreamPart>;
+  signal?: AbortSignal;
+  reconnectRun?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>;
 }): AsyncGenerator<StreamPart> {
   let stream = initialStream;
   let recoveryAttempts = 0;
@@ -276,8 +378,8 @@ async function* recoverStreamReplayGaps({
 
     // The SDK would otherwise ignore an unknown `gap` event and report a
     // normal finish. Surface a custom control event to DeerFlow's hook, reload
-    // durable values, then explicitly follow only events newer than the
-    // retained tail captured by the server.
+    // durable values, then resume after the retained tail when it exists
+    // (or rejoin without a cursor if the buffer is empty).
     clearReconnectRun(threadId, runId);
     yield {
       event: "custom",
@@ -285,16 +387,35 @@ async function* recoverStreamReplayGaps({
     };
 
     const durableState = await client.threads
-      .getState(threadId)
+      .getState(threadId, undefined, { signal })
       .catch((error: unknown) => {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw error;
+        }
         throw new StreamReplayGapError(gap, recoveryAttempts, error);
       });
     if (durableState.values != null) {
-      yield { event: "values", data: durableState.values };
+      // A gap can arrive after the initial hydration frame but before the
+      // input reaches the checkpoint. Rebuild the snapshot from run metadata
+      // so this recovery path cannot overwrite the rescued human message.
+      const recoveredSnapshot = reconnectRun
+        ? await loadReconnectInputSnapshot(
+            client,
+            threadId,
+            runId,
+            reconnectRun,
+            durableState.values,
+            signal,
+          )
+        : undefined;
+      yield {
+        event: "values",
+        data: recoveredSnapshot ?? durableState.values,
+      };
     }
 
     rememberReconnectRun(threadId, runId);
-    stream = resume(runId, gap.latest_available_event_id);
+    stream = resume(runId, gap.latest_available_event_id ?? undefined);
   }
 }
 
@@ -336,7 +457,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   // this return value with `for await`, so run creation still starts on first
   // iteration rather than when `runs.stream()` is called.
   client.runs.stream = async function* (threadId, assistantId, payload) {
-    const sanitizedPayload = sanitizeRunStreamOptions(payload);
+    const sanitizedPayload = forceChatRunStreamOptions(payload);
     const originalOnRunCreated = sanitizedPayload?.onRunCreated;
     let runId: string | undefined;
     const initialStream = originalRunStream(threadId, assistantId, {
@@ -352,6 +473,8 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       threadId,
       expectedRunId: () => runId,
       initialStream,
+      signal: streamOptionSignal(sanitizedPayload),
+      reconnectRun: undefined,
       resume: (resolvedRunId, lastEventId) => {
         // Keep the recovery run id available to the shared inactive-stream
         // handler even if the SDK omitted its onRunCreated callback.
@@ -394,11 +517,32 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     // reload after the backend's stream bridge is reaped blocks forever on a
     // drained condition variable, pinning ``isLoading`` true so the first
     // post-reload message is routed to ``stop`` instead of ``submit``.
-    if (threadId && (await shouldSkipReconnect(client, threadId, runId))) {
+    const reconnectSignal = streamOptionSignal(options);
+    const reconnectRun = threadId
+      ? await getReconnectRun(client, threadId, runId, reconnectSignal)
+      : undefined;
+    if (reconnectRun && TERMINAL_RUN_STATUSES.has(reconnectRun.status)) {
       clearReconnectRun(threadId, runId);
       return;
     }
-    const sanitizedOptions = sanitizeRunStreamOptions(options);
+    if (threadId && reconnectRun) {
+      const reconnectSnapshot = await loadReconnectInputSnapshot(
+        client,
+        threadId,
+        runId,
+        reconnectRun,
+        undefined,
+        reconnectSignal,
+      );
+      if (reconnectSnapshot) {
+        // This is an internal hydration frame. The requested network stream
+        // remains incremental; the SDK receives the current input before any
+        // replayed messages-tuple AI/tool chunks and deduplicates it against
+        // later history or stream copies by message id.
+        yield { event: "values", data: reconnectSnapshot };
+      }
+    }
+    const sanitizedOptions = forceChatRunStreamOptions(options);
     yield* handleInactiveRunStream({
       threadId,
       expectedRunId: () => runId,
@@ -407,6 +551,8 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         threadId,
         expectedRunId: () => runId,
         initialStream: originalJoinStream(threadId, runId, sanitizedOptions),
+        signal: reconnectSignal,
+        reconnectRun,
         resume: (resolvedRunId, lastEventId) =>
           originalJoinStream(threadId, resolvedRunId, {
             ...sanitizedOptions,

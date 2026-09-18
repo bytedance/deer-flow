@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
 # by the caller. Source of truth for what a skill *may* receive.
 SECRETS_CONTEXT_KEY = "secrets"
@@ -155,6 +157,11 @@ def redact_config_secrets(config: Any) -> Any:
     protected config surface is persisted or returned, while the live config
     that drives the run (built separately) keeps them. Ordinary metadata is
     preserved. Non-dict configs pass through unchanged.
+
+    ``deerflow_trace_id`` is dropped from both containers as well: the id is
+    server-issued and ignored as an input, so echoing a caller-supplied one
+    back would only manufacture disagreement with the ``X-Trace-Id`` header,
+    the logs, and the run record's own stamped metadata.
     """
     if not isinstance(config, dict):
         return config
@@ -162,10 +169,14 @@ def redact_config_secrets(config: Any) -> Any:
     redacted = dict(config)
     context = config.get("context")
     if isinstance(context, dict):
-        redacted["context"] = redact_secret_context_keys(context)
+        scrubbed_context = redact_secret_context_keys(context)
+        scrubbed_context.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        redacted["context"] = scrubbed_context
 
     metadata = config.get("metadata")
     if isinstance(metadata, dict):
-        redacted["metadata"] = redact_metadata_secrets(metadata)
+        scrubbed_metadata = redact_metadata_secrets(metadata)
+        scrubbed_metadata.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        redacted["metadata"] = scrubbed_metadata
 
     return redacted

@@ -8,6 +8,7 @@ skipped automatically when Playwright (or its browser binary) is unavailable.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1124,3 +1125,51 @@ async def test_request_guard_not_installed_for_cdp_sessions():
     await session._install_request_guard()
     assert context.routed is False
     assert session._request_guard_bound is False
+
+
+@pytest.mark.parametrize(
+    ("schedule_attr", "coro_attr", "pending_attr"),
+    [
+        ("_schedule_settle_live_frames", "_settle_live_frames", "_settle_live_frames_pending"),
+        ("_schedule_input_live_frame", "_flush_input_live_frames", "_input_live_frame_pending"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_live_frame_schedulers_retain_task_reference(schedule_attr, coro_attr, pending_attr):
+    """Detached live-frame tasks must stay referenced until they finish.
+
+    The event loop only holds weak references to tasks, so an unreferenced task
+    can be collected before it runs. Both schedulers clear their ``*_pending``
+    guard in a ``finally`` block, so losing the task would strand the guard at
+    ``True`` and silently stop every later refresh for the session.
+    """
+    session = BrowserSession(
+        MagicMock(),
+        headless=True,
+        timeout_ms=1000,
+        viewport={"width": 1000, "height": 500},
+    )
+    release = asyncio.Event()
+
+    async def _blocked() -> None:
+        try:
+            await release.wait()
+        finally:
+            setattr(session, pending_attr, False)
+
+    setattr(session, coro_attr, _blocked)
+
+    getattr(session, schedule_attr)()
+    assert getattr(session, pending_attr) is True
+    assert len(session._background_tasks) == 1
+
+    # A weakly-referenced task would be collectable at this point.
+    gc.collect()
+    assert len(session._background_tasks) == 1
+
+    release.set()
+    await asyncio.gather(*session._background_tasks)
+    await asyncio.sleep(0)  # let the done callback run
+
+    assert session._background_tasks == set()
+    assert getattr(session, pending_attr) is False

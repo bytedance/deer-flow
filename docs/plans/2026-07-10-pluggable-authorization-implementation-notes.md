@@ -403,6 +403,86 @@ Phase 1 最低验证要求：
   effective-permissions 展示；management route 的 provider 迁移；
   feishu/dingtalk 文件同步路径的 sandbox gate（身份传递机制待定）。
 
+### 2026-08-27 — Phase 3 / PR #5006 组合调用单次决策与异步阻塞收口
+
+- **背景：** review 在默认启用的 `ReadBeforeWriteMiddleware` 组合路径复现了一次工具
+  调用产生两次 provider 决策：读工具在 tool body 后重新读取以写 mark，写工具在
+  tool body 前读取以检查 gate。异步路径还在 event loop 上同步加载配置并解析 provider。
+- **决策（调用作用域）：** `sandbox_authorization_scope` / async counterpart 用 task-local
+  `ContextVar` 覆盖完整的组合工具调用，而不只覆盖 offload 的同步 tool body。读写 gate、
+  tool body 和 mark stamping 共用一次实时授权决策；下一个独立工具调用仍重新授权。
+- **决策（deny 语义）：** `ReadBeforeWriteMiddleware` 在作用域入口把
+  `SandboxAuthorizationError` 转成标准 error `ToolMessage`，并在 `_check_write_gate` 与
+  `_attach_read_mark` 中显式重新抛出该异常，禁止通用 fail-open 分支吞掉授权拒绝。
+- **决策（event-loop 边界）：** async config 加载通过 `safe_app_config_async()` offload；
+  `_resolve_authorization_inputs()` 也在线程中执行，避免每次复用 sandbox 时在 event loop
+  上 stat/hash 配置文件或 import/构造自定义 provider。只有 provider 的 `aauthorize()`
+  在异步调用路径上直接 await。
+- **证据：** `tests/test_sandbox_authorization.py` 新增 sync/async `read_file` 与
+  `write_file` 组合覆盖，断言每次调用恰好一个 provider 决策并验证 deny 不被 fail-open；
+  `tests/blocking_io/test_sandbox_authorization.py` 用真实阻塞文件探针固定配置与 provider
+  解析均不在 event loop 上执行。
+- **兼容性：** `authorization.enabled: false` 仍为 no-op；未启用
+  `ReadBeforeWriteMiddleware` 的普通 sandbox 工具继续在各自调用入口重新授权；同步与异步
+  deny 均保持工具级错误而非 run 级异常。
+
+#### PR #5006 review 补充：异步 provider 的构造线程
+
+- 自定义 provider 的模块发现可能触发阻塞 import，但 provider 构造函数也可能创建
+  asyncio loop-affine 客户端。`runtime.py` 因此把解析拆成两阶段：
+  `resolve_authorization_provider_spec()` 在线程池完成 class-path 发现，
+  `construct_authorization_provider()` 在调用方事件循环构造并校验实例。
+- 同步 `resolve_authorization_provider()` 继续组合这两个阶段，保持原有调用契约与错误语义。
+  async sandbox gate 的发现和构造任一失败仍统一遵循 `fail_closed` / `fail_open`。
+- 回归覆盖同时固定两个边界：阻塞文件探针证明 config hash 与 class discovery 不占用
+  event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
+  `aauthorize()` 验证仍是同一个 loop。
+
+### 2026-09-17 — Phase 4 / PR #5489 Skills listing visibility (list / detail)
+
+- **背景：** Phase 4 PR 1（#5228 `/me` route permissions）与 PR 2（#5294 前端权限门控）
+  合并后，模型已有 per-caller listing/use 授权（#4540），sandbox 已有 execute 授权
+  （#4911），但 skill 列表表面仍对全部已认证用户开放——`GET /api/skills`、
+  `GET /api/skills/custom`、`GET /api/skills/{name}` 不检查角色，是 Phase 3 资源类型
+  清单里最后未收口的 listing 面。
+- **决策（表面清单）：** 恰好三个非管理 GET 表面接入 per-caller 可见过滤：`list_skills`、
+  `list_custom_skills`、`get_skill`，共享 `_filter_visible_skills(request, config, skills)`
+  helper，语义镜像 `list_models`：`provider.filter_resources(principal, "skill", names)`
+  批量过滤；provider 解析失败 → `_AuthorizationUnavailable`（携带 `fail_closed` 标志）；
+  provider 抛错或返回非 `list[str]` → 空（fail-closed）或全量（fail-open）。skills.py
+  其余全部路由维持 `require_admin_user` 门控，不在本层重复过滤。
+- **决策（detail 404 而非 403）：** `get_skill` 对被过滤 skill 返回与真实缺失逐字一致的
+  404，而非 `get_model` 的 403。理由：`get_model` 执行的是 `authorize("model", "use")`
+  使用决策（模型存在但角色无权使用 → 403 合理）；本层只有 listing visibility，没有
+  skill 执行决策的对应物，403 会让 detail 端点变成过滤清单刚关掉的 existence oracle。
+- **决策（resolver 结构）：** 从 `resolve_model_authorization` 提取共享核心
+  `_resolve_route_scoped_authorization(user, *, is_internal)`，
+  `resolve_skill_authorization` 与 model 版本互为薄封装（含 `INTERNAL_SYSTEM_ROLE → None`
+  pop 与 internal-caller 语义）。RBAC `_RESOURCE_POLICY_KEYS` 已含 `"skill": "skills"`
+  （rbac.py），roles 的 `skills: {allow: [...]}` 直接生效，无 schema 变更。
+- **否决方案：** 不为 skill 引入 `authorize("skill", "read")` 逐名授权——listing 表面
+  用批量 `filter_resources` 一次往返即可，逐名决策增加配置面且与 `list_models` 不对称。
+  不只过滤 `/skills` 主列表——自审发现 `/skills/custom` 与 `/skills/{name}` 会原样
+  泄露主列表隐藏的名字，三个表面必须同批收口。
+- **兼容性：** `authorization.enabled: false` 时三表面均 no-op（返回全量）。匿名请求
+  （user=None）不过滤——生产 auth 开启时 `AuthMiddleware` 先行 401，该分支实际只覆盖
+  auth-disabled 本地模式，与 `list_models` 对齐。skill 管理端点（install/edit/export/
+  delete 等）保持 `require_admin_user`，不受本过滤影响。RBAC 缺 `skills` 键 = 放行，
+  `allow: []` = 全拒（与 `models` 键同语义）。
+- **证据：** `tests/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
+  allow/deny/wildcard/absent-policy、custom+public 一致过滤、provider error/unavailable/
+  坏返回类型 × fail-closed/fail-open、`("skill", [...])` 契约、custom 列表绕过封闭、
+  detail 404 与真实缺失逐字一致；`test_skills_router_authz.py` 与
+  `test_skills_custom_router.py` 的 fake config 补 `AuthorizationConfig`（含
+  `_make_test_app` 回填 shim）。review（willem-bd）在 head tree 执行验证：4 套件
+  78 tests 通过，且移除 custom-listing 过滤的突变使
+  `test_list_custom_skills_rbac_filters_by_deny` 变红，守护测试真实。
+- **延期：** #4541（Phase 3 执行层：assembly 过滤 + slash-activation 授权）与本 PR
+  互补（本 PR 管 listing visibility，#4541 管 runtime use），其 rebase 时需双向调和：
+  `config.example.yaml` roles 注释段两 PR 均改；本文件决策日志两 PR 也在同一插入点
+  各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
+  迁移（沿袭前阶段延期项）。
+
 ### 新记录模板
 
 ```markdown

@@ -1,10 +1,57 @@
 ## Service Startup Contracts
 
+Optional browser dependency detection reads the top-level `tools:` sequence
+without requiring `name` to be its first mapping key. Both indented and
+indentless lists are supported; nested option names and block-scalar text
+must not enable the browser extra. Keep the detector standard-library-only
+because it runs before dependency synchronization. Read UTF-8 config files
+with or without a leading BOM so the first section remains detectable.
+`setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
+keep its shell filter compatible with GNU and BSD sed.
+
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
+
+## Shell Script Invocation Contract
+
+Root Makefile recipes must invoke repository `.sh` files through
+`RUN_SHELL_SCRIPT`. On POSIX this expands to `$(BASH)`; on Windows it uses the
+Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
+likewise prefix the target with `bash`. This keeps documented `make` commands
+working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
+does not preserve executable bits.
+
+Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
+Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
+lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the
+same or an earlier PATH directory. If neither is found, it falls back to
+Corepack, checking `corepack.cmd` before `corepack`. POSIX Python (including
+MSYS/Cygwin Python) keeps the generic name first for each tool; the gate is
+based on Python's `os.name`, not the invoking shell.
+
+## Public Skill Review Waivers
+
+`review_changed_public_skills.py` keeps the analyzer strict and applies narrow
+CI-only exceptions from `.github/skill-review-waivers.v1.json`. The manifest is
+versioned by `contracts/skill_review/waiver_manifest.v1.schema.json`; each entry
+must identify one current error by package, source, rule, path, line, and
+evidence, and pin the complete source file with SHA-256 plus an expiry date.
+An optional, bounded `preapproved_file_sha256s` list authorizes reviewed future
+full-file digests without relaxing the exact finding match. Blockers are never
+waivable, and waived errors are still printed with their original severity and
+justification.
+
+For pull requests, only the base revision's manifest is effective. The head
+manifest is parsed and checked against the current analyzer output, but cannot
+self-authorize a finding in the same pull request. Push comparisons use the
+same before/after trust boundary. A waiver-only change can therefore land
+without weakening its own check, then become effective for later changes after
+it is part of the trusted base. Preapproved digests must be code-reviewed in
+that first change; after the corresponding file revision lands, promote the
+consumed digest to `file_sha256` and remove it from the preapproval list.
 
 ## Backend Static Analysis Commands
 

@@ -6,14 +6,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain.agents import AgentState
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.subagents import SubagentRuntime
 
 
 def _make_mock_model():
@@ -239,6 +244,57 @@ def test_subagent_injects_task_tool(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
     assert "task" in tool_names
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_explicit_subagent_runtime_aligns_factory_middleware_and_tools(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    submitter = MagicMock()
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=7),
+        max_total_per_run=12,
+        batch_submitter=submitter,
+    )
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(subagent=True, sandbox=False),
+        subagent_runtime=runtime,
+    )
+
+    call_kwargs = mock_create_agent.call_args.kwargs
+    limit = next(middleware for middleware in call_kwargs["middleware"] if type(middleware).__name__ == "SubagentLimitMiddleware")
+    assert limit.max_concurrent == 7
+    assert limit.max_total == 12
+    tool_names = {tool.name for tool in call_kwargs["tools"]}
+    assert {"task", "batch_task", "batch_status", "cancel_batch"} <= tool_names
+
+
+def test_explicit_subagent_runtime_requires_the_subagent_feature() -> None:
+    runtime = SubagentRuntime(SubagentRuntimeConfig(max_running=4))
+
+    with pytest.raises(ValueError, match="subagent_runtime.*features.subagent"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=False, sandbox=False),
+            subagent_runtime=runtime,
+        )
+
+
+def test_factory_rejects_configured_batch_runtime_before_worker_start() -> None:
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=4),
+        batch_repository=MagicMock(),
+        batch_config=SubagentBatchesConfig(enabled=True),
+        app_config=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="await subagent_runtime.start"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=True, sandbox=False),
+            subagent_runtime=runtime,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +934,8 @@ def test_full_chain_order(mock_create_agent):
         "DanglingToolCallMiddleware",
         "MyGuardrail",
         "ToolErrorHandlingMiddleware",
+        "DurableContextMiddleware",
+        "SystemMessageCoalescingMiddleware",
         "MySummarization",
         "TodoMiddleware",
         "TitleMiddleware",
@@ -1003,3 +1061,109 @@ def test_extra_circular_dependency():
             features=RuntimeFeatures(sandbox=False),
             extra_middleware=[MW_A(), MW_B()],
         )
+
+
+# ===========================================================================
+# Delegation ledger and compacted summary in a factory-built graph
+# ===========================================================================
+
+
+class _RecordingFakeModel(_FakeModel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "received", [])
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.received.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@tool("task")
+def _fake_task(description: str, prompt: str, subagent_type: str) -> str:
+    """Fake task tool."""
+    return f"Task Succeeded. Result: {description}"
+
+
+def _task_turn(call_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "task", "args": {"description": call_id, "prompt": "do it", "subagent_type": "general-purpose"}, "id": call_id, "type": "tool_call"}],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 43. The per-run subagent total holds across model turns
+# ---------------------------------------------------------------------------
+def test_subagent_total_per_run_holds_across_model_turns():
+    model = _FakeModel(responses=[_task_turn("call-1"), _task_turn("call-2"), _task_turn("call-3"), AIMessage(content="done")])
+    runtime = SubagentRuntime(SubagentRuntimeConfig(max_running=3), max_total_per_run=2)
+    graph = create_deerflow_agent(
+        model,
+        tools=[_fake_task],
+        features=RuntimeFeatures(subagent=True, sandbox=False),
+        subagent_runtime=runtime,
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="delegate three pieces of work")]}, context={"run_id": "run-1"})
+
+    ran = [message.tool_call_id for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "task"]
+    assert ran == ["call-1", "call-2"]
+
+
+# ---------------------------------------------------------------------------
+# 44. The model still sees the summary after summarization compacts history
+# ---------------------------------------------------------------------------
+def test_summarization_feature_keeps_the_summary_in_model_requests():
+    summarizer = DeerFlowSummarizationMiddleware(
+        model=_FakeModel(responses=[AIMessage(content="compressed summary")]),
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+    )
+    model = _RecordingFakeModel(responses=[AIMessage(content="one"), AIMessage(content="two"), AIMessage(content="three")])
+    graph = create_deerflow_agent(
+        model,
+        system_prompt="You are a test agent.",
+        features=RuntimeFeatures(summarization=summarizer, sandbox=False),
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "factory-summary"}}
+
+    for text in ("first", "second", "third"):
+        result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+
+    assert result["summary_text"] == "compressed summary"
+    assert "first" not in [message.content for message in result["messages"]]
+    request = model.received[-1]
+    assert any("compressed summary" in str(message.content) for message in request)
+    # The durable-context authority contract must not reach the provider as a second SystemMessage.
+    assert [index for index, message in enumerate(request) if isinstance(message, SystemMessage)] == [0]
+    assert "You are a test agent." in request[0].content
+
+
+# ---------------------------------------------------------------------------
+# 45. token_budget=True enforces the default budget
+# ---------------------------------------------------------------------------
+def test_token_budget_true_enforces_the_default_budget():
+    @tool("bash")
+    def bash(command: str) -> str:
+        """Run a fake shell command."""
+        return "ok"
+
+    over_budget = AIMessage(
+        content="",
+        tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-1", "type": "tool_call"}],
+        usage_metadata={"input_tokens": 250_000, "output_tokens": 0, "total_tokens": 250_000},
+    )
+    graph = create_deerflow_agent(
+        _FakeModel(responses=[over_budget, AIMessage(content="done")]),
+        tools=[bash],
+        features=RuntimeFeatures(token_budget=True, sandbox=False),
+    )
+    context = {"run_id": "run-1"}
+
+    result = graph.invoke({"messages": [HumanMessage(content="go")]}, context=context)
+
+    assert not any(isinstance(message, ToolMessage) for message in result["messages"])
+    assert "TOKEN BUDGET EXCEEDED" in result["messages"][-1].content
+    assert context["stop_reason"] == "token_capped"

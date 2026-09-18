@@ -27,13 +27,17 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
+import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useBrowserControlEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -46,6 +50,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { resolveThreadContext } from "@/core/settings/store";
 import {
   useThreadMetadata,
   useThreadStream,
@@ -61,13 +66,15 @@ import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const router = useRouter();
 
   const { agent_name } = useParams<{
     agent_name: string;
   }>();
 
-  const { agent } = useAgent(agent_name);
+  const { agent, isLoading: agentSkillsLoading } = useAgent(agent_name);
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
@@ -258,10 +265,10 @@ export default function AgentChatPage() {
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(
-                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+                "absolute top-0 right-0 left-0 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
                 isWelcomeMode
-                  ? "bg-background/0 backdrop-blur-none"
-                  : "bg-background/80 shadow-xs backdrop-blur",
+                  ? "bg-background/0 z-40 backdrop-blur-none"
+                  : "bg-background/80 z-30 shadow-xs backdrop-blur",
               )}
             >
               <SidebarTrigger className="md:hidden" />
@@ -269,18 +276,37 @@ export default function AgentChatPage() {
               <div className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
                 <BotIcon className="text-primary h-3.5 w-3.5" />
                 <span className="hidden max-w-24 truncate text-xs font-medium sm:inline sm:max-w-none">
-                  {agent?.name ?? agent_name}
+                  {agent?.display_name?.length
+                    ? agent.display_name
+                    : (agent?.name ?? agent_name)}
                 </span>
               </div>
 
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-                <ThreadTitle threadId={threadId} thread={thread} />
+                <ThreadTitle
+                  threadId={threadId}
+                  thread={thread}
+                  canonicalTitle={threadMetadata.data?.values?.title}
+                />
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadArchiveStatus
+                      threadId={threadId}
+                      metadata={threadMetadata.data?.metadata}
+                    />
+                  )}
               </div>
               <div className="flex shrink-0 items-center sm:mr-4">
                 {!isNewThread &&
                   !isMock &&
                   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                     <ThreadBackgroundTasks threadId={threadId} />
+                  )}
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadSubagentBatches threadId={threadId} />
                   )}
                 <Tooltip content={t.agents.newChat}>
                   <Button
@@ -321,10 +347,14 @@ export default function AgentChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  archiveDownloadsEnabled={
+                    isNewThread || isMock || threadMetadata.data != null
+                  }
                   className={cn("size-full", !isWelcomeMode && "pt-10")}
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}
@@ -406,6 +436,8 @@ export default function AgentChatPage() {
                     threadId={threadId}
                     draftThreadId={isNewThread ? "new" : threadId}
                     draftAgentName={agent_name}
+                    agentSkillNames={agent?.skills}
+                    agentSkillsLoading={agentSkillsLoading}
                     defaultModelName={agent?.model}
                     autoFocus={isWelcomeMode}
                     status={
@@ -428,12 +460,15 @@ export default function AgentChatPage() {
                       isUploading ||
                       (!isNewThread && isHistoryLoading)
                     }
-                    onContextChange={(context) =>
-                      setSettings("context", context)
-                    }
+                    onContextChange={(context, options) => {
+                      if (options?.automatic)
+                        resolveThreadContext(threadId, context);
+                      else setSettings("context", context);
+                    }}
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
                     onStop={handleStop}
+                    canStopStreaming={canStopStreaming}
                   />
                   {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
                     <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">

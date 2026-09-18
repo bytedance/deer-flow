@@ -34,17 +34,60 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from typing import TypedDict
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 
 TOOL_RECEIPT_KEY = "deerflow_tool_receipt"
+TOOL_RECEIPT_LEDGER_KEY = "deerflow_tool_receipt_ledger"
 
 _HASH_LEN = 16
 _RENDER_CHAR_BUDGET = 2000
+
+#: Single source of truth for the citation wire format. Id assignment, ledger
+#: validation, the model-facing prompt example, and the parent-side verifier
+#: all derive from these — the format changes in exactly one place.
+RECEIPT_ID_PREFIX = "r"
+_MAX_RECEIPT_ID_DIGITS = 10
+
+
+def receipt_id(position: int) -> str:
+    """Display id for the ``position``-th receipt (1-based): ``r1``..``rN``."""
+    return f"{RECEIPT_ID_PREFIX}{position}"
+
+
+#: ``[r2]`` bare or ``[r2 write_file]`` anchored. The optional label lets the
+#: verifier sanity-check claim-evidence coherence.
+CITATION_RE = re.compile(rf"\[{RECEIPT_ID_PREFIX}(\d+)(?:\s+([A-Za-z_][\w.-]*))?\]")
+
+
+def format_citation(rid: str, tool_name: str | None = None) -> str:
+    """Canonical model-facing citation (``[r2]`` bare, ``[r2 write_file]`` anchored)."""
+    return f"[{rid} {tool_name}]" if tool_name else f"[{rid}]"
+
+
+def parse_citations(text: str) -> list[tuple[str, str | None]]:
+    """Pull ``(id, anchor)`` pairs out of report prose, deduped first-seen."""
+    seen: set[tuple[str, str | None]] = set()
+    citations: list[tuple[str, str | None]] = []
+    for match in CITATION_RE.finditer(text):
+        digits = match.group(1)
+        # Model output is untrusted.  Bound the decimal string before int()
+        # so an enormous citation id cannot trip Python's conversion limit and
+        # turn an otherwise successful task into a verification exception.
+        if len(digits) > _MAX_RECEIPT_ID_DIGITS:
+            continue
+        rid = receipt_id(int(digits))
+        citation = (rid, match.group(2))
+        if citation in seen:
+            continue
+        seen.add(citation)
+        citations.append(citation)
+    return citations
 
 
 class ToolReceipt(TypedDict):
@@ -93,11 +136,11 @@ def extract_tool_receipts(messages: list) -> list[ToolReceipt]:
         if not isinstance(message, ToolMessage):
             continue
         receipt = (message.additional_kwargs or {}).get(TOOL_RECEIPT_KEY)
-        if not _is_valid_receipt(receipt):
+        if not is_valid_receipt(receipt):
             continue
         receipts.append(
             ToolReceipt(
-                id=f"r{len(receipts) + 1}",
+                id=receipt_id(len(receipts) + 1),
                 tool_call_id=receipt["tool_call_id"],
                 tool_name=receipt["tool_name"],
                 status=receipt["status"],
@@ -110,10 +153,55 @@ def extract_tool_receipts(messages: list) -> list[ToolReceipt]:
     return receipts
 
 
+def extract_citing_turn_receipts(messages: list) -> list[ToolReceipt] | None:
+    """Return the ledger snapshot shown to the last citing assistant turn.
+
+    ``ToolReceiptMiddleware`` stamps this runtime-owned snapshot on each model
+    response that received a receipt ledger. Unlike a terminal re-scan of tool
+    messages, these positional display ids remain the ids the response could
+    actually cite even if summarization later compacts and renumbers history.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        raw_ledger = (message.additional_kwargs or {}).get(TOOL_RECEIPT_LEDGER_KEY)
+        if raw_ledger is None:
+            continue
+        if not isinstance(raw_ledger, list):
+            return None
+        receipts: list[ToolReceipt] = []
+        first_position: int | None = None
+        for index, receipt in enumerate(raw_ledger):
+            if not is_valid_receipt(receipt):
+                return None
+            rid = receipt.get("id")
+            match = re.fullmatch(rf"{re.escape(RECEIPT_ID_PREFIX)}([1-9]\d*)", rid) if isinstance(rid, str) else None
+            if match is None:
+                return None
+            if first_position is None:
+                first_position = int(match.group(1))
+            if rid != receipt_id(first_position + index):
+                return None
+            receipts.append(
+                ToolReceipt(
+                    id=receipt["id"],
+                    tool_call_id=receipt["tool_call_id"],
+                    tool_name=receipt["tool_name"],
+                    status=receipt["status"],
+                    args_sha256=receipt["args_sha256"],
+                    output_sha256=receipt["output_sha256"],
+                    output_bytes=receipt["output_bytes"],
+                    created_at=receipt["created_at"],
+                )
+            )
+        return receipts
+    return None
+
+
 _RECEIPT_STR_FIELDS = ("tool_call_id", "tool_name", "status", "args_sha256", "output_sha256", "created_at")
 
 
-def _is_valid_receipt(receipt: object) -> bool:
+def is_valid_receipt(receipt: object) -> bool:
     """Structural check for a persisted receipt (types only, not provenance)."""
     if not isinstance(receipt, dict):
         return False
@@ -123,13 +211,25 @@ def _is_valid_receipt(receipt: object) -> bool:
     return isinstance(output_bytes, int) and not isinstance(output_bytes, bool)
 
 
-def render_tool_receipts(receipts: list[ToolReceipt], *, max_chars: int = _RENDER_CHAR_BUDGET) -> str:
-    """Render the receipt ledger as model-visible context (empty -> "")."""
+def render_tool_receipts_with_snapshot(
+    receipts: list[ToolReceipt],
+    *,
+    max_chars: int = _RENDER_CHAR_BUDGET,
+) -> tuple[str, list[ToolReceipt]]:
+    """Render a ledger and return the exact receipt subset visible in it.
+
+    The retained receipts keep their original display ids.  Callers that
+    persist a citing-turn ledger must use this snapshot rather than the full
+    input list, otherwise a citation could resolve against an entry omitted by
+    the model context budget.
+    """
     if not receipts:
-        return ""
+        return "", []
     lines = [
         "## Tool receipts (execution record)",
-        "Cite receipt ids (e.g. [r1]) in your final report for every claim about an action you took.",
+        # The example is generated from format_citation/parse_citations' shared
+        # format so the instruction can never drift from the verifier.
+        f"Cite receipt ids (e.g. {format_citation(receipt_id(1), 'write_file')}) in your final report for every claim about an action you took.",
         # Anti-automation-bias (design rule 4): the ledger always states its
         # evidence boundary so the model never reads provenance as endorsement.
         "Execution evidence only — receipts record that a call happened and its status; they do not validate claim correctness or task acceptance.",
@@ -137,14 +237,27 @@ def render_tool_receipts(receipts: list[ToolReceipt], *, max_chars: int = _RENDE
     receipt_lines = [f"- [{receipt['id']}] {receipt['tool_name']} status={receipt['status']} args_sha256={receipt['args_sha256']} output_sha256={receipt['output_sha256']} bytes={receipt['output_bytes']}" for receipt in receipts]
     if len("\n".join([*lines, *receipt_lines])) <= max_chars:
         lines.extend(receipt_lines)
+        retained_receipts = receipts
     else:
         omission = "- ... older receipts omitted (context budget)"
         retained: list[str] = []
+        retained_count = 0
         for line in reversed(receipt_lines):
             candidate = [*lines, omission, line, *retained]
             if len("\n".join(candidate)) > max_chars:
                 break
             retained.insert(0, line)
+            retained_count += 1
         lines.extend([omission, *retained])
+        retained_receipts = receipts[-retained_count:] if retained_count else []
     rendered = "\n".join(lines)
-    return rendered if len(rendered) <= max_chars else rendered[: max(0, max_chars - 4)] + "\n..."
+    if len(rendered) > max_chars:
+        rendered = rendered[: max(0, max_chars - 4)] + "\n..."
+        retained_receipts = []
+    return rendered, retained_receipts
+
+
+def render_tool_receipts(receipts: list[ToolReceipt], *, max_chars: int = _RENDER_CHAR_BUDGET) -> str:
+    """Render the receipt ledger as model-visible context (empty -> "")."""
+    rendered, _ = render_tool_receipts_with_snapshot(receipts, max_chars=max_chars)
+    return rendered

@@ -33,7 +33,9 @@ import asyncio
 import functools
 import inspect
 import logging
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
@@ -66,6 +68,10 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
 
 class AuthContext:
@@ -118,6 +124,28 @@ def get_auth_context(request: Request) -> AuthContext | None:
     return getattr(request.state, "auth", None)
 
 
+def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
+    """Require ``runs:cancel`` when a request carries cancel capability.
+
+    Cancel capability reaches the run lifecycle through more than the dedicated
+    cancel route: ``?action=interrupt|rollback`` on the join-stream entry and
+    ``multitask_strategy=interrupt|rollback`` on run creation both terminate an
+    already-active run. A credential whose scopes omit ``runs:cancel`` (e.g. a
+    create- or read-only PAT) must not reach any of those paths, and
+    decorators cannot express query- or body-parameter-conditional
+    permissions, so callers apply this check where the capability is known.
+
+    ``request.state.auth`` may be absent in middleware-less compositions
+    (unit-test stubs, auth-disabled startup); the shipped Gateway always
+    stamps it via ``AuthMiddleware`` before handlers run.
+    """
+    if not can_cancel:
+        return
+    auth = getattr(request.state, "auth", None)
+    if auth is not None and not auth.has_permission("runs", "cancel"):
+        raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+
+
 _ALL_PERMISSIONS: list[str] = [
     Permissions.THREADS_READ,
     Permissions.THREADS_WRITE,
@@ -125,6 +153,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -264,6 +295,17 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     return [p for p in results if p is not None]
 
 
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
+
+
 class _AuthorizationUnavailable(Exception):
     """Raised internally when the provider cannot be resolved for a route check.
 
@@ -275,11 +317,11 @@ class _AuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
-def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
-    """Return ``(provider, principal)`` for model-route authorization.
+def _resolve_route_scoped_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for route-level resource authorization.
 
     When authorization is disabled, returns ``(None, None)`` so callers can
-    short-circuit to legacy behavior (all models visible). When enabled,
+    short-circuit to legacy behavior (resource visible). When enabled,
     resolves the cached provider and builds a Principal identical to
     ``resolve_route_permissions`` (including the ``INTERNAL_SYSTEM_ROLE``
     → ``None`` pop so internal callers fall under ``default_role``).
@@ -297,7 +339,7 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:
-        logger.warning("Failed to resolve authorization provider for model routes", exc_info=True)
+        logger.warning("Failed to resolve authorization provider for route-level resources", exc_info=True)
         raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
 
     principal = build_principal_from_context(
@@ -307,13 +349,35 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     return provider, principal
 
 
+def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for model-route authorization.
+
+    Delegates to ``_resolve_route_scoped_authorization``: disabled →
+    ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` (carrying ``fail_closed``).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for skill-route authorization.
+
+    Same resolution and Principal construction as ``resolve_model_authorization``
+    (disabled → ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` carrying ``fail_closed``). Consumers translate
+    that into the appropriate deny response (empty skill listing).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
 def _route_authz_context(user: User, *, is_internal: bool) -> dict:
     """Build the shared Principal context dict for a request-scoped user.
 
     Applies the ``INTERNAL_SYSTEM_ROLE → None`` pop so internal callers fall
     under ``default_role`` (mirrors ``inject_authenticated_user_context``).
-    Used by ``resolve_model_authorization`` and ``authorize_sandbox_for_request``
-    so every route-level authorization path builds the identity the same way.
+    Used by ``_resolve_route_scoped_authorization`` (model/skill routes) and
+    ``authorize_sandbox_for_request`` so every route-level authorization path
+    builds the identity the same way.
     """
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
@@ -376,6 +440,27 @@ def authorize_sandbox_for_request(
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
 
 
+@dataclass(slots=True)
+class SandboxRequestLease:
+    """One Gateway request's process-local use of a sandbox client."""
+
+    sandbox: object | None
+    sandbox_id: str | None
+    denied: bool
+    owner_id: str | None
+    provider: object | None
+
+    async def release(self) -> None:
+        """Drop the request holder without bypassing concurrent executions."""
+        if self.owner_id is None or self.provider is None:
+            return
+        from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+        owner_id = self.owner_id
+        self.owner_id = None
+        await get_sandbox_lease_manager(self.provider).release_async(owner_id)
+
+
 async def try_acquire_sandbox_for_request(
     request: Request,
     sandbox_provider,
@@ -383,19 +468,21 @@ async def try_acquire_sandbox_for_request(
     *,
     user_id: str,
     app_config: AppConfig | None,
-) -> tuple[object, str | None, bool]:
+    owner_prefix: str = "gateway",
+    release_on_last: bool = True,
+) -> SandboxRequestLease:
     """Gate + acquire the thread sandbox for a Gateway sync path.
 
     Single entry point for the uploads/artifacts sandbox-sync paths so the
     deny/skip semantics live in one place: runs the ``sandbox:execute`` gate
-    for the request's user, then acquires the sandbox. Returns
-    ``(sandbox, sandbox_id, denied)``:
+    for the request's user, then acquires the sandbox under a unique request
+    holder. Callers must await :meth:`SandboxRequestLease.release` after their
+    last client operation.
 
-    - denied role → ``(None, None, True)``: acquisition was skipped by policy;
+    - denied role → no sandbox/owner and ``denied=True``: acquisition was skipped by policy;
       the primary operation (upload / artifact edit) proceeds without the
       sandbox copy.
-    - allowed → ``(sandbox, sandbox_id, False)``: ``sandbox`` is the acquired
-      instance (``sandbox_id`` for later release), or ``sandbox is None`` when
+    - allowed → ``sandbox`` is the acquired instance, or ``sandbox is None`` when
       the provider lost it right after acquiring (infrastructure error —
       callers surface it as 500 / RuntimeError respectively, since that is
       not a policy decision).
@@ -412,9 +499,30 @@ async def try_acquire_sandbox_for_request(
             authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
     except SandboxAuthorizationError:
         logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
-        return None, None, True
-    sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
-    return sandbox_provider.get(sandbox_id), sandbox_id, False
+        return SandboxRequestLease(
+            sandbox=None,
+            sandbox_id=None,
+            denied=True,
+            owner_id=None,
+            provider=None,
+        )
+
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    owner_id = f"{owner_prefix}:{uuid.uuid4()}"
+    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+        owner_id,
+        thread_id,
+        user_id=user_id,
+        release_on_last=release_on_last,
+    )
+    return SandboxRequestLease(
+        sandbox=sandbox_provider.get(sandbox_id),
+        sandbox_id=sandbox_id,
+        denied=False,
+        owner_id=owner_id,
+        provider=sandbox_provider,
+    )
 
 
 async def _authenticate(request: Request) -> AuthContext:
@@ -429,8 +537,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    permissions = await resolve_route_permissions_for_request(request, user)
     return AuthContext(user=user, permissions=permissions)
 
 
@@ -552,14 +659,22 @@ def require_permission(
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             request = kwargs.get("request")
             if request is None:
-                # Unit tests may call decorated route handlers directly without
-                # constructing a FastAPI Request object. Inject a minimal stub
-                # when the wrapped function declares `request`.
-                if "request" in inspect.signature(func).parameters:
+                # Unit tests may call decorated route handlers directly — with
+                # or without constructing a FastAPI Request object — and may
+                # pass ``request`` positionally. Bind to the real signature
+                # first so a positional request is found rather than
+                # duplicated by the stub injection below.
+                try:
+                    bound = inspect.signature(func).bind_partial(*args, **kwargs)
+                except TypeError:
+                    bound = None
+                if bound is not None and "request" in bound.arguments:
+                    request = bound.arguments["request"]
+                elif "request" in inspect.signature(func).parameters:
                     kwargs["request"] = _make_test_request_stub()
+                    request = kwargs["request"]
                 else:
                     return await func(*args, **kwargs)
-                request = kwargs["request"]
 
             if getattr(request, "_deerflow_test_bypass_auth", False):
                 return await func(*args, **kwargs)

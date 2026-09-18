@@ -22,9 +22,13 @@ class SubagentConfig:
                 disabled for this subagent. Skill bodies and their allowed-tools
                 policies take effect only after activation/loading at runtime.
         model: Model to use - 'inherit' uses parent's model.
-        max_turns: Maximum agent turns before stopping. Built-in agents use the
-            value set here (general-purpose=150, bash=60) unless the global
-            ``subagents.max_turns`` is set.
+        max_turns: Maximum agent turns — model call plus the tools it runs —
+            before stopping. Built-in agents use the value set here
+            (general-purpose=150, bash=60) unless the global
+            ``subagents.max_turns`` is set. ``turn_budget.py`` converts this
+            into the LangGraph ``recursion_limit`` that buys that many turns
+            through the assembled middleware chain; it is not passed through as
+            a super-step count.
         timeout_seconds: Bare fallback execution-time cap. For built-in agents the
             effective limit is the global ``subagents.timeout_seconds`` (default
             1800 = 30 min), layered on by the registry; this 900 only applies
