@@ -619,6 +619,8 @@ export const enUS: Translations = {
       cron: "Cron expression",
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
+      invalidRunAt:
+        "This local time does not exist in the selected timezone. Choose another time.",
       timezone: "Timezone",
       intervalAmount: "Every",
       intervalUnitSeconds: "seconds",
@@ -653,6 +655,11 @@ export const enUS: Translations = {
       reuseNoticeTitle: "Uses this thread's conversation history",
       reuseNoticeDescription:
         "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
+    },
+    search: {
+      placeholder: "Search task titles or prompts",
+      clear: "Clear search",
+      noResults: "No tasks match your search and filters.",
     },
     filters: {
       allStatuses: "All statuses",

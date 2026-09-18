@@ -34,6 +34,14 @@ describe("parseSlashSkillReference", () => {
     expect(parseSlashSkillReference("/help")).toBeNull();
   });
 
+  it("allows a context skill except for the compact alias", () => {
+    expect(parseSlashSkillReference("/context compact")).toBeNull();
+    expect(parseSlashSkillReference("/context use this skill")).toEqual({
+      name: "context",
+      remainingText: "use this skill",
+    });
+  });
+
   it("returns null when text is not a leading slash command", () => {
     expect(parseSlashSkillReference("hello /data-analysis")).toBeNull();
     expect(parseSlashSkillReference("/a/b")).toBeNull();

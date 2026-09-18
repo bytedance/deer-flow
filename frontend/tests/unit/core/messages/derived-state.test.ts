@@ -153,3 +153,61 @@ describe("incremental message derivation", () => {
     expect(next.byGroupIndex.at(-1)).not.toBe(initial.byGroupIndex.at(-1));
   });
 });
+
+it("keeps pre-clarification answers stable through hidden replies, reconnect, and settlement", () => {
+  const history = [
+    message("human", "h", "Plan a deployment"),
+    message("ai", "plan", "Completed plan"),
+    {
+      ...message("ai", "ask", ""),
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      ...message("tool", "request", "Which environment?"),
+      name: "ask_clarification",
+      tool_call_id: "call",
+    },
+  ] as Message[];
+  const reply = {
+    ...message("human", "reply", "staging"),
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const continued = [
+    ...history,
+    reply,
+    message("ai", "next", "Starting deployment"),
+  ];
+  const waiting = deriveStableMessageGroups(history, false, [], false);
+  const running = deriveStableMessageGroups(continued, true, waiting, false);
+  const reconnect = deriveStableMessageGroups(continued, true, [], false);
+  const settled = deriveStableMessageGroups(continued, false, running, true);
+  for (const groups of [waiting, running, reconnect, settled]) {
+    expect(groups.find((group) => group.id === "plan")?.type).toBe("assistant");
+    expect(
+      groups
+        .flatMap((group) => group.messages)
+        .filter((item) => item.id === "plan"),
+    ).toHaveLength(1);
+  }
+  expect(
+    running
+      .find((group) => group.id === "ask")
+      ?.messages.map((item) => item.id),
+  ).toEqual(["ask", "request"]);
+  expect(running.find((group) => group.id === "plan")).toBe(
+    waiting.find((group) => group.id === "plan"),
+  );
+  const nextVisibleTurn = [
+    ...continued,
+    message("human", "followup", "Check status"),
+    message("ai", "status", "Checking"),
+  ];
+  expect(
+    deriveStableMessageGroups(nextVisibleTurn, true, running, true),
+  ).toEqual(getMessageGroups(nextVisibleTurn, { isCurrentTurnLoading: true }));
+  expect(running).toEqual(reconnect);
+  expect(running.find((group) => group.id === "next")?.type).toBe(
+    "assistant:processing",
+  );
+  expect(settled.find((group) => group.id === "next")?.type).toBe("assistant");
+});

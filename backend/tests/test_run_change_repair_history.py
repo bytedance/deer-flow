@@ -29,7 +29,12 @@ def _historical_config(engine, tmp_path):
         if path.name not in historical_files:
             path.unlink()
     preferences = target / "versions" / "0023_user_preferences.py"
-    preferences.write_text(preferences.read_text(encoding="utf-8").replace('down_revision = "0023_run_change_seq"', 'down_revision = "0022_scheduled_occurrence_seq"'), encoding="utf-8")
+    text = preferences.read_text(encoding="utf-8")
+    expected_parent = 'down_revision = "0023_run_change_seq"'
+    assert expected_parent in text, f"{preferences.name}: expected {expected_parent!r}; update the historical migration rewrite"
+    historical_text = text.replace(expected_parent, 'down_revision = "0022_scheduled_occurrence_seq"')
+    assert historical_text != text, f"{preferences.name}: historical migration rewrite did not change the parent revision"
+    preferences.write_text(historical_text, encoding="utf-8")
     cfg = _get_alembic_config(engine)
     cfg.set_main_option("script_location", str(target))
     return cfg
