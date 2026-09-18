@@ -2085,6 +2085,11 @@
 
 ### 安全
 
+- **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
+  放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
+  `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
+  删除的是请求的文件名。现在符号链接返回 404，与上传列表一致；指向 uploads 目录之外的
+  链接仍以 400 拒绝。([#5547])
 - **前端：** 工具步骤不再把非 Web URL 渲染为链接。思维链面板中的 `web_fetch` URL 与
   `web_search` / `image_search` 结果链接此前绕过了 Markdown 链接使用的协议白名单，
   被提示注入的工具调用可在聊天中放入 `file:` 或系统协议处理程序链接（`ms-msdt:`、
@@ -3499,3 +3504,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5547]: https://github.com/bytedance/deer-flow/pull/5547

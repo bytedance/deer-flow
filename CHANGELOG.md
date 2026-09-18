@@ -2772,6 +2772,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Deleting an upload no longer follows a symlink to delete a
+  different file. A symlink planted in the sandbox-writable uploads directory
+  made `DELETE /api/threads/{id}/uploads/{filename}` (and
+  `DeerFlowClient.delete_upload`) remove the upload it pointed to, plus that
+  file's companion `.md`, while reporting the requested name as deleted.
+  Symlinks now return 404, matching the upload listing; links that leave the
+  uploads directory are still rejected with 400. ([#5547])
 - **frontend:** Tool steps no longer turn non-web URLs into links. The
   `web_fetch` URL and `web_search` / `image_search` result links in the
   chain-of-thought panel skipped the scheme allowlist that markdown links use,
@@ -4292,3 +4299,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5547]: https://github.com/bytedance/deer-flow/pull/5547
