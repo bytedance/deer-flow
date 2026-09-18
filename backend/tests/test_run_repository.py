@@ -1250,3 +1250,109 @@ class TestRunRepository:
         ok = await repo.claim_for_takeover("no-such-run", grace_seconds=10, error="claimed")
         assert ok is False
         await _cleanup()
+
+
+class TestRunRepositoryDeleteByThread:
+    """Bulk thread cleanup must never delete internal thread-operation rows."""
+
+    @pytest.mark.anyio
+    async def test_preserves_thread_operation_reservation(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put("historical-run", thread_id="t1", user_id="alice", status="success", operation_kind="run")
+            await repo.put(
+                "delete-reservation",
+                thread_id="t1",
+                user_id="alice",
+                status="pending",
+                operation_kind=ThreadOperationKind.delete,
+            )
+
+            count = await repo.delete_by_thread("t1", user_id="alice")
+
+            assert count == 1
+            assert await repo.get("historical-run", user_id="alice") is None
+            reservation = await repo.get("delete-reservation", user_id="alice")
+            assert reservation is not None
+            assert reservation["operation_kind"] == "delete"
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_is_owner_and_thread_scoped(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put("alice-t1", thread_id="t1", user_id="alice", status="success")
+            await repo.put("bob-t1", thread_id="t1", user_id="bob", status="success")
+            await repo.put("alice-t2", thread_id="t2", user_id="alice", status="success")
+
+            count = await repo.delete_by_thread("t1", user_id="alice")
+
+            assert count == 1
+            assert await repo.get("alice-t1", user_id="alice") is None
+            assert await repo.get("bob-t1", user_id="bob") is not None
+            assert await repo.get("alice-t2", user_id="alice") is not None
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_second_call_returns_zero(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put("alice-t1", thread_id="t1", user_id="alice", status="success")
+
+            assert await repo.delete_by_thread("t1", user_id="alice") == 1
+            assert await repo.delete_by_thread("t1", user_id="alice") == 0
+        finally:
+            await _cleanup()
+
+
+class TestMemoryRunStoreDeleteByThread:
+    """MemoryRunStore mirrors the SQL store's cleanup semantics."""
+
+    @pytest.mark.anyio
+    async def test_removes_only_run_operations_for_the_owner(self):
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+        await store.put("alice-run", thread_id="t1", user_id="alice", status="success")
+        await store.put(
+            "delete-reservation",
+            thread_id="t1",
+            user_id="alice",
+            status="pending",
+            operation_kind=ThreadOperationKind.delete,
+        )
+        await store.put("bob-run", thread_id="t1", user_id="bob", status="success")
+        await store.put("alice-other-thread", thread_id="t2", user_id="alice", status="success")
+
+        count = await store.delete_by_thread("t1", user_id="alice")
+
+        assert count == 1
+        assert await store.get("alice-run", user_id="alice") is None
+        assert await store.get("delete-reservation", user_id="alice") is not None
+        assert await store.get("bob-run", user_id="bob") is not None
+        assert await store.get("alice-other-thread", user_id="alice") is not None
+
+    @pytest.mark.anyio
+    async def test_keeps_the_thread_index_consistent(self):
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        store = MemoryRunStore()
+        await store.put("alice-run", thread_id="t1", user_id="alice", status="success")
+        await store.put(
+            "delete-reservation",
+            thread_id="t1",
+            user_id="alice",
+            status="pending",
+            operation_kind=ThreadOperationKind.delete,
+        )
+
+        await store.delete_by_thread("t1", user_id="alice")
+
+        assert "alice-run" not in store._runs
+        assert "alice-run" not in store._runs_by_thread.get("t1", {})
+        assert "delete-reservation" in store._runs_by_thread.get("t1", {})
+        # list_by_thread is run-scoped, so the surviving reservation is not listed
+        # even though the row is still tracked.
+        assert await store.list_by_thread("t1", user_id="alice") == []

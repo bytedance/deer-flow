@@ -215,6 +215,25 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
+    async def delete_by_thread(self, thread_id: str, *, user_id=None) -> int:
+        """Delete a thread's historical runs, keeping internal operation rows.
+
+        Mirrors ``RunRepository.delete_by_thread``: only ``operation_kind ==
+        "run"`` rows are removed, so durable thread-operation reservations keep
+        protecting the thread until their own release path drops them.
+        """
+        removed = 0
+        for run_id in list(self._runs_by_thread.get(thread_id, {})):
+            run = self._runs.get(run_id)
+            if run is None or run.get("operation_kind", "run") != "run":
+                continue
+            if user_id is not None and run.get("user_id") != user_id:
+                continue
+            self._runs.pop(run_id, None)
+            self._unindex_run(run_id, run["thread_id"])
+            removed += 1
+        return removed
+
     async def update_run_completion(self, run_id, *, status, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
