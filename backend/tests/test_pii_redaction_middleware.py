@@ -59,7 +59,14 @@ class TestDetectors:
     def test_pinned_detector_count(self):
         """New detectors must extend this pin and the config toggles together."""
         assert len(_DETECTORS) == 5
-        assert [d.name for d in _DETECTORS] == ["email", "api_key", "credit_card", "phone", "national_id"]
+        assert [d.name for d in _DETECTORS] == ["email", "api_key", "national_id", "credit_card", "phone"]
+
+    def test_cn_resident_id_with_luhn_valid_digits_not_mislabeled_as_card(self):
+        # 110105194912310150 passes both the GB 11643 checksum and Luhn; the
+        # national-id detector must claim it before the credit-card detector
+        # (review finding on #5527, reproduced at 0a2a9d0).
+        messages, _ = _run_model_call(_make_middleware(), [HumanMessage("id 110105194912310150")])
+        assert "id [NATIONAL_ID_1]" in messages[0].content
 
     def test_email_redacted(self):
         result = _make_middleware()._detectors[0].pattern.sub("X", "ping me at alice@example.com today")
@@ -274,6 +281,36 @@ class TestToolBoundary:
         result = Command(update={"events": ["alice@example.com"]})
         final = _run_tool_call(_make_middleware(), "web_fetch", result)
         assert final is result
+
+    def test_command_wrapped_tool_result_redacted_and_stamped(self):
+        tool_message = ToolMessage(content="page says alice@example.com", tool_call_id="c1", name="web_fetch")
+        result = Command(update={"messages": [tool_message]})
+        final = _run_tool_call(_make_middleware(), "web_fetch", result)
+        assert isinstance(final, Command)
+        new_message = final.update["messages"][0]
+        assert new_message.content == "page says [EMAIL_1]"
+        assert new_message.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "pii_redaction"
+        # The original Command and its message are untouched.
+        assert tool_message.content == "page says alice@example.com"
+
+    def test_command_without_tool_messages_passthrough(self):
+        result = Command(update={"messages": [AIMessage("alice@example.com")]})
+        final = _run_tool_call(_make_middleware(), "web_fetch", result)
+        assert final is result
+
+    def test_redacted_tool_message_preserves_artifact_and_metadata(self):
+        result = ToolMessage(
+            content="alice@example.com",
+            tool_call_id="c1",
+            name="web_fetch",
+            artifact={"rows": 3},
+            response_metadata={"latency_ms": 12},
+        )
+        final = _run_tool_call(_make_middleware(), "web_fetch", result)
+        assert final.content == "[EMAIL_1]"
+        assert final.artifact == {"rows": 3}
+        assert final.response_metadata == {"latency_ms": 12}
+        assert final.status == "success"
 
     def test_tool_message_not_mutated(self):
         result = ToolMessage(

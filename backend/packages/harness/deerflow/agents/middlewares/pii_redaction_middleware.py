@@ -26,12 +26,15 @@ Scope model (mirrors the structural guardrails):
 * subagents are covered because ``build_subagent_runtime_middlewares`` reuses
   this base;
 * NOT covered in v1: the memory-extraction path (follow-up slice per the issue
-  discussion), tool outputs externalized to disk by ``ToolOutputBudgetMiddleware``
-  (they are not model-bound), and ``Command`` tool results.
+  discussion) and tool outputs externalized to disk by
+  ``ToolOutputBudgetMiddleware`` (they are not model-bound).
 
 Detector order is fixed and pinned by a regression test; email → api_key →
-credit_card → phone → national_id so cheaper, unambiguous patterns rewrite
-first and checksum-gated numeric detectors never see digits already replaced.
+national_id → credit_card → phone. Checksum-gated national IDs run *before*
+the credit-card detector so an 18-digit resident ID whose digit run also
+passes Luhn is never consumed as a card; unambiguous prefix/format patterns
+(email, API keys) rewrite first, and phones last see only digits the stronger
+gates did not claim.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from typing import override
 
 from langchain.agents import AgentState
@@ -165,9 +169,9 @@ _NATIONAL_ID_PATTERN = re.compile(
 _DETECTORS: tuple[_Detector, ...] = (
     _Detector("email", _EMAIL_PATTERN),
     _Detector("api_key", _API_KEY_PATTERN),
+    _Detector("national_id", _NATIONAL_ID_PATTERN, _national_id_valid),
     _Detector("credit_card", _CREDIT_CARD_PATTERN, _luhn_valid),
     _Detector("phone", _PHONE_PATTERN, lambda value: 8 <= len(re.sub(r"\D", "", value)) <= 15),
-    _Detector("national_id", _NATIONAL_ID_PATTERN, _national_id_valid),
 )
 
 
@@ -322,20 +326,32 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
         return is_mcp_tool(getattr(request, "tool", None))
 
     def _redact_result(self, result: ToolMessage | Command) -> ToolMessage | Command:
-        if not isinstance(result, ToolMessage):
-            return result
-        content, changed = _redact_content(result.content, _Redactor(self._detectors))
+        """Redact a tool-call result, mirroring ``_sanitize_result``'s shapes.
+
+        Direct ``ToolMessage`` results are redacted; ``Command`` results carry
+        their ToolMessages inside ``update.messages`` and are rebuilt with
+        ``dc_replace`` only when one of them actually changed.
+        """
+        if isinstance(result, ToolMessage):
+            return self._redact_tool_message(result)
+        update = getattr(result, "update", None)
+        if isinstance(update, dict):
+            messages = update.get("messages")
+            if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
+                new_messages = [self._redact_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages]
+                if new_messages != messages:
+                    return dc_replace(result, update={**update, "messages": new_messages})
+        return result
+
+    def _redact_tool_message(self, message: ToolMessage) -> ToolMessage:
+        content, changed = _redact_content(message.content, _Redactor(self._detectors))
         if not changed:
-            return result
-        additional_kwargs = dict(result.additional_kwargs or {})
+            return message
+        additional_kwargs = dict(message.additional_kwargs or {})
         append_tool_transform(additional_kwargs, "pii_redaction", by="PiiRedactionMiddleware")
-        return ToolMessage(
-            content=content,
-            tool_call_id=result.tool_call_id,
-            name=result.name,
-            additional_kwargs=additional_kwargs,
-            status=result.status,
-        )
+        # model_copy preserves artifact / response_metadata that a hand-built
+        # constructor call would silently drop.
+        return message.model_copy(update={"content": content, "additional_kwargs": additional_kwargs})
 
     @override
     def wrap_tool_call(
