@@ -324,6 +324,11 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     If *convertible_extensions* is provided and the file's extension matches,
     the companion ``.md`` file is also removed (if it exists).
 
+    Only regular files are deleted. Upload directories may be mounted into
+    local sandboxes, so a sandbox process can plant a symlink under an upload
+    name; following it would delete the upload it aliases instead. Such
+    entries are reported as not found, matching ``list_files_in_dir``.
+
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
@@ -337,10 +342,10 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
-    file_path = (base_dir / filename).resolve()
+    file_path = base_dir / filename
     validate_path_traversal(file_path, base_dir)
 
-    if not file_path.is_file():
+    if file_path.is_symlink() or not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
     file_path.unlink()
