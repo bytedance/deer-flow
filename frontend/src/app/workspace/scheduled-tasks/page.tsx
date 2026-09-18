@@ -48,8 +48,8 @@ import {
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
 import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
-import { matchesScheduledTaskQuery } from "@/core/scheduled-tasks/search";
 import { useScheduledTaskRunHistory } from "@/core/scheduled-tasks/run-history";
+import { matchesScheduledTaskQuery } from "@/core/scheduled-tasks/search";
 import type {
   ScheduledTask,
   ScheduledTaskRun,
