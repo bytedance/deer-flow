@@ -941,6 +941,18 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** Heal databases that silently skipped the run-change clock
+  schema. `0023_run_change_seq` was inserted ahead of the already-shipped
+  `0023_user_preferences` revision, so databases stamped at that revision (or
+  later) treat it as an applied ancestor and never execute it — leaving the
+  `run_change_clock` table and the `runs.change_seq` column permanently
+  missing, and the first thread deletion (any run-store change-clock bump)
+  fails with `no such table: run_change_clock`. The new
+  `0025_repair_run_change_seq` revision re-applies the same guarded DDL on
+  upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
+  `UserPreferenceRow` are also registered in the ORM model registry so
+  `create_all` and autogenerate see every table through explicit imports
+  instead of module side effects.
 - **nginx:** Extend the 600-second read timeout to the two remaining locations
   whose routes wait on the Gateway, both left on nginx's 60-second default by
   the thread-route fix. Behind the `/api/` catch-all, the stateless
