@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 import uuid
@@ -727,6 +728,24 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         ) from None
 
 
+def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str, str]:
+    """Pass owner scope only when an event store accepts that keyword.
+
+    Third-party ``RunEventStore`` implementations may still expose the legacy
+    ``delete_by_thread(thread_id)`` contract; they must keep deleting, just
+    without the owner filter (their storage is not user-scoped). An
+    uninspectable callable keeps the old call contract, and a ``TypeError``
+    raised inside the backend must never trigger a retry.
+    """
+    try:
+        parameters = inspect.signature(delete_by_thread).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "user_id" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"user_id": user_id}
+    return {}
+
+
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
@@ -771,9 +790,12 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
 
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted
-    # thread's feed readable again through GET /threads/{id}/messages.
+    # thread's feed readable again through GET /threads/{id}/messages. A legacy
+    # store that predates the owner-scoped signature is still called, with the
+    # old contract.
     try:
-        await get_run_event_store(request).delete_by_thread(thread_id, user_id=user_id)
+        delete_events = get_run_event_store(request).delete_by_thread
+        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
     except Exception:
         logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
 

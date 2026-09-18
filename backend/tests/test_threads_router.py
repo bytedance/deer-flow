@@ -524,6 +524,41 @@ def test_delete_thread_route_tolerates_store_without_bulk_cleanup(tmp_path):
     event_store.delete_by_thread.assert_awaited_once()
 
 
+class _LegacyRunEventStore:
+    """Event store still on the pre-owner-scope delete contract.
+
+    ``RunEventStore`` is an ABC, but Python never validates override signatures,
+    so this store satisfies it while rejecting the new ``user_id`` keyword.
+    """
+
+    def __init__(self) -> None:
+        self.deleted_threads: list[str] = []
+
+    async def delete_by_thread(self, thread_id: str) -> int:
+        self.deleted_threads.append(thread_id)
+        return 1
+
+
+def test_delete_thread_route_supports_legacy_event_store_delete_signature(tmp_path):
+    """A legacy event store still deletes; the owner kwarg is only passed when accepted."""
+    paths = Paths(tmp_path)
+    event_store = _LegacyRunEventStore()
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=SimpleNamespace(),
+        event_store=event_store,
+        feedback_repo=None,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    assert event_store.deleted_threads == ["thread-cleanup"]
+
+
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
     paths = Paths(tmp_path)
 
