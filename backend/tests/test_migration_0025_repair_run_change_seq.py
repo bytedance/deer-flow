@@ -97,8 +97,16 @@ async def test_0025_repairs_schema_skipped_by_the_0023_insertion(tmp_path):
         await close_engine()
 
 
-async def test_0025_downgrade_preserves_ancestor_schema_and_reupgrade_is_safe(tmp_path):
-    url = f"sqlite+aiosqlite:///{tmp_path / 'downgrade.db'}"
+async def test_0025_downgrade_preserves_ancestor_owned_schema_and_data(tmp_path):
+    """Rolling back only this repair must not remove schema owned by 0023.
+
+    The change-clock schema belongs to ancestor ``0023_run_change_seq``; a
+    repair downgrade that dropped it would leave the database stamped at 0024
+    without 0023's schema — recreating the #5516 hole — and would discard
+    allocated clock positions.
+    """
+    db_path = tmp_path / "downgrade.db"
+    url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
     try:
         from deerflow.persistence.engine import get_engine
@@ -106,18 +114,32 @@ async def test_0025_downgrade_preserves_ancestor_schema_and_reupgrade_is_safe(tm
         engine = get_engine()
         assert engine is not None
         cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
-        has_table, has_column, _, _ = _table_and_column_state(tmp_path / "downgrade.db")
-        assert has_table
-        assert has_column
 
-        # Repeating the downgrade remains a no-op.
-        await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
+        # Allocate a clock position so the data-preservation claim is real.
+        sf = get_session_factory()
+        assert sf is not None
+        async with sf() as session:
+            assert await RunRepository._next_change_seq(session) == 1
+            await session.commit()
 
-        await asyncio.to_thread(command.upgrade, cfg, REVISION)
-        has_table, has_column, run_indexes, _ = _table_and_column_state(tmp_path / "downgrade.db")
+        await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
+        has_table, has_column, run_indexes, version = _table_and_column_state(db_path)
         assert has_table
         assert has_column
         assert {"ix_runs_change_seq", "ix_runs_user_change_seq"} <= run_indexes
+        assert version == PREVIOUS
+        with sqlite3.connect(db_path) as raw:
+            assert raw.execute("SELECT value FROM run_change_clock WHERE id = 1").fetchone()[0] == 1
+
+        # Downgrade is idempotent; re-upgrading re-runs the guarded repair as a no-op.
+        await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
+        await asyncio.to_thread(command.upgrade, cfg, REVISION)
+        has_table, has_column, run_indexes, version = _table_and_column_state(db_path)
+        assert has_table
+        assert has_column
+        assert {"ix_runs_change_seq", "ix_runs_user_change_seq"} <= run_indexes
+        assert version == REVISION
+        with sqlite3.connect(db_path) as raw:
+            assert raw.execute("SELECT value FROM run_change_clock WHERE id = 1").fetchone()[0] == 1
     finally:
         await close_engine()

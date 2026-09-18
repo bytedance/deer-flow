@@ -81,6 +81,8 @@
    as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
+AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
+
 Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
 variants after the write succeeds, merge only `deerflow_project_id`, then
 invalidate/refetch that metadata prefix. This fences delayed pre-move reads and

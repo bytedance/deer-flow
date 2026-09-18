@@ -15,7 +15,10 @@ already at or past 0023.
 This revision re-applies the same idempotent DDL as ``0023_run_change_seq``
 for every database that upgrades past it, restoring those skipped schemas.
 Fresh and legacy databases that ran 0023 itself are untouched: every step is
-guarded exactly like 0023 and no-ops on the healthy shape.
+guarded exactly like 0023 and no-ops on the healthy shape. Its downgrade is
+a deliberate no-op — the schema and the allocated clock positions are owned
+by ancestor 0023, and removing them here would leave a database stamped at
+0024 without 0023's schema, recreating exactly the hole this revision heals.
 
 Revision ID: 0025_repair_run_change_seq
 Revises: 0024_project_documents
@@ -57,7 +60,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # This repair does not own the objects: ancestor 0023_run_change_seq does.
-    # 0024 still needs them, and dropping them would also erase durable cursor
-    # positions on healthy databases. The original 0023 downgrade owns removal.
-    pass
+    # Deliberate no-op: the change-clock schema and its allocated positions
+    # are owned by ancestor 0023_run_change_seq, not by this repair. Dropping
+    # them here would leave a database stamped at 0024 without the schema its
+    # revision history claims is applied -- recreating exactly the #5516 hole
+    # this revision heals -- and would permanently discard cursor values.
+    # Downgrading to 0023 itself is what removes the schema, through that
+    # revision's own downgrade.
+    return None
