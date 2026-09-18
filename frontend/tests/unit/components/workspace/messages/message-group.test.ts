@@ -516,6 +516,115 @@ describe("MessageGroup", () => {
   });
 });
 
+// Tool args come from the model and results from search providers, so a
+// prompt-injected URL must not become a navigable anchor. React only rewrites
+// javascript: hrefs; local and OS-handler schemes would otherwise pass through.
+describe("MessageGroup tool links", () => {
+  const unsafeUrls = [
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    "ms-msdt:/id PCWDiagnostic",
+    "vscode://file/etc/passwd",
+  ];
+
+  it.each(unsafeUrls)("renders a web_fetch URL of %s as text", (url) => {
+    const html = renderToolCall("web_fetch", { url });
+
+    expect(html).toContain(url);
+    expect(html).not.toContain("<a");
+  });
+
+  it.each(unsafeUrls)("renders a web_search result at %s as text", (url) => {
+    const html = renderToolCall(
+      "web_search",
+      { query: "DeerFlow" },
+      JSON.stringify([
+        { title: "Safe source", url: "https://safe.example" },
+        { title: "Injected source", url },
+      ]),
+    );
+
+    expect(html).toContain('href="https://safe.example"');
+    expect(html).toContain("Injected source");
+    expect(anchorCount(html)).toBe(1);
+  });
+
+  it.each(unsafeUrls)(
+    "renders an image_search source at %s unlinked",
+    (url) => {
+      const html = renderToolCall(
+        "image_search",
+        { query: "DeerFlow" },
+        JSON.stringify({
+          results: [
+            {
+              title: "Injected image",
+              source_url: url,
+              thumbnail_url: "https://images.example/thumb.png",
+              image_url: "https://images.example/full.png",
+            },
+          ],
+        }),
+      );
+
+      expect(html).toContain('src="https://images.example/thumb.png"');
+      expect(html).not.toContain("<a");
+    },
+  );
+
+  it("keeps linking web_fetch and image_search results with web URLs", () => {
+    const fetchHtml = renderToolCall("web_fetch", {
+      url: "https://example.com/page",
+    });
+    const imageHtml = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: "Image",
+            source_url: "https://example.com/source",
+            thumbnail_url: "https://images.example/thumb.png",
+            image_url: "https://images.example/full.png",
+          },
+        ],
+      }),
+    );
+
+    expect(fetchHtml).toContain('href="https://example.com/page"');
+    expect(imageHtml).toContain('href="https://example.com/source"');
+  });
+});
+
+function renderToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  content?: string,
+) {
+  const messages: Message[] = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call-1", name, args }],
+    } as Message,
+  ];
+  if (content !== undefined) {
+    messages.push({
+      id: "tool-1",
+      type: "tool",
+      name,
+      tool_call_id: "call-1",
+      content,
+    } as Message);
+  }
+  return renderGroup(messages);
+}
+
+function anchorCount(html: string) {
+  return html.match(/<a\s/g)?.length ?? 0;
+}
+
 /** Asserts every needle is present and that they appear in the given order. */
 function expectRenderedInOrder(html: string, needles: string[]) {
   const indices = needles.map((needle) => html.indexOf(needle));

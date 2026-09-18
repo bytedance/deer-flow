@@ -48,6 +48,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { isSafeHref } from "./markdown-link";
 import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
@@ -731,11 +732,18 @@ function ToolCall({
       >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
+            {/* Tool args and results are model- or provider-controlled, so
+                every tool link passes the same scheme allowlist as markdown
+                links; unsafe URLs render as plain text. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
-                  {item.title}
-                </a>
+                {isSafeHref(item.url) ? (
+                  <a href={item.url} target="_blank" rel="noopener noreferrer">
+                    {item.title}
+                  </a>
+                ) : (
+                  item.title
+                )}
               </ChainOfThoughtSearchResult>
             ))}
           </ChainOfThoughtSearchResults>
@@ -766,26 +774,37 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => (
-                <Tooltip key={item.image_url} content={item.title}>
-                  <a
-                    className="size-24 overflow-hidden rounded-lg object-cover"
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div className="bg-accent size-24">
-                      <img
-                        className="size-full object-cover"
-                        src={item.thumbnail_url}
-                        alt={item.title}
-                        width={100}
-                        height={100}
-                      />
-                    </div>
-                  </a>
-                </Tooltip>
-              ))}
+              results.map((item) => {
+                const thumbnail = (
+                  <div className="bg-accent size-24">
+                    <img
+                      className="size-full object-cover"
+                      src={item.thumbnail_url}
+                      alt={item.title}
+                      width={100}
+                      height={100}
+                    />
+                  </div>
+                );
+                return (
+                  <Tooltip key={item.image_url} content={item.title}>
+                    {isSafeHref(item.source_url) ? (
+                      <a
+                        className="size-24 overflow-hidden rounded-lg object-cover"
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {thumbnail}
+                      </a>
+                    ) : (
+                      <div className="size-24 overflow-hidden rounded-lg">
+                        {thumbnail}
+                      </div>
+                    )}
+                  </Tooltip>
+                );
+              })}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
@@ -806,16 +825,19 @@ function ToolCall({
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
-              {title}
-            </a>
-          )}
+          {url &&
+            (isSafeHref(url) ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cursor-pointer"
+              >
+                {title}
+              </a>
+            ) : (
+              title
+            ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
