@@ -1146,6 +1146,15 @@ class McpTaskService:
                 "Timed out after %.1f seconds waiting for MCP task claim releases; they continue in the background",
                 _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
             )
+            return
+
+        results = completion.result()
+        for record, result in zip(records, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                logger.error(
+                    "MCP task claim release was cancelled (task_id=%s); the lease will expire for recovery",
+                    record.get("id"),
+                )
 
     async def _release_notification_failure(
         self,
