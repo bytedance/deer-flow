@@ -48,6 +48,7 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
@@ -205,7 +206,7 @@ async def _ensure_thread_metadata(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool = False,
-) -> None:
+) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
@@ -230,12 +231,12 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
-        await thread_store.create(
+        existing = await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
             metadata=metadata,
         )
-        return
+    return existing
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -1867,6 +1868,7 @@ async def start_run(
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
             metadata_failure: Exception | None = None
+            metadata_record: dict[str, Any] | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
@@ -1875,7 +1877,7 @@ async def start_run(
                 )
                 if metadata_task in done:
                     try:
-                        metadata_task.result()
+                        metadata_record = metadata_task.result()
                     except asyncio.CancelledError:
                         pass
                     except Exception as exc:
@@ -1897,8 +1899,20 @@ async def start_run(
                         metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
-                    if not metadata_failure_logged:
-                        _log_thread_metadata_task_result(metadata_task, thread_id=thread_id)
+                    if metadata_record is None and not metadata_failure_logged:
+                        try:
+                            metadata_record = metadata_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            metadata_failure_logged = True
+                            metadata_failure = exc
+                            logger.warning(
+                                "Failed to ensure thread_meta for %s%s",
+                                sanitize_log_param(thread_id),
+                                "" if require_existing_thread else " (non-fatal)",
+                                exc_info=True,
+                            )
                 else:
                     metadata_task.cancel()
                     metadata_task.add_done_callback(
@@ -1919,6 +1933,28 @@ async def start_run(
             # or strict verification failure:
             # its startup barrier is the single path that turns pending
             # cancellation into no-agent-construction plus publish_end.
+            incarnation_kwargs: dict[str, str | None] = {}
+            if metadata_record is None:
+                if not record.abort_event.is_set():
+                    logger.warning(
+                        "Thread metadata for %s is unavailable; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+            else:
+                if "incarnation" not in metadata_record:
+                    logger.warning(
+                        "Thread metadata for %s has no incarnation; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+                else:
+                    incarnation = metadata_record["incarnation"]
+                    if is_valid_thread_incarnation(incarnation):
+                        incarnation_kwargs["thread_incarnation"] = incarnation
+                    else:
+                        logger.warning(
+                            "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
+                            sanitize_log_param(thread_id),
+                        )
             await run_agent(
                 bridge,
                 run_mgr,
@@ -1932,6 +1968,7 @@ async def start_run(
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
                 knowledge_scope=admitted_knowledge_scope,
+                **incarnation_kwargs,
             )
 
         try:

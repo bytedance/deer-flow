@@ -7,6 +7,7 @@ import stat
 import sys
 import threading
 import weakref
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -15,6 +16,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
+from deerflow.mcp_scope import mcp_session_scope_key
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +24,13 @@ def _reset_pool():
     reset_session_pool()
     yield
     reset_session_pool()
+
+
+def _legacy_tool_runtime(*, thread_id: str = "default"):
+    return SimpleNamespace(
+        context={"thread_id": thread_id, "thread_incarnation": None},
+        config={},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +477,7 @@ mcp.run(transport="stdio")
         "args": ["-c", server, str(marker)],
     }
     runtime = MagicMock()
-    runtime.context = {"thread_id": "thread", "user_id": "user"}
+    runtime.context = {"thread_id": "thread", "user_id": "user", "thread_incarnation": "incarnation-1"}
     runtime.config = {}
 
     with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
@@ -477,7 +486,12 @@ mcp.run(transport="stdio")
             await wrapped.coroutine(runtime=runtime)
 
         assert exc_info.value.error.code == CONNECTION_CLOSED
-        assert ("crash", "user:thread") not in {k[:2] for k in get_session_pool()._entries}
+        scope_key = mcp_session_scope_key(
+            user_id="user",
+            thread_id="thread",
+            thread_incarnation="incarnation-1",
+        )
+        assert ("crash", scope_key) not in {k[:2] for k in get_session_pool()._entries}
 
         content, _artifact = await wrapped.coroutine(runtime=runtime)
 
@@ -504,7 +518,7 @@ async def test_session_pool_tool_evicts_session_after_transport_disconnect(tmp_p
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(type(transport_error)),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
 
@@ -529,7 +543,7 @@ async def test_session_pool_tool_evicts_connection_closed_through_interceptor(tm
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match="Connection closed"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
 
@@ -553,7 +567,7 @@ async def test_session_pool_tool_keeps_session_after_nonfatal_mcp_error(tmp_path
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match=str(error)),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -572,7 +586,7 @@ async def test_session_pool_tool_preserves_disconnect_error_when_eviction_fails(
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(anyio.ClosedResourceError) as exc_info,
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     assert exc_info.value is error
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
@@ -636,7 +650,7 @@ async def test_session_pool_tool_keeps_session_after_tool_error_result(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(ToolException, match="invalid input"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -660,7 +674,7 @@ async def test_session_pool_tool_keeps_session_after_interceptor_error(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(RuntimeError, match="interceptor failed"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     session.call_tool.assert_not_awaited()
     pool.close_session_if_current.assert_not_awaited()
@@ -722,15 +736,16 @@ async def test_late_disconnect_from_old_session_does_not_evict_replacement(tmp_p
             "srv",
             {"transport": "stdio", "command": "x", "args": []},
         )
-        first_call = asyncio.create_task(wrapped.coroutine(value=1))
-        late_call = asyncio.create_task(wrapped.coroutine(value=2))
+        runtime = _legacy_tool_runtime()
+        first_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=1))
+        late_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=2))
         await asyncio.wait_for(both_started.wait(), timeout=1)
 
         first_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await first_call
 
-        await wrapped.coroutine(value=3)
+        await wrapped.coroutine(runtime=runtime, value=3)
         late_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await late_call
@@ -772,7 +787,7 @@ async def test_session_pool_tool_wrapping():
 
         # Simulate a tool call with a runtime context containing thread_id.
         mock_runtime = MagicMock()
-        mock_runtime.context = {"thread_id": "thread-42"}
+        mock_runtime.context = {"thread_id": "thread-42", "thread_incarnation": "incarnation-1"}
         mock_runtime.config = {}
 
         await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
@@ -812,7 +827,7 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"KEEP": "1"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -868,7 +883,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"TMPDIR": "/operator/tmp"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -915,7 +930,7 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "cwd": operator_cwd}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -962,7 +977,7 @@ async def test_session_pool_tool_skips_fs_work_for_non_stdio_transport(tmp_path)
     paths = Paths(tmp_path)
     connection = {"transport": "sse", "url": "http://localhost:9000/sse", "env": {"KEEP": "1"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -1015,7 +1030,7 @@ async def test_session_pool_tool_skips_after_walk_when_no_text_content(tmp_path)
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": []}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -1061,7 +1076,7 @@ async def test_session_pool_tool_runs_after_walk_when_text_content_present(tmp_p
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": []}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -1113,7 +1128,7 @@ async def test_session_pool_tool_forwards_interceptor_headers():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1}, meta={"headers": {"X-User-Id": "u-42"}})
 
@@ -1162,7 +1177,7 @@ async def test_session_pool_interceptor_reads_request_scoped_secret():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[secret_header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with(
         "act",
@@ -1208,7 +1223,7 @@ async def test_session_pool_tool_no_headers_omits_meta():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[passthrough_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
 
@@ -1252,7 +1267,7 @@ async def test_session_pool_tool_ignores_unsupported_header_type(caplog):
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[invalid_header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
     assert "unsupported type" in caplog.text
@@ -1287,16 +1302,20 @@ async def test_session_pool_tool_extracts_thread_id():
         wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
 
         mock_runtime = MagicMock()
-        mock_runtime.context = {}
+        mock_runtime.context = {"thread_incarnation": "incarnation-1"}
         mock_runtime.config = {"configurable": {"thread_id": "from-config"}}
 
         await wrapped.coroutine(runtime=mock_runtime, x=1)
 
-    # Verify the session was created with the correct scope key.
-    # The scope key is "{user_id}:{thread_id}"; the autouse fixture sets
-    # the effective user to "test-user-autouse".
+    # Verify the session was created with the canonical versioned JSON scope;
+    # the autouse fixture sets the effective user to "test-user-autouse".
     pool = get_session_pool()
-    assert ("server", "test-user-autouse:from-config") in {k[:2] for k in pool._entries}
+    expected_scope = mcp_session_scope_key(
+        user_id="test-user-autouse",
+        thread_id="from-config",
+        thread_incarnation="incarnation-1",
+    )
+    assert ("server", expected_scope) in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio

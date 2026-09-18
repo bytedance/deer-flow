@@ -17,13 +17,9 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp_scope import mcp_session_scope_key
 
 logger = logging.getLogger(__name__)
-
-
-def mcp_task_session_scope_key(*, user_id: str, thread_id: str) -> str:
-    """Keep background calls in the same per-user/per-thread session scope."""
-    return f"{user_id}:{thread_id}"
 
 
 def _prepare_stdio_connection(
@@ -92,6 +88,7 @@ class McpTaskToolCaller:
         arguments: dict[str, Any],
         user_id: str,
         thread_id: str,
+        thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
     ) -> Any:
         """Call a raw MCP tool.
@@ -107,7 +104,11 @@ class McpTaskToolCaller:
             raise LookupError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
         connection = build_server_params(server_name, server_config)
         transport = connection.get("transport", "stdio")
-        scope_key = mcp_task_session_scope_key(user_id=user_id, thread_id=thread_id)
+        scope_key = mcp_session_scope_key(
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+        )
 
         if transport == "stdio":
             connection = await asyncio.to_thread(
