@@ -14,7 +14,7 @@ from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
@@ -834,6 +834,127 @@ async def test_worker_finalization_cancel_deadline_hands_off_to_background_owner
         while run_manager._background_finalization_tasks:
             await asyncio.sleep(0)
 
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_worker_repeated_cancellation_during_journal_close_keeps_lifecycle_owner(monkeypatch):
+    from deerflow.runtime.journal import RunJournal
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalization-teardown-cancel")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    original_close = RunJournal.close
+
+    async def blocking_close(self, *, flush: bool = True) -> None:
+        close_started.set()
+        await release_close.wait()
+        await original_close(self, flush=flush)
+
+    monkeypatch.setattr(RunJournal, "close", blocking_close)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    # Terminal signaling already belongs to the owner; teardown is still running.
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+    worker.cancel("first teardown cancellation")
+    await asyncio.sleep(0)
+    worker.cancel("second teardown cancellation")
+    await asyncio.sleep(0)
+
+    assert not worker.done()
+
+    release_close.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await worker
+
+    assert raised.value.args == ("first teardown cancellation",)
+    assert worker.cancelling() == 0
+
+
+@pytest.mark.anyio
+async def test_worker_lifecycle_failure_does_not_replace_first_cancellation(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalization-error-precedence")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+
+    async def failing_receipt(*args, **kwargs):
+        receipt_started.set()
+        await release_receipt.wait()
+        raise RuntimeError("receipt backend exploded")
+
+    monkeypatch.setattr(worker_module, "_persist_delivery_receipt", failing_receipt)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+    worker.cancel("first finalization cancellation")
+    await asyncio.sleep(0)
+
+    release_receipt.set()
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await worker
+
+    # The first host cancellation stays the reported interruption; the owned
+    # lifecycle's own failure remains visible as its cause.
+    assert raised.value.args == ("first finalization cancellation",)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+@pytest.mark.anyio
+async def test_real_run_cancel_clears_finalizing_barrier_after_owned_lifecycle():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalizing-barrier")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    class BlockingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            stream_started.set()
+            await release_stream.wait()
+            yield {"messages": []}
+
+    worker = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=store),
+            agent_factory=lambda *, config: BlockingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+
+    await asyncio.wait_for(stream_started.wait(), timeout=1)
+
+    outcome = await run_manager.cancel(record.run_id, action="interrupt")
+    assert outcome is CancelOutcome.cancelled
+
+    release_stream.set()
+    await worker
+
+    # The owned lifecycle cleared the barrier, so a later same-thread admission
+    # is not blocked forever by this cancelled run.
+    assert record.finalizing is False
+    assert await run_manager.has_inflight(record.thread_id) is False
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
