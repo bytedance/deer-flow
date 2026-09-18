@@ -22,6 +22,7 @@ import pytest
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
+from deerflow.runtime.runs.store.base import LeaseRenewal
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -907,6 +908,75 @@ async def test_heartbeat_renews_active_run_leases():
     assert record.lease_expires_at is not None
     # Lease should have been extended
     assert record.lease_expires_at >= original_lease
+
+
+@pytest.mark.anyio
+async def test_heartbeat_renews_terminal_staged_run_with_live_lifecycle_owner():
+    """A run whose local status is staged terminal must keep its lease while the
+    terminal lifecycle owner still writes the durable row.
+
+    The worker stages the terminal status with ``persist=False`` whenever an
+    event store is configured, so the durable row intentionally stays
+    ``running`` while finalization runs. Pre-fix the renewal filter keyed only
+    on the local ``pending``/``running`` status, so that run's lease was never
+    renewed and a peer could reclaim a row this worker was still finalizing.
+    """
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=config)
+
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    assert record.status is RunStatus.success
+
+    owner = asyncio.create_task(asyncio.sleep(3600))
+    manager.track_lifecycle_owner(owner, run_id=record.run_id)
+
+    original_lease = record.lease_expires_at
+    assert original_lease is not None
+    # Force a measurable gap so the renewed lease strictly post-dates the original.
+    await asyncio.sleep(0.001)
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    await manager._renew_leases()
+
+    store.update_lease.assert_awaited_once()
+    assert record.lease_expires_at is not None
+    assert record.lease_expires_at > original_lease
+    assert record.ownership_lost is False
+
+    owner.cancel()
+    await asyncio.gather(owner, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_terminal_staged_run_is_fenced_when_lifecycle_lease_renewal_fails():
+    """Losing the durable lease fences the retained finalizer.
+
+    ``_mark_ownership_lost`` used to require a locally active record, so a run
+    staged terminal (durable row still running) could never be fenced — the
+    retained lifecycle kept writing after the row was taken over.
+    """
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=config)
+
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    owner = asyncio.create_task(asyncio.sleep(3600))
+    manager.track_lifecycle_owner(owner, run_id=record.run_id)
+
+    store.renew_lease = AsyncMock(return_value=LeaseRenewal(renewed=False))
+
+    await manager._renew_leases()
+
+    assert record.ownership_lost is True
+
+    owner.cancel()
+    await asyncio.gather(owner, return_exceptions=True)
 
 
 @pytest.mark.anyio

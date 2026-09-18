@@ -749,7 +749,7 @@ def _blocking_receipt(worker_module, monkeypatch, receipt_started, release_recei
     monkeypatch.setattr(worker_module, "_persist_delivery_receipt", blocking_receipt)
 
 
-def _start_worker(bridge, run_manager, record, store):
+def _start_worker(bridge, run_manager, record, store, **ctx_kwargs):
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             yield {"messages": []}
@@ -759,7 +759,7 @@ def _start_worker(bridge, run_manager, record, store):
             bridge,
             run_manager,
             record,
-            ctx=RunContext(checkpointer=None, event_store=store),
+            ctx=RunContext(checkpointer=None, event_store=store, **ctx_kwargs),
             agent_factory=lambda *, config: DummyAgent(),
             graph_input={},
             config={},
@@ -913,6 +913,93 @@ async def test_worker_lifecycle_failure_does_not_replace_first_cancellation(monk
     # lifecycle's own failure remains visible as its cause.
     assert raised.value.args == ("first finalization cancellation",)
     assert isinstance(raised.value.__cause__, RuntimeError)
+    # ... and the handled interruption is balanced, so callers such as
+    # ``asyncio.wait_for`` do not mistake the re-raise for their own timeout.
+    assert worker.cancelling() == 0
+
+
+@pytest.mark.anyio
+async def test_run_manager_shutdown_observes_lifecycle_owner_before_foreground_handoff(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-shutdown-registration")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    worker.cancel("shutdown registration cancellation")
+    await asyncio.sleep(0)
+
+    # The foreground is now inside its bounded drain; the local status is already
+    # terminal, so shutdown has no pending/running record to key on.
+    shutdown = asyncio.create_task(run_manager.shutdown(timeout=1.0))
+    await asyncio.sleep(0)
+
+    assert not shutdown.done()
+
+    release_receipt.set()
+    await asyncio.wait_for(shutdown, timeout=1.0)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+
+@pytest.mark.anyio
+async def test_retained_lifecycle_defers_host_cancellation_without_failure_report(monkeypatch, caplog):
+    import logging
+
+    import deerflow.runtime.runs.worker as worker_module
+
+    # Foreground gives up ownership while the lifecycle is still blocked; the
+    # owner then reaches a stage that observes the host's interruption.
+    monkeypatch.setattr(worker_module, "_RUN_FINALIZATION_CANCEL_DRAIN_SECONDS", 0.01)
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-deferred-host-cancellation")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt)
+
+    async def completion_hook(_record):
+        # An interrupted host must not keep the retained lifecycle waiting on a
+        # hook that never returns (#5191); this blocks forever if it is awaited.
+        await asyncio.Event().wait()
+
+    worker = _start_worker(bridge, run_manager, record, store, on_run_completed=completion_hook)
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    worker.cancel("deferred host cancellation")
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+    retained = set(run_manager._background_finalization_tasks)
+    assert retained
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.manager"):
+        release_receipt.set()
+        async with asyncio.timeout(1):
+            while run_manager._background_finalization_tasks:
+                await asyncio.sleep(0)
+
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+    # The deferred host cancellation is the foreground's to report: the owner
+    # finishes cleanly instead of surfacing it as a lifecycle failure.
+    for task in retained:
+        assert task.cancelled() is False
+        assert task.exception() is None
+    assert not [record for record in caplog.records if "background finalization failed" in record.getMessage()]
 
 
 @pytest.mark.anyio

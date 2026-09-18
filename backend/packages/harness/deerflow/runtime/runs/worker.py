@@ -862,7 +862,9 @@ async def _await_completion_hook_until_host_cancellation(
         cancellation = host_cancellation.result()
         hook_task.cancel()
         await asyncio.gather(hook_task, return_exceptions=True)
-        raise asyncio.CancelledError(*cancellation.args)
+        # Re-raise the foreground's own instance so the owner can recognize the
+        # interruption by identity instead of guessing from its type.
+        raise cancellation
     finally:
         if not hook_task.done():
             hook_task.cancel()
@@ -913,6 +915,10 @@ async def run_agent(
     # lifecycle owner is never cancelled itself, but its completion-hook stage
     # still observes the host interruption (#5191).
     host_cancellation: asyncio.Future[BaseException] = asyncio.get_running_loop().create_future()
+    # True once the foreground's own interruption has been deferred inside the
+    # lifecycle owner. The foreground reports that interruption, so the owner
+    # must finish cleanly instead of surfacing it as its own failure.
+    host_cancellation_deferred = False
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1727,6 +1733,9 @@ async def run_agent(
                     except Exception:
                         logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
                     except BaseException as exc:
+                        nonlocal host_cancellation_deferred
+                        if host_cancellation.done() and exc is host_cancellation.result():
+                            host_cancellation_deferred = True
                         # A terminal hook must not leave replacement runs blocked or
                         # stream consumers waiting indefinitely.
                         deferred_finalization_interrupt = _defer_finalization_interrupt(
@@ -1781,7 +1790,7 @@ async def run_agent(
 
                 await bridge.publish_end(run_id)
 
-                if deferred_finalization_interrupt is not None:
+                if deferred_finalization_interrupt is not None and not host_cancellation_deferred:
                     raise deferred_finalization_interrupt
             finally:
                 try:
@@ -1846,6 +1855,11 @@ async def run_agent(
             _finish_run_lifecycle(),
             name=f"deerflow-run-terminal-lifecycle-{run_id}",
         )
+        # The manager owns the *task* from the moment it exists: the foreground
+        # only owns the wait, and it may hand that over (or lose it) at any
+        # point. Registering here — not at handoff — is what keeps shutdown from
+        # returning while a lifecycle that is still using run resources runs.
+        run_manager.track_lifecycle_owner(lifecycle_task, run_id=run_id)
         try:
             # ``shield`` keeps a host cancellation from cancelling the owner; the
             # foreground still observes its own cancellation and drains below.
@@ -1868,6 +1882,7 @@ async def run_agent(
                 deadline=deadline,
             )
 
+            failure: BaseException | None = None
             if not settled:
                 # The owner keeps running under RunManager supervision; the
                 # logged-out foreground must not cancel it or close resources.
@@ -1881,14 +1896,8 @@ async def run_agent(
                     _RUN_FINALIZATION_CANCEL_DRAIN_SECONDS,
                     run_id,
                 )
-            elif isinstance(lifecycle_error, asyncio.CancelledError):
-                # The owner re-raised the interruption this foreground already
-                # carries; the foreground stays the sole reporter.
-                pass
-            elif lifecycle_error is not None:
-                # First cancellation wins; the secondary failure stays visible
-                # as its cause.
-                raise cancellation from lifecycle_error
+            else:
+                failure = lifecycle_error
 
             # Balance the interruption we handled so this re-raise is not
             # mistaken for an outstanding cancellation request by callers such
@@ -1896,6 +1905,10 @@ async def run_agent(
             while host.cancelling():
                 host.uncancel()
 
+            if failure is not None:
+                # First cancellation wins; the secondary failure stays visible
+                # as its cause.
+                raise cancellation from failure
             raise cancellation
 
 
