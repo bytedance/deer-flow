@@ -360,8 +360,12 @@ class OpenSandboxSandbox(Sandbox):
             relative = entry[len(root) :].lstrip("/")
             if relative and path_matches(pattern, relative):
                 matches.append(entry)
-                if len(matches) >= max_results:
-                    return matches, True
+                # Look one match past the cap before deciding: returning on the
+                # max-th match cannot tell a search that held exactly
+                # ``max_results`` from one that held more, so an exhausted tree
+                # was reported as truncated.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, output.truncated
 
     def grep(
@@ -423,8 +427,9 @@ class OpenSandboxSandbox(Sandbox):
                 continue
             seen_positions.add(position)
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line)))
-            if len(matches) >= max_results:
-                return matches, True
+            # Same one-match-past-the-cap rule as glob() above.
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, output.truncated
 
     def ping(self, timeout: float = 10) -> bool:

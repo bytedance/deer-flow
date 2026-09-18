@@ -5429,6 +5429,27 @@ def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tm
     assert result == ([], truncated)
 
 
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    sb = _rs_sandbox(tmp_path)
+
+    if op == "grep":
+        matches, reported = sb.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = sb.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
 @pytest.mark.parametrize("op", ["grep", "glob"])
 def test_remote_search_raises_when_the_client_call_fails(op):
     sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE])))

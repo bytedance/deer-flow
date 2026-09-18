@@ -1016,6 +1016,15 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
+- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
+  reporting an exactly-full result as truncated. They hold the whole listing —
+  the raw stream is capped above `max_results` and reports its own cut-off — but
+  they returned as soon as they had collected `max_results` filtered matches, so
+  a tree holding exactly that many — and no more — came back flagged as cut off
+  and the tool told the model the result was incomplete. They now look one match
+  past the cap before deciding, the rule AIO's `glob` branches already apply.
+  This concerns the filtered-match cap only; the raw-output cap
+  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -4281,3 +4290,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
