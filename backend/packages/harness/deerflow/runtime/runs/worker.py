@@ -40,7 +40,7 @@ from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import TOOL_RESULTS_DIRNAME
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -52,7 +52,13 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    DEFAULT_AGENT_NAME_METADATA_VALUE,
+    PROJECT_CONTEXT_KEY,
+    checkpoint_agent_binding_metadata,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -81,6 +87,7 @@ from deerflow.runtime.user_context import get_current_user, get_effective_user_i
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
@@ -194,6 +201,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        CONVERSATION_READER_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -217,6 +225,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -512,6 +521,16 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
+            CONVERSATION_READER_CONTEXT_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
+            # The Gateway pins the run's project snapshot under this key at
+            # admission (spec §7.1); a caller-supplied value in
+            # ``config['context']`` must never be merged (§12).
+            PROJECT_CONTEXT_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -525,6 +544,7 @@ def _build_runtime_context(
     app_config: AppConfig | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
+    conversation_reader: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -546,6 +566,8 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if conversation_reader is not None:
+        runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -562,6 +584,23 @@ def _build_runtime_context(
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
+
+
+def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject the admission-pinned project snapshot into the runtime context.
+
+    The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
+    after stripping client-supplied values at admission (``build_run_config``
+    drops ``__``-prefixed context keys; the services pop-set covers both
+    sections), so a value surviving to this point is server-authoritative.
+    ``_build_runtime_context`` refuses server-owned keys from the caller
+    merge, and ``_install_runtime_context`` treats the runtime context as the
+    authoritative view — hoisting here is what lets middleware and tools read
+    exactly the snapshot admission pinned.
+    """
+    caller_context = config.get("context")
+    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+        runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
 
 
 @dataclass(frozen=True)
@@ -586,9 +625,16 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    # The host binds this capability to one run's authenticated reader and references.
+    conversation_reader: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    # Configurable participates in lead-agent option merging and checkpoint
+    # persistence; the reader capability belongs only to host-owned context.
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict):
+        configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1033,7 +1079,24 @@ async def run_agent(
             ctx.app_config,
             task_store,
             extensions,
+            ctx.conversation_reader,
         )
+        # Bind every checkpoint produced by this run to the effective agent
+        # identity that produced its state. Manual compaction uses only this
+        # server-overwritten value for memory policy; request metadata cannot
+        # forge it, and an explicit default sentinel distinguishes new default
+        # checkpoints from unbound legacy state.
+        if "agent_name" in runtime_ctx:
+            checkpoint_agent_name = runtime_ctx["agent_name"]
+        else:
+            configurable = config.get("configurable")
+            checkpoint_agent_name = configurable.get("agent_name") if isinstance(configurable, dict) else None
+        checkpoint_metadata = config.get("metadata")
+        if not isinstance(checkpoint_metadata, dict):
+            checkpoint_metadata = {}
+            config["metadata"] = checkpoint_metadata
+        checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        _pin_admission_project_context(config, runtime_ctx)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
@@ -1087,7 +1150,11 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1200,7 +1267,10 @@ async def run_agent(
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                if single_mode != "custom":
+                                    # Custom frames carry task_* events whose payload can hold a delegated
+                                    # subagent's messages; see the multi-mode branch below.
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1240,10 +1310,12 @@ async def run_agent(
                             if mode is None:
                                 continue
 
-                            if not namespace:
+                            if not namespace and mode != "custom":
                                 # Only root-graph frames may decide the parent run's error
                                 # fallback: a delegated subagent's marked fallback is the
-                                # executor's to map (task_failed), not this run's.
+                                # executor's to map (task_failed), not this run's. That
+                                # includes the child messages task_running custom events
+                                # carry, which are root frames too.
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -1301,6 +1373,7 @@ async def run_agent(
                 deerflow_trace_id=deerflow_trace_id,
                 task_store=task_store,
                 extensions=extensions,
+                run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -1747,6 +1820,23 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     return _message_type(visible_messages[-1]) == "ai"
 
 
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. The goal evaluator only reads human and AI text and never sees it.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
+
+
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
     if evaluation["satisfied"]:
         return None
@@ -1846,6 +1936,7 @@ async def _prepare_goal_continuation_input(
     deerflow_trace_id: str | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
+    run_stop_reason: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1902,6 +1993,19 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(
@@ -1983,6 +2087,11 @@ async def _prepare_goal_continuation_input(
         return None
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
+    if stand_down_reason is None and run_stop_reason == "token_capped":
+        # The run already used up its token budget, and continuations share that
+        # budget, so another hidden turn would spend one more model call only to
+        # have its tool calls stripped.
+        stand_down_reason = "token_capped"
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
@@ -2199,6 +2308,7 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
     # middleware channel can be restored. Reducer channels need Overwrite to
@@ -2288,8 +2398,13 @@ async def _rollback_to_pre_run_checkpoint(
             operation="rollback",
         )
     else:
-        restore_config = rollback_point.config
+        restore_config = {
+            **rollback_point.config,
+            "configurable": dict(rollback_point.config.get("configurable", {})),
+        }
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
+    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
 
     restored_config = await mutation_accessor.aupdate(
         restore_config,

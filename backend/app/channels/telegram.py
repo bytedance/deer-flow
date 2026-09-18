@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Coroutine
@@ -41,6 +42,35 @@ MAX_TRACKED_STREAM_MESSAGES = 256
 
 # Indirection so tests can patch the clock without touching the global time module.
 _monotonic = time.monotonic
+
+# Rich Messages only earn their keep when the text carries a construct that
+# renders natively: a fenced code block, emphasis, a table, a task list,
+# <details>, block math, or a link. Structured command/error replies are plain
+# text with none of these, so they stay plain and their newlines and
+# <placeholder> tokens survive verbatim instead of being collapsed by the
+# rich parser.
+#
+# The patterns are deliberately *well-formed*, not "contains this character":
+# a table must be a line that leads with a pipe, a link must be [text](url),
+# so a command line like "/goal [condition|clear]" (brackets + a mid-line pipe)
+# never trips the detector.
+_TELEGRAM_RICH_CONSTRUCT_RE = re.compile(
+    r"(?m)"
+    r"^\s*(`{3,}|~{3,})"  # fenced code block
+    r"|^\s*[-*+]\s+\[[ xX]\]"  # task list item
+    r"|^\s*\|.*\|"  # table row (line leads with a pipe)
+    r"|^\s*\|?\s*:?-{2,}\s*\|"  # table separator row (needs a pipe, so "--flag" stays plain)
+    r"|\[[^\]]*\]\("  # markdown link [text](url)
+    r"|\*\*[^*\n]+\*\*"  # bold
+    r"|\*(?!\s)[^*\n]+?(?<!\s)\*"  # italic (tight delimiters, so "2 * 3" stays plain)
+    r"|<details"  # collapsible details
+    r"|\$\$"  # block math
+)
+
+
+def _has_rich_constructs(text: str) -> bool:
+    """Whether *text* contains a construct that needs native rich rendering."""
+    return _TELEGRAM_RICH_CONSTRUCT_RE.search(text) is not None
 
 
 def _load_telegram_input_file(path, filename: str):
@@ -310,7 +340,11 @@ class TelegramChannel(Channel):
         return False
 
     def _can_send_rich(self, text: str) -> bool:
-        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+        # Rich Messages are used only when rich_messages is on and the text
+        # actually contains a rich construct. Structured command/error replies
+        # are plain text with none, so they stay plain and their newlines and
+        # <placeholder> tokens are not collapsed into one line.
+        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH and _has_rich_constructs(text)
 
     async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
         """Replace a streamed preview with a persistent Telegram Rich Message."""

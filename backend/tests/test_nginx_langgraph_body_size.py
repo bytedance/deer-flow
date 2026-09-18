@@ -52,6 +52,11 @@ _MAX_EXPECTED_BODY_SIZE_BYTES = 100 * 1024 * 1024
 
 _SIZE_MULTIPLIERS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 
+# The read timeout /api/langgraph/ already allows for a model-bound request.
+_MIN_BLOCKING_READ_TIMEOUT_SECONDS = 600
+
+_DURATION_MULTIPLIERS = {"": 1, "s": 1, "m": 60, "h": 3600}
+
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
@@ -86,6 +91,14 @@ def _parse_body_size_bytes(block: str) -> int:
     assert match, "client_max_body_size value not found or not parseable"
     value, unit = match.groups()
     return int(value) * _SIZE_MULTIPLIERS[unit.lower()]
+
+
+def _parse_read_timeout_seconds(block: str) -> int:
+    # Anchored to the start of a line so a commented-out directive does not count.
+    match = re.search(r"^\s*proxy_read_timeout\s+(\d+)([smh]?)\s*;", block, re.M)
+    assert match, "no active proxy_read_timeout directive"
+    value, unit = match.groups()
+    return int(value) * _DURATION_MULTIPLIERS[unit]
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
@@ -128,6 +141,22 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
 
     assert "client_max_body_size 100M;" in block
     assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_threads_route_outlasts_blocking_gateway_calls(path):
+    """The browser calls ``/api/threads/*`` directly, not through
+    ``/api/langgraph/``. Routes such as ``/compact`` and ``/suggestions`` hold
+    the response open for a whole model call, and ``/runs/wait`` for a whole
+    run. Under nginx's 60s default the client gets a 504 mid-work: the
+    compaction still commits behind the failed request, and ``/runs/wait``
+    cancels its run on the disconnect."""
+    content = _read(path)
+    block = _extract_location_block(content, "~ ^/api/threads")
+
+    timeout_seconds = _parse_read_timeout_seconds(block)
+
+    assert timeout_seconds >= _MIN_BLOCKING_READ_TIMEOUT_SECONDS, f"{path}: the generic /api/threads location allows {timeout_seconds}s, expected at least {_MIN_BLOCKING_READ_TIMEOUT_SECONDS}s like /api/langgraph/"
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)

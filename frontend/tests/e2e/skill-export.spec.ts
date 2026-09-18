@@ -58,12 +58,21 @@ test("custom export previews, handles stale content and downloads only after ref
           body: Buffer.from("synthetic transport fixture"),
         });
   });
-  await page.goto("/workspace/chats/new?settings=skills");
+  await page.goto("/workspace/capabilities?tab=skills");
+  await page
+    .getByRole("button", { name: "View details public-demo", exact: true })
+    .click();
   await expect(
-    page.getByRole("button", { name: "Export public-demo" }),
+    page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Export", exact: true }),
   ).toHaveCount(0);
-  await page.getByRole("tab", { name: "Custom", exact: true }).click();
-  await page.getByRole("button", { name: "Export demo", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "My skills", exact: true }).click();
+  await page
+    .getByRole("button", { name: "View details demo", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
   const dialog = page.getByRole("dialog", {
     name: "Export skill",
     exact: true,
@@ -94,7 +103,7 @@ test("custom export previews, handles stale content and downloads only after ref
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(
-    page.getByRole("dialog", { name: "Settings", exact: true }),
+    page.getByRole("heading", { name: "Capability Center", exact: true }),
   ).toBeVisible();
 });
 
@@ -123,9 +132,12 @@ test("mobile manifest blockers are readable and cannot download", async ({
       },
     }),
   );
-  await page.goto("/workspace/chats/new?settings=skills");
-  await page.getByRole("tab", { name: "Custom", exact: true }).click();
-  await page.getByRole("button", { name: "Export demo", exact: true }).click();
+  await page.goto("/workspace/capabilities?tab=skills");
+  await page.getByRole("tab", { name: "My skills", exact: true }).click();
+  await page
+    .getByRole("button", { name: "View details demo", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
   const dialog = page.getByRole("dialog", {
     name: "Export skill",
     exact: true,

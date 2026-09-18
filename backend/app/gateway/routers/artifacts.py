@@ -25,18 +25,15 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 
-ACTIVE_CONTENT_MIME_TYPES = {
-    "text/html",
-    "application/xhtml+xml",
-    "image/svg+xml",
-}
-
+# Active-content MIME classification (``_is_active_content_mime_type``) lives
+# in ``deerflow.utils.text_detection``, shared with the project-document shelf.
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -161,7 +158,9 @@ def _build_content_disposition(disposition_type: str, filename: str) -> str:
 
 
 def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
-    headers = {"Content-Disposition": _build_content_disposition("attachment", filename)}
+    # nosniff: a declared binary/document type must never be reinterpreted as
+    # HTML — the transport-level guarantee behind unsandboxed PDF preview.
+    headers = {"Content-Disposition": _build_content_disposition("attachment", filename), "X-Content-Type-Options": "nosniff"}
     if extra_headers:
         headers.update(extra_headers)
     return headers
@@ -210,17 +209,6 @@ def _slice_byte_range(content: bytes, range_header: str | None) -> tuple[bytes, 
         }
     )
     return ranged_content, 206, headers
-
-
-def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
-    """Check if file is text by examining content for null bytes."""
-    try:
-        with open(path, "rb") as f:
-            chunk = f.read(sample_size)
-            # Text files shouldn't contain null bytes
-            return b"\x00" not in chunk
-    except Exception:
-        return False
 
 
 def _read_skill_archive_member(zip_ref: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
@@ -307,7 +295,7 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
     mime_type, _ = mimetypes.guess_type(actual_path)
     # Active content / explicit download is streamed by FileResponse — no read here.
-    if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
+    if download or _is_active_content_mime_type(mime_type):
         return ("file", mime_type)
     if mime_type and mime_type.startswith("text/"):
         return ("inline_file", mime_type)
@@ -361,7 +349,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     Returns:
         The file content as a FileResponse with appropriate content type:
-        - Active content (HTML/XHTML/SVG): Served as download attachment
+        - Active content (HTML and XML documents, including XHTML/SVG): Served as download attachment
         - Text files: Plain text with proper MIME type
         - Binary files: Inline display with download option
 
@@ -373,13 +361,13 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     Query Parameters:
         download (bool): If true, forces attachment download for file types that are
-            otherwise returned inline or as plain text. Active HTML/XHTML/SVG content
-            is always downloaded regardless of this flag.
+            otherwise returned inline or as plain text. Active HTML/XML content
+            (including XHTML and SVG) is always downloaded regardless of this flag.
 
     Example:
         - Get text file inline: `/api/threads/abc123/artifacts/mnt/user-data/outputs/notes.txt`
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
-        - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
+        - Active web content such as `.html`, `.xhtml`, `.svg`, and `.xml` artifacts is always downloaded
     """
     # Trusted internal callers may act on behalf of a thread's owner via the
     # owner-user-id header (honored only after the internal token validates).
@@ -407,7 +395,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
         cache_headers = {"Cache-Control": "private, max-age=300"}
         download_name = Path(internal_path).name or actual_skill_path.stem
-        if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
+        if download or _is_active_content_mime_type(mime_type):
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
 
         # Archive members are already bounded during extraction. Preserve byte
@@ -419,6 +407,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         inline_headers = {
             **cache_headers,
             **range_headers,
+            "X-Content-Type-Options": "nosniff",
             # Real SHA-256 so the browser can skip crypto.subtle (unavailable on
             # non-secure contexts) when previewing / editing artifacts (#4864).
             "ETag": f'"{hashlib.sha256(content).hexdigest()}"',
@@ -469,8 +458,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     if kind == "inline_file":
         # FileResponse honors byte-Range requests for large text previews and
-        # media seeking without buffering the full artifact in the Gateway.
-        headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name)}
+        headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), "X-Content-Type-Options": "nosniff"}
         file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
         if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
             # Real SHA-256 so the browser can skip crypto.subtle (unavailable

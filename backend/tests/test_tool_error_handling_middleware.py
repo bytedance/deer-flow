@@ -796,12 +796,14 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
         app_config=None,
         keep=None,
         skip_memory_flush=False,
+        archive_task_history=True,
         run_model_name=None,
         extensions=None,
     ):
         captured["app_config"] = app_config
         captured["keep"] = keep
         captured["skip_memory_flush"] = skip_memory_flush
+        captured["archive_task_history"] = archive_task_history
         captured["run_model_name"] = run_model_name
         captured["extensions"] = extensions
         return sentinel
@@ -822,6 +824,7 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     # skip_memory_flush=True so subagent-internal turns are not flushed into the
     # PARENT thread's durable memory (#3875 Phase 3 review).
     assert captured["skip_memory_flush"] is True
+    assert captured["archive_task_history"] is False
     # Model ownership: the subagent's own resolved model is threaded into the factory
     # so a distinct-model subagent summarizes with its model, not the parent's — the
     # subagent context/configurable never carries the child model.
@@ -841,9 +844,10 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     """A three-tool turn with ``keep=4`` must remain provider-valid.
 
     This reproduces the production failure shape: compaction preserves an
-    assistant tool-call plus three tool results while removing the original
-    system/user messages. The subagent chain must inject the generated summary
-    as durable human context before that tail reaches the model.
+    assistant tool-call plus three tool results and compresses the turn before
+    them. The subagent chain must inject the generated summary as durable human
+    context before that tail reaches the model, and keep the subagent's own
+    system prompt, which lives in state rather than in ``create_agent``.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models import BaseChatModel
@@ -880,6 +884,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
                 # outgoing request is provider-valid: a single leading SystemMessage.
                 system_indices = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
                 assert system_indices == [0], f"request must have exactly one leading SystemMessage, got {system_indices}"
+                assert "subagent instructions" in messages[0].content, "the subagent system prompt must survive compaction"
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
 
     summary_model = _StaticModel(text="COMPRESSED_SUBAGENT_HISTORY")
@@ -915,6 +920,8 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     seed = [
         SystemMessage(content="subagent instructions", id="system"),
         HumanMessage(content="research three regions", id="human"),
+        AIMessage(content="planning", tool_calls=[{"name": "web_search", "args": {"query": "overview"}, "id": "call_plan", "type": "tool_call"}], id="plan"),
+        ToolMessage(content="overview result", tool_call_id="call_plan", id="tool_plan"),
         AIMessage(content="searching", tool_calls=tool_calls, id="assistant"),
         *[ToolMessage(content=f"result {i}", tool_call_id=f"call_{i}", id=f"tool_{i}") for i in range(3)],
     ]
@@ -922,6 +929,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     result = agent.invoke({"messages": seed})
 
     assert result["summary_text"] == "COMPRESSED_SUBAGENT_HISTORY"
+    assert result["messages"][0].id == "system"
     assert result["messages"][-1].content == "final answer"
 
 

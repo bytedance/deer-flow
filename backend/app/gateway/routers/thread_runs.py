@@ -38,11 +38,20 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 from app.gateway.context_usage import build_context_usage
+from app.gateway.conversation_reader import (
+    default_history_hidden_run_ids as _default_history_hidden_run_ids,
+)
+from app.gateway.conversation_reader import (
+    read_visible_message_page,
+)
+from app.gateway.conversation_reader import (
+    scan_visible_thread_messages as _scan_visible_thread_messages,
+)
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
-from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
@@ -437,11 +446,6 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
-def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
-    caller = str((row.get("metadata") or {}).get("caller", ""))
-    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
-
-
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
     return checkpoint_messages(snapshot)
 
@@ -586,7 +590,7 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -673,7 +677,7 @@ def _run_status_value(record: Any) -> str | None:
 
 async def _require_successful_source_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None:
         # The run-event journal is the authoritative lookup above. This fallback
@@ -700,7 +704,7 @@ async def _find_interrupted_target_run_id(
         return None
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(source_run_id, user_id=user_id)
     if record is None:
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
@@ -889,12 +893,6 @@ async def _prepare_edit_regenerate_payload(
     )
 
 
-async def _default_history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_id: str | None) -> set[str]:
-    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
-    edit_visibility = await run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id)
-    return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1038,7 +1036,7 @@ async def wait_run(
     # thread head may be a later run, so do not claim it as this run's result.
     if completed and not reused:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,
@@ -1064,12 +1062,38 @@ def _parse_run_page_created_at(value: str) -> str:
     return normalized
 
 
+async def _run_scope_user_id(request: Request) -> str | None:
+    """Resolve the data-filter id for run and message reads, not for authorization.
+
+    Thread visibility on these endpoints is already authorized by
+    ``@require_permission(..., owner_check=True)``. Trusted internal callers
+    are authorized as a synthetic internal user instead — ``id="default"``
+    without an owner header, or the ``make_safe_user_id``-normalized owner
+    otherwise — while ``start_run`` stamps run rows and run-event rows with
+    the raw trusted-owner value. Filtering by the authorization identity
+    therefore never matches the persisted rows (#5437), so internal callers
+    read the authorized thread's runs, event-store messages, hidden-run
+    lookups, turn durations and feedback unfiltered; browser/API sessions
+    keep the per-user filter.
+
+    Feedback note: an explicit ``None`` also skips the ``user_id`` WHERE in
+    ``FeedbackRepository``, so on shared/NULL-owner threads several users'
+    feedback rows collapse per run — ``FeedbackRepository.list_by_thread_grouped``
+    / ``list_by_run_ids`` order deterministically (latest wins, ``feedback_id``
+    breaks ties) to keep that well-defined.
+    """
+    user = getattr(request.state, "user", None)
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return None
+    return await get_current_user(request)
+
+
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
@@ -1097,7 +1121,7 @@ async def list_runs_page(
         before_created_at = _parse_run_page_created_at(before_created_at)
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(
         thread_id,
         user_id=user_id,
@@ -1121,7 +1145,7 @@ async def list_runs_page(
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -1344,9 +1368,10 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
-    # Resolve the caller once; it is needed both to scope the feedback query
-    # below and to list the thread's runs for turn-duration injection.
-    user_id = await get_current_user(request)
+    # Resolve the data-filter id once (None for internal callers — same
+    # rationale as the runs endpoints above); it scopes the feedback query,
+    # the hidden-run lookup, the event-store scan and turn-duration injection.
+    user_id = await _run_scope_user_id(request)
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     messages, _ = await _scan_visible_thread_messages(
@@ -1354,7 +1379,7 @@ async def list_thread_messages(
         limit=limit,
         before_seq=before_seq,
         after_seq=after_seq,
-        request=request,
+        event_store=get_run_event_store(request),
         user_id=user_id,
         hidden_run_ids=hidden_run_ids,
         include_middleware=True,
@@ -1404,122 +1429,6 @@ async def list_thread_messages(
     return messages
 
 
-async def _scan_visible_thread_messages(
-    thread_id: str,
-    *,
-    limit: int,
-    before_seq: int | None,
-    after_seq: int | None,
-    request: Request,
-    user_id: str | None,
-    hidden_run_ids: set[str],
-    include_middleware: bool,
-    include_extra: bool,
-    batch_size: int,
-) -> tuple[list[dict[str, Any]], bool]:
-    """Scan raw message rows until ``limit`` visible rows survive filtering."""
-    event_store = get_run_event_store(request)
-    needed = limit + 1 if include_extra else limit
-
-    if after_seq is not None:
-        visible: list[dict[str, Any]] = []
-        scan_after = after_seq
-        while len(visible) < needed:
-            raw = await event_store.list_messages(
-                thread_id,
-                limit=batch_size,
-                after_seq=scan_after,
-                user_id=user_id,
-            )
-            if not raw:
-                break
-            _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
-            reached_before_bound = False
-            for row in raw:
-                if before_seq is not None and row["seq"] >= before_seq:
-                    reached_before_bound = True
-                    break
-                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
-                    continue
-                visible.append(row)
-                if len(visible) == needed:
-                    break
-            next_scan_after = max(row["seq"] for row in raw)
-            if next_scan_after <= scan_after:
-                _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=None, scan_after=scan_after, next_cursor=next_scan_after, row_count=len(raw))
-            scan_after = next_scan_after
-            if reached_before_bound or len(raw) < batch_size:
-                break
-        has_more = len(visible) > limit
-        return visible[:limit], has_more
-
-    visible_desc: list[dict[str, Any]] = []
-    scan_before = before_seq
-    while len(visible_desc) < needed:
-        raw = await event_store.list_messages(
-            thread_id,
-            limit=batch_size,
-            before_seq=scan_before,
-            user_id=user_id,
-        )
-        if not raw:
-            break
-        _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
-        for row in reversed(raw):
-            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
-                continue
-            visible_desc.append(row)
-            if len(visible_desc) == needed:
-                break
-        next_scan_before = min(row["seq"] for row in raw)
-        if scan_before is not None and next_scan_before >= scan_before:
-            _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=scan_before, scan_after=None, next_cursor=next_scan_before, row_count=len(raw))
-        scan_before = next_scan_before
-        if len(raw) < batch_size:
-            break
-    has_more = len(visible_desc) > limit
-    return list(reversed(visible_desc[:limit])), has_more
-
-
-def _validate_message_scan_rows(
-    rows: list[dict[str, Any]],
-    *,
-    thread_id: str,
-    scan_before: int | None,
-    scan_after: int | None,
-) -> None:
-    invalid_seq_rows = [row for row in rows if not isinstance(row.get("seq"), int)]
-    if invalid_seq_rows:
-        logger.error(
-            "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s scan_after=%s row_count=%d invalid_count=%d",
-            thread_id,
-            scan_before,
-            scan_after,
-            len(rows),
-            len(invalid_seq_rows),
-        )
-        raise RuntimeError("Run event message rows are missing sequence values")
-
-
-def _raise_non_advancing_message_scan(
-    *,
-    thread_id: str,
-    scan_before: int | None,
-    scan_after: int | None,
-    next_cursor: int,
-    row_count: int,
-) -> None:
-    logger.error(
-        "Thread message scan cursor did not advance: thread_id=%s scan_before=%s scan_after=%s next_cursor=%s row_count=%d",
-        thread_id,
-        scan_before,
-        scan_after,
-        next_cursor,
-        row_count,
-    )
-    raise RuntimeError("Run event message scan did not advance its cursor")
-
-
 async def _scan_thread_message_page(
     thread_id: str,
     *,
@@ -1529,18 +1438,13 @@ async def _scan_thread_message_page(
     user_id: str | None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
-    run_mgr = get_run_manager(request)
-    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
-    return await _scan_visible_thread_messages(
-        thread_id,
+    return await read_visible_message_page(
+        event_store=get_run_event_store(request),
+        run_manager=get_run_manager(request),
+        thread_id=thread_id,
         limit=limit,
         before_seq=before_seq,
-        after_seq=None,
-        request=request,
         user_id=user_id,
-        hidden_run_ids=hidden_run_ids,
-        include_middleware=False,
-        include_extra=True,
         batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
     )
 
@@ -1605,7 +1509,7 @@ async def list_thread_messages_page(
     if "after_seq" in request.query_params:
         raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
 
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     rows, has_more = await _scan_thread_message_page(
         thread_id,
         limit=limit,

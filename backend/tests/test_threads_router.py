@@ -31,6 +31,7 @@ from deerflow.persistence.thread_meta import (
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -211,6 +212,10 @@ class _RawStateAccessor:
         checkpoint_tuple = await self.checkpointer.aget_tuple(config)
         return self._snapshot(checkpoint_tuple, config)
 
+    async def aget_metadata(self, config):
+        checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        return dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+
     async def ahistory(self, config, *, limit=None):
         snapshots = []
         async for checkpoint_tuple in self.checkpointer.alist(config, limit=limit):
@@ -269,7 +274,10 @@ def _patch_checkpoint_state_builder(monkeypatch):
     async def _mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
         return _mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", _builder)
+    async def _abuild(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        return _builder(request, thread_id=thread_id, assistant_id=assistant_id, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", _abuild)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", _mutation_builder)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", _read_boundary)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", _mutation_boundary)
@@ -1171,9 +1179,8 @@ def test_latest_thread_readers_use_materialized_snapshot_values() -> None:
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            create=True,
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         patch(
             "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
@@ -1228,8 +1235,8 @@ def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint()
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         TestClient(app) as client,
     ):
@@ -1272,8 +1279,8 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, snapshot.config),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, snapshot.config)),
         ),
         TestClient(app) as client,
     ):
@@ -2728,7 +2735,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
     source_accessor.aget = source_aget
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2745,7 +2752,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2847,7 +2854,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
     source_accessor = SimpleNamespace(ahistory=source_ahistory, aget=unexpected_lineage_read)
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2864,7 +2871,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2982,7 +2989,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         aget=AsyncMock(side_effect=lambda config: next(item for item in source_history if item.config["configurable"]["checkpoint_id"] == config["configurable"]["checkpoint_id"])),
     )
 
-    def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         if thread_id != source_thread_id:
             raise AssertionError("fresh branches must use the dedicated mutation graph")
         return source_accessor, {
@@ -2993,7 +3000,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         }
 
     real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", source_builder)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=source_builder))
     monkeypatch.setattr(
         threads,
         "build_checkpoint_state_mutation_accessor",
@@ -3066,7 +3073,7 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     ctx = SimpleNamespace(checkpointer=checkpointer, store=None, checkpoint_channel_mode=mode, app_config=None)
     monkeypatch.setattr(gateway_services, "get_run_context", lambda _request: ctx)
     monkeypatch.setattr(gateway_services, "resolve_agent_factory", selective_factory)
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", gateway_services.build_checkpoint_state_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", gateway_services.abuild_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", gateway_services.build_checkpoint_state_mutation_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", gateway_services.build_thread_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", gateway_services.build_thread_checkpoint_state_mutation_accessor)
@@ -3074,20 +3081,23 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     return custom_factory
 
 
-async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id):
+async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id, *, agent_name=None):
     accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    if agent_name is not None:
+        config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: agent_name}
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [HumanMessage(id="h1", content="question")], "ext_list": ["merged"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a1", content="answer")], "ext_list": ["payload"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {
             "messages": [
                 HumanMessage(
@@ -3100,7 +3110,7 @@ async def _seed_extension_source(checkpointer, custom_factory, mode, source_thre
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a2", content="follow-up answer")]},
         as_node="model",
     )
@@ -3156,7 +3166,15 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
         assert created.status_code == 200, created.text
 
         # Seed after creation: create_thread writes an empty head checkpoint.
-        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+        asyncio.run(
+            _seed_extension_source(
+                checkpointer,
+                custom_factory,
+                mode,
+                source_thread_id,
+                agent_name="stateless-worker",
+            )
+        )
 
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
@@ -3190,18 +3208,19 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
 
     async def materialize(thread_id):
         accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-        snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-        return snapshot.values
+        return await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
 
-    branch_values = asyncio.run(materialize(branch_thread_id))
+    branch_snapshot = asyncio.run(materialize(branch_thread_id))
+    branch_values = branch_snapshot.values
     assert branch_values["ext_list"] == ["replaced"]
     assert [message.id for message in branch_values["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert branch_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
     prepared = prepare_response.json()
     assert prepared["target_run_id"] == "source-run"
     assert prepared["input"]["messages"][0]["id"] == "h2"
     base_accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-    base_values = asyncio.run(
+    base_snapshot = asyncio.run(
         base_accessor.aget(
             {
                 "configurable": {
@@ -3211,8 +3230,10 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
                 }
             }
         )
-    ).values
+    )
+    base_values = base_snapshot.values
     assert [message.id for message in base_values["messages"]] == ["h1", "a1"]
+    assert base_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
 
 async def _seed_branch_history_source(checkpointer, custom_factory, mode, source_thread_id):
@@ -3337,6 +3358,8 @@ async def _seed_union_channel_source(checkpointer, custom_factory, mode, source_
             "todos": [{"content": "write tests", "status": "pending"}],
             "sandbox": {"sandbox_id": "local:parent-thread"},
             "thread_data": {"workspace_path": "/parent/workspace"},
+            "task_history": {"scope": "parent-scope", "batches": ["a" * 64], "status": "available"},
+            "task_notes": {"next": {"content": "verify the batch", "authority": "model_report"}},
         },
         as_node="model",
     )
@@ -3404,6 +3427,8 @@ def test_branch_does_not_inherit_thread_scoped_channels(monkeypatch, mode) -> No
 
     assert branch_values.get("sandbox") is None
     assert branch_values.get("thread_data") is None
+    assert branch_values.get("task_history") is None
+    assert branch_values["task_notes"]["next"]["content"] == "verify the batch"
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
@@ -3437,6 +3462,86 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
+    """A manual state rewrite must retain the state-producing agent policy."""
+    import deerflow.config.agents_config as agents_config
+    from deerflow.runtime import context_compaction
+
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"state-binding-{mode}"
+
+    async def seed_bound_state() -> None:
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        await accessor.aupdate(
+            {
+                "configurable": {"thread_id": thread_id, "checkpoint_ns": ""},
+                "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+            },
+            {
+                "messages": [
+                    HumanMessage(id="h1", content="old question"),
+                    AIMessage(id="a1", content="old answer"),
+                    HumanMessage(id="h2", content="latest question"),
+                ]
+            },
+            as_node="model",
+        )
+
+    config_reads: list[str] = []
+
+    def load_agent_config(name, **_kwargs):
+        config_reads.append(name)
+        if name != "stateless-worker":
+            raise AssertionError(f"untrusted agent name reached policy lookup: {name}")
+        return SimpleNamespace(model=None, memory_enabled=False)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", load_agent_config)
+    monkeypatch.setattr(context_compaction, "get_app_config", lambda: SimpleNamespace(models=[]))
+    captured: dict[str, object] = {}
+
+    class CompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
+            del runtime, force, raise_on_failure
+            return SimpleNamespace(
+                summary_text="summary",
+                messages_to_summarize=tuple(state["messages"][:-1]),
+                preserved_messages=tuple(state["messages"][-1:]),
+                total_tokens=42,
+            )
+
+    def create_compaction_middleware(**kwargs):
+        captured.update(kwargs)
+        return CompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_compaction_middleware)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+        asyncio.run(seed_bound_state())
+
+        updated = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "Renamed"}},
+        )
+        assert updated.status_code == 200, updated.text
+
+        compacted = client.post(
+            f"/api/threads/{thread_id}/compact",
+            json={"force": True, "agent_name": "memory-enabled-impostor"},
+        )
+
+    assert compacted.status_code == 200, compacted.text
+    assert compacted.json()["compacted"] is True
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == ["stateless-worker"]
 
 
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
@@ -3757,6 +3862,9 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
 
     accessor = SimpleNamespace(
         aupdate=aupdate,
+        aget_metadata=AsyncMock(
+            return_value={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+        ),
         aget=AsyncMock(return_value=snapshot),
     )
 
@@ -3793,12 +3901,16 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert len(update_calls) == 1
     read_config, updates, as_node = update_calls[0]
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
+    assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
     assert updates["messages"].value[0]["id"] == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"
     assert as_node == "manual_state_update"
+    accessor.aget_metadata.assert_awaited_once_with(
+        {"configurable": {"thread_id": "state-overwrite", "checkpoint_ns": ""}},
+    )
     accessor.aget.assert_awaited_once_with(updated_config)
     assert response.json()["checkpoint_id"] == "ckpt-updated"
 
@@ -4402,3 +4514,32 @@ def test_branch_from_archived_project_thread_degrades_to_unassigned(tmp_path):
 
         unassigned = client.post("/api/threads/search", json={"project_id": None}).json()
         assert {h["thread_id"] for h in unassigned} == {branch_id}
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallback):
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    if fallback:
+        monkeypatch.setattr(threads, "graph_reducer_channels", lambda graph: None)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "note-replacement", "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200
+        first = client.post("/api/threads/note-replacement/state", json={"values": {"task_notes": {"old": {"content": "stale"}}}})
+        assert first.status_code == 200, first.text
+        updated = client.post(
+            "/api/threads/note-replacement/state",
+            json={
+                "values": {
+                    "task_notes": {
+                        "new": {"content": "keep backups", "authority": "system", "extra": "forged proof"},
+                        "oversized": {"content": "x" * 751},
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        read = client.get("/api/threads/note-replacement/state")
+        assert read.status_code == 200, read.text
+        assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
