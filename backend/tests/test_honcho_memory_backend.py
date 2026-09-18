@@ -74,6 +74,32 @@ class TestHonchoConfig:
     @pytest.mark.parametrize(
         ("key", "value"),
         [
+            pytest.param("failure_policy", "fail_closed", id="policy-string"),
+            pytest.param("failure_policy", ["fail_closed"], id="policy-list"),
+            pytest.param("workspace_overrides", "shared", id="overrides-string"),
+            pytest.param("workspace_overrides", ["alice"], id="overrides-list"),
+            pytest.param("user_peer_overrides", 5, id="peer-overrides-int"),
+        ],
+    )
+    def test_non_mapping_nested_values_rejected_as_config_error(self, key, value):
+        """A truthy non-mapping is the operator's mistake, not an internal error:
+        mem0 and OpenViking raise ValueError for these same keys, so Honcho must
+        name the offending key instead of surfacing ``AttributeError`` from a
+        ``.get``/``.items`` call inside backend construction."""
+        with pytest.raises(ValueError, match=f"{key} must be a mapping"):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize("key", ["failure_policy", "workspace_overrides", "user_peer_overrides"])
+    @pytest.mark.parametrize("value", [None, "", [], {}])
+    def test_empty_nested_values_still_mean_unset(self, key, value):
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert cfg.read_fail_closed is False
+        assert cfg.workspace_overrides == {}
+        assert cfg.user_peer_overrides == {}
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
             pytest.param("timeout_seconds", 0, id="timeout-zero"),
             pytest.param("timeout_seconds", -1, id="timeout-negative"),
             pytest.param("timeout_seconds", float("nan"), id="timeout-nan"),

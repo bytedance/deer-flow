@@ -21,13 +21,29 @@ def sanitize_id(raw: str) -> str:
     return _ID_RE.sub("-", str(raw)).strip("-")[:64]
 
 
+def _mapping(value: Any, name: str) -> dict[str, Any]:
+    """Narrow an operator-supplied nested value to a mapping.
+
+    Falsy values (absent key, YAML null, ``{}``, ``""``) mean "unset" and keep
+    the default. A truthy non-mapping — a bare string, a YAML list — is a
+    config mistake, and naming the key here beats the ``AttributeError`` that
+    ``.get``/``.items`` would otherwise raise inside backend construction. The
+    mem0 and OpenViking backends already report these keys as ``ValueError``.
+    """
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Honcho backend: {name} must be a mapping, got {type(value).__name__}")
+    return value
+
+
 def _parse_override_map(cfg: dict[str, Any], key: str) -> dict[str, str]:
     """Overrides map raw user ids to explicit workspace/peer ids; an empty or
     null VALUE is always a config mistake (empty string is falsy and would
     silently fall through to the default derivation; YAML null would stringify
     into an id literally named "None"), so fail fast at parse time."""
     out: dict[str, str] = {}
-    for k, v in (cfg.get(key) or {}).items():
+    for k, v in _mapping(cfg.get(key), key).items():
         if v is None or not str(v).strip():
             raise ValueError(f"Honcho backend: {key}[{k!r}] has an empty value; remove the entry or set a non-empty id.")
         out[str(k)] = str(v)
@@ -65,7 +81,7 @@ class HonchoConfig:
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> HonchoConfig:
         cfg = dict(backend_config or {})
-        failure_policy = cfg.get("failure_policy") or {}
+        failure_policy = _mapping(cfg.get("failure_policy"), "failure_policy")
         base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
         api_key = cfg.get("api_key") or None
         allow_insecure = bool(cfg.get("allow_insecure_http", False))
