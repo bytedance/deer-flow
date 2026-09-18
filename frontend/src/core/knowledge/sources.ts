@@ -14,7 +14,7 @@ export type KnowledgeSource = {
 
 const SOURCE_ID = /^[a-f0-9]{32}-[1-9][0-9]{0,2}$/;
 const SOURCE_LINK =
-  /(?<!!)\[citation:[^\]\n]+\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g;
+  /(?<!!)\[[^\]\n]+\]\(#(?:user-content-)?knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g;
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

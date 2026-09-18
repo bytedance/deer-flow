@@ -1108,6 +1108,10 @@ Missing source records are shown as unavailable rather than turned into guessed
 links. Source snapshots do not add a knowledge-management page or expose the
 RAGFlow API key. Durable batch exports and standalone Markdown files do not
 carry these interactive conversation source records.
+Ordinary document-title links in a Sources section open the same evidence as
+inline citations. When a tool-output budget applies, only complete evidence
+entries that fit remain citable; omitted sources are reported rather than
+retaining a source record for a cut-off excerpt.
 
 DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
 `knowledge_search` Agent tool resolves the configured dataset scope, groups

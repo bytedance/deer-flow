@@ -82,3 +82,19 @@ describe("knowledge citation provenance", () => {
     expect(collectKnowledgeSources([message, next, message]).size).toBe(2);
   });
 });
+
+it("collects ordinary Sources-section links without collecting code or images", () => {
+  const link = `[Manual.pdf](#knowledge-${id})`;
+  expect(
+    citedKnowledgeSources(
+      `## Sources\n- ${link}\n${link}`,
+      collectKnowledgeSources([message]),
+    ),
+  ).toEqual([source]);
+  expect(
+    citedKnowledgeSources(
+      `\`${link}\`\n!${link}`,
+      collectKnowledgeSources([message]),
+    ),
+  ).toEqual([]);
+});

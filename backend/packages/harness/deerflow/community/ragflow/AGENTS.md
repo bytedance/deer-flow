@@ -12,3 +12,9 @@ historical evidence. Direct `knowledge_search()` callers retain its string API.
 with count/text budgets. The source dialog uses stored thread messages and
 introduces no unauthenticated document proxy. Durable batch result storage and
 standalone Markdown do not include native source artifacts.
+
+Output budgeting retains complete evidence entries and their source records
+together, including delegated results and model-request history. Never shorten
+an excerpt under an existing ID. Drop entries that cannot fit, with an omission
+notice, while preserving unrelated artifact fields. This honors per-tool and
+fallback limits without exempting citation-bearing results from the budget.

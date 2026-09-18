@@ -200,3 +200,5 @@ AI/human text and metadata cannot create a source. `CitationLink` resolves
 there is no matching record. `KnowledgeSourcesPanel` lists only sources cited
 outside code/images. Dialog excerpts render as plain text, never HTML or nested
 Markdown. Source records retain retrieval-time evidence, not live documents.
+Resolve knowledge destinations before testing the label in message and artifact
+link renderers: Sources lists use ordinary titles without a `citation:` prefix.

@@ -46,7 +46,7 @@ const messages = [
   {
     id: "answer-1",
     type: "ai",
-    content: `The maximum pressure is **42 kPa**. [citation:1](#knowledge-${sourceId})`,
+    content: `The maximum pressure is **42 kPa**. [citation:1](#knowledge-${sourceId})\n\n## Sources\n- [Safety manual.pdf](#knowledge-${sourceId})`,
   },
 ];
 
@@ -72,6 +72,7 @@ test("knowledge references open source evidence before and after history reload"
     "Maximum pressure: 42 kPa.",
   );
   await expect(page.getByRole("dialog")).toContainText("Pages 3");
+  await expect(page.getByRole("dialog")).toHaveCSS("opacity", "1");
   await page.screenshot({
     path: testInfo.outputPath("knowledge-citation-desktop.png"),
     fullPage: true,
@@ -80,13 +81,24 @@ test("knowledge references open source evidence before and after history reload"
     .getByRole("dialog")
     .getByRole("button", { name: "Close", exact: true })
     .click();
+  // Sources-section links have an ordinary title, without the citation prefix.
+  const titledSource = source.filter({ hasText: "Safety manual.pdf" }).first();
+  await titledSource.click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Maximum pressure: 42 kPa.",
+  );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
   await page.reload();
   await expect(source.first()).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
-  await source.first().click();
+  await titledSource.click();
   await expect(page.getByRole("dialog")).toContainText(
     "Inspect the seal before operation.",
   );
+  await expect(page.getByRole("dialog")).toHaveCSS("opacity", "1");
   await page.screenshot({
     path: testInfo.outputPath("knowledge-citation-mobile.png"),
     fullPage: true,
