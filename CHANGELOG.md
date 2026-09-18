@@ -2763,7 +2763,9 @@ This release closes that milestone with **765 merged pull requests**.
   chain-of-thought panel skipped the scheme allowlist that markdown links use,
   so a prompt-injected tool call could put a `file:` or OS protocol-handler
   link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
-  and render an unsafe URL as plain text. ([#5526])
+  and show an unsafe URL with the same "Unsafe link omitted" marker as
+  markdown links; a non-string `web_fetch` URL no longer crashes the message
+  list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it

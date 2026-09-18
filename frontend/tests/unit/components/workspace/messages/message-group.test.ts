@@ -519,6 +519,7 @@ describe("MessageGroup", () => {
 // Tool args come from the model and results from search providers, so a
 // prompt-injected URL must not become a navigable anchor. React only rewrites
 // javascript: hrefs; local and OS-handler schemes would otherwise pass through.
+// A blocked URL keeps the markdown path's "Unsafe link omitted" marker.
 describe("MessageGroup tool links", () => {
   const unsafeUrls = [
     "javascript:alert(1)",
@@ -527,14 +528,16 @@ describe("MessageGroup tool links", () => {
     "vscode://file/etc/passwd",
   ];
 
-  it.each(unsafeUrls)("renders a web_fetch URL of %s as text", (url) => {
+  it.each(unsafeUrls)("marks a web_fetch URL of %s as omitted", (url) => {
     const html = renderToolCall("web_fetch", { url });
 
-    expect(html).toContain(url);
+    expect(html).toContain(`>${url}</span>`);
+    expect(html).toContain(`title="Unsafe link scheme in ${url}"`);
+    expect(unsafeMarkerCount(html)).toBe(1);
     expect(html).not.toContain("<a");
   });
 
-  it.each(unsafeUrls)("renders a web_search result at %s as text", (url) => {
+  it.each(unsafeUrls)("marks a web_search result at %s as omitted", (url) => {
     const html = renderToolCall(
       "web_search",
       { query: "DeerFlow" },
@@ -545,12 +548,13 @@ describe("MessageGroup tool links", () => {
     );
 
     expect(html).toContain('href="https://safe.example"');
-    expect(html).toContain("Injected source");
+    expect(html).toContain(">Injected source</span>");
+    expect(unsafeMarkerCount(html)).toBe(1);
     expect(anchorCount(html)).toBe(1);
   });
 
   it.each(unsafeUrls)(
-    "renders an image_search source at %s unlinked",
+    "marks an image_search source at %s as omitted",
     (url) => {
       const html = renderToolCall(
         "image_search",
@@ -568,6 +572,7 @@ describe("MessageGroup tool links", () => {
       );
 
       expect(html).toContain('src="https://images.example/thumb.png"');
+      expect(unsafeMarkerCount(html)).toBe(1);
       expect(html).not.toContain("<a");
     },
   );
@@ -593,6 +598,18 @@ describe("MessageGroup tool links", () => {
 
     expect(fetchHtml).toContain('href="https://example.com/page"');
     expect(imageHtml).toContain('href="https://example.com/source"');
+    expect(unsafeMarkerCount(fetchHtml + imageHtml)).toBe(0);
+  });
+
+  // Models occasionally emit non-string args, and the step renders mid-stream;
+  // an object reaching the JSX would throw and take down the message list.
+  it("renders a web_fetch step whose url arg is not a string", () => {
+    const html = renderToolCall("web_fetch", {
+      url: { href: "https://example.com/page" },
+    });
+
+    expect(html).toContain("View web page");
+    expect(html).not.toContain("<a");
   });
 });
 
@@ -619,6 +636,10 @@ function renderToolCall(
     } as Message);
   }
   return renderGroup(messages);
+}
+
+function unsafeMarkerCount(html: string) {
+  return html.split('aria-label="Unsafe link omitted"').length - 1;
 }
 
 function anchorCount(html: string) {

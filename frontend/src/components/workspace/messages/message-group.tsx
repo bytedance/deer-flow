@@ -48,7 +48,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
-import { isSafeHref } from "./markdown-link";
+import { isSafeHref, UnsafeLink } from "./markdown-link";
 import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
@@ -734,7 +734,7 @@ function ToolCall({
           <ChainOfThoughtSearchResults>
             {/* Tool args and results are model- or provider-controlled, so
                 every tool link passes the same scheme allowlist as markdown
-                links; unsafe URLs render as plain text. */}
+                links and degrades to the same UnsafeLink marker. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
                 {isSafeHref(item.url) ? (
@@ -742,7 +742,7 @@ function ToolCall({
                     {item.title}
                   </a>
                 ) : (
-                  item.title
+                  <UnsafeLink href={item.url}>{item.title}</UnsafeLink>
                 )}
               </ChainOfThoughtSearchResult>
             ))}
@@ -798,9 +798,12 @@ function ToolCall({
                         {thumbnail}
                       </a>
                     ) : (
-                      <div className="size-24 overflow-hidden rounded-lg">
+                      <UnsafeLink
+                        href={item.source_url}
+                        className="size-24 overflow-hidden rounded-lg"
+                      >
                         {thumbnail}
-                      </div>
+                      </UnsafeLink>
                     )}
                   </Tooltip>
                 );
@@ -810,7 +813,9 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "web_fetch") {
-    const url = (args as { url: string })?.url;
+    // Models occasionally emit non-string args mid-stream; an object here
+    // would reach the JSX below and throw.
+    const url = typeof args.url === "string" ? args.url : undefined;
     let title = url;
     if (typeof result === "string") {
       const potentialTitle = extractTitleFromMarkdown(result);
@@ -836,7 +841,7 @@ function ToolCall({
                 {title}
               </a>
             ) : (
-              title
+              <UnsafeLink href={url}>{title}</UnsafeLink>
             ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
