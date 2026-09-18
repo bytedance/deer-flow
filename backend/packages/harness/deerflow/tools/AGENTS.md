@@ -1,5 +1,11 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。
+游标绑定可信用户/线程、规范化过滤条件、本轮上传排除集合和目录元数据；身份与目录
+始终由 runtime 解析，游标只负责一致性校验。先过滤，再按修改时间降序和原始文件名
+排序分页；失效返回 `restart_required`，不得静默回到第一页或伪报末页。
+页大小及大纲选项不参与清单绑定；`total_count` 表示完整过滤结果，摘要只统计剩余项。
+
 `conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
 assembly opts in only with a host reader; default, bootstrap, embedded and
 subagent assembly withhold it. The tool requires the worker-owned
