@@ -74,6 +74,14 @@ def test_message_content_to_text_still_joins_with_newline():
     assert message_content_to_text(["a", {"text": "b"}]) == "a\nb"
 
 
+def test_message_content_to_text_none_content_is_empty_not_literal_none():
+    # Content-less messages (tool-call-only turns, ``model_copy(update={"content": None})``
+    # rewrites) must yield empty text: ``str(None)`` is the truthy literal ``"None"``, which
+    # survives the ``text if text else ...`` fallbacks in the subagent executor and archive.
+    assert message_content_to_text(None) == ""
+    assert message_content_to_text(None) == message_to_text(SimpleNamespace(content=None))
+
+
 # ---------- restore_original_human_message ----------
 
 
