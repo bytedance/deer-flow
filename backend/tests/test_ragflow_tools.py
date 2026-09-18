@@ -1065,3 +1065,98 @@ def test_ragflow_package_has_explicit_init_file() -> None:
     package_dir = Path(ragflow_tools.__file__).resolve().parent
 
     assert (package_dir / "__init__.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_search_artifact_binds_citation_to_exact_retrieved_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "Engineering")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "Manual.pdf", "content": "The limit is 42.", "positions": [[3, 10, 20, 30, 40]]}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    runtime = SimpleNamespace(context={})
+    content, artifact = await ragflow_tools._knowledge_search_entrypoint("limit", runtime)
+    source = artifact["knowledge_sources"]["sources"][0]
+    assert source["document_id"] == "doc-a"
+    assert source["chunk_id"] == "chunk-a"
+    assert source["document_name"] == "Manual.pdf"
+    assert source["text"] == "The limit is 42."
+    assert source["pages"] == [3]
+    assert f"](#knowledge-{source['id']})" in content
+    assert DATASET_ID_1 not in content
+    assert "doc-a" not in content
+    _, next_artifact = await ragflow_tools._knowledge_search_entrypoint("limit", runtime)
+    assert next_artifact["knowledge_sources"]["sources"][0]["id"] != source["id"]
+
+
+@pytest.mark.asyncio
+async def test_search_artifact_redacts_credentials_and_has_no_sources_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "ragflow-secret")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "ragflow-secret", "content": "ragflow-secret"}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    result = await ragflow_tools._knowledge_search_entrypoint("query", SimpleNamespace(context={}))
+    assert "ragflow-secret" not in str(result)
+    content, artifact = await ragflow_tools._knowledge_search_entrypoint("", SimpleNamespace(context={}))
+    assert content.startswith("Error:")
+    assert artifact is None
+
+
+@pytest.mark.asyncio
+async def test_citation_artifact_survives_native_tool_node_and_message_serialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.messages import AIMessage, messages_from_dict, messages_to_dict
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "Engineering")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "Manual.pdf", "content": "Limit: 42."}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", ToolNode([ragflow_tools.knowledge_search_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    result = await builder.compile().ainvoke({"messages": [AIMessage(content="", tool_calls=[{"name": "knowledge_search", "args": {"query": "limit"}, "id": "call-a"}])]})
+    tool_message = result["messages"][-1]
+    assert tool_message.status == "success"
+    assert tool_message.artifact["knowledge_sources"]["sources"][0]["document_id"] == "doc-a"
+    restored = messages_from_dict(messages_to_dict([tool_message]))[0]
+    assert restored.artifact == tool_message.artifact
+    assert restored.content == tool_message.content
+
+
+def test_subagent_forwards_only_cited_captured_sources() -> None:
+    from deerflow.community.ragflow.sources import cited_source_artifact
+
+    sources = [{"id": "a", "text": "first"}, {"id": "b", "text": "second"}]
+    messages = [{"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": sources}}}]
+    assert cited_source_artifact(messages, "[citation:1](#knowledge-a)") == {"knowledge_sources": {"version": 1, "sources": [sources[0]]}}
+    assert cited_source_artifact(messages, "[citation:3](#knowledge-invented)") is None
+    assert cited_source_artifact([{**messages[0], "type": "ai"}], "[citation:1](#knowledge-a)") is None
+
+
+def test_citation_budget_never_emits_partial_links_or_unseen_artifact_text() -> None:
+    from deerflow.community.ragflow.formatting import format_retrieval_sources
+
+    chunks = [{"id": f"chunk-{i}", "dataset_id": DATASET_ID_1, "document_id": "doc", "content": "X" * 1000} for i in range(4)]
+    content, artifact = format_retrieval_sources({"chunks": chunks}, dataset_names_by_id={DATASET_ID_1: "Knowledge"}, max_total_chars=200, max_chars_per_chunk=100)
+    assert len(content) <= 200
+    sources = artifact["knowledge_sources"]["sources"]
+    assert len(sources) == 1
+    assert f"](#knowledge-{sources[0]['id']})" in content
+    assert sources[0]["text"] in content
+    assert sources[0]["truncated"] is True
+
+
+def test_task_command_preserves_child_source_artifact() -> None:
+    from deerflow.tools.builtins.task_tool import _task_result_command
+
+    source = {"id": "abc", "text": "evidence"}
+    message = {"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": [source]}}}
+    command = _task_result_command(tool_call_id="task-1", status="completed", result="Answer [citation:1](#knowledge-abc)", source_messages=[message])
+    assert command.update["messages"][0].artifact["knowledge_sources"]["sources"] == [source]

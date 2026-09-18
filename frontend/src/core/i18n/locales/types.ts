@@ -185,6 +185,12 @@ export interface Translations {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => string;
+    sourcePages: (pages: string) => string;
+    retrievedExcerpt: string;
+    excerptTruncated: string;
+    sourceUnavailable: string;
+    knowledgeSourcesSummary: (count: number) => string;
     sourcesSummary: (count: number) => string;
     citeCount: (count: number) => string;
     copyReference: (title: string) => string;

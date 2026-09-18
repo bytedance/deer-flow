@@ -190,3 +190,13 @@ association and usage accounting, but renders text accompanying
 message grouping. Incremental prefix/tail splitting applies only at human
 boundaries; clarification results also belong to the preceding processing group,
 so derive the full grouping and stabilize references at clarification boundaries.
+
+### Knowledge source citations
+
+`KnowledgeSourcesProvider` scopes source records to the current message list.
+Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
+AI/human text and metadata cannot create a source. `CitationLink` resolves
+`#knowledge-…` citations through that context and renders unavailable text when
+there is no matching record. `KnowledgeSourcesPanel` lists only sources cited
+outside code/images. Dialog excerpts render as plain text, never HTML or nested
+Markdown. Source records retain retrieval-time evidence, not live documents.

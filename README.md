@@ -1097,6 +1097,18 @@ under `web_fetch` or use `TAVILY_API_KEY` for both.
 
 ### Private Knowledge Retrieval (RAGFlow)
 
+Answers can cite retrieved RAGFlow evidence with clickable knowledge citations.
+Click a citation, or an entry in the answer's knowledge sources list, to see the
+original retrieved excerpt, dataset and document names, and page numbers when
+RAGFlow supplies them. These are retrieval-time snapshots retained with the
+conversation, including sources forwarded by ordinary `task` subagents; they
+remain inspectable after reloading the conversation. An excerpt is not a live
+copy of the full document: changes in RAGFlow do not rewrite past evidence.
+Missing source records are shown as unavailable rather than turned into guessed
+links. Source snapshots do not add a knowledge-management page or expose the
+RAGFlow API key. Durable batch exports and standalone Markdown files do not
+carry these interactive conversation source records.
+
 DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
 `knowledge_search` Agent tool resolves the configured dataset scope, groups
 datasets by embedding model, and retrieves those groups in parallel so mixed

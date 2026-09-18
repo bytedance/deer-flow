@@ -19,6 +19,7 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.community.ragflow.sources import cited_source_artifact
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -616,6 +617,7 @@ def _task_result_command(
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
+    source_messages: list[dict] | None = None,
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
 ) -> Command:
@@ -631,6 +633,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
+                    artifact=cited_source_artifact(source_messages or [], content),
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,
@@ -1089,6 +1092,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=receipts,
+                    source_messages=getattr(result, "ai_messages", None),
                     receipt_verdict=receipt_verdict,
                     acceptance_verdict=acceptance_verdict,
                 )
@@ -1117,6 +1121,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -1139,6 +1144,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -1161,6 +1167,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
 
             # Still running, wait before next poll
@@ -1197,6 +1204,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively, then

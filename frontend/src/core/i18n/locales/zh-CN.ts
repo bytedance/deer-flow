@@ -207,6 +207,13 @@ export const zhCN: Translations = {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => `查看来源：${title}`,
+    sourcePages: (pages: string) => `第 ${pages} 页`,
+    retrievedExcerpt:
+      "这是回答生成时检索到的证据片段，源文档此后可能已发生变化。",
+    excerptTruncated: "该片段已按检索长度限制截短。",
+    sourceUnavailable: "当前加载的对话中没有这条引用的来源记录。",
+    knowledgeSourcesSummary: (count: number) => `${count} 个知识库来源`,
     sourcesSummary: (count) => `使用了 ${count} 个来源`,
     citeCount: (count) => `${count} 次引用`,
     copyReference: (title) => `复制 ${title} 引用`,

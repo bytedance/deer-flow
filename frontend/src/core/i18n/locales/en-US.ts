@@ -218,6 +218,14 @@ export const enUS: Translations = {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => `View source: ${title}`,
+    sourcePages: (pages: string) => `Pages ${pages}`,
+    retrievedExcerpt:
+      "Evidence captured when this answer was researched. The source document may have changed since retrieval.",
+    excerptTruncated: "This excerpt was shortened to fit the retrieval limit.",
+    sourceUnavailable:
+      "Source evidence is unavailable in the loaded conversation.",
+    knowledgeSourcesSummary: (count: number) => `${count} knowledge sources`,
     sourcesSummary: (count) =>
       `Used ${count} ${count === 1 ? "source" : "sources"}`,
     citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
