@@ -322,6 +322,22 @@ describe("filterSkillsForAgent", () => {
 });
 
 describe("getMatchingSkillSuggestions", () => {
+  it("offers only builtin commands when the catalog is empty (denied role)", () => {
+    // A role whose `skills` policy allows nothing gets an empty catalog from
+    // GET /api/skills (resource-level listing filter); the composer must
+    // still offer the builtin commands rather than lose the whole dropdown.
+    const result = getMatchingSkillSuggestions([], "", builtins);
+
+    expect(result.map((s) => `${s.kind}:${s.name}`)).toEqual([
+      "builtin:goal",
+      "builtin:new",
+    ]);
+  });
+
+  it("returns an empty list when an empty catalog matches nothing", () => {
+    expect(getMatchingSkillSuggestions([], "deep", builtins)).toEqual([]);
+  });
+
   it("excludes disabled skills and ranks prefix matches first", () => {
     const skills = [
       makeSkill("deep-research"),
@@ -364,6 +380,9 @@ describe("getMatchingSkillSuggestions", () => {
     // these names, so such a skill can never activate — picking it would send
     // literal text to the model with nothing loaded.
     for (const reserved of RESERVED_SLASH_SKILL_NAMES) {
+      if (reserved === "context") {
+        continue;
+      }
       const result = getMatchingSkillSuggestions(
         [makeSkill(reserved), makeSkill(`${reserved}-helper`)],
         reserved,
@@ -380,6 +399,18 @@ describe("getMatchingSkillSuggestions", () => {
     const result = getMatchingSkillSuggestions([makeSkill("status")], "", []);
 
     expect(result).toEqual([]);
+  });
+
+  it("keeps a context skill available because only its compact alias is reserved", () => {
+    const result = getMatchingSkillSuggestions(
+      [makeSkill("context")],
+      "context",
+      [],
+    );
+
+    expect(
+      result.map((suggestion) => `${suggestion.kind}:${suggestion.name}`),
+    ).toEqual(["skill:context"]);
   });
 
   it("caps the number of suggestions", () => {

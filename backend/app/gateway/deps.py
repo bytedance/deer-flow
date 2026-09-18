@@ -167,24 +167,37 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
     Shields the (internally-bounded) drain so that even if the lifespan
-    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
-    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
-    checkpointer pool is not closed while run tasks are still writing
-    checkpoints. On such a cancellation we let the already-running drain finish
-    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
-    the cancellation.
+    coroutine is repeatedly cancelled mid-shutdown — e.g. signal escalation or
+    the server's graceful-shutdown timeout — the checkpointer pool is not closed
+    while run tasks are still writing checkpoints. Cancellation is remembered
+    and propagated only after the already-running drain reaches a safe terminal
+    point.
     """
     drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
-    try:
-        await asyncio.shield(drain)
-    except asyncio.CancelledError:
-        # Re-shield so this second wait does not abandon the in-flight drain;
-        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+    cancellation: asyncio.CancelledError | None = None
+
+    while not drain.done():
         try:
             await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            if cancellation is not None:
+                logger.exception("In-flight run drain failed after shutdown cancellation")
+                raise cancellation
+            logger.exception("Failed to drain in-flight runs during shutdown")
+            return
+
+    if cancellation is not None:
+        try:
+            drain.result()
         except Exception:
             logger.exception("In-flight run drain failed after shutdown cancellation")
-        raise
+        raise cancellation
+
+    try:
+        drain.result()
     except Exception:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
@@ -736,8 +749,8 @@ def get_run_context(request: Request) -> RunContext:
     ``app_config`` field is resolved live so per-run fields (e.g.
     ``models[*].max_tokens``) follow ``config.yaml`` edits; the
     ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
-    captured in :func:`langgraph_runtime` so callers never see a store bound
-    to one backend paired with a config pointing at another.
+    captured in :func:`langgraph_runtime` so callers never see a store bound to
+    one backend paired with a config pointing at another.
     """
     return RunContext(
         checkpointer=get_checkpointer(request),
