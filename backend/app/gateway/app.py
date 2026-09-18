@@ -197,10 +197,15 @@ async def _warm_memory_retrieval(manager) -> None:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
 
-async def _shutdown_memory_backend(app_cfg, *, retrieval_warm_finished: bool) -> None:
-    """Drain and close the memory backend as one cancellation-safe lifecycle step."""
+async def _shutdown_memory_backend(*, retrieval_warm_finished: bool) -> None:
+    """Resolve, drain, and close memory within the caller's cancellation shield.
+
+    Backend ``close()`` overrides must be quick or internally bounded: unlike
+    ``shutdown_flush``, close has no host timeout and is drained even on cancellation.
+    """
     manager = None
     try:
+        app_cfg: AppConfig = await asyncio.to_thread(get_app_config)
         if app_cfg.memory.enabled:
             from deerflow.agents.memory import get_memory_manager
 
@@ -643,9 +648,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
         # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # session close + the brief retrieval-warm wait + config/backend
+        # resolution + this drain + backend close + buffer),
         # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
         # mid-flight and the loss this is fixing is silently re-introduced.
+        # Backend close has no host timeout: overrides must be quick or
+        # internally bounded, since cancellation waits for that worker too.
         # The retrieval index is derived from canonical memory files, so its
         # wait is independently capped and never consumes the flush budget.
         retrieval_warm_finished = True
@@ -677,10 +685,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # worker keeps running. Treat resolve + flush + close as one owned
         # shutdown operation so lifespan cancellation cannot close the backend
         # underneath an in-flight flush or return while either worker is live.
-        app_cfg = get_app_config()
         await await_drained(
             _shutdown_memory_backend(
-                app_cfg,
                 retrieval_warm_finished=retrieval_warm_finished,
             )
         )

@@ -1570,6 +1570,14 @@ and the [request contract](backend/docs/API.md#referencing-a-previous-conversati
 
 ### Long-Term Memory
 
+Gateway shutdown drains memory updates before closing the backend, even when
+shutdown is cancelled. Config reload failures are logged without aborting runtime
+teardown. For Kubernetes, budget `terminationGracePeriodSeconds` for all shutdown
+hooks, config/backend resolution, `memory.shutdown_flush_timeout_seconds`, and
+backend close plus a safety margin. The flush timeout does not bound `close()`:
+custom backends must make close quick or internally bounded, or shutdown can wait
+until the process is forcibly terminated.
+
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
 DeerMem can optionally suppress near-duplicate extracted facts with

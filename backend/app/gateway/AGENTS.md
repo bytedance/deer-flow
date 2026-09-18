@@ -1,5 +1,13 @@
 ### Gateway API (`app/gateway/`)
 
+Memory shutdown resolves hot-reloaded config and the backend, flushes, then
+closes as one `await_drained` operation. Keep config resolution inside the
+best-effort error handler and off the event loop so malformed config edits do
+not abort runtime teardown. Cancellation waits for the owned workers before
+propagating; backend `close()` overrides must be quick or internally bounded
+because close has no host timeout. Budget resolution and close in the pod grace
+period in addition to the configured flush timeout and other shutdown hooks.
+
 `conversation_access.py` binds an opt-in read-only tool to a run request's
 explicit `conversation_references` and effective `runs:read` permission. Never
 derive grants from message contents or checkpoints. The callback travels through
