@@ -192,6 +192,15 @@ def _build_runtime_middlewares(
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
     ]
+    if app_config.pii_redaction.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        # Listed last so it is the innermost Layer-1 wrapper: tool results are
+        # PII-redacted before ToolResultSanitizationMiddleware neutralizes tags
+        # and ToolOutputBudgetMiddleware externalizes oversized copies to disk
+        # (so those copies hold redacted text), and user messages reach it
+        # after the other request rewrites (issue #3190).
+        outer_wrappers.append(PiiRedactionMiddleware(app_config.pii_redaction))
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
