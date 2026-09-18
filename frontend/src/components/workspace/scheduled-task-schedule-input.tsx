@@ -24,7 +24,7 @@ import {
   serializeCron,
   utcToZonedLocalInput,
   WEEKDAYS,
-  zonedLocalToUtcIso,
+  validZonedLocalToUtcIso,
   type CronParts,
   type CronPreset,
   type IntervalUnit,
@@ -118,16 +118,27 @@ export function ScheduledTaskScheduleInput({
   const [parts, setParts] = useState<CronParts>(
     () => parseCron(initial.schedule_spec.cron ?? "0 9 * * *").parts,
   );
+  const [timezone, setTimezone] = useState<string>(
+    () => initial.timezone || detectBrowserTimezone(),
+  );
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
-      ? utcToZonedLocalInput(
-          initial.schedule_spec.run_at,
-          initial.timezone || "UTC",
-        )
+      ? utcToZonedLocalInput(initial.schedule_spec.run_at, timezone)
       : "",
   );
-  const [timezone, setTimezone] = useState<string>(
-    initial.timezone || detectBrowserTimezone(),
+
+  // Minute-precision wall time cannot retain seconds or identify the later
+  // occurrence of a repeated DST time. Keep the mounted task's original
+  // instant while its schedule fields match, even if the parent echoes edits
+  // back through initial. Task switches remount this component with a key.
+  const [initialOnce] = useState(() =>
+    initial.schedule_type === "once" && initial.schedule_spec.run_at
+      ? {
+          runAt: initial.schedule_spec.run_at,
+          local: runAtLocal,
+          timezone,
+        }
+      : null,
   );
   const initialInterval = parseInitialInterval(initial.schedule_spec);
   const [intervalAmount, setIntervalAmount] = useState(initialInterval.amount);
@@ -138,6 +149,11 @@ export function ScheduledTaskScheduleInput({
     initialInterval.unit,
   );
   const [intervalEdited, setIntervalEdited] = useState(false);
+
+  const onceRunAt = runAtLocal
+    ? validZonedLocalToUtcIso(runAtLocal, timezone)
+    : null;
+  const invalidOnceTime = scheduleType === "once" && !!runAtLocal && !onceRunAt;
 
   // Hold the latest onChange in a ref so the effect below does not depend on
   // it. This avoids a re-render loop: if the parent passes an inline
@@ -151,7 +167,9 @@ export function ScheduledTaskScheduleInput({
   // value always matches what the user sees in the preview.
   useEffect(() => {
     if (scheduleType === "once") {
-      const runAt = runAtLocal ? zonedLocalToUtcIso(runAtLocal, timezone) : "";
+      const unchanged =
+        runAtLocal === initialOnce?.local && timezone === initialOnce.timezone;
+      const runAt = unchanged ? initialOnce.runAt : onceRunAt;
       onChangeRef.current({
         schedule_type: "once",
         schedule_spec: runAt ? { run_at: runAt } : {},
@@ -186,8 +204,10 @@ export function ScheduledTaskScheduleInput({
     scheduleType,
     preset,
     parts,
+    onceRunAt,
     runAtLocal,
     timezone,
+    initialOnce,
     intervalAmount,
     intervalUnit,
     intervalEdited,
@@ -433,6 +453,7 @@ export function ScheduledTaskScheduleInput({
           value={runAtLocal}
           onChange={(e) => setRunAtLocal(e.target.value)}
           aria-label={labels.fields.runAt}
+          aria-invalid={invalidOnceTime}
         />
       )}
 
@@ -449,6 +470,11 @@ export function ScheduledTaskScheduleInput({
         </SelectContent>
       </Select>
 
+      {invalidOnceTime && (
+        <p role="alert" className="text-destructive text-sm">
+          {labels.fields.invalidRunAt}
+        </p>
+      )}
       <div
         className="text-muted-foreground text-sm"
         data-testid="schedule-preview"

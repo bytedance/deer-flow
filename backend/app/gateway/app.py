@@ -66,9 +66,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Upper bound (seconds) each lifespan shutdown hook is allowed to run.
-# Bounds worker exit time so uvicorn's reload supervisor does not keep
-# firing signals into a worker that is stuck waiting for shutdown cleanup.
+# Grace budget (seconds) lifespan shutdown hooks get for ordinary completion.
+# Hooks that own uncancellable executor work may spend additional time draining
+# already-started work after cancellation rather than detach it from teardown.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
 # The retrieval index is derived state, so shutdown only waits briefly for its
@@ -203,9 +203,10 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
     Runs beside the lazy trigger on the trash listing — no daemon, no
     scheduler (§15.9). Sweeps every user (``user_id=None``) with the
     configured retention window, including the full reconciliation. A sweep
-    failure is logged and never blocks gateway readiness; the lifespan runs
-    this as a background task and awaits it (bounded) on shutdown, cancelling
-    it when the budget runs out.
+    failure is logged and never blocks gateway readiness; on shutdown the
+    lifespan gives it a bounded graceful-completion budget, then cancels an
+    overrun while draining any already-started file reconciliation before
+    teardown continues.
     """
     try:
         from deerflow.config.paths import get_paths
@@ -232,14 +233,14 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
 
 
 async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
-    """Bounded shutdown wait for the background startup sweep (§8.3).
+    """Grace-budgeted shutdown for the background startup sweep (§8.3).
 
-    Waits ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS`` for an in-flight sweep and
-    cancels it when the budget runs out. The shield keeps that wait bounded
-    without killing the sweep, so an overrun must be cancelled here: the
-    all-users reconciliation reads through the document repo and the DB
-    engine, and leaving it running would have it walk rows and files while
-    the teardown below disposes both underneath it.
+    Waits ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS`` for graceful completion, then
+    cancels an overrun. That budget is not a hard upper bound for this hook:
+    reconciliation runs in executor threads that cannot be safely killed, so
+    cancellation drains any already-started filesystem worker before returning.
+    This keeps the sweep's file ownership intact until the teardown below can
+    safely dispose the document repo and DB engine.
     """
     task = getattr(app.state, "startup_trash_sweep_task", None)
     if task is None or task.done():
@@ -247,17 +248,19 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
     except TimeoutError:
-        # Cancellation lands at the sweep's next await; ``_run_startup_trash_sweep``
-        # only catches ``Exception``, so ``CancelledError`` propagates. A
-        # ``cancel()`` that returns False means the sweep finished inside the
-        # window between the deadline firing and this call — report that as
-        # the late finish it is, not as a cancellation that never happened.
+        # Cancellation prevents later sweep stages from starting, but an
+        # executor-backed reconciliation that already started drains before
+        # ``CancelledError`` reaches this task. The final await may therefore
+        # exceed the graceful-completion budget; detaching that worker would
+        # reintroduce teardown/file-mutation overlap. A ``cancel()`` that
+        # returns False means the sweep finished inside the window between the
+        # deadline firing and this call — report that as the late finish it is.
         cancelled = task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         if cancelled:
             logger.warning(
-                "Startup trash sweep exceeded %.1fs during shutdown; cancelled and proceeding with worker exit.",
+                "Startup trash sweep exceeded %.1fs during shutdown; cancelled and drained before proceeding with worker exit.",
                 _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
             )
         else:
@@ -388,9 +391,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Runs after langgraph_runtime so app.state.project_document_repo is
         # available. The per-user reconciliation walks every row and file, so
         # it is scheduled as a background task: gateway readiness never waits
-        # on it, a failure is logged by the task itself, and shutdown awaits
-        # the in-flight sweep (bounded, cancelled on overrun) before the
-        # runtime is torn down.
+        # on it, a failure is logged by the task itself, and shutdown gives the
+        # in-flight sweep a bounded graceful budget before cancelling it; any
+        # already-started file worker drains before the runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         try:
