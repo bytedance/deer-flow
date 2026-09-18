@@ -621,6 +621,7 @@ export const zhCN: Translations = {
       cron: "cron 表达式",
       cronPlaceholder: "0 9 * * *",
       runAt: "运行时间",
+      invalidRunAt: "所选时区中不存在这个本地时间，请选择其他时间。",
       timezone: "时区",
       intervalAmount: "每",
       intervalUnitSeconds: "秒",
@@ -655,6 +656,11 @@ export const zhCN: Translations = {
       reuseNoticeTitle: "使用该线程的历史对话",
       reuseNoticeDescription:
         "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
+    },
+    search: {
+      placeholder: "搜索任务标题或提示词",
+      clear: "清除搜索",
+      noResults: "没有符合搜索内容和筛选条件的任务。",
     },
     filters: {
       allStatuses: "全部状态",

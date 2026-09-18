@@ -6,6 +6,12 @@ Agent selections configure the tools and skills assembled for a run; they are no
 an authorization boundary. Customer-specific authorization can remain in the
 existing policy extension points.
 
+Skill installation discovery applies the same caller visibility policy as
+`/api/skills`, including its configured fail-open or fail-closed behavior.
+Public host APIs for skill evolution (mutation transactions, completed-task
+snapshots, evaluation runners, lifecycle events and command registration) are
+deferred to a separate proposal and PR.
+
 ## Ownership
 
 | Concern | Owner |

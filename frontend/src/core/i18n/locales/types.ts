@@ -545,6 +545,7 @@ export interface Translations {
       cron: string;
       cronPlaceholder: string;
       runAt: string;
+      invalidRunAt: string;
       timezone: string;
       intervalAmount: string;
       intervalUnitSeconds: string;
@@ -579,6 +580,7 @@ export interface Translations {
       reuseNoticeTitle: string;
       reuseNoticeDescription: string;
     };
+    search: { placeholder: string; clear: string; noResults: string };
     filters: {
       allStatuses: string;
       enabled: string;

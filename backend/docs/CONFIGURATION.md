@@ -485,8 +485,23 @@ tools:
     group: web
     use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
+    include_domains:             # Optional: limit search sources to these domains
+      - docs.python.org
+      - developer.mozilla.org
+    exclude_domains: []         # Optional: domains to exclude from search results
     # api_key: $TAVILY_API_KEY  # Optional
 ```
+
+For Tavily, `include_domains` and `exclude_domains` are deployment-only options
+read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
+For a non-empty `include_domains`, DeerFlow also sends `include_domains_mode: filter`
+so Tavily restricts results to those domains rather than merely boosting them.
+Either list may be configured independently. Omitted options are not added to the SDK
+call; explicit empty lists are forwarded as `[]`, meaning no inclusion restriction
+or no excluded domains, respectively. No `include_domains_mode` is sent for an
+empty or omitted `include_domains`. These filters compose with `max_results`
+and the model's optional `time_range`. The model-visible arguments remain `query`
+and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)

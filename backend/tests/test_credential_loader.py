@@ -248,6 +248,57 @@ def test_load_claude_code_credential_falls_back_to_default_file_when_override_is
     assert cred.source == "claude-cli-file"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"claudeAiOauth": None},
+        {"claudeAiOauth": "sk-ant-oat01-raw"},
+        {"claudeAiOauth": []},
+        {"claudeAiOauth": 5},
+        [],
+    ],
+)
+def test_load_claude_code_credential_ignores_malformed_oauth_container(tmp_path, monkeypatch, payload):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    assert load_claude_code_credential() is None
+
+
+def test_load_claude_code_credential_falls_back_to_default_when_override_container_is_malformed(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    override_path = tmp_path / "credentials.json"
+    override_path.write_text(json.dumps({"claudeAiOauth": None}), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-default",
+                    "refreshToken": "sk-ant-ort01-default",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-default"
+    assert cred.refresh_token == "sk-ant-ort01-default"
+    assert cred.source == "claude-cli-file"
+
+
 def test_load_codex_cli_credential_supports_nested_tokens_shape(tmp_path, monkeypatch):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
