@@ -125,6 +125,25 @@ def test_section_value_does_not_descend_into_grandchildren():
     assert detect.section_value(yaml_lines, "database", "backend") == "sqlite"
 
 
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+@pytest.mark.parametrize(
+    ("config_text", "expected"),
+    [
+        ("database:\n  backend: postgres\n", ["postgres"]),
+        ("tools:\n  - name: browser_navigate\n", ["browser"]),
+        ("models:\n  - use: langchain_ollama:ChatOllama\n", ["ollama"]),
+        ("database:\n  backend: sqlite\n", []),
+        ("# database:\n#   backend: postgres\n", []),
+    ],
+    ids=["postgres", "browser", "ollama", "sqlite", "commented"],
+)
+def test_detect_from_config_utf8_with_optional_bom(tmp_path, encoding, config_text, expected):
+    """A UTF-8 BOM must not hide the first section or enable inactive extras."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(config_text, encoding=encoding)
+    assert detect.detect_from_config(cfg) == expected
+
+
 def test_detect_from_config_postgres_via_database(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\n  postgres_url: $DATABASE_URL\n")
@@ -173,6 +192,70 @@ def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+@pytest.mark.parametrize("indent", ["", "  "])
+@pytest.mark.parametrize("first_key", ["use", "group"])
+def test_detect_browser_name_after_other_fields(tmp_path, indent, first_key):
+    """A tool mapping's field order must not change its required extras."""
+    fields = {
+        "use": "deerflow.community.browser_automation.tools:browser_navigate_tool",
+        "group": "browser",
+    }
+    second_key = "group" if first_key == "use" else "use"
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n"
+        f"{indent}- name: web_fetch\n"
+        f"{indent}  group: web\n"
+        f"{indent}- {first_key}: {fields[first_key]}\n"
+        f"{indent}  {second_key}: {fields[second_key]}\n"
+        f"{indent}  # The name does not have to be the first field.\n"
+        f"{indent}  name: 'browser_navigate' # enable browser\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+@pytest.mark.parametrize(
+    "other_name",
+    [
+        "  options:\n    name: browser_navigate\n",
+        "  options:\n    - name: browser_navigate\n",
+        "  description: |\n    name: browser_navigate\n",
+        "  # name: browser_navigate\n",
+    ],
+    ids=["nested-mapping", "nested-list", "block-scalar", "comment"],
+)
+def test_detect_browser_ignores_names_outside_tool_fields(tmp_path, indent, other_name):
+    """Nested or commented names must not install an unrelated optional extra."""
+    cfg = tmp_path / "config.yaml"
+    nested_lines = "".join(f"{indent}{line}\n" for line in other_name.splitlines())
+    cfg.write_text(f"tools:\n{indent}- name: web_fetch\n{nested_lines}", encoding="utf-8")
+    assert detect.detect_from_config(cfg) == []
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_detect_browser_name_after_nested_block(tmp_path, indent):
+    """A nested block must not reset tracking of the tool's direct fields."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"tools:\n{indent}- group: browser\n{indent}  options:\n{indent}    x: 1\n{indent}  name: browser_navigate\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_detect_browser_stops_at_following_section(tmp_path, indent):
+    """A later section's item name is not a tool name."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"tools:\n{indent}- group: web\n{indent}  name: web_fetch\nmodels:\n{indent}- use: provider:Model\n{indent}  name: browser_navigate\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
@@ -206,6 +289,102 @@ def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
     assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_via_model_use(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n    model: qwen3:32b\n    base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_is_the_first_key(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - use: langchain_ollama:ChatOllama\n    name: qwen3-local\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_commented_ollama_block(tmp_path):
+    """config.example.yaml ships the Ollama models fully commented out."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  # - name: qwen3-local\n  #   use: langchain_ollama:ChatOllama\n  #   base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_use_in_nested_model_mapping(tmp_path):
+    """A `use` inside a sub-mapping is not the model's own provider.
+
+    `when_thinking_enabled` / `when_thinking_disabled` blocks are common in
+    config.example.yaml, so matching `use:` at any depth would misread them.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: doubao\n    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n    when_thinking_enabled:\n      use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_in_setup_wizard_output(tmp_path):
+    """`make setup` writes config.yaml with yaml.safe_dump, which leaves list items unindented."""
+    from wizard.writer import build_minimal_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        build_minimal_config(
+            provider_use="langchain_ollama:ChatOllama",
+            model_name="qwen3:32b",
+            display_name="Qwen3 32B (Ollama)",
+            api_key_field="api_key",
+            env_var=None,
+            base_url="http://localhost:11434",
+        ),
+        encoding="utf-8",
+    )
+    # Pin the layout under test, so a writer change fails here rather than silently passing.
+    assert "\nmodels:\n- " in cfg.read_text(encoding="utf-8")
+    assert "ollama" in detect.detect_from_config(cfg)
+
+
+def test_detect_from_config_ollama_via_indentless_models_list(tmp_path):
+    """Same shape as the setup wizard, and as scripts/config-upgrade.sh emits."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n- name: qwen3-local\n  use: langchain_ollama:ChatOllama\n  model: qwen3:32b\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_follows_a_nested_list(tmp_path):
+    """A sequence inside a model option must not move the key indent; key order is irrelevant."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: local\n    model: qwen3:32b\n    stop:\n      - END\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_use_in_nested_indentless_sequence(tmp_path):
+    """A `- use:` item inside a model option is not that model's provider."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n- name: x\n  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n  fallbacks:\n  - use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_ollama_and_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "database:\n  backend: postgres\nmodels:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama", "postgres"]
 
 
 def test_detect_from_config_combines_postgres_and_redis(tmp_path):

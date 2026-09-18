@@ -175,7 +175,15 @@ class Sandbox(ABC):
             max_depth: The maximum depth to traverse. Default is 2.
 
         Returns:
-            The contents of the directory.
+            The contents of the directory. An existing empty directory may
+            return an empty list. A missing path must not.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not exist or is not a directory.
+            OSError: If the listing cannot be performed (command/client failure).
+                Both local and remote implementations must raise rather than
+                return ``[]`` for failure or a missing path: ``ls_tool``
+                renders an empty list as ``(empty)``.
         """
         pass
 
@@ -192,7 +200,18 @@ class Sandbox(ABC):
 
     @abstractmethod
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        """Find paths that match a glob pattern under a root directory."""
+        """Find paths that match a glob pattern under a root directory.
+
+        Returns the matches and ``truncated``, which is true whenever the
+        matches may be incomplete: the search stopped at an output cap before
+        filtering, or an eligible match beyond ``max_results`` was dropped.
+
+        Providers differ in how precisely they can decide the second case. One
+        that holds the whole listing can tell an exactly-full result from a
+        cut-off one and reports the former as complete; one reading a capped
+        stream cannot, and reports it as truncated. Treat the flag as "may be
+        incomplete", never as a count.
+        """
         pass
 
     @abstractmethod
@@ -206,7 +225,11 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside a text file or files under a directory."""
+        """Search for matches inside a text file or files under a directory.
+
+        Returns the matches and ``truncated``, with the same meaning as in
+        :meth:`glob`.
+        """
         pass
 
     @abstractmethod

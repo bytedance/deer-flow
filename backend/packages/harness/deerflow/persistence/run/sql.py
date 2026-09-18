@@ -11,16 +11,17 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -34,6 +35,21 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
 class RunRepository(RunStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    @staticmethod
+    async def _next_change_seq(session: AsyncSession) -> int:
+        dialect = session.bind.dialect.name
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+        else:  # pragma: no cover - configured databases are SQLite/Postgres
+            raise RuntimeError(f"unsupported run-change clock dialect: {dialect}")
+        await session.execute(insert(RunChangeClockRow).values(id=1, value=0).on_conflict_do_nothing(index_elements=[RunChangeClockRow.id]))
+        value = await session.scalar(update(RunChangeClockRow).where(RunChangeClockRow.id == 1).values(value=RunChangeClockRow.value + 1).returning(RunChangeClockRow.value))
+        if value is None:
+            raise RuntimeError("run-change clock did not return a position")
+        return int(value)
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:
@@ -139,6 +155,7 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
         async with self._sf() as session:
+            values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
             if row is None:
                 session.add(RunRow(run_id=run_id, created_at=created, **values))
@@ -162,18 +179,59 @@ class RunRepository(RunStore):
                 return None
             return self._row_to_dict(row)
 
+    async def list_changed(
+        self,
+        *,
+        after_change_seq: int,
+        after_run_id: str,
+        user_id: str | None | _AutoSentinel = AUTO,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_changed")
+        stmt = select(RunRow).where(
+            RunRow.operation_kind == "run",
+            or_(
+                RunRow.change_seq > after_change_seq,
+                and_(RunRow.change_seq == after_change_seq, RunRow.run_id > after_run_id),
+            ),
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(RunRow.change_seq.asc(), RunRow.run_id.asc()).limit(limit)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
     async def list_by_thread(
         self,
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
         limit=100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
-        stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
+        if before_created_at and before_run_id:
+            cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
+            if cursor_dt.tzinfo is None:
+                cursor_dt = cursor_dt.replace(tzinfo=UTC)
+            else:
+                cursor_dt = cursor_dt.astimezone(UTC)
+            stmt = stmt.where(
+                or_(
+                    RunRow.created_at < cursor_dt,
+                    and_(RunRow.created_at == cursor_dt, RunRow.run_id < before_run_id),
+                )
+            )
+        # Keyset pages filter on (created_at, run_id) after thread_id. Existing
+        # indexes are (thread_id) and (thread_id, status), so each page still
+        # sorts matching rows. A covering (thread_id, created_at, run_id) index
+        # is a follow-up if deep paging shows up in profiles.
+        stmt = stmt.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
@@ -250,6 +308,7 @@ class RunRepository(RunStore):
         # ``error`` and ``success`` remain locked so a peer's takeover (or a
         # completed run) cannot be overwritten by a late writer.
         async with self._sf() as session:
+            values["change_seq"] = await self._next_change_seq(session)
             result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
             await session.commit()
             return result.rowcount != 0
@@ -257,20 +316,30 @@ class RunRepository(RunStore):
     async def start_run(self, run_id: str) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.status == "pending",
                 )
-                .values(status="running", updated_at=datetime.now(UTC))
+                .values(status="running", updated_at=datetime.now(UTC), change_seq=change_seq)
             )
             await session.commit()
             return result.rowcount != 0
 
     async def update_model_name(self, run_id, model_name):
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
+            change_seq = await self._next_change_seq(session)
+            await session.execute(
+                update(RunRow)
+                .where(RunRow.run_id == run_id)
+                .values(
+                    model_name=self._normalize_model_name(model_name),
+                    updated_at=datetime.now(UTC),
+                    change_seq=change_seq,
+                )
+            )
             await session.commit()
 
     async def delete(
@@ -373,6 +442,7 @@ class RunRepository(RunStore):
         if status == "error" and "interrupted" not in allowed_sources:
             allowed_sources.append("interrupted")
         async with self._sf() as session:
+            values["change_seq"] = await self._next_change_seq(session)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -555,6 +625,7 @@ class RunRepository(RunStore):
             raise ValueError(f"Unsupported cancellation action: {action}")
         now = datetime.now(UTC)
         async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -571,6 +642,7 @@ class RunRepository(RunStore):
                         else_=RunRow.cancel_requested_at,
                     ),
                     updated_at=now,
+                    change_seq=change_seq,
                 )
                 .returning(RunRow.cancel_action)
             )
@@ -597,6 +669,7 @@ class RunRepository(RunStore):
             values["stop_reason"] = stop_reason
 
         async with self._sf() as session:
+            values["change_seq"] = await self._next_change_seq(session)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -636,6 +709,7 @@ class RunRepository(RunStore):
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
         async with self._sf() as session:
+            values["change_seq"] = await self._next_change_seq(session)
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -731,6 +805,10 @@ class RunRepository(RunStore):
         }
 
         async with self._sf() as session:
+            # Keep the global clock -> run-row lock order used by every other
+            # mutator. One position covers this atomic set of changes; run_id
+            # provides deterministic ordering within the position.
+            change_seq = await self._next_change_seq(session)
             claimed: list[dict[str, Any]] = []
 
             if multitask_strategy in ("interrupt", "rollback"):
@@ -771,8 +849,10 @@ class RunRepository(RunStore):
                     row.error = "Cancelled by newer run"
                     row.owner_worker_id = owner_worker_id
                     row.updated_at = now
+                    row.change_seq = change_seq
                     claimed.append(self._row_to_dict(row))
 
+            values["change_seq"] = change_seq
             session.add(RunRow(run_id=run_id, **values))
             try:
                 await session.commit()

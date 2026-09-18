@@ -5,6 +5,7 @@ import {
   type InfiniteData,
 } from "@tanstack/react-query";
 
+import { PROJECTS_QUERY_KEY } from "@/core/projects/api";
 import {
   fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,
@@ -324,7 +325,7 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       false,
     ]);
-    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
   });
 
   test("preserves loaded history pages while invalidating", () => {
@@ -360,7 +361,7 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       true,
     ]);
-    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
   });
 
   test("wraps SDK stop and refreshes caches after it resolves", async () => {

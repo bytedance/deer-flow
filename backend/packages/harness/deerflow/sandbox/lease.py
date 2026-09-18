@@ -343,7 +343,7 @@ class SandboxLeaseManager:
                 release_on_last=release_on_last,
             )
         if release_previous and previous is not None:
-            await asyncio.to_thread(
+            await run_sync_lifecycle_operation(
                 self._provider.release,
                 previous.sandbox_id,
             )
@@ -396,7 +396,7 @@ class SandboxLeaseManager:
                     release_on_last=release_on_last,
                 )
             if release_previous and previous is not None:
-                await asyncio.to_thread(
+                await run_sync_lifecycle_operation(
                     self._provider.release,
                     previous.sandbox_id,
                 )
@@ -529,7 +529,7 @@ class SandboxLeaseManager:
                         release_on_last=release_on_last,
                     )
                 if release_previous and previous is not None:
-                    await asyncio.to_thread(
+                    await run_sync_lifecycle_operation(
                         self._provider.release,
                         previous.sandbox_id,
                     )

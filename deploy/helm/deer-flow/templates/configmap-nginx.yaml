@@ -133,6 +133,10 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                # Installing a .skill archive runs one LLM security scan per file, and a
+                # custom-skill edit or rollback runs one more; none sets its own timeout.
+                # The upload endpoint above already allows 600s for the same work.
+                proxy_read_timeout 600s;
             }
 
             location /api/agents {
@@ -163,6 +167,10 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                # /compact and /suggestions hold the response open for a model call,
+                # /runs/wait for a whole run. nginx's 60s default would 504 them mid-work:
+                # the compaction still commits, and the waited run is cancelled.
+                proxy_read_timeout 600s;
             }
 
             location /docs {
@@ -223,6 +231,10 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                # /api/runs/wait blocks on a whole run and /api/input-polish on a model
+                # call. nginx's 60s default would 504 them mid-work, and the waited run is
+                # cancelled on the disconnect.
+                proxy_read_timeout 600s;
             }
 
             # Everything else -> frontend (with WebSocket upgrade for HMR/sockets).

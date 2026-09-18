@@ -6,12 +6,14 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.30",
+    "beautifulsoup4>=4.12",
+    "html5lib>=1.1",
     "croniter>=6.0.0",
     # Exact pin by design (extension-system version contract): the host pins
     # the contract version it implements, extensions declare ranges. A range
     # here would let pip resolve a newer contract package than this harness
     # implements, making newer extensions look supported at runtime.
-    "deerflow-extension-api==0.2.0",
+    "deerflow-extension-api==0.2.1",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",

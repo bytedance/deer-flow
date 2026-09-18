@@ -6,16 +6,17 @@ from dataclasses import dataclass
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import Skill
 
-#: Composer control commands that own the leading slash and must never be
-#: treated as ``/skill`` activations. These values plus :data:`_SLASH_SKILL_RE`
-#: are mirrored by the frontend display parser in
+#: Composer control names that may own the leading slash and must not be
+#: treated as ``/skill`` activations when their command syntax matches.
+#: These values plus :data:`_SLASH_SKILL_RE` are mirrored by the frontend parser in
 #: ``frontend/src/core/skills/slash.ts``; both sides are pinned to the shared
 #: fixture at ``contracts/slash_skill_contract.json`` by contract tests
 #: (``tests/test_slash_skill_contract.py`` here, ``slash-contract.test.ts`` on
 #: the frontend), so a reserved command or grammar change in only one language
 #: fails CI.
-RESERVED_SLASH_SKILL_NAMES = frozenset({"agent", "bootstrap", "goal", "help", "memory", "models", "new", "status"})
+RESERVED_SLASH_SKILL_NAMES = frozenset({"agent", "bootstrap", "context", "goal", "help", "memory", "models", "new", "status"})
 _SLASH_SKILL_RE = re.compile(r"^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)")
+_CONTEXT_COMPACT_ARGUMENT = "compact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,11 +42,12 @@ def parse_slash_skill_reference(text: str) -> SlashSkillReference | None:
     if not match:
         return None
     name = match.group(1)
-    if name in RESERVED_SLASH_SKILL_NAMES:
+    remaining_text = text[match.end() :].lstrip()
+    if name in RESERVED_SLASH_SKILL_NAMES and not (name == "context" and remaining_text.strip().casefold() != _CONTEXT_COMPACT_ARGUMENT):
         return None
     return SlashSkillReference(
         name=name,
-        remaining_text=text[match.end() :].lstrip(),
+        remaining_text=remaining_text,
     )
 
 

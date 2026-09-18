@@ -561,6 +561,74 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
         assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
 
 
+def test_pat_projects_policy_admits_exactly_the_mounted_routes():
+    """Projects subtree (and the thread move endpoint) follow the same
+    enumerated-no-dead-methods discipline as the runs subtree: every
+    method/path the projects router actually implements is admitted (derived
+    from the mounted router, not a hand-maintained list), and deliberately
+    unimplemented neighbors stay default-denied. A new projects route fails
+    here until explicitly allowlisted; a removed one leaves a dead rule
+    visible."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers import project_documents, project_thread_files, projects, trash
+
+    def concrete(path: str) -> str:
+        return path.replace("{project_id}", "p1").replace("{document_id}", "d1").replace("{thread_id}", "t1")
+
+    for router in (projects.router, project_documents.router, project_thread_files.router, trash.router):
+        for route in router.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            path = concrete(route.path)
+            for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+                assert is_pat_allowed_route(method, path), f"{method} {path} is implemented but PAT-denied"
+
+    # ``/config`` is a literal collection route, not a project id: admitted
+    # for PATs holding projects:read, with wrong methods default-denied.
+    assert is_pat_allowed_route("GET", "/api/projects/config") is True
+    assert is_pat_allowed_route("POST", "/api/projects/config") is False
+    assert is_pat_allowed_route("PUT", "/api/projects/config") is False
+    for method, path in [
+        ("PUT", "/api/projects"),
+        ("DELETE", "/api/projects"),
+        ("PUT", "/api/projects/p1"),
+        ("GET", "/api/projects/p1/archive"),
+        ("GET", "/api/projects/p1/restore"),
+        ("POST", "/api/projects/p1/threads"),
+        # Document-shelf neighbors that must stay default-denied: the bare
+        # item read, collection deletes, wrong-method variants of the
+        # Slice C routes, and the Slice D trash routes.
+        ("GET", "/api/projects/p1/documents/d1"),
+        ("POST", "/api/projects/p1/documents/d1"),
+        ("PUT", "/api/projects/p1/documents"),
+        ("DELETE", "/api/projects/p1/documents"),
+        ("DELETE", "/api/projects/p1/documents/d1/content"),
+        ("GET", "/api/projects/p1/documents/from-thread"),
+        ("GET", "/api/projects/p1/documents/d1/attach-to-thread/t1"),
+        ("POST", "/api/projects/p1/thread-files"),
+        # Trash-tier neighbors that must stay default-denied: collection
+        # mutations on the listing, wrong-method variants of the Slice D
+        # routes, and the bare trash root.
+        ("POST", "/api/trash/documents"),
+        ("DELETE", "/api/trash/documents"),
+        ("GET", "/api/trash/documents/d1/restore"),
+        ("GET", "/api/trash/documents/d1/purge"),
+        ("DELETE", "/api/trash/documents/d1"),
+        ("GET", "/api/trash/purge"),
+        ("DELETE", "/api/trash/purge"),
+        ("GET", "/api/trash"),
+    ]:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+    # Thread move (POST /api/threads/{id}/move) is admitted for PATs holding
+    # threads:write; other methods on the same path stay denied.
+    move_path = "/api/threads/6f1c2f0e-3b7a-4d2e-9c1a-2b5f0e8a1d3c/move"
+    assert is_pat_allowed_route("POST", move_path) is True
+    assert is_pat_allowed_route("GET", move_path) is False
+
+
 def test_pat_scopes_enforced_on_stateless_run_entry(client):
     """Follow-up to the review's P1-1: the stateless run entrypoints now
     carry @require_permission("runs", "create"), so a threads:read-only PAT

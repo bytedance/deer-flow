@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import gc
+import json
 import threading
 import weakref
 from types import SimpleNamespace
@@ -31,6 +32,87 @@ def test_discord_channel_init() -> None:
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
     assert channel.name == "discord"
+
+
+# ---------------------------------------------------------------------------
+# thread-mapping persistence across restart (#2897)
+# ---------------------------------------------------------------------------
+
+
+def test_discord_thread_mapping_persists_across_restart(tmp_path) -> None:
+    """A channel->thread mapping written before shutdown is restored on a
+    subsequent start, so conversations are not lost across restarts (#2897)."""
+    store_path = tmp_path / "discord_threads.json"
+
+    # First process lifetime: record and persist a mapping.
+    first = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    first._thread_store_path = store_path
+    first._record_thread_mapping("chan-1", "thread-1")
+    first._persist_thread_mappings()
+    assert store_path.exists()
+    assert json.loads(store_path.read_text()) == {"chan-1": "thread-1"}
+
+    # Restart: a brand-new channel instance reads the same file.
+    second = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    second._thread_store_path = store_path
+    second._active_threads.clear()
+    second._active_thread_ids.clear()
+    second._load_active_threads()
+
+    assert second._active_threads == {"chan-1": "thread-1"}
+    assert "thread-1" in second._active_thread_ids
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_flushes_thread_mappings(tmp_path) -> None:
+    """stop() best-effort flushes in-memory thread mappings to disk so the
+    most recent mapping survives a hard shutdown."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = tmp_path / "discord_threads.json"
+    # stop() only flushes once the load has marked the in-memory map
+    # authoritative (see DiscordChannel._thread_store_loaded); simulate the
+    # normal post-start() state so this exercises the flush, not the guard.
+    channel._thread_store_loaded = True
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    channel._record_thread_mapping("chan-2", "thread-2")
+    await channel.stop()
+
+    assert channel._thread_store_path.exists()
+    assert json.loads(channel._thread_store_path.read_text()) == {"chan-2": "thread-2"}
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_does_not_clobber_store_before_load(tmp_path) -> None:
+    """stop() before the initial load must not overwrite the persisted file.
+
+    ``ChannelService`` deliberately stops a channel whose ``start()`` bailed
+    before ``_load_active_threads()`` ran (missing bot_token / discord import
+    error), when the in-memory map is still empty. An ungated flush would write
+    ``{}`` over the persisted mappings — the #2897 data loss this PR exists to
+    prevent.
+    """
+    store_path = tmp_path / "discord_threads.json"
+    store_path.write_text(json.dumps({"chan-9": "thread-9"}))
+
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = store_path
+    # start() bailed before the load, so the flag is still False.
+    assert channel._thread_store_loaded is False
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    await channel.stop()
+
+    # The pre-existing mapping survives intact: nothing was flushed over it.
+    assert json.loads(store_path.read_text()) == {"chan-9": "thread-9"}
 
 
 def _make_discord_message(text: str):
@@ -433,3 +515,138 @@ async def test_stop_wiring_drains_ack_tasks_across_loops() -> None:
         assert not channel._ack_reaction_tasks
     finally:
         _stop_bg_loop(bg_loop, bg_thread)
+
+
+# ---------------------------------------------------------------------------
+# Dead-client fail-fast and is_running thread-aliveness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_fails_fast_when_discord_loop_is_not_running() -> None:
+    """A stopped (not closed) Discord loop must fail the send, not hang the worker.
+
+    ``_run_client`` leaves the loop stopped-but-unclosed when the client dies,
+    which is exactly the state where ``call_soon_threadsafe`` queues callbacks
+    that never run — the permanent-hang case this guards against.
+    """
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._discord_loop = asyncio.new_event_loop()  # created, never run
+    channel._running = True
+    msg = OutboundMessage(channel_name="discord", chat_id="c1", thread_id="t1", text="hello")
+
+    try:
+        with pytest.raises(RuntimeError, match="event loop is not running"):
+            await channel.send(msg)
+    finally:
+        channel._discord_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_outbound_loop_call_times_out_when_never_completes() -> None:
+    """Even on a live loop, an outbound call that never resolves is bounded by the timeout."""
+    bg_loop, bg_thread = _start_bg_loop()
+    try:
+        channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+        channel._discord_loop = bg_loop
+
+        async def _never_completes() -> None:
+            await asyncio.sleep(3600)
+
+        with pytest.raises(TimeoutError):
+            await channel._run_on_discord_loop(_never_completes(), timeout=0.1)
+
+        # The cancelled call leaves its task parked on the bg loop (concurrent
+        # cancellation cannot reach a running run_coroutine_threadsafe task);
+        # clean it up so stopping the loop has nothing pending.
+        async def _cancel_leftovers() -> None:
+            current = asyncio.current_task()
+            for task in asyncio.all_tasks():
+                if task is not current:
+                    task.cancel()
+
+        cleanup = asyncio.run_coroutine_threadsafe(_cancel_leftovers(), bg_loop)
+        cleanup.result(timeout=5)
+    finally:
+        _stop_bg_loop(bg_loop, bg_thread)
+
+
+def test_is_running_tracks_thread_aliveness() -> None:
+    """``is_running`` reflects the client thread, so readiness can restart a dead channel."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    assert channel.is_running is False  # never started
+
+    channel._running = True
+    assert channel.is_running is False  # started but the thread object is gone
+
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join()
+    channel._thread = finished
+    assert channel.is_running is False  # dead client thread (fatal exit)
+
+    channel._thread = threading.current_thread()
+    assert channel.is_running is True  # live thread -> healthy
+
+
+def _close_unawaited_mock_coroutines(run_mock) -> None:
+    """Close the coroutines handed to an AsyncMock that never awaited them.
+
+    ``_run_on_discord_loop`` receives already-created coroutine objects; an
+    AsyncMock stand-in records them without awaiting, so they must be closed
+    explicitly or GC warns about never-awaited coroutines.
+    """
+    for call in run_mock.await_args_list:
+        call.args[0].close()
+
+
+@pytest.mark.asyncio
+async def test_send_file_upload_call_uses_the_dedicated_upload_timeout(tmp_path) -> None:
+    """Pin the upload call site to DISCORD_UPLOAD_TIMEOUT_SECONDS.
+
+    Regressing ``send_file``'s upload call to the 30 s control-plane default
+    (the exact bug round 1 of this review caught) keeps every helper-level
+    test green; only the call site's ``timeout=`` kwarg can guard it.
+    """
+    from app.channels.discord import DISCORD_UPLOAD_TIMEOUT_SECONDS
+
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._discord_module = SimpleNamespace(File=lambda fp, filename=None: fp)
+    run_mock = AsyncMock(return_value=None)
+    channel._run_on_discord_loop = run_mock  # type: ignore[method-assign]
+    channel._resolve_target = _resolve_to(SimpleNamespace(send=_noop_coro))
+
+    path = tmp_path / "upload.txt"
+    path.write_bytes(b"hello")
+    att = ResolvedAttachment("/mnt/user-data/outputs/upload.txt", path, "upload.txt", "text/plain", 5, False)
+    msg = OutboundMessage(channel_name="discord", chat_id="c1", thread_id="t1", text="t")
+
+    try:
+        assert await channel.send_file(msg, att) is True
+    finally:
+        _close_unawaited_mock_coroutines(run_mock)
+
+    assert len(run_mock.await_args_list) == 2  # stop_typing, then the upload
+    stop_call, upload_call = run_mock.await_args_list
+    assert "timeout" not in stop_call.kwargs  # control-plane call keeps the 30 s default
+    assert upload_call.kwargs.get("timeout") == DISCORD_UPLOAD_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_send_control_calls_keep_the_default_outbound_bound() -> None:
+    """``send``'s typing-stop and message sends rely on the 30 s default, not an override."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    run_mock = AsyncMock(return_value=None)
+    channel._run_on_discord_loop = run_mock  # type: ignore[method-assign]
+    channel._resolve_target = _resolve_to(SimpleNamespace(send=_noop_coro))
+
+    msg = OutboundMessage(channel_name="discord", chat_id="c1", thread_id="t1", text="hello")
+
+    try:
+        await channel.send(msg)
+    finally:
+        _close_unawaited_mock_coroutines(run_mock)
+
+    assert len(run_mock.await_args_list) == 2  # stop_typing + one text chunk
+    for call in run_mock.await_args_list:
+        assert "timeout" not in call.kwargs

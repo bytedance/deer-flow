@@ -664,6 +664,63 @@ describe("human message internal context stripping", () => {
     expect(stripInternalMarkers(content)).toBe("Export me");
   });
 
+  test("stripInternalMarkers removes attributed project context blocks on export", () => {
+    const content =
+      '<project name="Roadmap">\nsecret instructions\n</project>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers removes documents blocks on export", () => {
+    const content =
+      '<documents count="2" shown="2">\n- id=abc | q3.pdf (2.1 MB, modified 2026-09-10)\n</documents>\n\nExport me';
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
+  test("stripInternalMarkers preserves fenced code that uses marker tag names", () => {
+    const content = [
+      "Here is my pom:",
+      "```xml",
+      "<project>",
+      "  <artifactId>demo</artifactId>",
+      "</project>",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
+  test("stripInternalMarkers preserves tilde-fenced and indented code spans", () => {
+    const tilde = ["~~~", '<documents count="1">', "</documents>", "~~~"].join(
+      "\n",
+    );
+    expect(stripInternalMarkers(tilde)).toBe(tilde);
+
+    // The leading text keeps ``trim()`` from eating the code's indentation.
+    const indented = [
+      "Pasted snippet:",
+      "",
+      "    <project>",
+      "    </project>",
+    ].join("\n");
+    expect(stripInternalMarkers(indented)).toBe(indented);
+  });
+
+  test("stripInternalMarkers still removes an injected block whose content contains a fence", () => {
+    const content = [
+      "<memory>",
+      "```",
+      "not a real fence owner",
+      "```",
+      "</memory>",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
+  });
+
   test("strips slash skill activation context from display content", () => {
     const content =
       "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";
@@ -1424,5 +1481,67 @@ describe("orphan tool messages", () => {
     const t1b = allMessages.find((m) => m.id === "t-1b");
     expect(t1b).toBeDefined();
     expect(t1b?.type).toBe("tool");
+  });
+});
+
+describe("clarification run boundaries", () => {
+  const beforeReply = [
+    { id: "human", type: "human", content: "Plan the deployment" },
+    { id: "plan", type: "ai", content: "The completed deployment plan." },
+    {
+      id: "ask",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call",
+      content: "Which environment?",
+    },
+  ] as Message[];
+
+  test("keeps completed text outside processing when the request arrives and during hidden-reply continuation", () => {
+    const reply = {
+      id: "reply",
+      type: "human",
+      content: "staging",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const continuation = {
+      id: "next",
+      type: "ai",
+      content: "Deploying now.",
+    } as Message;
+    for (const messages of [
+      beforeReply,
+      [...beforeReply, reply, continuation],
+    ]) {
+      const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+      expect(groups.find((group) => group.id === "plan")?.type).toBe(
+        "assistant",
+      );
+      expect(groups.filter((group) => group.type === "human")).toHaveLength(1);
+    }
+    const groups = getMessageGroups([...beforeReply, reply, continuation], {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups.find((group) => group.id === "next")?.type).toBe(
+      "assistant:processing",
+    );
+    expect(
+      getMessageGroups([...beforeReply, reply, continuation]).find(
+        (group) => group.id === "next",
+      )?.type,
+    ).toBe("assistant");
+  });
+
+  test("recognizes a clarification boundary without a loaded visible human message", () => {
+    const groups = getMessageGroups(beforeReply.slice(1), {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups[0]?.type).toBe("assistant");
   });
 });

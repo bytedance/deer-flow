@@ -4,7 +4,9 @@ import { DownloadIcon, ExternalLinkIcon, LoaderIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useStandaloneArtifactContent } from "@/core/artifacts/hooks";
+import { getTabularDelimiter } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
+import { resolveStoredArtifactLanguage } from "@/core/artifacts/viewer";
 import { useI18n } from "@/core/i18n/hooks";
 import { getFileIcon, getFileName } from "@/core/utils/files";
 
@@ -13,15 +15,7 @@ import {
   ArtifactFilePreview,
 } from "./artifact-file-preview";
 
-/**
- * Standalone markdown artifact window.
- *
- * The artifacts panel's "open in new window" action used to hand the browser
- * the raw Gateway response, which shows markdown as its own source. This
- * renders it with the same components the panel uses, so the new window is a
- * reader rather than a text dump. Markdown only — HTML and SVG artifacts stay
- * on the Gateway's download path so active content never runs in this origin.
- */
+/** Shared standalone reader for Markdown and bounded CSV/TSV previews. */
 export function ArtifactViewer({
   filepath,
   threadId,
@@ -33,6 +27,8 @@ export function ArtifactViewer({
 }) {
   const { t } = useI18n();
   const filename = getFileName(filepath);
+  const language = resolveStoredArtifactLanguage(filepath) ?? "text";
+  const isTabular = getTabularDelimiter(language) !== null;
   const {
     content,
     url,
@@ -86,7 +82,7 @@ export function ArtifactViewer({
         </Button>
       </header>
 
-      {truncated && (
+      {truncated && !isTabular && (
         <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
           <span className="text-muted-foreground">
             {t.artifactPreview.limited(
@@ -106,7 +102,9 @@ export function ArtifactViewer({
         </div>
       )}
 
-      <main className="mx-auto min-h-0 w-full max-w-4xl flex-1 overflow-hidden">
+      <main
+        className={`mx-auto min-h-0 w-full flex-1 overflow-hidden ${isTabular ? "" : "max-w-4xl"}`}
+      >
         {error ? (
           <p className="text-muted-foreground p-6 text-sm">
             {t.artifactPreview.previewFailed}
@@ -119,8 +117,9 @@ export function ArtifactViewer({
         ) : (
           <ArtifactFilePreview
             content={content}
-            language="markdown"
-            scrollKey={filepath}
+            language={language}
+            scrollKey={`${threadId}:${filepath}`}
+            truncated={truncated}
             url={url}
           />
         )}

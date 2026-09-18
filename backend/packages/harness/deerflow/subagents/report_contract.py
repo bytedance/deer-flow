@@ -113,21 +113,14 @@ def build_acceptance_criteria_system_note(*, receipts_enabled: bool = True) -> s
     )
 
 
-def render_acceptance_criteria_block(acceptance_criteria: list[str] | None) -> str:
-    """Render lead-supplied acceptance criteria as data for the task message.
+def normalize_acceptance_criteria(acceptance_criteria: list[str] | None) -> list[str]:
+    """Return the bounded, neutralized list shared by storage and execution.
 
-    Returns "" when there is nothing usable. Entries are stripped, empties
-    dropped, the list/item sizes capped, and each entry neutralized via
-    :func:`neutralize_untrusted_tags` before interpolation, so the stored
-    state itself carries no live framework/injection tags. The block uses a
-    plain-text header rather than an ``<acceptance_criteria>`` tag on purpose:
-    the task ``HumanMessage`` is sanitized by ``InputSanitizationMiddleware``
-    at model-call time, which HTML-escapes denylisted framework tags — a tag
-    here would reach the model only in escaped form, while plain markdown
-    survives intact.
+    Reapplying this operation to persisted criteria preserves their text:
+    escaping can expand tags, so bound the neutralized output as well.
     """
     if not acceptance_criteria:
-        return ""
+        return []
     # Lazy import: the executor package is imported in cycles with
     # ``deerflow.agents``; resolving the sanitizer at call time keeps module
     # init order-independent (same pattern as build_report_contract_section).
@@ -139,9 +132,24 @@ def render_acceptance_criteria_block(acceptance_criteria: list[str] | None) -> s
             continue
         cleaned = criterion.strip()[:MAX_CRITERION_CHARS].strip()
         if cleaned:
-            criteria.append(neutralize_untrusted_tags(cleaned))
+            # Expansion can move the cap into an otherwise allowed tag name
+            # (e.g. <systematic> -> <system). Neutralize that final prefix too;
+            # recapping its escaped form cannot expose another literal tag.
+            cleaned = neutralize_untrusted_tags(cleaned)[:MAX_CRITERION_CHARS].strip()
+            criteria.append(neutralize_untrusted_tags(cleaned)[:MAX_CRITERION_CHARS].strip())
         if len(criteria) >= MAX_ACCEPTANCE_CRITERIA:
             break
+    return criteria
+
+
+def render_acceptance_criteria_block(acceptance_criteria: list[str] | None) -> str:
+    """Render normalized criteria as untrusted data for the task message.
+
+    Returns "" when there is nothing usable. The block uses a plain-text
+    header rather than a framework tag: InputSanitizationMiddleware escapes
+    those tags when it frames the task HumanMessage as untrusted input.
+    """
+    criteria = normalize_acceptance_criteria(acceptance_criteria)
     if not criteria:
         return ""
     items = "\n".join(f"- {criterion}" for criterion in criteria)

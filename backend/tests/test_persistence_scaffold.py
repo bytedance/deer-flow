@@ -205,6 +205,20 @@ class TestMemoryRunStore:
         assert [r["run_id"] for r in rows] == ["r4", "r3"]
 
     @pytest.mark.anyio
+    async def test_list_by_thread_keyset_cursor(self, store):
+        for i in range(5):
+            await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
+        first = await store.list_by_thread("t1", limit=2)
+        assert [r["run_id"] for r in first] == ["r4", "r3"]
+        second = await store.list_by_thread(
+            "t1",
+            limit=2,
+            before_created_at=first[-1]["created_at"],
+            before_run_id=first[-1]["run_id"],
+        )
+        assert [r["run_id"] for r in second] == ["r2", "r1"]
+
+    @pytest.mark.anyio
     async def test_delete_keeps_thread_index_consistent(self, store):
         await store.put("r1", thread_id="t1")
         await store.put("r2", thread_id="t1")

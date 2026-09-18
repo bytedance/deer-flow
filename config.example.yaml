@@ -20,7 +20,17 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 45
+
+# Optional per-model request pacing (inside a models[] entry):
+# request_admission:
+#   requests_per_minute: 60
+#   group: shared-provider-account  # optional; defaults to the model config name
+#   max_wait_seconds: 300
+#   max_queue_size: 256
+# Off unless configured. Shared groups require identical settings; restart after
+# changes. Process-local RPM only, not TPM or a cluster-wide quota. See the
+# "Model request admission" section in backend/docs/CONFIGURATION.md.
 
 # ============================================================================
 # Logging
@@ -43,9 +53,13 @@ logging:
 # Optional AgentMiddleware classes loaded into the lead and subagent runtime
 # middleware chains after built-in runtime middlewares, but before the
 # safety/clarification tail. Missing packages, invalid classes, and broken
-# modules fail loudly at agent creation with an actionable import error.
-# The same zero-argument class list applies to both lead and subagent runtimes;
-# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# modules fail at agent creation with an actionable import error; constructor
+# errors fail at agent creation with the underlying exception.
+# The same list applies to both lead and subagent runtimes; lead-only vs
+# subagent-only configuration is not expressible yet. Each entry is a class
+# path or `{class, kwargs}` for constructor arguments. kwargs values must be
+# JSON types (object, array, string, number, boolean, or null); YAML dates
+# and timestamps are coerced to ISO strings so they match JSON. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
 # lets extensions_config.json remain the source of truth for this fixed-slot
@@ -53,7 +67,9 @@ logging:
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
-#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
+#     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       kwargs:
+#         header: X-DeerFlow-Latency
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -88,14 +104,16 @@ token_budget:
   hard_stop_threshold: 1.0      # Force stop at 100% of the budget
 
 # ============================================================================
-# Recursion Limit — Hard ceiling for a client-supplied run recursion_limit
+# Recursion Limits
 # ============================================================================
 # A run's recursion_limit caps the number of LangGraph super-steps (each is at
-# least one LLM call). The Gateway never trusts a client-supplied value
-# verbatim: any value above this ceiling is clamped down to it, preventing
-# runaway API cost / DoS. Invalid or non-positive client values fall back to
-# the server default of 100. Raise this only if you legitimately run very
-# deeply nested subagent graphs.
+# least one LLM call). Clients may override the default per request; invalid or
+# non-positive client values fall back to this configured default.
+recursion_limit: 100
+
+# The Gateway never trusts a configured or client-supplied value above this
+# ceiling, preventing runaway API cost / DoS. Raise it only if you legitimately
+# run very deeply nested subagent graphs.
 max_recursion_limit: 1000
 
 
@@ -252,6 +270,12 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   # Optional, forwarded to ChatOpenAI as-is (default false): send only the new
+  #   # turn plus previous_response_id instead of replaying the full history. The
+  #   # chained context is still billed as input tokens, and any client-side
+  #   # history rewrite (e.g. blocked-write payload elision) is only honored when
+  #   # the history is replayed.
+  #   use_previous_response_id: false
   #   context_window: 400000
   #   supports_vision: true
 
@@ -722,6 +746,12 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # Read explicitly referenced conversations (Gateway API only, opt-in).
+  # Each run must submit conversation_references; see backend/docs/API.md.
+  # - name: read_conversation
+  #   group: conversation
+  #   use: deerflow.tools.conversation:read_conversation
+
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
   # search time; an explicit `datasets: []` is invalid. Empty datasets are
@@ -824,6 +854,11 @@ tools:
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool
   #   max_results: 5
+  #   # Optional search-source filters; omit or use [] for no restriction of that kind.
+  #   # include_domains:
+  #   #   - docs.python.org
+  #   #   - developer.mozilla.org
+  #   # exclude_domains: []
   #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
@@ -854,12 +889,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
-  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_search_tool
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # GroundRoute is a meta search layer: one API in front of six engines (Serper,
@@ -881,6 +917,19 @@ tools:
   #   max_results: 5
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
+
+  # Web search tool (uses Sofya, requires SOFYA_API_KEY)
+  # Sofya returns the content of the result pages, not only their snippets.
+  # Sign up at https://sofya.co to get a key.
+  # Note: set SOFYA_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.sofya.tools:web_search_tool
+  #   max_results: 5                # capped at 20 by the Sofya provider
+  #   # search_depth: basic         # basic reads the result pages, snippets returns snippets only
+  #   contents_max_characters: 2000 # per-result content cap; 0 disables it
+  #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
 
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
@@ -1032,11 +1081,12 @@ tools:
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
 
-  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web fetch tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1057,6 +1107,15 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+
+  # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
+  # Returns the page as markdown. Also handles PDF, DOCX and other documents.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.sofya.tools:web_fetch_tool
+  #   # api_key: $SOFYA_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -1159,6 +1218,13 @@ tool_search:
 #
 # `exempt_tools` prevents persist→read→persist infinite loops for read tools.
 # `tool_overrides` allows per-tool threshold customization.
+#
+# The same middleware also elides the `content` argument of successful
+# write_file calls from model-bound requests once the same path was read or
+# modified again later (issue #5328): the file on disk is then the source of
+# truth, and the read-before-write gate forces a read_file before the next
+# modification anyway, so the historical copy only costs context. Stored
+# history, receipts, and the run journal keep the original arguments.
 
 tool_output:
   enabled: true
@@ -1177,6 +1243,18 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
+  # Replace a successful write_file call's `content` with a short placeholder
+  # pointing at read_file once a later successful read_file / write_file /
+  # str_replace of the same path exists. Only the model-bound request changes.
+  elide_superseded_writes: true
+  # Only elide content at least this many characters long (a character count,
+  # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
+  # every non-empty content.
+  superseded_write_min_chars: 2000
+  # The newest N successful write_file calls (across all paths) always stay
+  # visible, even when superseded, so the model can still say what it just
+  # wrote without a read. 0 keeps none.
+  keep_recent_writes: 1
 
 # ============================================================================
 # Suggestions Configuration
@@ -1214,6 +1292,7 @@ loop_detection:
   warn_threshold: 3
   hard_limit: 5
   window_size: 20
+  # Compatibility name: bounds retained (thread_id, run_id) histories, not whole threads.
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
@@ -1261,6 +1340,41 @@ loop_detection:
 
 read_before_write:
   enabled: true
+  # A blocked call never ran and must be re-issued after a re-read, so its
+  # payload (write_file content, str_replace old_str/new_str) is dead weight in
+  # every later model call. Replace it with a short placeholder in model-bound
+  # requests; stored history, receipts, and the run journal keep the original.
+  elide_blocked_payloads: true
+  # Only elide payload fields at least this many characters long (a character
+  # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
+  # 0 elides every non-empty payload.
+  elide_min_chars: 2000
+
+# ============================================================================
+# Projects
+# ============================================================================
+# User projects group threads under a name plus free-form instructions. Member
+# threads receive the project's current instructions as a bounded, request-
+# scoped <project> block rendered from the snapshot pinned at run admission;
+# the block never enters the system prompt or persisted history. The shelf
+# index bounds below cap the request-scoped <documents> listing rendered from
+# the same pinned snapshot. Oversized instructions are rejected at write time
+# (422) and never truncated.
+
+projects:
+  # Hard UTF-8 byte cap for project instructions (range: 256-262144). Multi-
+  # byte characters count as their UTF-8 byte length, not as characters.
+  instructions_max_bytes: 8192
+  # Maximum shelf entries rendered into the <documents> index per run
+  # (range: 1-500).
+  shelf_index_max_entries: 50
+  # UTF-8 byte cap for the rendered <documents> index, counting IDs, escaped
+  # names, wrappers, separators and the overflow note (range: 512-65536).
+  # Usually binds before the entry cap for CJK document names.
+  shelf_index_max_bytes: 4096
+  # Days a trashed project document stays recoverable before the retention
+  # sweep may purge it permanently (range: 1-3650).
+  trash_retention_days: 30
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -1344,6 +1458,8 @@ sandbox:
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
   # read_file and ls use head-truncation since their content is front-loaded.
+  # A read_file cut lands on a line boundary when the budget allows, and the marker names
+  # the next start_line to continue with, so the agent can page through a long file exactly.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
@@ -1427,11 +1543,22 @@ sandbox:
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
+#   # AIO semver images default MAX_SHELL_SESSIONS to 10. DeerFlow leaves that
+#   # image default unchanged while subagent_runtime.max_running + 1 fits, and
+#   # otherwise injects the required value for local and provisioner sandboxes.
+#   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
+#   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#   #   # Required when using the OpenAI-compatible image-generation provider:
+#   #   IMAGE_GENERATION_PROVIDER: $IMAGE_GENERATION_PROVIDER
+#   #   IMAGE_GENERATION_API_KEY: $IMAGE_GENERATION_API_KEY
+#   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
+#   #   IMAGE_GENERATION_MODEL: $IMAGE_GENERATION_MODEL
+#   #   IMAGE_GENERATION_SIZE: $IMAGE_GENERATION_SIZE  # Optional fixed-size override
 #
 #   # Optional: Cross-instance container ownership (issue #4206).
 #   #
@@ -1586,7 +1713,9 @@ subagent_runtime:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
 #   timeout_seconds: 1800
-#   # Optional global max-turn override for all subagents.
+#   # Optional global max-turn override for all subagents. One turn is one
+#   # model call plus the tools it runs; the turn count is converted into
+#   # LangGraph's step budget, so this is the number of turns you actually get.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
@@ -1787,6 +1916,13 @@ title:
 # ============================================================================
 # Automatically summarize conversation history when token limits are approached
 # This helps maintain context in long conversations without exceeding model limits
+
+# Optional task notes and keyword recall of compacted messages. See docs/task-continuity.md.
+task_continuity:
+  enabled: false
+  max_batches: 32
+  max_records_per_batch: 256
+  max_record_chars: 16000
 
 summarization:
   enabled: true
@@ -2292,7 +2428,7 @@ agent_storage:
 # ============================================================================
 # Scheduled Tasks Configuration
 # ============================================================================
-# Background scheduler for one-time and recurring (cron) agent runs.
+# Background scheduler for one-time, cron, and interval agent runs.
 # Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
 # max_concurrent_runs, min_once_delay_seconds) are restart-required.
 # recursion_limit is read at dispatch and applies to the next scheduled run
@@ -2311,7 +2447,7 @@ agent_storage:
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
-#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   min_once_delay_seconds: 60   # Floor for one-time run_at offset and interval every_seconds
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
@@ -2540,6 +2676,10 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
+#     # Optional: extra host suffixes inbound media downloads may come from,
+#     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
+#     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
+#     allowed_media_hosts: []
 #     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
 #     polling_retry_delay: 5
@@ -2579,6 +2719,11 @@ run_ownership:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#     # Optional: extra host suffixes inbound media downloads may come from, in
+#     # addition to the built-in qq.com family and WeCom's official COS media
+#     # host (ww-aibot-img-1258476243.<region>.myqcloud.com). Add a suffix here
+#     # if WeCom rotates to a new COS account or media is routed through a proxy.
+#     allowed_media_hosts: []
 #
 #   dingtalk:
 #     enabled: false
@@ -2660,17 +2805,23 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # `models` / `skills` govern the per-caller listing/detail surfaces
+#       # (which models/skills the caller sees on GET /api/models and the
+#       # GET /api/skills[.../custom, /{name}] skill routes); skill
+#       # management endpoints (install/edit/export) stay admin-gated.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2680,6 +2831,7 @@ run_ownership:
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
+#           skills: {allow: []}      # no skills visible in the listing
 authorization:
   enabled: false
 

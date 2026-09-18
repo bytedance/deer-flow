@@ -6,23 +6,24 @@ import html
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Any, Literal, Protocol, override, runtime_checkable
 
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
+from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
-from deerflow.utils.messages import is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -68,6 +69,7 @@ class ContextCompactionResult:
     messages_to_summarize: tuple[AnyMessage, ...]
     preserved_messages: tuple[AnyMessage, ...]
     total_tokens: int
+    task_history: dict | None = None
 
 
 @runtime_checkable
@@ -108,6 +110,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *args,
         before_summarization: list[BeforeSummarizationHook] | None = None,
+        task_continuity_config: TaskContinuityConfig | None = None,
         app_config: Any | None = None,
         configured_model_name: str | None = None,
         run_model_name: str | None = None,
@@ -116,6 +119,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
         # per run and is the authoritative source of truth, so the caller (lead /
@@ -177,6 +181,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             # behaviour (token counting/profile inspection and, absent an
             # explicit configured summary model, generation itself).
             "summary_model": self._anchor_model_name,
+            "task_continuity": self._task_continuity_config.model_dump(mode="json") if self._task_continuity_config is not None else None,
         }
 
     def _tag_nostream(self, model: Any) -> Any:
@@ -452,9 +457,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     return content
         except Exception:
             logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
+        if strategy == "last":
+            omitted_marker = "\n...\n"
+            if len(text) > max_tokens and max_tokens > len(omitted_marker):
+                return omitted_marker + text[-(max_tokens - len(omitted_marker)) :]
+            return text[-max_tokens:]
         return self._bound_text(text, max_tokens)
 
-    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None, *, new_messages_strategy: Literal["first", "last"] = "first") -> str | None:
+        """Trim raw input sections before adding escaping and prompt overhead."""
         if self.trim_tokens_to_summarize is None:
             trimmed_new_messages = formatted_messages
             trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
@@ -471,14 +482,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 trimmed_new_messages = self._trim_summary_section_text(
                     formatted_messages,
                     new_message_tokens,
-                    strategy="first",
+                    strategy=new_messages_strategy,
                 )
             else:
                 trimmed_previous_summary = ""
                 trimmed_new_messages = self._trim_summary_section_text(
                     formatted_messages,
                     max_tokens,
-                    strategy="first",
+                    strategy=new_messages_strategy,
                 )
 
         # Escape < > & before embedding into the <existing_summary>/<new_messages>
@@ -516,14 +527,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        new_messages_strategy: Literal["first", "last"] = "first"
         if not trimmed_messages:
-            trimmed_messages = messages_to_summarize[-1:]
+            if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
+                # The human anchor can fall outside the token-limited tail.
+                # Preserve the existing final-message fallback for this case.
+                trimmed_messages = messages_to_summarize[-1:]
+            else:
+                # Rescuing the current request can leave an AI/Tool-only window,
+                # which the inherited human-anchored trimmer rejects even below
+                # budget. Bound its raw text while favoring recent content.
+                trimmed_messages = messages_to_summarize
+                new_messages_strategy = "last"
         if not trimmed_messages:
             return None
         # Format messages to avoid token inflation from metadata when str() is called on
         # message objects.
         formatted_messages = get_buffer_string(trimmed_messages)
-        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
+        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary, new_messages_strategy=new_messages_strategy)
         if not formatted_messages:
             return None
         return self.summary_prompt.format(messages=formatted_messages).rstrip()
@@ -554,18 +575,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         # The latest real user message (the current request) must survive: peer
-        # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
+        # rescue no longer covers it (see _preserve_required_context), so
         # lock its id here and rescue by exact id. This keeps the current request
         # without "moving cutoff" — which would also retain early AI/Tool turns and
-        # never compress a first-turn long analysis.
+        # never compress a first-turn long analysis. A Human Input Card reply is
+        # hidden from the UI but is still the user's current request.
         latest_user_id: str | None = None
         for msg in reversed(messages):
-            if is_real_user_message(msg):
+            if is_genuine_user_message(msg):
                 latest_user_id = msg.id
                 break
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
+        messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -653,11 +675,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
         )
+        task_history = None
+        if self._task_continuity_config is not None:
+            from deerflow.agents.task_continuity.archive import capture
+
+            task_history = capture(state, runtime, messages_to_summarize, self._task_continuity_config)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
             preserved_messages=tuple(preserved_messages),
             total_tokens=total_tokens,
+            task_history=task_history,
         )
 
     async def acompact_state(
@@ -693,11 +721,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
         )
+        task_history = None
+        if self._task_continuity_config is not None:
+            from deerflow.agents.task_continuity.archive import acapture
+
+            task_history = await acapture(state, runtime, messages_to_summarize, self._task_continuity_config)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
             preserved_messages=tuple(preserved_messages),
             total_tokens=total_tokens,
+            task_history=task_history,
         )
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -710,6 +744,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -722,30 +757,39 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
-    def _preserve_dynamic_context_reminders(
+    def _preserve_required_context(
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         *,
         latest_user_id: str | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep tagged dynamic-context reminders and the current user request out of compression.
+        """Keep system messages, tagged dynamic-context reminders and the current user request out of compression.
 
-        Only tagged reminders (date ``SystemMessage`` + optional ``__memory`` peer,
-        both carrying ``dynamic_context_reminder=True``) and the latest real user
-        message are rescued. The untagged ``__user`` peer is deliberately NOT
+        State-level SystemMessages are framework-owned instructions and must
+        survive compaction, including legacy untagged reminders and extension
+        instructions. Transient instructions should be injected into requests,
+        not state. Tagged reminders (including their ``__memory`` peers) and the
+        latest real user message are also rescued. A subagent keeps its whole system
+        prompt as the leading ``SystemMessage`` in state (``create_agent`` is built
+        with ``system_prompt=None``), so compressing it would leave every later
+        call without its instructions. The untagged ``__user`` peer is deliberately NOT
         rescued by ID-swap prefix: it is a stale historical request that must be
         allowed to compress — the source of cross-turn prompt contamination. The
         *current* request is instead identified by ``latest_user_id``, so a
         first-turn long analysis keeps its ``__user`` request while its early
         AI/Tool turns still compress.
+
+        Rescuing the whole partition is legitimate: ``_prepare_compaction``
+        skips compaction when there is no history left to summarize.
         """
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
+            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
@@ -873,6 +917,7 @@ def create_summarization_middleware(
     app_config: Any | None = None,
     keep: tuple[str, int | float] | None = None,
     skip_memory_flush: bool = False,
+    archive_task_history: bool = True,
     run_model_name: str | None = None,
     extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
@@ -889,9 +934,13 @@ def create_summarization_middleware(
     ``runtime.context`` / ``get_config()``, which do not carry a custom agent's or a
     subagent's resolved model.
 
+    ``archive_task_history=False`` keeps subagent-internal messages out of the
+    parent thread archive, independently of the long-term memory opt-out.
+
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
-    chain keeps it (research should persist); the subagent chain sets it so a
+    chain keeps it unless its Custom Agent opted out of memory; manual
+    compaction follows that same policy. The subagent chain always sets it so a
     subagent's INTERNAL turns (the "Task" human message + intermediate AI/tool
     turns) are not written into the PARENT thread's durable memory — the hook
     is keyed by ``thread_id`` and subagents share the parent's ``thread_id``
@@ -953,9 +1002,8 @@ def create_summarization_middleware(
         "model": anchor_model,
         "trigger": trigger,
         "keep": keep_tuple,
+        "trim_tokens_to_summarize": config.trim_tokens_to_summarize,
     }
-    if config.trim_tokens_to_summarize is not None:
-        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
@@ -968,6 +1016,7 @@ def create_summarization_middleware(
     return DeerFlowSummarizationMiddleware(
         **kwargs,
         before_summarization=hooks,
+        task_continuity_config=(resolved_app_config.task_continuity if archive_task_history and getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True else None),
         app_config=resolved_app_config,
         configured_model_name=config.model_name,
         run_model_name=run_model_name,

@@ -102,6 +102,65 @@ def test_middleware_order_does_affect_the_fingerprint():
     assert base.fingerprint != replace(base, middlewares=(m2, m1)).fingerprint
 
 
+class TestShelfIndexReleasePolicy:
+    """The shelf rendering caps change the model-visible ``<documents>`` block,
+    so DynamicContextMiddleware declares both effective limits and each change
+    moves the assembly fingerprint."""
+
+    @staticmethod
+    def _params(**projects_kwargs):
+        from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.projects_config import ProjectsConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        config = AppConfig(
+            models=[ModelConfig(name="m", display_name="m", description=None, use="langchain_openai:ChatOpenAI", model="m", supports_thinking=False, supports_vision=False)],
+            projects=ProjectsConfig(**projects_kwargs),
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+        return DynamicContextMiddleware(app_config=config).release_policy_parameters()
+
+    @staticmethod
+    def _descriptor_with(policy):
+        return AgentAssemblyDescriptor(
+            namespace="lead",
+            agent_name="lead-agent",
+            requested_model=None,
+            effective_model="gpt-x",
+            model_parameters={},
+            thinking_enabled=False,
+            reasoning_effort=None,
+            base_prompt_hash="abc",
+            tools=(),
+            middlewares=(MiddlewareDescriptor(name="DynamicContextMiddleware", module="m", policy_parameters=dict(policy)),),
+            deferred_tool_names=(),
+            enabled_skills=(),
+            effective_policies={},
+        )
+
+    def test_both_effective_shelf_limits_are_declared(self):
+        from deerflow.config.projects_config import ProjectsConfig
+
+        params = self._params()
+        assert params["shelf_index_max_entries"] == ProjectsConfig().shelf_index_max_entries
+        assert params["shelf_index_max_bytes"] == ProjectsConfig().shelf_index_max_bytes
+
+    def test_changing_either_shelf_limit_moves_the_fingerprint(self):
+        base = self._params()
+        by_entries = self._params(shelf_index_max_entries=99)
+        by_bytes = self._params(shelf_index_max_bytes=8192)
+        # Each knob moves independently.
+        assert by_entries["shelf_index_max_entries"] == 99
+        assert by_entries["shelf_index_max_bytes"] == base["shelf_index_max_bytes"]
+        assert by_bytes["shelf_index_max_bytes"] == 8192
+        assert by_bytes["shelf_index_max_entries"] == base["shelf_index_max_entries"]
+        base_descriptor = self._descriptor_with(base)
+        assert base_descriptor.fingerprint != self._descriptor_with(by_entries).fingerprint
+        assert base_descriptor.fingerprint != self._descriptor_with(by_bytes).fingerprint
+
+
 class TestLeadAgentAssembly:
     def test_make_lead_agent_still_returns_a_bare_graph(self):
         """langgraph.json declares this factory; its ABI must not move."""
@@ -126,6 +185,7 @@ class TestLeadAgentAssembly:
         from deerflow.config.app_config import AppConfig
         from deerflow.config.model_config import ModelConfig
         from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
 
         app_config = AppConfig(
             models=[
@@ -139,6 +199,7 @@ class TestLeadAgentAssembly:
                     supports_vision=False,
                 )
             ],
+            subagents=SubagentsAppConfig(custom_agents={"researcher": CustomSubagentConfig(description="research", system_prompt="research")}),
             sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
         )
         monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
@@ -215,6 +276,34 @@ class TestLeadAgentAssembly:
         assert prompt_calls[0]["allowed_subagents"] == ["general-purpose"]
         assert assembly.graph["system_prompt"] == "allowed_subagents=['general-purpose']"
         assert assembly.descriptor.base_prompt_hash == canonical_hash(assembly.graph["system_prompt"])
+
+    def test_descriptor_subagent_policy_respects_custom_agent_allowed_subagents(self, monkeypatch):
+        """Fixes #5205: custom agent assembly descriptor must restrict its
+        subagents policy allowlist and runtime limits to allowed_subagents."""
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.config.agents_config import AgentConfig
+        from deerflow.extensions import bind_agent_build_extensions
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        agent_config = AgentConfig(name="custom", allowed_subagents=["general-purpose"])
+        monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            assembly = assemble_lead_agent(
+                {
+                    "configurable": {
+                        "thread_id": "t-scoped-subagents",
+                        "agent_name": "custom",
+                        "subagent_enabled": True,
+                    }
+                }
+            )
+
+        subagent_policy = assembly.descriptor.effective_policies["subagents"]
+        assert subagent_policy["enabled"] is True
+        assert subagent_policy["type_allowlist"] == ["general-purpose"]
+        assert list(subagent_policy["runtime_limits"].keys()) == ["general-purpose"]
 
     def test_observers_receive_the_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import assemble_lead_agent
@@ -634,3 +723,84 @@ class TestSkillCatalogHashesContent:
         skill = self._skill(tmp_path / "missing-skill")
         descriptor = self._build([skill])
         assert descriptor.fingerprint
+
+
+class TestProjectDocumentToolRegistration:
+    """The two shelf tools exist only in project runs (spec §7.3, §10.11).
+
+    Registration follows the admission-pinned ``PROJECT_CONTEXT_KEY`` and
+    nothing else: a run assembled without the key never carries the tools'
+    schemas, a run with it always does — even when instructions and shelf
+    are both empty. Since the tool list feeds ``build_assembly_descriptor``,
+    both variants are pinned here (descriptor and fingerprint).
+    """
+
+    @staticmethod
+    def _assemble(monkeypatch, config):
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.extensions import bind_agent_build_extensions
+
+        helpers = TestLeadAgentAssembly
+        helpers._isolate_from_the_ambient_config(monkeypatch)
+        with bind_agent_build_extensions(helpers._extensions_with_an_agent_assembly_observer()):
+            return assemble_lead_agent(config)
+
+    def test_project_run_registers_both_tools(self, monkeypatch):
+        from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+        assembly = self._assemble(
+            monkeypatch,
+            {
+                "configurable": {"thread_id": "t-proj"},
+                "context": {PROJECT_CONTEXT_KEY: {"project_id": "p-1", "name": "P", "instructions": "ctx"}},
+            },
+        )
+        tool_names = {getattr(tool, "name", None) for tool in assembly.graph["tools"]}
+        assert {"list_project_documents", "read_project_document"} <= tool_names
+        descriptor_names = {tool.name for tool in assembly.descriptor.tools}
+        assert {"list_project_documents", "read_project_document"} <= descriptor_names
+
+    def test_non_project_run_registers_neither_tool(self, monkeypatch):
+        assembly = self._assemble(monkeypatch, {"configurable": {"thread_id": "t-plain"}})
+        tool_names = {getattr(tool, "name", None) for tool in assembly.graph["tools"]}
+        assert "list_project_documents" not in tool_names
+        assert "read_project_document" not in tool_names
+        descriptor_names = {tool.name for tool in assembly.descriptor.tools}
+        assert "list_project_documents" not in descriptor_names
+        assert "read_project_document" not in descriptor_names
+
+    def test_both_descriptor_variants_are_distinct_and_stable(self, monkeypatch):
+        from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+        with_project = self._assemble(
+            monkeypatch,
+            {
+                "configurable": {"thread_id": "t-proj"},
+                "context": {PROJECT_CONTEXT_KEY: {"project_id": "p-1", "name": "P", "instructions": ""}},
+            },
+        )
+        without_project = self._assemble(monkeypatch, {"configurable": {"thread_id": "t-plain"}})
+        assert with_project.descriptor.fingerprint != without_project.descriptor.fingerprint
+
+        again = self._assemble(
+            monkeypatch,
+            {
+                "configurable": {"thread_id": "t-proj"},
+                "context": {PROJECT_CONTEXT_KEY: {"project_id": "p-1", "name": "P", "instructions": ""}},
+            },
+        )
+        assert again.descriptor.fingerprint == with_project.descriptor.fingerprint
+
+    def test_registration_follows_the_key_when_blocks_are_empty(self, monkeypatch):
+        """Empty instructions and an empty shelf still mean a project run."""
+        from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+        assembly = self._assemble(
+            monkeypatch,
+            {
+                "configurable": {"thread_id": "t-empty"},
+                "context": {PROJECT_CONTEXT_KEY: {"project_id": "p-1", "name": "P", "instructions": "", "shelf": {"total": 0, "entries": []}}},
+            },
+        )
+        tool_names = {getattr(tool, "name", None) for tool in assembly.graph["tools"]}
+        assert {"list_project_documents", "read_project_document"} <= tool_names

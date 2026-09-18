@@ -96,7 +96,7 @@ test.describe("Artifact viewer window", () => {
     await viewer.waitForLoadState("domcontentloaded");
 
     await expect
-      .poll(() => new URL(viewer.url()).pathname)
+      .poll(() => new URL(viewer.url(), "http://localhost").pathname)
       .toBe("/artifacts/view");
     const params = new URL(viewer.url()).searchParams;
     expect(params.get("path")).toBe(MARKDOWN_ARTIFACT_PATH);
@@ -157,7 +157,7 @@ test.describe("Artifact viewer window", () => {
     const opened = await openedPromise;
 
     await expect
-      .poll(() => new URL(opened.url()).pathname)
+      .poll(() => new URL(opened.url(), "http://localhost").pathname)
       .toBe(
         `/api/threads/${HTML_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.html`,
       );

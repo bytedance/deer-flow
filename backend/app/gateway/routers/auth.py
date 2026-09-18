@@ -560,14 +560,26 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request):
-    """Get current authenticated user info."""
+    """Get current authenticated user info, including effective permissions."""
     user = await get_current_user_from_request(request)
+    auth = getattr(getattr(request, "state", None), "auth", None)
+    if auth is not None:
+        # AuthMiddleware already resolved the per-request permission set (with
+        # PAT-scope intersection and internal-caller semantics applied) — reuse
+        # it instead of evaluating the provider a second time.
+        permissions: list[str] = list(auth.permissions)
+    else:
+        # Middleware-less composition: resolve exactly as _authenticate does.
+        from app.gateway.authz import resolve_route_permissions_for_request
+
+        permissions = await resolve_route_permissions_for_request(request, user)
     return UserResponse(
         id=str(user.id),
         email=user.email,
         system_role=user.system_role,
         needs_setup=user.needs_setup,
         oauth_provider=user.oauth_provider,
+        permissions=permissions,
     )
 
 

@@ -359,7 +359,7 @@ class TestRenderDelegationLedger:
 
         out = render_delegation_ledger(entries)
 
-        assert "do NOT delegate" in out
+        assert "inspect self-report before reuse" in out
         assert "research auth" in out
         assert "general-purpose" in out
         assert "auth uses JWT" in out

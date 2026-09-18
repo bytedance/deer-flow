@@ -255,11 +255,15 @@ class ChannelService:
                 return True
 
             if channel is not None:
-                try:
-                    await channel.stop()
-                except Exception:
-                    logger.exception("Error stopping non-running channel before readiness retry")
-                self._channels.pop(name, None)
+                # Ownership-preserving cleanup: the instance is retained when
+                # its stop() fails or is cancelled, and this round must NOT
+                # start a replacement over it — _start_channel would overwrite
+                # the tracked entry and orphan the still-subscribed listener
+                # one hop later (the gap this closes from the review on 5227).
+                await self._stop_and_discard_channel(name, channel)
+                if self._channels.get(name) is channel:
+                    logger.warning("Readiness retry deferred: previous %s channel failed to stop and remains tracked", name)
+                    return False
 
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
@@ -267,6 +271,13 @@ class ChannelService:
                     logger.info("Retrying channel startup after readiness check")
                 if await self._start_channel(name, channel_config):
                     return True
+                # A failed attempt whose cleanup retained the instance ends
+                # the loop for this round: the next attempt would be refused
+                # by _start_channel's retained-instance guard anyway, and the
+                # still-tracked channel must not be replaced one hop later.
+                if self._channels.get(name) is not None:
+                    logger.warning("Readiness retries deferred: %s channel failed to clean up after a failed start and remains tracked", name)
+                    return False
             return False
 
     async def stop(self) -> None:
@@ -329,11 +340,14 @@ class ChannelService:
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
         if name in self._channels:
-            try:
-                await self._channels[name].stop()
-            except Exception:
-                logger.exception("Error stopping channel for restart")
-            del self._channels[name]
+            channel = self._channels[name]
+            # Same ownership rule as readiness retries: retain an instance
+            # whose stop() fails, and decline the restart rather than
+            # overwriting a still-tracked (still-listening) channel.
+            await self._stop_and_discard_channel(name, channel)
+            if self._channels.get(name) is channel:
+                logger.warning("Restart deferred: %s channel failed to stop and remains tracked", name)
+                return False
 
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
@@ -364,22 +378,75 @@ class ChannelService:
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
         self._config.pop(name, None)
-        channel = self._channels.pop(name, None)
+        channel = self._channels.get(name)
         if channel is None:
             return True
+        # Stop-then-drop with the shared ownership rule: a channel whose
+        # stop() fails stays tracked (and returns False) instead of being
+        # popped first and leaking its subscribed listener on failure.
+        await self._stop_and_discard_channel(name, channel)
+        if self._channels.get(name) is channel:
+            logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
+            return False
+        logger.info("Channel stopped and removed")
+        return True
+
+    async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
+        """Stop a channel and drop it only once its ``stop()`` has completed.
+
+        This is the single ownership-preserving cleanup every discard path
+        routes through (failed startup, readiness retry, restart, removal).
+        ``start()`` subscribes the outbound listener before the transport is
+        up, so an instance that never reached ``is_running`` — or a running
+        one being torn down — must be ``stop()``-ed before it is discarded:
+        otherwise the bus keeps a strong reference to the dead listener and
+        every future outbound for this channel name fans out to it, while
+        repeated attempts accumulate more stale listeners the service can no
+        longer clean up (the instances are untracked by then). Discord's
+        fail-fast ``is_running`` makes this reachable for a client thread that
+        dies immediately (invalid token); the same hygiene applies to any
+        channel that subscribes before its transport is confirmed.
+
+        Ownership mirrors ``ChannelService.stop()``: the instance is dropped
+        only after its ``stop()`` actually completes. A cancellation arriving
+        mid-cleanup (or a ``stop()`` that raises) leaves it tracked, so a
+        retried readiness attempt stops it again before replacing it and
+        service shutdown can still reach it — untracking first would orphan
+        resources nobody can clean up anymore. Callers check for retention
+        (``self._channels.get(name) is channel``) and defer starting or
+        removing a replacement for that round, so startup cannot silently
+        overwrite a still-listening retained instance; ``ensure_channel_ready``
+        additionally serializes on the per-channel readiness lock.
+        """
         try:
             await channel.stop()
-            logger.info("Channel stopped and removed")
-            return True
+        except asyncio.CancelledError:
+            # Keep this transport owned by the service: the Gateway deadline
+            # interrupted cleanup, so detaching it here would hide resources
+            # that may still be in use (mirrors ChannelService.stop()).
+            raise
         except Exception:
-            logger.exception("Error stopping channel for removal")
-            return False
+            logger.exception("Error stopping channel %s during discard", name)
+            return
+        if self._channels.get(name) is channel:
+            self._channels.pop(name, None)
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
+            return False
+
+        # Never install a fresh instance over a retained one: a channel whose
+        # failed cleanup kept it tracked still holds a subscribed outbound
+        # listener, and overwriting the entry here is the one remaining way to
+        # orphan it (nothing would be able to stop it afterwards). Callers
+        # decline the operation when they see the name still tracked; this
+        # guard makes the invariant hold at the mechanism itself.
+        retained = self._channels.get(name)
+        if retained is not None:
+            logger.warning("Refusing to start %s: another channel instance is still tracked under this name (previous cleanup incomplete, or the instance is still running)", name)
             return False
 
         try:
@@ -390,6 +457,7 @@ class ChannelService:
             logger.exception("Failed to import channel class")
             return False
 
+        channel: Channel | None = None
         try:
             config = dict(config)
             config["channel_store"] = self.store
@@ -407,14 +475,17 @@ class ChannelService:
             self._channels[name] = channel
             await channel.start()
             if not channel.is_running:
-                self._channels.pop(name, None)
                 logger.error("Channel did not enter a running state after start()")
+                await self._stop_and_discard_channel(name, channel)
                 return False
             logger.info("Channel started")
             return True
         except Exception:
-            self._channels.pop(name, None)
             logger.exception("Failed to start channel")
+            if channel is not None:
+                await self._stop_and_discard_channel(name, channel)
+            else:
+                self._channels.pop(name, None)
             return False
 
     def get_status(self) -> dict[str, Any]:

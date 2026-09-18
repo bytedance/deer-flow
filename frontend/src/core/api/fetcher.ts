@@ -1,6 +1,8 @@
 import { buildLoginUrl } from "@/core/auth/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { UnauthorizedError } from "./errors";
+import { staticApiResponse } from "./static-response";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
 export type StateChangingMethod = "POST" | "PUT" | "DELETE" | "PATCH";
@@ -60,6 +62,17 @@ export async function fetch(
   init?: RequestInit,
 ): Promise<Response> {
   const url = typeof input === "string" ? input : input.url;
+
+  // Static demos have no Gateway. Resolve REST calls before credentials,
+  // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
+  if (isStaticWebsiteOnly()) {
+    const response = await staticApiResponse(url, {
+      ...init,
+      method:
+        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+    });
+    if (response) return response;
+  }
 
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.

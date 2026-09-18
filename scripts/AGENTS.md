@@ -1,5 +1,14 @@
 ## Service Startup Contracts
 
+Optional browser dependency detection reads the top-level `tools:` sequence
+without requiring `name` to be its first mapping key. Both indented and
+indentless lists are supported; nested option names and block-scalar text
+must not enable the browser extra. Keep the detector standard-library-only
+because it runs before dependency synchronization. Read UTF-8 config files
+with or without a leading BOM so the first section remains detectable.
+`setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
+keep its shell filter compatible with GNU and BSD sed.
+
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
@@ -14,6 +23,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
+Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
+lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the
+same or an earlier PATH directory. If neither is found, it falls back to
+Corepack, checking `corepack.cmd` before `corepack`. POSIX Python (including
+MSYS/Cygwin Python) keeps the generic name first for each tool; the gate is
+based on Python's `os.name`, not the invoking shell.
 
 ## Public Skill Review Waivers
 

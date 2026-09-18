@@ -68,6 +68,10 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
 
 class AuthContext:
@@ -149,6 +153,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -288,6 +295,17 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     return [p for p in results if p is not None]
 
 
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
+
+
 class _AuthorizationUnavailable(Exception):
     """Raised internally when the provider cannot be resolved for a route check.
 
@@ -299,11 +317,11 @@ class _AuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
-def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
-    """Return ``(provider, principal)`` for model-route authorization.
+def _resolve_route_scoped_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for route-level resource authorization.
 
     When authorization is disabled, returns ``(None, None)`` so callers can
-    short-circuit to legacy behavior (all models visible). When enabled,
+    short-circuit to legacy behavior (resource visible). When enabled,
     resolves the cached provider and builds a Principal identical to
     ``resolve_route_permissions`` (including the ``INTERNAL_SYSTEM_ROLE``
     → ``None`` pop so internal callers fall under ``default_role``).
@@ -321,7 +339,7 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
     except Exception:
-        logger.warning("Failed to resolve authorization provider for model routes", exc_info=True)
+        logger.warning("Failed to resolve authorization provider for route-level resources", exc_info=True)
         raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
 
     principal = build_principal_from_context(
@@ -331,13 +349,35 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     return provider, principal
 
 
+def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for model-route authorization.
+
+    Delegates to ``_resolve_route_scoped_authorization``: disabled →
+    ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` (carrying ``fail_closed``).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for skill-route authorization.
+
+    Same resolution and Principal construction as ``resolve_model_authorization``
+    (disabled → ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` carrying ``fail_closed``). Consumers translate
+    that into the appropriate deny response (empty skill listing).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
 def _route_authz_context(user: User, *, is_internal: bool) -> dict:
     """Build the shared Principal context dict for a request-scoped user.
 
     Applies the ``INTERNAL_SYSTEM_ROLE → None`` pop so internal callers fall
     under ``default_role`` (mirrors ``inject_authenticated_user_context``).
-    Used by ``resolve_model_authorization`` and ``authorize_sandbox_for_request``
-    so every route-level authorization path builds the identity the same way.
+    Used by ``_resolve_route_scoped_authorization`` (model/skill routes) and
+    ``authorize_sandbox_for_request`` so every route-level authorization path
+    builds the identity the same way.
     """
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
@@ -497,8 +537,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    permissions = await resolve_route_permissions_for_request(request, user)
     return AuthContext(user=user, permissions=permissions)
 
 

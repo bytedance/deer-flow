@@ -44,7 +44,10 @@ import {
   reconcileArtifactDraft,
 } from "@/core/artifacts/editing";
 import { useArtifactContent } from "@/core/artifacts/hooks";
-import { getArtifactViewState } from "@/core/artifacts/preview";
+import {
+  getArtifactViewState,
+  getTabularDelimiter,
+} from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
   resolveArtifactOpenURL,
@@ -58,6 +61,7 @@ import { installSkill, SkillRequestError } from "@/core/skills/api";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
+  getFileExtension,
   getFileName,
 } from "@/core/utils/files";
 import { env } from "@/env";
@@ -151,7 +155,8 @@ export function ArtifactFileDetail({
     if (isWriteFile) {
       const codeResult = checkCodeFile(filepath);
       // Non-code browser-previewable files (PDF, images, audio, video)
-      // should render in the sandboxed iframe, not the code editor.
+      // should render in the inline iframe (unsandboxed for PDF), not the
+      // code editor.
       if (!codeResult.isCodeFile && canBrowserPreviewFile(filepath)) {
         return codeResult;
       }
@@ -169,9 +174,9 @@ export function ArtifactFileDetail({
   const canPreviewInBrowser = useMemo(() => {
     return canBrowserPreviewFile(filepath);
   }, [filepath]);
-  const isSupportPreview = useMemo(() => {
-    return language === "html" || language === "markdown";
-  }, [language]);
+  const isTabular = getTabularDelimiter(language) !== null;
+  const isSupportPreview =
+    language === "html" || language === "markdown" || isTabular;
   const toolResult = (() => {
     if (!isWriteFile) {
       return undefined;
@@ -185,7 +190,9 @@ export function ArtifactFileDetail({
   })();
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
-    isSupportPreview,
+    isSupportPreview:
+      isSupportPreview &&
+      (!isTabular || !isWriteFile || toolResult?.trim() === "OK"),
     toolResult,
   });
   const {
@@ -254,7 +261,7 @@ export function ArtifactFileDetail({
     truncated && language === "html" ? "code" : viewMode;
   useEffect(() => {
     setViewMode(artifactViewState.initialViewMode);
-  }, [artifactViewState.initialViewMode]);
+  }, [artifactViewState.initialViewMode, filepathFromProps]);
 
   const confirmDiscard = useCallback(() => {
     return !isDirty || window.confirm(t.artifactEditing.discardChanges);
@@ -420,7 +427,7 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center gap-2">
-          {artifactViewState.canPreview && !truncated && (
+          {artifactViewState.canPreview && (!truncated || isTabular) && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -433,10 +440,18 @@ export function ArtifactFileDetail({
                 }
               }}
             >
-              <ToggleGroupItem value="code">
+              <ToggleGroupItem
+                value="code"
+                aria-label={t.artifactPreview.viewSource}
+              >
                 <Code2Icon />
               </ToggleGroupItem>
-              <ToggleGroupItem value="preview">
+              <ToggleGroupItem
+                value="preview"
+                aria-label={
+                  isTabular ? t.artifactTable.title : t.common.preview
+                }
+              >
                 <EyeIcon />
               </ToggleGroupItem>
             </ToggleGroup>
@@ -535,7 +550,11 @@ export function ArtifactFileDetail({
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}
                 label={t.common.openInNewWindow}
-                tooltip={t.common.openInNewWindow}
+                tooltip={
+                  isTabular && isDirty
+                    ? t.artifactTable.savedVersion
+                    : t.common.openInNewWindow
+                }
                 onClick={() => {
                   const w = window.open(
                     resolveArtifactOpenURL({ filepath, threadId, isMock }),
@@ -573,7 +592,11 @@ export function ArtifactFileDetail({
               <ArtifactAction
                 icon={DownloadIcon}
                 label={t.common.download}
-                tooltip={t.common.download}
+                tooltip={
+                  isTabular && isDirty
+                    ? t.artifactTable.savedVersion
+                    : t.common.download
+                }
                 onClick={() => {
                   const w = window.open(
                     urlOfArtifact({
@@ -608,7 +631,7 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="flex flex-col p-0">
-        {truncated && (
+        {truncated && !(isTabular && effectiveViewMode === "preview") && (
           <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
             <span className="text-muted-foreground">
               {t.artifactPreview.limited(
@@ -639,15 +662,17 @@ export function ArtifactFileDetail({
           )}
           {artifactViewState.canPreview &&
             !error &&
-            effectiveViewMode === "preview" &&
-            !isLoading &&
-            (!truncated || language === "markdown") &&
-            (language === "markdown" || language === "html") && (
+            (isTabular || effectiveViewMode === "preview") &&
+            (!isLoading || isTabular) &&
+            (!truncated || language === "markdown" || isTabular) &&
+            (language === "markdown" || language === "html" || isTabular) && (
               <ArtifactFilePreview
                 content={editorContent}
-                language={language}
-                scrollKey={filepathFromProps}
+                language={language ?? "text"}
+                scrollKey={`${threadId}:${filepathFromProps}`}
                 url={url}
+                truncated={truncated}
+                active={effectiveViewMode === "preview" && !isLoading}
               />
             )}
           {isCodeFile &&
@@ -685,8 +710,19 @@ export function ArtifactFileDetail({
           {!isCodeFile && canPreviewInBrowser && (
             <iframe
               className="size-full"
-              sandbox=""
+              // PDFs render WITHOUT the sandbox attribute: Chromium blocks
+              // its built-in PDF viewer inside ``sandbox=""``. This is safe
+              // because the endpoint declares ``application/pdf`` and sends
+              // ``X-Content-Type-Options: nosniff``, so the bytes cannot be
+              // reinterpreted as active markup, and the PDFium viewer
+              // exposes no same-origin script surface. Active content
+              // (HTML/XML family) never reaches this branch — the backend
+              // serves it as an attachment.
+              sandbox={getFileExtension(filepath) === "pdf" ? undefined : ""}
               src={urlOfArtifact({ filepath, threadId, isMock })}
+              // Accessible name for the frame (WCAG frame titles); the PDF
+              // branch must not be located by a bare ``iframe:not([title])``.
+              title={getFileName(filepath)}
             />
           )}
           {!isCodeFile && !canPreviewInBrowser && (

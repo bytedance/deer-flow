@@ -193,11 +193,15 @@ function isOfferableSkill(
 ): boolean {
   // Grammar before shadowing: a name the slash parser can never match
   // (uppercase, whitespace, underscores, leading/trailing hyphens) must not
-  // be offered even when no reserved word shadows it.
+  // be offered even when no reserved word shadows it. `context` is the one
+  // exception: only the exact `/context compact` alias is reserved, while
+  // `/context <task>` activates the skill — so a skill named `context`
+  // stays offerable on every surface.
+  const foldedName = skill.name.toLowerCase();
   return (
     skill.enabled &&
     isActivatableSkillName(skill.name) &&
-    !foldedShadowedNames.has(skill.name.toLowerCase())
+    (!foldedShadowedNames.has(foldedName) || foldedName === "context")
   );
 }
 
@@ -211,6 +215,18 @@ export function getSelectableSkills(
 ): Skill[] {
   const foldedShadowedNames = foldShadowedSlashNames(builtinCommandNames);
   return skills.filter((skill) => isOfferableSkill(skill, foldedShadowedNames));
+}
+
+export function filterSkillsForAgent(
+  skills: Skill[],
+  agentSkillNames?: string[] | null,
+): Skill[] {
+  if (!agentSkillNames) {
+    return skills;
+  }
+
+  const allowedNames = new Set(agentSkillNames);
+  return skills.filter((skill) => allowedNames.has(skill.name));
 }
 
 export function getMatchingSkillSuggestions(

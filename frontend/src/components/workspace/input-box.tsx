@@ -71,10 +71,18 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
+import {
+  buildConversationReferenceMetadata,
+  type ConversationReference,
+} from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import {
+  isHiddenFromUIMessage,
+  type FileInMessage,
+} from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -117,15 +125,6 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -135,6 +134,8 @@ import {
 } from "../ui/dropdown-menu";
 
 import { ComposerSkillPicker } from "./composer-skill-picker";
+import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
+import { ReferenceConversationsButton } from "./conversation-references/reference-conversations-button";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -142,6 +143,7 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  filterSkillsForAgent,
   getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
@@ -157,6 +159,11 @@ import {
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
@@ -229,6 +236,8 @@ function escapeXmlAttribute(value: string) {
 export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  /** Thread IDs attached through the conversation picker; sent as run context. */
+  conversationReferences?: string[];
   onSent?: () => void;
 };
 
@@ -300,8 +309,12 @@ export function InputBox({
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
+  agentSkillNames,
+  agentSkillsLoading = false,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -324,6 +337,8 @@ export function InputBox({
   threadId: string;
   draftThreadId?: string;
   draftAgentName?: string | null;
+  agentSkillNames?: string[] | null;
+  agentSkillsLoading?: boolean;
   /**
    * The active custom agent's configured default model, if any. Used as the
    * auto-selection fallback so an agent chat honors the agent's own default
@@ -333,21 +348,43 @@ export function InputBox({
   defaultModelName?: string | null;
   initialValue?: string;
   onContextChange?: (
-    context: Omit<
-      AgentThreadContext,
-      "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
-    > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-      reasoning_effort?: "minimal" | "low" | "medium" | "high";
-    },
+    // Explicit selections contain only the fields changed by that action,
+    // never the whole thread-resolved context (which may override the account).
+    context: Partial<
+      Omit<
+        AgentThreadContext,
+        "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+      > & {
+        mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+        reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      }
+    >,
+    options?: { automatic: boolean },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
+  /**
+   * Prepare a not-yet-materialized thread before a builtin command creates
+   * it server-side. The `/goal <condition>` PUT endpoint materializes a
+   * missing thread row itself, so a project-scoped new chat uses this to
+   * assign membership first — the later idempotent thread create would
+   * otherwise return that unassigned row without the project. Only runs for
+   * goal-set: status/clear never create a thread server-side. Rejecting
+   * aborts the command and keeps the composer's text for a retry.
+   */
+  onPrepareThread?: () => void | Promise<void>;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -360,7 +397,22 @@ export function InputBox({
   const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
+  // Conversations attached for the next message only. Not persisted with the
+  // draft; cleared once a send proceeds or the composer moves to another thread.
+  const [conversationReferences, setConversationReferences] = useState<
+    ConversationReference[]
+  >([]);
+  useEffect(() => {
+    setConversationReferences([]);
+  }, [threadId]);
   const removeAttachment = attachments.remove;
+  // Project documents attached from the shelf arrive already ingested
+  // thread-side (spec §9): the composer shows them as completed attachments
+  // and includes them in the next send without a re-upload. Staged only on
+  // attach success; the hook consumes the staged entry once per thread and
+  // keeps it across a Strict-Mode effect replay.
+  const [projectAttachments, setProjectAttachments] =
+    useStagedProjectAttachments(threadId);
   const { skills, isLoading: skillsLoading } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
@@ -576,11 +628,14 @@ export function InputBox({
       return;
     }
 
-    onContextChange?.({
-      ...context,
-      model_name: nextModelName,
-      mode: nextMode,
-    });
+    onContextChange?.(
+      {
+        ...context,
+        model_name: nextModelName,
+        mode: nextMode,
+      },
+      { automatic: true },
+    );
   }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
@@ -613,12 +668,19 @@ export function InputBox({
       }),
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
+  const agentScopedSkills = useMemo(
+    () =>
+      agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
+    [agentSkillNames, agentSkillsLoading, skills],
+  );
   const enabledSkillNames = useMemo(
     () =>
       new Set(
-        skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+        agentScopedSkills
+          .filter((skill) => skill.enabled)
+          .map((skill) => skill.name),
       ),
-    [skills],
+    [agentScopedSkills],
   );
   const cancelDraftSaveTimer = useCallback(() => {
     if (draftSaveTimerRef.current === null) {
@@ -724,7 +786,7 @@ export function InputBox({
   }, [flushLatestDraft]);
 
   useEffect(() => {
-    if (skillsLoading || hydratedDraftKey === draftKey) {
+    if (skillsLoading || agentSkillsLoading || hydratedDraftKey === draftKey) {
       return;
     }
 
@@ -743,7 +805,7 @@ export function InputBox({
     const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
     setTextInput(resolvedDraft.text);
     const restoredSkill = resolvedDraft.skillName
-      ? skills.find(
+      ? agentScopedSkills.find(
           (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
         )
       : undefined;
@@ -763,7 +825,8 @@ export function InputBox({
     hydratedDraftKey,
     initialValue,
     setTextInput,
-    skills,
+    agentScopedSkills,
+    agentSkillsLoading,
     skillsLoading,
     textInput.value,
   ]);
@@ -833,11 +896,13 @@ export function InputBox({
       if (!model) {
         return;
       }
+      const mode = getResolvedMode(
+        context.mode,
+        model.supports_thinking ?? false,
+      );
       onContextChange?.({
-        ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        ...(mode !== context.mode ? { mode } : {}),
       });
       setModelDialogOpen(false);
     },
@@ -850,7 +915,6 @@ export function InputBox({
         return;
       }
       onContextChange?.({
-        ...context,
         mode: getResolvedMode(mode, supportThinking),
         reasoning_effort:
           mode === "ultra"
@@ -862,7 +926,7 @@ export function InputBox({
                 : "minimal",
       });
     },
-    [disabled, onContextChange, context, polishingInput, supportThinking],
+    [disabled, onContextChange, polishingInput, supportThinking],
   );
 
   const handleReasoningEffortSelect = useCallback(
@@ -871,11 +935,10 @@ export function InputBox({
         return;
       }
       onContextChange?.({
-        ...context,
         reasoning_effort: effort,
       });
     },
-    [disabled, onContextChange, context, polishingInput],
+    [disabled, onContextChange, polishingInput],
   );
 
   const handleGoalCommand = useCallback(
@@ -1093,16 +1156,41 @@ export function InputBox({
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
+      const referenceIds = conversationReferences.map(
+        (reference) => reference.threadId,
+      );
+      // Project-shelf attachments are already ingested thread-side (§9):
+      // they join ``additional_kwargs.files`` as completed uploads without a
+      // re-upload, and merge with any files uploaded in this send
+      // (buildThreadSubmitMessages concatenates the two lists).
+      const stagedFiles: FileInMessage[] = projectAttachments.map(
+        (attachment) => ({
+          filename: attachment.filename,
+          size: attachment.size_bytes,
+          path: attachment.virtual_path,
+          status: "uploaded" as const,
+        }),
+      );
+      const additionalKwargs = {
+        ...(quotes.length ? buildReferenceMessageMetadata(quoteContexts) : {}),
+        ...(referenceIds.length
+          ? buildConversationReferenceMetadata(conversationReferences)
+          : {}),
+        ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
+      };
       const submitOptions: InputBoxSubmitOptions = {
+        ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
         ...(quotes.length
           ? {
-              additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
               additionalInputMessages: [
                 buildHiddenConversationQuoteMessage({
                   contexts: quoteContexts,
                 }),
               ],
             }
+          : {}),
+        ...(referenceIds.length
+          ? { conversationReferences: referenceIds }
           : {}),
         // Clear one-time state only once the send genuinely proceeds. If the
         // send is dropped by the in-flight guard, `onSent` never fires.
@@ -1114,6 +1202,8 @@ export function InputBox({
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
           sidecar?.clearConversationQuotes(quoteIds);
+          setConversationReferences([]);
+          setProjectAttachments([]);
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
@@ -1121,14 +1211,17 @@ export function InputBox({
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
-        onContextChange?.({
-          ...context,
-          model_name: resolvedModelName,
-          mode: getResolvedMode(
-            context.mode,
-            selectedModel?.supports_thinking ?? false,
-          ),
-        });
+        onContextChange?.(
+          {
+            ...context,
+            model_name: resolvedModelName,
+            mode: getResolvedMode(
+              context.mode,
+              selectedModel?.supports_thinking ?? false,
+            ),
+          },
+          { automatic: true },
+        );
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
             Promise.resolve(submit()).then(resolve).catch(reject);
@@ -1140,13 +1233,16 @@ export function InputBox({
     },
     [
       context,
+      conversationReferences,
       draftKey,
       invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
+      projectAttachments,
+      setProjectAttachments,
       reportUploadLimitViolations,
       resolvedModelName,
-      selectedModel?.supports_thinking,
+      selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
@@ -1154,6 +1250,14 @@ export function InputBox({
   );
 
   const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
+    if (!canStopStreaming) {
+      return;
+    }
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
@@ -1161,7 +1265,7 @@ export function InputBox({
     setFollowupsHidden(true);
     setFollowupsLoading(false);
     onStop?.();
-  }, [onStop]);
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -1178,7 +1282,13 @@ export function InputBox({
         : message;
       const submitAction = getInputSubmitAction({
         text: messageWithSlashSkill.text,
-        fileCount: messageWithSlashSkill.files.length,
+        // Staged project-shelf attachments count exactly like uploaded
+        // files: submitThreadMessage maps them into the outgoing message's
+        // ``additional_kwargs.files``, so an attachment-only submit must not
+        // read as empty, and /goal or /compact must not intercept while an
+        // attach chip is present.
+        fileCount:
+          messageWithSlashSkill.files.length + projectAttachments.length,
         status,
       });
       if (submitAction.kind === "goal") {
@@ -1194,6 +1304,35 @@ export function InputBox({
           // Reject so the composer keeps the user's text for editing instead of
           // clearing it (PromptInput only preserves input on a rejected submit).
           return Promise.reject(new Error("goal-too-long"));
+        }
+        if (submitAction.command.kind === "set") {
+          // A goal-set PUT creates the thread server-side when missing, so a
+          // project-scoped new chat must assign membership first. The prepare
+          // callback toasts its own failure; reject so the composer keeps the
+          // text for a retry instead of issuing an unassigned goal.
+          //
+          // Fence against conversation switches while preparation runs: the
+          // goal PUT registers its AbortController only when it starts, so
+          // the thread-change/unmount cleanup cannot cancel an in-flight
+          // prepare. Capture the goal-request epoch before the await — the
+          // cleanup bumps it via abortGoalRequest — and drop the stale
+          // continuation before it can clear the new conversation's composer
+          // or launch the abandoned submission.
+          const requestEpoch = goalRequestStateRef.current.sequence;
+          try {
+            await onPrepareThread?.();
+          } catch (error) {
+            return Promise.reject(
+              error instanceof Error
+                ? error
+                : new Error("thread preparation failed"),
+            );
+          }
+          if (goalRequestStateRef.current.sequence !== requestEpoch) {
+            // Reject (not resolve) so PromptInput keeps the current
+            // conversation's composer text untouched.
+            return Promise.reject(new Error("goal-preparation-stale"));
+          }
         }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
@@ -1231,6 +1370,8 @@ export function InputBox({
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
+      onPrepareThread,
+      projectAttachments.length,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1303,7 +1444,7 @@ export function InputBox({
       return [];
     }
     const matches = getMatchingSkillSuggestions(
-      skills,
+      agentScopedSkills,
       slashSkillQuery,
       builtinSlashCommands,
     );
@@ -1316,7 +1457,12 @@ export function InputBox({
     return selectedSlashSkill
       ? matches.filter(({ kind }) => kind === "skill")
       : matches;
-  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
+  }, [
+    agentScopedSkills,
+    builtinSlashCommands,
+    selectedSlashSkill,
+    slashSkillQuery,
+  ]);
   // A selected skill does not close the catalog: `/` reopens it so a skill can
   // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =
@@ -1328,6 +1474,9 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2209,6 +2358,47 @@ export function InputBox({
               </div>
             )}
           </PromptInputAttachments>
+          {projectAttachments.map((attachment) => (
+            <div
+              key={attachment.virtual_path}
+              className="bg-muted text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+              data-testid="project-attachment-chip"
+            >
+              <PaperclipIcon className="size-3" />
+              <span className="max-w-40 truncate">{attachment.filename}</span>
+              <button
+                aria-label={t.inputBox.removeProjectAttachment}
+                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                type="button"
+                onClick={() =>
+                  setProjectAttachments((previous) =>
+                    previous.filter(
+                      (candidate) =>
+                        candidate.virtual_path !== attachment.virtual_path,
+                    ),
+                  )
+                }
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+          {conversationReferences.map((reference) => (
+            <ConversationReferenceChip
+              key={reference.threadId}
+              onRemove={() =>
+                setConversationReferences((current) =>
+                  current.filter(
+                    (item) => item.threadId !== reference.threadId,
+                  ),
+                )
+              }
+              removeLabel={t.inputBox.referenceConversationsRemove(
+                reference.title,
+              )}
+              title={reference.title}
+            />
+          ))}
           {polishingInput && (
             <div
               aria-live="polite"
@@ -2324,6 +2514,14 @@ export function InputBox({
                   textInput.setInput(draft);
                 }
               }}
+            />
+
+            <ReferenceConversationsButton
+              className="px-2!"
+              currentThreadId={threadId}
+              disabled={composerLocked}
+              onChange={setConversationReferences}
+              references={conversationReferences}
             />
             <VoiceInputButton
               disabled={composerLocked}
@@ -2678,52 +2876,46 @@ export function InputBox({
                 {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
               </span>
             )}
-            <ModelSelector
+            <ModelPicker
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
-              <ModelSelectorTrigger asChild>
+              <ModelPickerTrigger asChild>
                 <PromptInputButton
                   className="max-w-40 min-w-0 sm:max-w-56"
                   disabled={composerLocked}
                 >
                   <div className="flex min-w-0 flex-col text-left">
-                    <ModelSelectorName className="text-xs font-normal">
+                    <span className="flex-1 truncate text-left text-xs font-normal">
                       {selectedModel?.display_name}
-                    </ModelSelectorName>
+                    </span>
                   </div>
                 </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
+              </ModelPickerTrigger>
+              <ModelPickerContent
+                open={modelDialogOpen}
+                models={models}
+                selectedModelName={selectedModel?.name}
+                onModelSelect={handleModelSelect}
+              />
+            </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={composerLocked || stopDenied}
               variant="outline"
               status={status}
+              // A bare disabled stop square reads as a broken composer;
+              // explain the permission boundary (native title, since a
+              // Radix tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
