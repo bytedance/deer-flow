@@ -34,14 +34,20 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     # a login-profile ``set -e`` so a failing find still records $?. End with
     # ``exit`` of that status (126 if the file is missing): the last command
     # would otherwise be ``rm``, whose 0/1 is not find's status.
+    # ``set +e`` stays outermost (pinned by existing tests); the rest runs in a
+    # ( ... ) subshell: a bare ``exit`` in the implicit persistent session kills
+    # the session's shell process and the AIO server's response path for that
+    # request hangs forever (verified: bare ``exit 0`` always wedges; a subshell
+    # ``exit`` only kills the subshell, the session survives, and the exit code
+    # and output propagate unchanged).
     return (
-        f"set +e; if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 1; fi; "
+        f"set +e; ( if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 1; fi; "
         f"_st=/tmp/df_find_$$; "
         f"{{ find -H {quoted} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null; "
         f'echo $? > "$_st"; }} | head -n {n}; '
         f'st=$(cat "$_st" 2>/dev/null); '
         f"printf '\\n%s\\n' {_STATUS_PREFIX}$st; "
-        f'rm -f "$_st"; exit "${{st:-126}}"'
+        f'rm -f "$_st"; exit "${{st:-126}}" )'
     )
 
 
