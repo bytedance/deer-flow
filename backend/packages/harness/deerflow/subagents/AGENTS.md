@@ -2,6 +2,8 @@
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until the owned service stop task terminates, then propagates the first caller cancellation with any service failure/cancellation as its cause. The drain is intentionally unbounded: repository awaits and child cleanup must terminate; a timeout must not detach still-owned work. Keep terminal-outcome and repeated-cancellation coverage in `tests/test_subagent_runtime.py`.
+
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
 before persistence (empty becomes null; 20 items × 500 neutralized characters),
 sharing `normalize_acceptance_criteria` with the executor and checker.

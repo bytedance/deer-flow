@@ -126,3 +126,52 @@ async def test_runtime_stop_drains_owned_batch_worker_across_repeated_cancellati
 
         service.stop.assert_awaited_once_with()
         assert runtime.batch_submitter is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_caller", [False, True])
+@pytest.mark.parametrize("stop_error_type", [RuntimeError, asyncio.CancelledError])
+async def test_runtime_stop_preserves_caller_cancellation_when_service_fails(cancel_caller: bool, stop_error_type: type[BaseException]) -> None:
+    stop_error = stop_error_type("service shutdown failed")
+    stop_started = asyncio.Event()
+    allow_stop = asyncio.Event()
+
+    async def failing_stop() -> None:
+        stop_started.set()
+        await allow_stop.wait()
+        raise stop_error
+
+    service = MagicMock()
+    service.start = AsyncMock()
+    service.stop = AsyncMock(side_effect=failing_stop)
+    with patch("deerflow.subagents.batch_service.SubagentBatchService", return_value=service):
+        runtime = SubagentRuntime(
+            batch_repository=MagicMock(),
+            batch_config=SubagentBatchesConfig(enabled=True),
+            app_config=MagicMock(),
+        )
+        await runtime.start()
+        stop_task = asyncio.create_task(runtime.stop())
+        try:
+            await asyncio.wait_for(stop_started.wait(), timeout=1)
+            if cancel_caller:
+                stop_task.cancel("first caller cancellation")
+                await asyncio.sleep(0)
+                stop_task.cancel("second caller cancellation")
+                await asyncio.sleep(0)
+                assert not stop_task.done()
+            allow_stop.set()
+
+            expected_error = asyncio.CancelledError if cancel_caller else type(stop_error)
+            with pytest.raises(expected_error) as raised:
+                await stop_task
+            if cancel_caller:
+                assert raised.value.args == ("first caller cancellation",)
+                assert raised.value.__cause__ is stop_error
+            else:
+                assert raised.value is stop_error
+            service.stop.assert_awaited_once_with()
+            assert runtime.batch_submitter is None
+        finally:
+            allow_stop.set()
+            await asyncio.gather(stop_task, return_exceptions=True)

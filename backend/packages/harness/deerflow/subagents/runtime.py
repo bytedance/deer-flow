@@ -129,7 +129,13 @@ class SubagentRuntime:
             self._batch_started = True
 
     async def stop(self) -> None:
-        """Stop the owned worker before propagating caller cancellation."""
+        """Stop the owned worker before propagating caller cancellation.
+
+        The drain intentionally has no timeout: releasing lifecycle ownership
+        while the service is still stopping would allow work to outlive this
+        runtime. The owned service's stop() must terminate, so its repository
+        awaits and child cleanup must not suppress cancellation indefinitely.
+        """
 
         service = self._owned_batch_service
         if service is None:
@@ -144,7 +150,10 @@ class SubagentRuntime:
             cancellation: asyncio.CancelledError | None = None
             while not stop_task.done():
                 try:
-                    await asyncio.shield(stop_task)
+                    # wait() neither forwards caller cancellation to the owned
+                    # task nor raises that task's exception. Inspect its outcome
+                    # below so a service failure cannot replace cancellation.
+                    await asyncio.wait({stop_task})
                 except asyncio.CancelledError as exc:
                     if cancellation is None:
                         cancellation = exc
@@ -152,7 +161,7 @@ class SubagentRuntime:
             if cancellation is not None:
                 try:
                     stop_task.result()
-                except Exception as exc:
+                except (asyncio.CancelledError, Exception) as exc:
                     raise cancellation from exc
                 raise cancellation
             stop_task.result()
