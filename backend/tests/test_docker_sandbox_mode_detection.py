@@ -7,23 +7,16 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from shutil import which
 
 import pytest
+from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
-BASH_CANDIDATES = [
-    Path(r"C:\Program Files\Git\bin\bash.exe"),
-    Path(which("bash")) if which("bash") else None,
-]
-BASH_EXECUTABLE = next(
-    (str(path) for path in BASH_CANDIDATES if path is not None and path.exists() and "WindowsApps" not in str(path)),
-    None,
-)
+BASH_EXECUTABLE = find_script_bash()
 
 if BASH_EXECUTABLE is None:
-    pytestmark = pytest.mark.skip(reason="bash is required for docker.sh detection tests")
+    pytestmark = pytest.mark.skip(reason="Git Bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:
@@ -610,3 +603,151 @@ def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "Docker socket not found" in result.stdout + result.stderr
+
+
+def test_aio_deploy_socket_unsets_default_on_windows(tmp_path):
+    """deploy.sh on Windows Git Bash unsets default /var/run/docker.sock before calling Compose."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""
+
+
+def test_aio_deploy_socket_preserves_unset_default_on_windows(tmp_path):
+    """deploy.sh does not export default /var/run/docker.sock when unset initially."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env.pop("DEER_FLOW_DOCKER_SOCKET", None)
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""
+
+
+def test_aio_deploy_socket_preserves_custom_socket_on_windows(tmp_path):
+    """deploy.sh preserves and exports custom DEER_FLOW_DOCKER_SOCKET on Windows."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text(
+        'uname() { echo "MINGW64_NT-10.0"; }\n[() {\n    if [[ "$1" == "!" && "$2" == "-S" ]]; then\n        return 1\n    fi\n    builtin [ "$@"\n}\n',
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/custom/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == "/custom/docker.sock"
+
+
+def test_aio_deploy_socket_reads_from_dotenv(tmp_path):
+    """deploy.sh resolves DEER_FLOW_DOCKER_SOCKET from .env when unset in shell environment."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    (worktree / ".env").write_text("DEER_FLOW_DOCKER_SOCKET=/var/run/docker.sock\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env.pop("DEER_FLOW_DOCKER_SOCKET", None)
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""

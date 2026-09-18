@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, text
+from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -57,11 +57,14 @@ class RunRow(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    change_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),
         Index("ix_runs_lease", "lease_expires_at"),
         Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
+        Index("ix_runs_change_seq", "change_seq", "run_id"),
+        Index("ix_runs_user_change_seq", "user_id", "change_seq", "run_id"),
         # Cross-process atomicity guarantee: at most one pending/running run per
         # thread. Must live in ORM ``__table_args__`` (not just the migration)
         # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``
@@ -74,3 +77,12 @@ class RunRow(Base):
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
     )
+
+
+class RunChangeClockRow(Base):
+    """Singleton counter allocating backend-owned changed-run positions."""
+
+    __tablename__ = "run_change_clock"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))

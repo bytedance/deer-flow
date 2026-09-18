@@ -10,12 +10,17 @@ nothing and exited 0, exactly like a genuine "no matches" (#5376).
 command's own status after the bounded output, the same technique as
 :mod:`deerflow.sandbox.remote_list_dir`. The script always exits 0 so SDKs that
 raise on a non-zero exit still return the marker; the marker alone decides.
+
+Callers filter the bounded lines in Python (ignored directories, glob scope),
+so returning fewer than ``max_results`` does not prove the search was complete.
+The command lets one line past ``limit`` through, and the parser reports
+whether it arrived; exactly ``limit`` lines is a complete result.
 """
 
 from __future__ import annotations
 
 import shlex
-from typing import Literal
+from typing import Literal, NamedTuple
 
 SearchTool = Literal["grep", "find"]
 
@@ -33,13 +38,22 @@ _OK_STATUSES: dict[str, tuple[int, ...]] = {"grep": (0, 1, _SIGPIPE), "find": (0
 _READ_ERROR_STATUS: dict[str, int] = {"grep": 2, "find": 1}
 
 
+class RemoteSearchOutput(NamedTuple):
+    """Search output lines, and whether the search produced more than ``limit``."""
+
+    text: str
+    truncated: bool
+
+
 def remote_search_command(search: str, root: str, *, limit: int) -> str:
     """Wrap a ``grep``/``find`` command so its outcome survives ``| head``.
 
     ``search`` must write only results to stdout; callers keep ``2>/dev/null``.
+    Pass the same ``limit`` to :func:`parse_remote_search_output`.
     """
     quoted = shlex.quote(root)
-    n = int(limit)
+    # One extra line is the truncation signal; the parser drops it.
+    n = int(limit) + 1
     return (
         f"set +e; if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 0; fi; "
         f'_st=/tmp/df_search_$$; {{ {search}; echo $? > "$_st"; }} | head -n {n}; '
@@ -48,8 +62,11 @@ def remote_search_command(search: str, root: str, *, limit: int) -> str:
     )
 
 
-def parse_remote_search_output(stdout: str | None, root: str, *, tool: SearchTool) -> str:
-    """Return the search output without the status marker.
+def parse_remote_search_output(stdout: str | None, root: str, *, tool: SearchTool, limit: int) -> RemoteSearchOutput:
+    """Return at most ``limit`` output lines without the status marker.
+
+    ``truncated`` is true when the search printed more than ``limit`` lines, so
+    results filtered from ``text`` may be incomplete.
 
     Raises:
         FileNotFoundError: The search root does not exist.
@@ -73,7 +90,7 @@ def parse_remote_search_output(stdout: str | None, root: str, *, tool: SearchToo
     except ValueError:
         raise OSError(f"Failed to {tool} under {root}: search status unavailable") from None
     if status in _OK_STATUSES[tool]:
-        return "\n".join(lines)
+        return RemoteSearchOutput("\n".join(lines[:limit]), len(lines) > limit)
     if status == _READ_ERROR_STATUS[tool]:
         raise OSError(f"Failed to {tool} under {root}: {tool} exited with code {status}, usually because some files or directories could not be read; results would be incomplete, so search a narrower path")
     raise OSError(f"Failed to {tool} under {root}: command exited with code {status}")

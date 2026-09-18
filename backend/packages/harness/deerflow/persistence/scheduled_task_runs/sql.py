@@ -12,7 +12,12 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import (
+    ACTIVE_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    ScheduledTaskRow,
+    ScheduledTaskRunStatus,
+)
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -224,17 +229,18 @@ class ScheduledTaskRunRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
+    async def list_by_task(
+        self,
+        task_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: ScheduledTaskRunStatus | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        if status is not None:
+            stmt = stmt.where(ScheduledTaskRunRow.status == status)
+        stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
@@ -306,11 +312,23 @@ class ScheduledTaskRunRepository:
     ) -> dict[str, Any] | None:
         """Atomically move one waiting row into the lease-fenced launch phase."""
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "postgresql":
+            dialect = session.get_bind().dialect.name
+            if dialect == "postgresql":
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY},
                 )
+            elif dialect == "sqlite":
+                # The budget count below is only meaningful if no peer can
+                # claim between it and the UPDATE. A deferred SQLite
+                # transaction does not reserve the writer until that UPDATE,
+                # which is too late: every claimer would read the same stale
+                # count and pass. BEGIN IMMEDIATE takes the writer first, the
+                # same reservation _lock_task makes for a parent row, and it
+                # serializes claimers in other processes sharing the file too.
+                # The claim targets one row, but the budget is global, so this
+                # has to be the database-wide writer rather than a row lock.
+                await session.execute(text("BEGIN IMMEDIATE"))
             executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
             if int(executing or 0) >= global_max_concurrent_runs:
                 await session.rollback()

@@ -151,7 +151,8 @@ async def test_abandoned_relay_records_are_drained_by_retried_stop_or_restart(tm
     await abandoned_relay
     assert await seen_events.aseen(_CHANNEL_ID, "late-event")
 
-    await asyncio.sleep(0.05)
+    assert seen_events._flush_handle is None
+    assert seen_events._flush_task is None
     stopped_view = BuzzSeenEventStore(path)
     assert not await stopped_view.aseen(_CHANNEL_ID, "late-event")
 
@@ -160,15 +161,28 @@ async def test_abandoned_relay_records_are_drained_by_retried_stop_or_restart(tm
     assert await retried_stop_view.aseen(_CHANNEL_ID, "late-event")
 
     await seen_events.arecord(_CHANNEL_ID, "restart-event")
-    await asyncio.sleep(0.05)
+    assert seen_events._flush_handle is None
+    assert seen_events._flush_task is None
     still_stopped_view = BuzzSeenEventStore(path)
     assert not await still_stopped_view.aseen(_CHANNEL_ID, "restart-event")
 
+    flush_completed = asyncio.Event()
+    original_flush_once = seen_events._flush_once
+
+    async def tracked_flush_once() -> bool:
+        saved = await original_flush_once()
+        flush_completed.set()
+        return saved
+
+    monkeypatch.setattr(seen_events, "_flush_once", tracked_flush_once)
     monkeypatch.setattr(buzz_nostr, "parse_private_key", lambda _value: buzz_nostr.NostrKeys(secret=b"", pubkey_hex=_BOT_PUBLIC))
     channel._spawn_connection = lambda: None
     await channel.start()
-    await asyncio.sleep(0.05)
-
-    restarted_view = BuzzSeenEventStore(path)
-    assert await restarted_view.aseen(_CHANNEL_ID, "restart-event")
-    await channel.stop()
+    try:
+        # Wait for the automatically resumed write, not a fixed disk/executor
+        # latency. Calling aflush() here would hide a broken resume() path.
+        await asyncio.wait_for(flush_completed.wait(), timeout=5)
+        restarted_view = BuzzSeenEventStore(path)
+        assert await restarted_view.aseen(_CHANNEL_ID, "restart-event")
+    finally:
+        await channel.stop()

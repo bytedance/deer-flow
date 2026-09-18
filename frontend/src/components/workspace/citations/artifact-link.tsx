@@ -2,7 +2,7 @@ import type { AnchorHTMLAttributes } from "react";
 
 import { cn } from "@/lib/utils";
 
-import { isSafeHref } from "../messages/markdown-link";
+import { isSafeHref, UnsafeLink } from "../messages/markdown-link";
 
 import { CitationLink, extractReactNodeText } from "./citation-link";
 
@@ -21,16 +21,9 @@ export function ArtifactLink(props: AnchorHTMLAttributes<HTMLAnchorElement>) {
     // into the DOM / trigger React DOM warnings.
     const { className, children } = props;
     return (
-      <span
-        className={cn(
-          "text-muted-foreground cursor-not-allowed underline decoration-dotted underline-offset-2",
-          className,
-        )}
-        aria-label="Unsafe link omitted"
-        title={`Unsafe link scheme in ${props.href}`}
-      >
+      <UnsafeLink href={props.href} className={className}>
         {children}
-      </span>
+      </UnsafeLink>
     );
   }
   const childrenText = extractReactNodeText(props.children);

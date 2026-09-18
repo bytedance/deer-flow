@@ -4,6 +4,21 @@ Oversized tool results are persisted to disk and replaced with a compact
 typed synopsis containing a file reference.  When disk persistence is
 unavailable the middleware falls back to head+tail truncation so the
 model context is never blown by a single large tool return.
+
+The model-call hooks also budget the other bulky side of a tool call: the
+``content`` argument of a successful ``write_file`` call (issue #5328, step
+2). After a successful write the file on disk is the source of truth, and the
+read-before-write gate forces a ``read_file`` before the next modification of
+that path, so once a *later* successful read or write of the same path exists
+the historical copy is redundant with it. Such superseded content is replaced
+by a short deterministic placeholder in the *model-bound request only*
+(``request.override``): ``state["messages"]``, checkpoints, tool receipts,
+loop detection, and the run journal keep the original arguments, and nothing
+is externalized to disk (the file itself is the reference). The newest
+``keep_recent_writes`` successful writes always stay visible so the model can
+still say what it just wrote without a read. Gate-blocked calls are the
+read-before-write middleware's own policy; both rewrite through the shared
+``tool_call_args`` helper so every provider surface changes together.
 """
 
 from __future__ import annotations
@@ -11,20 +26,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import posixpath
 import shlex
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -579,6 +597,115 @@ def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list
 
 
 # ---------------------------------------------------------------------------
+# Superseded write payload elision (issue #5328, step 2)
+# ---------------------------------------------------------------------------
+
+_WRITE_TOOL = "write_file"
+# A successful call of these tools changes the file, so every earlier write's
+# content is stale afterwards. ``str_replace`` payloads are never elided
+# themselves: they are usually small, and the issue scopes step 2 to
+# ``write_file.content``.
+_FILE_MODIFYING_TOOLS = frozenset({"write_file", "str_replace"})
+# A non-error read (full, ranged, or head-truncated — ``partial_success``)
+# showed the model the on-disk file, which is what the placeholder points at.
+_FILE_READING_TOOLS = frozenset({"read_file"})
+_SUPERSEDING_READ_STATUSES = frozenset({"success", "partial_success"})
+# Deterministic for a given payload so repeated model calls keep the same
+# request prefix (prompt caching) instead of drifting. Framework-owned static
+# text plus a character count; no model-supplied value is interpolated (the
+# path stays visible in the call's own ``path`` argument).
+_ELIDED_WRITE_CONTENT_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+
+
+def elide_superseded_write_payloads(messages: list[Any], *, min_chars: int, keep_recent: int) -> list[Any] | None:
+    """Return ``messages`` with superseded ``write_file`` content replaced by placeholders, or ``None`` if unchanged.
+
+    Only the policy lives here. A call qualifies when its paired result is
+    stamped ``deerflow_tool_meta.status == "success"``, its ``content`` is a
+    string of at least ``min_chars`` characters, a *later* message holds a
+    successful ``read_file`` / ``write_file`` / ``str_replace`` of the same
+    normalized path, and it is not among the ``keep_recent`` newest successful
+    writes. Calls are paired with results per occurrence
+    (``tool_call_args.pair_tool_call_results``), and "later" means a later
+    message index: the calls of one AIMessage ran concurrently, so a same-turn
+    read may predate the write and never supersedes it. The surface-by-surface
+    rewrite is ``rewrite_messages_tool_call_args``, which never mutates the
+    input and passes untouched messages through by identity, so the stored
+    history keeps the original arguments and the output is identical across
+    model calls. The policy is monotonic: once a write is elided, more history
+    never brings its content back.
+    """
+    if not _has_elidable_write(messages, min_chars):
+        return None
+
+    latest_touch: dict[str, int] = {}
+    successful_writes: list[tuple[ToolCallOccurrence, str]] = []
+    for occurrence in pair_tool_call_results(messages):
+        path = _normalized_path_arg(occurrence.args)
+        if path is None:
+            continue
+        name = occurrence.name
+        if name in _FILE_MODIFYING_TOOLS:
+            if _result_status(occurrence.result) != "success":
+                continue
+            if name == _WRITE_TOOL:
+                successful_writes.append((occurrence, path))
+        elif name in _FILE_READING_TOOLS:
+            if _result_status(occurrence.result) not in _SUPERSEDING_READ_STATUSES:
+                continue
+        else:
+            continue
+        latest_touch[path] = max(latest_touch.get(path, -1), occurrence.index)
+
+    replacements: dict[tuple[int, str], dict[str, Any]] = {}
+    cutoff = max(0, len(successful_writes) - keep_recent)
+    for occurrence, path in successful_writes[:cutoff]:
+        content = occurrence.args.get("content")
+        if not isinstance(content, str) or not content or len(content) < min_chars:
+            continue
+        if latest_touch.get(path, -1) <= occurrence.index:
+            continue
+        replacements[(id(occurrence.message), occurrence.call_id)] = {**occurrence.args, "content": _ELIDED_WRITE_CONTENT_TEMPLATE.format(chars=len(content))}
+    if not replacements:
+        return None
+
+    def replacement_for(message: AIMessage, tool_call: dict[str, Any]) -> dict[str, Any] | None:
+        return replacements.get((id(message), tool_call["id"]))
+
+    return rewrite_messages_tool_call_args(messages, replacement_for)
+
+
+def _has_elidable_write(messages: list[Any], min_chars: int) -> bool:
+    """Cheap pre-scan so a history without a sizeable ``write_file`` call is never paired or rebuilt."""
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in message.tool_calls or ():
+            if not isinstance(tool_call, dict) or tool_call.get("name") != _WRITE_TOOL:
+                continue
+            args = tool_call.get("args")
+            content = args.get("content") if isinstance(args, dict) else None
+            if isinstance(content, str) and content and len(content) >= min_chars:
+                return True
+    return False
+
+
+def _result_status(result: ToolMessage | None) -> str | None:
+    """``deerflow_tool_meta.status`` of a paired result; ``None`` when unanswered or unstamped (never treated as success)."""
+    if result is None:
+        return None
+    meta = (result.additional_kwargs or {}).get(TOOL_META_KEY)
+    status = meta.get("status") if isinstance(meta, dict) else None
+    return status if isinstance(status, str) else None
+
+
+def _normalized_path_arg(args: Mapping[str, Any]) -> str | None:
+    """The call's ``path`` argument normalized the way the read-before-write gate keys its marks."""
+    path = args.get("path")
+    return posixpath.normpath(path) if isinstance(path, str) and path else None
+
+
+# ---------------------------------------------------------------------------
 # Middleware class
 # ---------------------------------------------------------------------------
 
@@ -636,7 +763,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         sandbox = _resolve_sandbox(request)
         return await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
 
-    # -- model call hooks (historical message truncation) ------------------
+    # -- model call hooks (historical context budgeting) -------------------
 
     @override
     def wrap_model_call(
@@ -644,13 +771,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        if self._config.enabled:
-            messages = getattr(request, "messages", None)
-            if isinstance(messages, list):
-                patched = _patch_model_messages(messages, self._config)
-                if patched is not None:
-                    request = request.override(messages=patched)
-        return handler(request)
+        return handler(self._budget_model_request(request))
 
     @override
     async def awrap_model_call(
@@ -658,10 +779,28 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        if self._config.enabled:
-            messages = getattr(request, "messages", None)
-            if isinstance(messages, list):
-                patched = _patch_model_messages(messages, self._config)
-                if patched is not None:
-                    request = request.override(messages=patched)
-        return await handler(request)
+        # Pure in-memory rewrite: no sandbox or file I/O, so it stays on the loop.
+        return await handler(self._budget_model_request(request))
+
+    def _budget_model_request(self, request: ModelRequest) -> ModelRequest:
+        """Truncate oversized historical tool output and elide superseded write payloads in the request copy only."""
+        if not self._config.enabled:
+            return request
+        original = getattr(request, "messages", None)
+        if not isinstance(original, list):
+            return request
+        messages = original
+        patched = _patch_model_messages(messages, self._config)
+        if patched is not None:
+            messages = patched
+        if self._config.elide_superseded_writes:
+            elided = elide_superseded_write_payloads(
+                messages,
+                min_chars=self._config.superseded_write_min_chars,
+                keep_recent=self._config.keep_recent_writes,
+            )
+            if elided is not None:
+                messages = elided
+        if messages is original:
+            return request
+        return request.override(messages=messages)

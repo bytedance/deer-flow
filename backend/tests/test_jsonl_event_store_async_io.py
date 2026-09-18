@@ -362,6 +362,20 @@ async def test_delete_by_run_removes_run_events():
     assert events == []
 
 
+@pytest.mark.anyio
+async def test_delete_methods_accept_the_gateway_owner_scope():
+    """The Gateway calls deletion with an explicit owner on every backend."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+
+        assert await store.delete_by_run("t1", "r1", user_id="alice") == 1
+        assert await store.count_messages("t1") == 1
+        assert await store.delete_by_thread("t1", user_id="alice") == 1
+        assert await store.count_messages("t1") == 0
+
+
 # ---------------------------------------------------------------------------
 # DB put_batch: rejects mixed-thread batches
 # ---------------------------------------------------------------------------

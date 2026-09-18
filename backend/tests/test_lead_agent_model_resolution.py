@@ -130,6 +130,41 @@ def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
 
 
+@pytest.mark.parametrize(
+    ("reader", "is_subagent", "is_bootstrap", "expected"),
+    [
+        (None, False, False, False),
+        ({"allowed_ids": ["other-thread"]}, False, False, False),
+        (lambda: None, False, False, True),
+        (lambda: None, True, False, False),
+        (lambda: None, False, True, False),
+    ],
+)
+def test_lead_conversation_tool_requires_callable_host_reader(monkeypatch, reader, is_subagent, is_bootstrap, expected):
+    import deerflow.tools as tools_module
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    get_available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr(tools_module, "get_available_tools", get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "system prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+
+    lead_agent_module._make_lead_agent(
+        {"context": {"__conversation_reader": reader, "is_subagent": is_subagent, "is_bootstrap": is_bootstrap}},
+        app_config=app_config,
+    )
+
+    kwargs = get_available_tools.call_args.kwargs
+    if is_bootstrap:
+        assert "include_conversation_reader" not in kwargs
+    else:
+        assert kwargs["include_conversation_reader"] is expected
+
+
 def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     captured: dict[str, object] = {}
@@ -180,6 +215,51 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         "skills_user_id": "authenticated-user",
         "middleware_user_id": "authenticated-user",
         "prompt_user_id": "authenticated-user",
+    }
+
+
+def test_make_lead_agent_applies_custom_agent_memory_opt_out(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.memory = MemoryConfig(enabled=True, mode="tool")
+    captured: dict[str, object] = {"memory_tool_appends": 0}
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda name, *, user_id=None: AgentConfig(name=name, memory_enabled=False),
+    )
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+
+    def _build_middlewares(*args, **kwargs):
+        captured["middleware_memory_enabled"] = kwargs.get("memory_enabled")
+        return []
+
+    def _apply_prompt_template(**kwargs):
+        captured["prompt_memory_enabled"] = kwargs.get("memory_enabled")
+        return "system prompt"
+
+    def _append_memory_tools(_tools):
+        captured["memory_tool_appends"] = int(captured["memory_tool_appends"]) + 1
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _build_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _apply_prompt_template)
+    monkeypatch.setattr(lead_agent_module, "_append_memory_tools_without_name_conflicts", _append_memory_tools)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"agent_name": "stateless-worker"}},
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "memory_tool_appends": 0,
+        "middleware_memory_enabled": False,
+        "prompt_memory_enabled": False,
     }
 
 
@@ -285,6 +365,45 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
         "app_config": app_config,
     }
     assert result["model"] is not None
+
+
+@pytest.mark.parametrize(
+    ("runtime_options", "expected_effort"),
+    [
+        pytest.param({}, "high", id="request-leaves-effort-unset"),
+        pytest.param({"reasoning_effort": "low"}, "low", id="request-chooses-effort"),
+    ],
+)
+def test_internal_make_lead_agent_builds_model_whose_profile_sets_reasoning_effort(monkeypatch, runtime_options, expected_effort):
+    """The regular lead-agent build forwards ``reasoning_effort`` even when it is
+    None, so the real factory must merge it with a profile-level value instead of
+    handing the constructor the keyword twice (which raised ``TypeError``)."""
+    model = ModelConfig(
+        name="effort-model",
+        display_name="effort-model",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="effort-model",
+        api_key="test-key",
+        reasoning_effort="high",
+        supports_thinking=False,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    app_config = _make_app_config([model])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"model_name": "effort-model", **runtime_options}},
+        app_config=app_config,
+    )
+
+    assert result["model"].reasoning_effort == expected_effort
 
 
 @pytest.mark.parametrize("is_bootstrap", [False, True])
@@ -540,7 +659,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, app_config=app_config)
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, include_conversation_reader=False, app_config=app_config)
     assert result["model"] is not None
 
 
@@ -642,6 +761,33 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert isinstance(middlewares[-3], ModelLengthFinishReasonMiddleware)
     assert isinstance(middlewares[-2], SafetyFinishReasonMiddleware)
     assert isinstance(middlewares[-1], ClarificationMiddleware)
+
+
+def test_build_middlewares_custom_agent_memory_opt_out_keeps_dynamic_date_only(monkeypatch):
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    summarization_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: summarization_kwargs.update(kwargs) or None,
+    )
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        agent_name="stateless-worker",
+        memory_enabled=False,
+        app_config=app_config,
+    )
+
+    dynamic_context = next(middleware for middleware in middlewares if isinstance(middleware, DynamicContextMiddleware))
+    assert dynamic_context._memory_enabled is False
+    assert summarization_kwargs["skip_memory_flush"] is True
+    assert not any(isinstance(middleware, MemoryMiddleware) for middleware in middlewares)
 
 
 def test_build_middlewares_prefers_startup_execution_capacity_after_reload(monkeypatch):
@@ -1369,6 +1515,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
         model_name="agent-model",
         groups=None,
         subagent_enabled=False,
+        include_conversation_reader=False,
         app_config=app_config,
     )
     assert config["context"]["subagent_enabled"] is False

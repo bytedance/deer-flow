@@ -3,11 +3,13 @@
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_project_repo, get_thread_store
+from app.gateway.deps import get_config, get_project_repo, get_thread_store
+from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.projects_config import ProjectsConfig
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.utils.time import coerce_iso
 
@@ -41,6 +43,13 @@ class ProjectPatchRequest(BaseModel):
 
 class ProjectListResponse(BaseModel):
     projects: list[ProjectResponse]
+
+
+class ProjectsConfigResponse(BaseModel):
+    """The projects-block knobs the UI needs before it can validate client-side."""
+
+    instructions_max_bytes: int
+    trash_retention_days: int
 
 
 class ProjectThreadResponse(BaseModel):
@@ -83,9 +92,31 @@ def _not_found() -> HTTPException:
     return HTTPException(status_code=404, detail="Project not found")
 
 
+def _projects_config() -> ProjectsConfig:
+    """Projects config, falling back to defaults when the app config is unavailable."""
+    try:
+        return get_app_config().projects
+    except (FileNotFoundError, RuntimeError):
+        return ProjectsConfig()
+
+
+def _validate_instructions_length(instructions: str | None) -> None:
+    """Reject oversized instructions with 422 — never truncate (spec §6.5/§11).
+
+    The cap counts UTF-8 bytes, so multi-byte characters cost their encoded
+    length rather than one character each.
+    """
+    if instructions is None:
+        return
+    max_bytes = _projects_config().instructions_max_bytes
+    if len(instructions.encode("utf-8")) > max_bytes:
+        raise HTTPException(status_code=422, detail=f"instructions exceeds the configured {max_bytes}-byte UTF-8 limit")
+
+
 @router.post("", response_model=ProjectResponse, status_code=201)
 @require_permission("projects", "write")
 async def create_project(body: ProjectCreateRequest, request: Request) -> ProjectResponse:
+    _validate_instructions_length(body.instructions)
     repo = get_project_repo(request)
     return _to_response(await repo.create(name=body.name, instructions=body.instructions, presentation=body.presentation))
 
@@ -95,6 +126,21 @@ async def create_project(body: ProjectCreateRequest, request: Request) -> Projec
 async def list_projects(request: Request, status: ProjectStatus | None = None) -> ProjectListResponse:
     repo = get_project_repo(request)
     return ProjectListResponse(projects=[_to_response(r) for r in await repo.list(status=status)])
+
+
+@router.get("/config", response_model=ProjectsConfigResponse)
+@require_permission("projects", "read")
+async def get_projects_config(request: Request, config: AppConfig = Depends(get_config)) -> ProjectsConfigResponse:
+    """Projects config for the UI (instructions byte cap, trash retention).
+
+    Declared before ``/{project_id}`` so ``config`` is never swallowed as a
+    project id. Values come from the live ``projects`` config block; when the
+    block is absent the ``ProjectsConfig`` defaults apply.
+    """
+    return ProjectsConfigResponse(
+        instructions_max_bytes=config.projects.instructions_max_bytes,
+        trash_retention_days=config.projects.trash_retention_days,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -109,6 +155,7 @@ async def get_project(project_id: str, request: Request) -> ProjectResponse:
 @router.patch("/{project_id}", response_model=ProjectResponse)
 @require_permission("projects", "write")
 async def patch_project(project_id: str, body: ProjectPatchRequest, request: Request) -> ProjectResponse:
+    _validate_instructions_length(body.instructions)
     row = await get_project_repo(request).patch(project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
     if row is None:
         raise _not_found()

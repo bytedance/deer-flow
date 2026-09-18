@@ -14,12 +14,13 @@ import re
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
@@ -32,16 +33,22 @@ from app.gateway.internal_auth import (
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -67,6 +74,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -83,7 +91,7 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -122,6 +130,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
@@ -129,9 +138,14 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # A replayed message carrying it back would write a thread-scoped seq
             # into the checkpoint, which a fork then re-seeds and reassigns (#4380).
             MESSAGE_SEQ_KEY,
+            # The transient project-context request message marker (spec §12):
+            # a client-supplied copy must never survive into a run, where the
+            # renderer would treat the message as its own.
+            PROJECT_CONTEXT_MESSAGE_MARKER,
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
+            UNTRUSTED_INPUT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -265,21 +279,87 @@ async def _orphan_recovery_observed_after_heartbeat(
 # ---------------------------------------------------------------------------
 
 
+def _skips_input_guardrail(additional_kwargs: dict[str, Any], name: Any) -> bool:
+    """Whether these markers would make ``InputSanitizationMiddleware`` skip a message.
+
+    Mirrors ``is_genuine_user_message`` exactly, truthiness included: a
+    ``summary`` name, or a truthy ``hide_from_ui`` without a valid human-input
+    reply. Keying off key presence instead would mark ``hide_from_ui: False``,
+    which never skipped the guardrail and so needs no mark.
+    """
+    if name == _SUMMARY_MESSAGE_NAME:
+        return True
+    return bool(additional_kwargs.get("hide_from_ui")) and read_human_input_response(additional_kwargs) is None
+
+
+def _mark_untrusted_framework_markers(additional_kwargs: dict[str, Any], name: Any) -> dict[str, Any]:
+    """Mark a caller's message whose markers would skip the input guardrail.
+
+    ``is_genuine_user_message`` reads ``hide_from_ui`` and a human
+    ``name="summary"`` as proof the framework wrote the message, and the guardrail
+    skips those — so a caller able to set either one placed raw
+    ``<system-reminder>`` text outside the user-input boundary markers, which the
+    lead-agent prompt declares trusted internal framework data.
+
+    The markers are deliberately *kept*. ``hide_from_ui`` has a second,
+    legitimate role: three frontend senders (quoted conversation context, sidecar
+    context, the agent save command) set it purely to keep a context message out
+    of the transcript, carry no ``human_input_response``, and are hidden by
+    nothing else — removing it would render all three as chat bubbles. Only the
+    guardrail-skipping role is a vulnerability, so the two are separated here
+    instead: the message stays hidden, and ``requires_input_sanitization`` reads
+    this mark and sanitizes it anyway. Marking rather than removing also keeps
+    this boundary from silently changing behaviour that reads the marker for
+    presentation, persistence, or memory filtering.
+
+    HumanInputCard replies need no mark: a valid ``human_input_response`` already
+    makes them genuine, so they are sanitized on that path.
+    """
+    if not _skips_input_guardrail(additional_kwargs, name):
+        return additional_kwargs
+    return {**additional_kwargs, UNTRUSTED_INPUT_KEY: True}
+
+
+def _is_human_message_like(message: Any) -> bool:
+    """Whether *message* is the human role ``is_genuine_user_message`` acts on.
+
+    Only that role reads ``name`` as a framework marker, and ``name`` on a
+    ToolMessage is the tool's own name — reserving it there would rename tools.
+
+    Matched by ``isinstance``, exactly as the predicate this defends does: a
+    ``HumanMessageChunk`` is a ``HumanMessage`` whose ``type`` is not ``"human"``,
+    so a ``type``-based check would leave that subclass's marker settable.
+    """
+    if isinstance(message, BaseMessage):
+        return isinstance(message, HumanMessage)
+    if isinstance(message, dict):
+        return (message.get("type") or message.get("role")) in {"human", "user"}
+    return False
+
+
 def _strip_external_message_metadata(message: Any) -> Any:
-    """Remove server-owned metadata from an untrusted input message."""
+    """Remove server-owned metadata from an untrusted input message.
+
+    Also stamps ``untrusted_input`` on a human message whose caller-owned markers
+    would skip the input guardrail — see ``_mark_untrusted_framework_markers``.
+    The stamp is applied after the strip loop, so a caller cannot preset it.
+    """
     if not isinstance(message, BaseMessage):
         return message
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
+    if _is_human_message_like(message):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, message.name)
     if additional_kwargs == message.additional_kwargs:
         return message
     return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
-    """Strip server-owned keys from a message, in object or raw-dict form.
+    """Strip server-owned keys from a message, in object or raw-dict form, and
+    stamp ``untrusted_input`` where a caller's markers would skip the guardrail.
 
     Callers reach the checkpoint by two different routes and the message is a
     ``BaseMessage`` on one and a plain dict on the other, so both shapes have
@@ -288,12 +368,24 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
-    if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
-        additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
-        if additional_kwargs == item["additional_kwargs"]:
-            return item
-        return {**item, "additional_kwargs": additional_kwargs}
-    return item
+    if not isinstance(item, dict):
+        return item
+    # A missing (or non-dict) ``additional_kwargs`` is the most natural request
+    # shape, and it still needs the mark: the messages reducer coerces the dict
+    # with ``convert_to_messages``, which supplies ``additional_kwargs={}``, so an
+    # unmarked ``name="summary"`` would reach the model on the guardrail's
+    # genuine-user fallback. Treat it as empty for both steps rather than
+    # returning early.
+    source_kwargs = item.get("additional_kwargs")
+    source_kwargs = source_kwargs if isinstance(source_kwargs, dict) else {}
+    additional_kwargs = {key: value for key, value in source_kwargs.items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+    if _is_human_message_like(item):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
+    if additional_kwargs == source_kwargs:
+        # Nothing to change — including the ordinary key-omitted message, which
+        # must not gain an empty dict just by passing through here.
+        return item
+    return {**item, "additional_kwargs": additional_kwargs}
 
 
 #: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
@@ -317,7 +409,8 @@ def _strip_external_delegation_verdict(entry: Any) -> Any:
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove server-owned message metadata from caller-supplied state values.
+    """Remove server-owned message metadata from caller-supplied state values,
+    and mark messages whose caller-owned markers would skip the input guardrail.
 
     ``normalize_input`` does this for the run path. The thread-state mutation
     route writes its values straight into a checkpoint, so without the same
@@ -354,13 +447,25 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, tool receipts, and delegated receipt
-    metadata/verdicts are server-owned. External callers cannot supply them;
-    trusted internal channel calls may preserve metadata they added before
-    invoking this boundary. The same applies to the ``delegations`` channel:
-    a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
-    stripped before the graph runs.
+    ``original_user_content``, dynamic-context reminder markers, the transient
+    view-image context marker, the execution-only knowledge-scope marker, tool
+    receipts, delegated receipt metadata/verdicts, and ``untrusted_input`` are
+    server-owned. External callers cannot supply them; trusted internal channel
+    calls may preserve metadata they added before invoking this boundary. The
+    same applies to the ``delegations`` channel: a caller-supplied ledger entry's
+    ``receipt_verdict`` is a forgery and is stripped before the graph runs.
+
+    ``hide_from_ui`` and a human ``summary`` name are the exception: they stay
+    caller-owned and are deliberately preserved, because ``hide_from_ui`` is also
+    how three frontend senders (quoted conversation context, sidecar context, the
+    agent save command) keep a context message out of the transcript, and nothing
+    else hides those. What they must not do is tell
+    ``is_genuine_user_message`` the framework authored the message, which would
+    skip input sanitization — so a caller's message carrying either marker is
+    stamped with ``untrusted_input`` instead, and
+    ``requires_input_sanitization`` sanitizes it anyway. That key is stripped
+    first, so a caller can neither forge nor clear it. HumanInputCard replies need
+    no stamp: a valid ``human_input_response`` already makes them genuine.
     """
     if raw_input is None:
         return {}
@@ -391,6 +496,25 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
     return result
+
+
+def _canonical_run_record_input(
+    raw_input: dict[str, Any] | None,
+    graph_input: object,
+) -> dict[str, Any] | None:
+    """Persist the same normalized messages that cross run admission.
+
+    The run record is a client-visible audit surface. Keeping the original raw
+    message there would preserve a non-canonical scope even though the graph
+    receives the validated form.
+    """
+    if not isinstance(graph_input, dict):
+        return raw_input
+    canonical = dict(raw_input or {})
+    messages = graph_input.get("messages")
+    if isinstance(messages, list):
+        canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    return canonical
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -438,8 +562,19 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "is_internal",
             "authz_attributes",
             "channel_user_id",
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            # Server-owned pinned project snapshot (spec §7.1): resolved once
+            # at admission from threads_meta; a client-supplied value must
+            # never survive in either run-config section.
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -480,7 +615,7 @@ _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable
 # credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
 # smuggled through ``body.config['configurable']`` would be written to the
 # checkpoint store.
-_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -494,7 +629,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _INTERNAL_ONLY_CONTEXT_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 value.pop(key, None)
 
 
@@ -661,10 +796,34 @@ def resolve_agent_factory(assistant_id: str | None):
 # client-supplied ``recursion_limit`` verbatim: an arbitrarily large value lets
 # a single run execute unbounded LangGraph super-steps (each at least one LLM
 # call), enabling runaway API cost / DoS. ``_DEFAULT_RECURSION_LIMIT`` is the
-# server default when the client sends nothing; the hard ceiling any client
-# value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
+# fallback when app config cannot be loaded; the normal server default and hard
+# ceiling are configurable via ``AppConfig.recursion_limit`` and
+# ``AppConfig.max_recursion_limit``.
 _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
+
+
+def _resolve_gateway_recursion_limits() -> tuple[int, int]:
+    """Resolve the run default and ceiling from one hot-reloaded snapshot."""
+    try:
+        app_config = get_app_config()
+        raw = app_config.recursion_limit
+        max_limit = app_config.max_recursion_limit
+        if raw > max_limit:
+            logger.warning(
+                "recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for Gateway runs",
+                raw,
+                max_limit,
+                max_limit,
+            )
+        return min(raw, max_limit), max_limit
+    except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d and max_recursion_limit=%d for Gateway runs",
+            _DEFAULT_RECURSION_LIMIT,
+            _DEFAULT_MAX_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT, _DEFAULT_MAX_RECURSION_LIMIT
 
 
 def _resolve_max_recursion_limit() -> int:
@@ -717,15 +876,15 @@ def _resolve_scheduler_recursion_limit() -> int:
         return _DEFAULT_RECURSION_LIMIT
 
 
-def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
+def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> int:
     """Clamp a client-supplied ``recursion_limit`` into a safe server range.
 
     Non-integer values (including ``bool``, an ``int`` subclass) and non-positive
-    values fall back to ``_DEFAULT_RECURSION_LIMIT``; valid positive integers are
+    values fall back to the configured default; valid positive integers are
     capped at ``max_limit`` (from ``AppConfig.max_recursion_limit``).
     """
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return _DEFAULT_RECURSION_LIMIT
+        return default_limit
     return min(value, max_limit)
 
 
@@ -749,16 +908,17 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic so that
-    the LangGraph Platform-compatible HTTP API and the IM channel path behave
-    identically.
+    This mirrors the channel manager's ``_resolve_run_params`` logic except for
+    the recursion default: Gateway API runs use the configured top-level
+    ``recursion_limit``, while IM channel runs retain their own default.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
-    # limit via `subagents.max_turns`. Do not conflate this 100 with the
+    # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
-    config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
+    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
@@ -807,14 +967,13 @@ def build_run_config(
         # super-steps (runaway LLM cost / DoS). Applied after the passthrough so
         # it overrides whatever the client sent.
         if "recursion_limit" in request_config:
-            max_limit = _resolve_max_recursion_limit()
-            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_limit)
+            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_recursion_limit, default_recursion_limit)
             if clamped != request_config["recursion_limit"]:
                 logger.warning(
                     "build_run_config: clamped client recursion_limit %r -> %d (max %d). thread_id=%s",
                     request_config["recursion_limit"],
                     clamped,
-                    max_limit,
+                    max_recursion_limit,
                     thread_id,
                 )
             config["recursion_limit"] = clamped
@@ -1317,6 +1476,140 @@ async def ensure_checkpoint_history_seeded(
     logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
+def _message_identifier(message: Any) -> str | None:
+    if isinstance(message, BaseMessage):
+        return str(message.id) if message.id else None
+    if isinstance(message, Mapping):
+        value = message.get("id")
+        return str(value) if value else None
+    return None
+
+
+def _message_additional_kwargs(message: Any) -> Mapping[str, Any]:
+    if isinstance(message, BaseMessage):
+        return message.additional_kwargs
+    if isinstance(message, Mapping):
+        value = message.get("additional_kwargs")
+        return value if isinstance(value, Mapping) else {}
+    return {}
+
+
+def _is_scope_source_human_message(message: Any) -> bool:
+    """Return whether a checkpoint message can originate a recovered scope."""
+    if isinstance(message, HumanMessage):
+        return is_genuine_user_message(message)
+    if not isinstance(message, Mapping):
+        return False
+    if message.get("type") != "human" and message.get("role") not in {"human", "user"}:
+        return False
+    return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
+
+
+async def _recover_run_knowledge_scope(
+    request: Request,
+    *,
+    thread_id: str,
+    target_message_id: str | None,
+) -> object | None:
+    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    accessor, config = await build_thread_checkpoint_state_accessor(
+        request,
+        thread_id=thread_id,
+    )
+    try:
+        snapshot = await accessor.aget(config)
+    except Exception as exc:
+        logger.exception("Failed to recover knowledge scope for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to recover knowledge scope") from exc
+    values = getattr(snapshot, "values", None)
+    messages = values.get("messages") if isinstance(values, Mapping) else None
+    if not isinstance(messages, list):
+        messages = []
+
+    source: Any | None = None
+    if target_message_id:
+        target_index = next(
+            (index for index, message in enumerate(messages) if _message_identifier(message) == target_message_id),
+            None,
+        )
+        if target_index is not None:
+            source = next(
+                (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
+                None,
+            )
+        else:
+            # Interrupted assistant output may never reach a checkpoint. Its
+            # source is still the terminal HumanMessage of the latest state.
+            source = next(
+                (message for message in reversed(messages) if _is_scope_source_human_message(message)),
+                None,
+            )
+        if source is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not recover the source HumanMessage knowledge_scope",
+            )
+    else:
+        source = next(
+            (message for message in reversed(messages) if _is_scope_source_human_message(message)),
+            None,
+        )
+    if source is None:
+        return None
+    additional_kwargs = _message_additional_kwargs(source)
+    return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
+
+
+def _current_human_message(graph_input: object) -> HumanMessage | None:
+    if not isinstance(graph_input, Mapping):
+        return None
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return None
+    return next(
+        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
+        None,
+    )
+
+
+async def _load_scope_agent_config(
+    *,
+    assistant_id: str | None,
+    user_id: str | None,
+) -> Any | None:
+    if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
+        return None
+    normalized = assistant_id.strip().lower().replace("_", "-")
+    try:
+        return await asyncio.to_thread(
+            load_agent_config,
+            normalized,
+            user_id=user_id,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="knowledge_scope assistant configuration could not be resolved",
+        ) from exc
+
+
+async def _validate_scope_thread_binding(
+    run_ctx: RunContext,
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+) -> None:
+    existing = await run_ctx.thread_store.get(thread_id)
+    if not isinstance(existing, Mapping):
+        return
+    bound = existing.get("assistant_id")
+    if isinstance(bound, str) and bound and assistant_id and bound != assistant_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread assistant does not match knowledge_scope assistant",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -1451,6 +1744,54 @@ async def start_run(
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
+        replay_kind = run_metadata.get("replay_kind")
+        target_message_id = run_metadata.get("regenerate_from_message_id")
+        scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
+        scope_messages = scope_graph_input.get("messages")
+        candidate_has_scope = isinstance(scope_messages, list) and any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_messages)
+        current_human_message = _current_human_message(graph_input)
+        current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
+        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
+        # Clarification and edit-replay messages may intentionally replace the
+        # source scope. If either client omits its current selector snapshot,
+        # inherit the source turn's authoritative scope instead of widening the
+        # run to every operator-approved dataset. Other replay paths always use
+        # server recovery regardless of client input.
+        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_scope = (
+            await _recover_run_knowledge_scope(
+                request,
+                thread_id=thread_id,
+                target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+            )
+            if is_scope_recovery
+            else None
+        )
+        agent_config = (
+            await _load_scope_agent_config(
+                assistant_id=body.assistant_id,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+            )
+            if candidate_has_scope or recovery_scope is not None
+            else None
+        )
+        admitted_knowledge_scope = admit_message_knowledge_scope(
+            scope_graph_input,
+            assistant_id=body.assistant_id,
+            app_config=run_ctx.app_config or get_app_config(),
+            agent_config=agent_config,
+            recovery_scope=recovery_scope,
+            recovery=is_scope_recovery,
+        )
+        if admitted_knowledge_scope is not None:
+            await _validate_scope_thread_binding(
+                run_ctx,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+        run_record_input = _canonical_run_record_input(body.input, graph_input)
+
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer
         # that carries agent configuration (model_name, thinking_enabled, etc.).
@@ -1467,6 +1808,52 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+
+        conversation_references = list(getattr(body, "conversation_references", None) or [])
+        if conversation_references:
+            from app.gateway.conversation_access import prepare_conversation_reader
+
+            prepared = prepare_conversation_reader(
+                conversation_references,
+                request=request,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+                run_context=run_ctx,
+                run_manager=run_mgr,
+                app_config=get_app_config(),
+            )
+            reader, source_ids = prepared
+            run_ctx = replace(run_ctx, conversation_reader=reader)
+            if isinstance(graph_input, dict):
+                reference_messages = graph_input.get("messages")
+                if reference_messages is None:
+                    reference_messages = []
+                if not isinstance(reference_messages, list):
+                    raise HTTPException(status_code=422, detail="input.messages must be a list")
+                # Reference IDs are user-selected data. Keep them out of the
+                # system prompt and grant no authority from this persisted hint.
+                graph_input = {
+                    **graph_input,
+                    "messages": [
+                        *reference_messages,
+                        HumanMessage(
+                            content="Read-only conversation references for this run: " + json.dumps(source_ids),
+                            additional_kwargs={"hide_from_ui": True},
+                        ),
+                    ],
+                }
+        # Resolve and pin the thread's project context once per run (spec
+        # §7.1): middlewares and tools read only this server-owned snapshot —
+        # nothing re-resolves membership mid-run, and admission never writes
+        # membership (§10.7). Resolution failure degrades to unassigned with a
+        # warning inside the resolver; it never fails the run.
+        project_context = await resolve_project_context(
+            run_ctx.thread_store,
+            getattr(request.app.state, "project_repo", None),
+            thread_id,
+            getattr(request.app.state, "project_document_repo", None),
+        )
+        if project_context is not None:
+            config["context"][PROJECT_CONTEXT_KEY] = project_context
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -1544,6 +1931,7 @@ async def start_run(
                 stream_subgraphs=body.stream_subgraphs,
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
+                knowledge_scope=admitted_knowledge_scope,
             )
 
         try:
@@ -1570,7 +1958,11 @@ async def start_run(
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live
                     # config built above keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    kwargs={
+                        "input": run_record_input,
+                        "config": redact_config_secrets(body.config),
+                        **({"conversation_references": conversation_references} if conversation_references else {}),
+                    },
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
@@ -1579,7 +1971,13 @@ async def start_run(
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
-                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id:
+                    stored_input = stored.get("input")
+                    # New runs persist the admitted, canonical message snapshot
+                    # so a scope display cannot be rewritten through the run
+                    # record. Accept the raw request as well for records written
+                    # by older Gateway versions, while comparing canonical
+                    # retries to the same representation as the stored record.
+                    if (stored_input != body.input and stored_input != run_record_input) or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",

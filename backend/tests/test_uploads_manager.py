@@ -286,3 +286,24 @@ class TestDeleteFileSafe:
     def test_delete_traversal_raises(self, tmp_path):
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
+
+    def test_delete_symlink_to_sibling_upload_keeps_target(self, tmp_path):
+        """A symlink planted in the uploads dir must not delete the upload it aliases."""
+        victim = tmp_path / "victim.pdf"
+        victim.write_bytes(b"pdf-bytes")
+        companion = tmp_path / "victim.md"
+        companion.write_text("converted", encoding="utf-8")
+        alias = tmp_path / "alias.pdf"
+        try:
+            alias.symlink_to(victim.name)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
+
+        with pytest.raises(FileNotFoundError):
+            delete_file_safe(tmp_path, "alias.pdf", convertible_extensions={".pdf"})
+
+        assert victim.read_bytes() == b"pdf-bytes"
+        assert companion.exists()
+        assert alias.is_symlink()

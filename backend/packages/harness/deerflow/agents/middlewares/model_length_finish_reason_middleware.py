@@ -1,22 +1,12 @@
-"""Surface provider length-capped model responses as run stop reasons.
+"""Surface provider length-capped responses and block truncated tool calls.
 
 Background — see issue bytedance/deer-flow#4271.
 
 Some providers stop generation because the output budget is exhausted and
 surface that through ``finish_reason='length'`` while still returning assistant
-content. DeerFlow should preserve that content for audit, but it should not
-silently treat the run as an uncapped clean completion when the provider has
-explicitly signaled truncation.
-
-This middleware keeps that boundary narrow:
-- it only marks a run-level stop reason when the final AIMessage is capped
-  by a provider length signal and still has visible content;
-- it never rewrites the assistant content or reparses XML-like text into a
-  tool call;
-- it ignores any response that still carries tool-call intent, malformed
-  tool-call metadata, or no visible content, so only terminal assistant
-  responses with visible content can be marked capped.
-
+content. DeerFlow preserves visible content, adds a deterministic notice when
+no visible answer was produced, and drops tool calls that may have been
+truncated at the output boundary before they can execute.
 """
 
 from __future__ import annotations
@@ -34,43 +24,69 @@ from deerflow.agents.middlewares.model_length_termination_detectors import (
     ModelLengthTerminationDetector,
     default_detectors,
 )
+from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent, has_visible_content
 
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
+_MODEL_LENGTH_CAPPED_CONTENT = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
 logger = logging.getLogger(__name__)
 
 
-def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
-    if message.tool_calls or getattr(message, "invalid_tool_calls", None):
-        return True
+def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
+    """Count suppressed tool calls and return their deduplicated names."""
+    names: list[str] = []
+    structured_calls: list[Any] = [*(message.tool_calls or []), *(getattr(message, "invalid_tool_calls", None) or [])]
     additional_kwargs = message.additional_kwargs or {}
-    return bool(additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"))
+    if structured_calls:
+        # LangChain commonly keeps both parsed calls and their raw provider copy.
+        calls = structured_calls
+    else:
+        calls = list(additional_kwargs.get("tool_calls") or [])
+        function_call = additional_kwargs.get("function_call")
+        if not calls and isinstance(function_call, dict):
+            calls.append(function_call)
+        if not calls:
+            calls = _anthropic_tool_use_blocks(message)
+
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("name")
+        function = call.get("function")
+        if not isinstance(name, str) and isinstance(function, dict):
+            name = function.get("name")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return len(calls), names
 
 
-def _has_visible_content(message: AIMessage) -> bool:
-    content = message.content
-    if isinstance(content, str):
-        return bool(content.strip())
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, str) and block.strip():
-                return True
-            if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    return True
-    return False
+def _anthropic_tool_use_blocks(message: AIMessage) -> list[dict[str, Any]]:
+    """Extract native Anthropic tool-use blocks retained in message content."""
+    if not isinstance(message.content, list):
+        return []
+    return [block for block in message.content if isinstance(block, dict) and block.get("type") == "tool_use"]
+
+
+def _without_anthropic_tool_use_blocks(content: Any) -> Any:
+    """Remove native tool calls that cannot receive a matching tool result."""
+    if not isinstance(content, list):
+        return content
+    return [block for block in content if not (isinstance(block, dict) and block.get("type") == "tool_use")]
 
 
 class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
-    """Record provider length caps for terminal assistant responses with content.
-
-    If the last AIMessage still carries tool-call intent, this middleware
-    leaves it alone and lets the normal tool-handling path decide what to do.
-    """
+    """Record provider length termination and block truncated tool calls."""
 
     def __init__(self, detectors: list[ModelLengthTerminationDetector] | None = None) -> None:
         super().__init__()
         self._detectors: list[ModelLengthTerminationDetector] = list(detectors) if detectors else default_detectors()
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        from deerflow_extension_api import canonical_hash
+
+        return {
+            "suppress_truncated_tool_calls": True,
+            "empty_content_fallback_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
+        }
 
     def _detect(self, message: AIMessage) -> ModelLengthTermination | None:
         for detector in self._detectors:
@@ -89,11 +105,6 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             return None
 
         last = messages[-1]
-        if _has_tool_call_intent_or_error(last):
-            return None
-        if not _has_visible_content(last):
-            return None
-
         termination = self._detect(last)
         if termination is None:
             return None
@@ -119,7 +130,36 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
                 "stamped_stop_reason": stamped_stop_reason,
             },
         )
-        return None
+
+        contains_tool_call = has_tool_call_intent(last) or bool(_anthropic_tool_use_blocks(last))
+        cleaned_content = _without_anthropic_tool_use_blocks(last.content) if contains_tool_call else last.content
+        content_source = last.model_copy(update={"content": cleaned_content})
+        contains_visible_content = has_visible_content(content_source)
+        if not contains_tool_call and contains_visible_content:
+            return None
+
+        additional_kwargs = dict(last.additional_kwargs or {})
+        suppressed_count, suppressed_names = _tool_call_summary(last) if contains_tool_call else (0, [])
+        if contains_tool_call:
+            # Tool arguments may be incomplete at a max-token boundary.
+            additional_kwargs.pop("tool_calls", None)
+            additional_kwargs.pop("function_call", None)
+        additional_kwargs["model_length_termination"] = {
+            "detector": termination.detector,
+            "reason_field": termination.reason_field,
+            "reason_value": termination.reason_value,
+            "suppressed_tool_call_count": suppressed_count,
+            "suppressed_tool_call_names": suppressed_names,
+        }
+        replacement = last.model_copy(
+            update={
+                "content": (cleaned_content if contains_visible_content else append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT)),
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "additional_kwargs": additional_kwargs,
+            }
+        )
+        return {"messages": [replacement]}
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
