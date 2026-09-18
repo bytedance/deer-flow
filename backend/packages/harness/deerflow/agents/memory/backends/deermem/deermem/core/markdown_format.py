@@ -1,17 +1,29 @@
-"""Markdown (de)serialization for DeerMem user-memory summaries.
+"""Markdown-aware parsing for DeerMem user-memory summaries.
 
 This module is intentionally dependency-free so it can be unit-tested and
 imported without the rest of the DeerMem stack.
 
-Design
-------
+Design (read path only)
+-----------------------
 A Markdown summary carries its *lossless* state inside a fenced
-````` ```memory-json ```` ``` block. Everything above the fence is a
-human-readable rendering (debugging / hand-editing convenience). When
-loading, the fenced JSON block is the source of truth; if it is missing or
-malformed we fall back to a best-effort structured parse of the Markdown
-sections. This makes the on-disk format tolerant: a partially written or
-hand-edited file still recovers instead of crashing the agent.
+```` ```memory-json ```` block. When loading, the fenced JSON block is the
+only trusted Markdown representation: if it is present and parses to a JSON
+object it is returned verbatim; anything else (no fence, malformed fence,
+non-object JSON) yields ``None`` so the caller can decide policy (the
+default is to quarantine the unreadable file rather than silently rebuild
+over persistent state).
+
+The fence is matched greedily up to the *last* ```` ``` ```` in the input,
+because remembered strings may themselves contain triple backticks (code
+snippets); a non-greedy match would truncate the JSON mid-string and break
+the lossless round-trip.
+
+A lossy structured parse of the human-readable sections is deliberately NOT
+provided: it cannot reproduce the manifest schema (``user``/``history`` must
+be objects, ``version``/``revision`` scalars) and previously surfaced as
+``ValueError``/``AttributeError`` crashes on the very hand-edited files the
+loader claimed to tolerate. Rendering Markdown is deferred to a future
+write-path change.
 """
 
 from __future__ import annotations
@@ -20,20 +32,9 @@ import json
 import re
 from typing import Any
 
-_FENCE_RE = re.compile(r"```memory-json\s*\n(.*?)```", re.DOTALL)
-_META_BULLET_RE = re.compile(r"^-\s+([A-Za-z_][\w]*)\s*:\s*(.+)$", re.MULTILINE)
-_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$\n(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
-
-
-def _looks_like_markdown(raw: str) -> bool:
-    """Heuristic: True when *raw* is more likely Markdown than JSON."""
-    stripped = raw.lstrip()
-    if stripped.startswith("#"):
-        return True
-    if "memory-json" in raw:
-        return True
-    # A JSON document starts with '{' or '[` after optional whitespace.
-    return bool(stripped) and stripped[0] not in "{["
+# Greedy: capture up to the LAST closing fence so JSON string values that
+# contain ``` (remembered code snippets) survive the round-trip intact.
+_FENCE_RE = re.compile(r"```memory-json\s*\n(.*)```", re.DOTALL)
 
 
 def _extract_fenced_json(raw: str) -> str | None:
@@ -41,63 +42,19 @@ def _extract_fenced_json(raw: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def _parse_markdown_sections(raw: str) -> dict[str, Any] | None:
-    """Best-effort parse of the readable Markdown sections into a dict."""
-    data: dict[str, Any] = {}
-    for m in _META_BULLET_RE.finditer(raw):
-        key, val = m.group(1), m.group(2).strip()
-        if key in ("version", "revision"):
-            try:
-                data[key] = int(val)
-            except ValueError:
-                data[key] = val
-        else:
-            data[key] = val
-    for m in _SECTION_RE.finditer(raw):
-        heading = m.group(1).strip().lower()
-        body = m.group(2).strip()
-        items = re.findall(r"^-\s+(.+)$", body, re.MULTILINE)
-        data[heading] = items if items else body
-    return data or None
-
-
 def _parse_markdown_memory(raw: str) -> dict[str, Any] | None:
-    """Parse a Markdown summary into a dict, or None when nothing usable."""
-    fenced = _extract_fenced_json(raw)
-    if fenced is not None:
-        try:
-            value = json.loads(fenced)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(value, dict):
-                return value
-    structured = _parse_markdown_sections(raw)
-    if structured:
-        return structured
-    return None
+    """Parse a Markdown summary into a dict, or None when nothing usable.
 
-
-def _render_memory_markdown(data: dict[str, Any]) -> str:
-    """Render a summary dict as a readable Markdown document.
-
-    The fenced ``memory-json`` block at the end is the lossless source of
-    truth; the sections above are for humans.
+    Only the fenced ```` ```memory-json ```` block is trusted. There is no
+    structured fallback: without a valid fenced block the file cannot be
+    mapped onto the manifest schema losslessly, so returning ``None`` (the
+    caller quarantines and starts fresh) is the honest outcome.
     """
-    lines: list[str] = ["# DeerFlow Memory", ""]
-    for key in ("version", "revision", "lastUpdated"):
-        if key in data and data[key] is not None:
-            lines.append(f"- {key}: {data[key]}")
-    lines.append("")
-    for key in ("user", "history"):
-        section = data.get(key)
-        if isinstance(section, dict) and section:
-            lines.append(f"## {key.capitalize()}")
-            lines.append("")
-            for k, v in section.items():
-                lines.append(f"- {k}: {v}")
-            lines.append("")
-    lines.append("```memory-json")
-    lines.append(json.dumps(data, ensure_ascii=False, indent=2))
-    lines.append("```")
-    return "\n".join(lines) + "\n"
+    fenced = _extract_fenced_json(raw)
+    if fenced is None:
+        return None
+    try:
+        value = json.loads(fenced)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
