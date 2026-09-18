@@ -279,6 +279,11 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Terminal-lifecycle owners whose foreground worker already logged out
+        # (cancelled past its drain deadline). Shutdown observes them inside the
+        # same budget but never cancels them: cancellation mid-write is exactly
+        # what this ownership mechanism exists to survive.
+        self._background_finalization_tasks: set[asyncio.Task[Any]] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -2303,6 +2308,65 @@ class RunManager:
                 timeout,
             )
 
+    def track_background_finalization(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        action: str,
+        run_id: str,
+    ) -> None:
+        """Retain the exact terminal-lifecycle task that outlived its worker.
+
+        The run's foreground worker logged out (host cancellation) before its
+        lifecycle owner settled. The owner keeps running under this manager's
+        supervision so a slow durable write is never cancelled mid-flight; the
+        retained set holds that same task, and shutdown observes it inside the
+        existing drain budget.
+        """
+        if task in self._background_finalization_tasks:
+            return
+
+        self._background_finalization_tasks.add(task)
+
+        def finalize(completed: asyncio.Task[Any]) -> None:
+            self._background_finalization_tasks.discard(completed)
+
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError as exc:
+                error = exc
+
+            if error is None:
+                return
+
+            logger.error(
+                "Run background finalization failed (%s, run_id=%s): %s",
+                action,
+                run_id,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+        task.add_done_callback(finalize)
+
+    async def _drain_background_finalization_tasks(self, *, deadline: float, timeout: float) -> None:
+        """Observe retained lifecycle owners within the remaining shutdown budget."""
+        loop = asyncio.get_running_loop()
+        background_finalization = {task for task in self._background_finalization_tasks if not task.done()}
+        remaining = deadline - loop.time()
+        if background_finalization and remaining > 0:
+            _, pending_finalization = await asyncio.wait(background_finalization, timeout=remaining)
+        else:
+            pending_finalization = background_finalization
+
+        if pending_finalization:
+            logger.warning(
+                "Run shutdown deadline expired with %d background finalization task(s) still supervised",
+                len(pending_finalization),
+            )
+        elif background_finalization:
+            logger.info("Drained %d background finalization task(s) on shutdown", len(background_finalization))
+
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
@@ -2349,6 +2413,7 @@ class RunManager:
         await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
 
         if not inflight:
+            await self._drain_background_finalization_tasks(deadline=deadline, timeout=timeout)
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
             return
 
@@ -2401,6 +2466,7 @@ class RunManager:
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+        await self._drain_background_finalization_tasks(deadline=deadline, timeout=timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
 
 

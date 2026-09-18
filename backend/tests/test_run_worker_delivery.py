@@ -800,6 +800,44 @@ async def test_worker_cancellation_during_delivery_receipt_closes_terminal_lifec
 
 
 @pytest.mark.anyio
+async def test_worker_finalization_cancel_deadline_hands_off_to_background_ownership(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    # Foreground timeout must never cancel the owner: the lifecycle keeps running
+    # under RunManager supervision and still owns terminal signaling + cleanup.
+    monkeypatch.setattr(worker_module, "_RUN_FINALIZATION_CANCEL_DRAIN_SECONDS", 0.01)
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-finalization-handoff")
+    store = MemoryRunEventStore()
+    bridge = _make_bridge()
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    _blocking_receipt(worker_module, monkeypatch, receipt_started, release_receipt)
+
+    worker = _start_worker(bridge, run_manager, record, store)
+
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    worker.cancel("finalization deadline cancellation")
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+
+    assert any(not task.done() for task in run_manager._background_finalization_tasks)
+    bridge.publish_end.assert_not_awaited()
+
+    release_receipt.set()
+
+    async with asyncio.timeout(1):
+        while run_manager._background_finalization_tasks:
+            await asyncio.sleep(0)
+
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
 async def test_worker_repeated_cancellation_during_delivery_receipt_keeps_lifecycle_owner(monkeypatch):
     import deerflow.runtime.runs.worker as worker_module
 
