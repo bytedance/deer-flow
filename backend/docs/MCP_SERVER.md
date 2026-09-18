@@ -97,12 +97,19 @@ conversation, so enable it only if you are comfortable sending that data to
 Parallel.
 
 Access is anonymous by default: no API key or authentication headers are needed.
-For higher rate limits, optionally add this `headers` field to the
+Keep `"User-Agent": "deer-flow"` in the entry's `headers`. This stable,
+project-wide identity lets Parallel measure aggregate usage from this
+integration to understand adoption and support it; it does not identify an
+individual user or installation. Preserve it on search and fetch HTTP requests
+if the transport changes. Existing configurations can add the same header.
+
+For higher rate limits, optionally add authorization to the `headers` field of the
 `parallel-search` entry in your local `extensions_config.json`:
 
 ```json
 {
   "headers": {
+    "User-Agent": "deer-flow",
     "Authorization": "$PARALLEL_AUTHORIZATION"
   }
 }
@@ -112,7 +119,7 @@ Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
 value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
 in the environment variable because DeerFlow expands only whole-string
 `$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
-files. Remove the `headers` field and restart DeerFlow to return to anonymous
+files. Remove only `Authorization` and restart DeerFlow to return to anonymous
 access. See the
 [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 for details.
@@ -198,6 +205,20 @@ that name instead of becoming
 backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
+
+Session reuse also requires the same owning event loop. Parallel synchronous
+tool calls from the embedded client use separate loops and separate stdio
+sessions, so they can finish independently without cancelling a sibling's
+connection. They do not share server-side state. The synchronous wrapper closes
+its loop after each call; use the asynchronous path on a shared loop when
+session continuity is required. Explicit pool cleanup covers all loops for the
+selected server/thread scope.
+
+If you manage event loops manually, close the pool or cancel and await its owner
+tasks before closing their loop. Calling `loop.close()` with pending owners
+prevents transport teardown and completion callbacks. Abandoned live-registry
+records can be removed by LRU eviction or explicit cleanup, but those operations
+cannot finish transport cleanup on a loop that has already closed.
 
 ## Server Timeouts
 

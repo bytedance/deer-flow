@@ -547,6 +547,7 @@ def build_subagent_runtime_middlewares(
     summarization_middleware = create_summarization_middleware(
         app_config=app_config,
         skip_memory_flush=True,
+        archive_task_history=False,
         # The subagent's resolved model is the source of truth for null-model
         # summarization: the subagent context/configurable does not carry the child
         # model (it inherits the parent's), so passing it directly is what makes a

@@ -242,6 +242,115 @@ test("short-circuits reconnect to a terminal run", async () => {
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
 
+test("hydrates the active run input before replaying an incremental stream", async () => {
+  const sessionStorage = makeSessionStorage();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-input")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                { id: "human-2", type: "human", content: "Second question" },
+              ],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-input/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+              { id: "human-2", type: "human", content: "Second question" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-input/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-input",
+    "run-input",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries[0]).toMatchObject({
+    event: "values",
+    data: {
+      messages: [
+        { id: "human-1", content: "First question" },
+        { id: "human-2", content: "Second question" },
+      ],
+    },
+  });
+  expect(
+    (entries[0]?.data as { messages: Array<{ id: string }> }).messages,
+  ).toHaveLength(2);
+});
+
+test("continues reconnect when durable state hydration fails", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-no-state")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [{ id: "human-2", type: "human", content: "Second" }],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-no-state/state")) {
+      return new Response(JSON.stringify({ detail: "state unavailable" }), {
+        status: 404,
+      });
+    }
+    if (path.endsWith("/runs/run-no-state/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-no-state",
+    "run-no-state",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries).toEqual([{ event: "end", data: null }]);
+  expect(fetchFn).toHaveBeenCalledTimes(3);
+});
+
 test("falls back to join when preflight cannot resolve the run", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
@@ -437,9 +546,25 @@ test("recovers a join stream gap from durable state and resumes after the retain
   const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
     const path = url.toString();
     if (path.endsWith("/runs/run-1")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                {
+                  id: "human-2",
+                  type: "human",
+                  content: "Second question",
+                },
+              ],
+            },
+          },
+        }),
+        {
+          status: 200,
+        },
+      );
     }
     if (path.includes("/runs/run-1/stream")) {
       recoveryRequests.push(init ?? {});
@@ -451,7 +576,11 @@ test("recovers a join stream gap from durable state and resumes after the retain
     if (path.includes("/threads/thread-1/state")) {
       return new Response(
         JSON.stringify({
-          values: { messages: [{ type: "ai", content: "durable" }] },
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+            ],
+          },
           next: [],
           tasks: [],
           metadata: {},
@@ -483,12 +612,26 @@ test("recovers a join stream gap from durable state and resumes after the retain
 
   expect(received).toEqual([
     {
+      event: "values",
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
+    },
+    {
       event: "custom",
       data: { type: "stream_replay_gap", ...gap },
     },
     {
       event: "values",
-      data: { messages: [{ type: "ai", content: "durable" }] },
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
     },
     { event: "end", data: null },
   ]);

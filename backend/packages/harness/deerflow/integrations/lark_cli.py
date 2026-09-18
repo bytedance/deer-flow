@@ -82,7 +82,8 @@ except ImportError:  # pragma: no cover - Windows fallback
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
-from deerflow.skills.installer import is_executable_binary_prefix, is_symlink_member, is_unsafe_zip_member
+from deerflow.skills.installer import is_symlink_member, is_unsafe_zip_member
+from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -138,8 +139,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 exec "$script_dir/../linux-$arch/lark-cli" "$@"
 """
 _VERSION_TAG_RE = re.compile(r"v?\d+\.\d+\.\d+")
-_DEERFLOW_LARK_SHARED_GUIDANCE_MARKER = "<!-- deerflow-lark-cli-auth-guidance-v2 -->"
-_DEERFLOW_LARK_SHARED_GUIDANCE_LEGACY_MARKERS = ("<!-- deerflow-lark-cli-auth-guidance-v1 -->",)
+_DEERFLOW_LARK_SHARED_GUIDANCE_MARKER = "<!-- deerflow-lark-cli-auth-guidance-v3 -->"
+_DEERFLOW_LARK_SHARED_GUIDANCE_LEGACY_MARKERS = ("<!-- deerflow-lark-cli-auth-guidance-v1 -->", "<!-- deerflow-lark-cli-auth-guidance-v2 -->")
 _LARK_APP_REGISTRATION_PATH = "/oauth/v1/app/registration"
 
 LARK_SKILL_NAMES: tuple[str, ...] = (
@@ -1248,6 +1249,23 @@ def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher.chmod(0o755)
 
 
+def _runtime_artifact_is_executable(relative: Path, candidate: Path) -> bool:
+    """Decide whether a managed runtime artifact is executable, platform-aware.
+
+    POSIX keeps the strict executable-bit contract. NTFS cannot represent the
+    exec bit, so Windows validates these Linux-only artifacts by content
+    instead: the per-arch binaries must carry an executable image magic and
+    the ``bin/lark-cli`` launcher must be a script with a shebang.
+    """
+    if os.name != "nt":
+        return candidate.stat().st_mode & 0o111 != 0
+    with candidate.open("rb") as handle:
+        prefix = handle.read(4)
+    if relative == Path("bin/lark-cli"):
+        return prefix.startswith(b"#!")
+    return is_executable_binary_prefix(prefix)
+
+
 def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
     if root.is_symlink() or not root.is_dir():
         raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink.")
@@ -1260,7 +1278,7 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
         candidate = root / relative
         if not candidate.is_file():
             raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative}")
-        if candidate.stat().st_mode & 0o111 == 0:
+        if not _runtime_artifact_is_executable(relative, candidate):
             raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative}")
 
 
@@ -2806,8 +2824,8 @@ def _append_deerflow_lark_shared_guidance(root: Path) -> None:
 在 DeerFlow 中，如果 `lark-cli auth status` 或业务命令提示未配置、未登录、token 过期或缺少用户授权：
 
 1. 不要要求用户在终端执行 `lark-cli config init`、`lark-cli auth login` 或 `lark-cli auth login --device-code`。
-2. 回复用户这个可点击链接：[打开飞书授权设置](?settings=integrations)。
-3. 告诉用户在 **Settings → Integrations → Lark / Feishu CLI** 点击“连接飞书”，在浏览器里完成授权后再回来继续当前任务。
+2. 回复用户这个可点击链接：[打开飞书授权设置](/workspace/capabilities?tab=plugins&plugin=lark)。
+3. 告诉用户在 **Capability Center → Plugins → Lark / Feishu** 点击“连接飞书”，在浏览器里完成授权后再回来继续当前任务。
 4. 如果错误中包含缺失的 `scope`、`permission_violations` 或建议的 `--domain`，告诉用户在该设置页选择对应权限域（例如日历选择 Calendar），或把具体 scope 填入“Exact OAuth scope / 具体 OAuth scope”后重新授权。
 
 只有在用户明确说明已经完成授权后，才继续调用具体的 `lark-cli` 业务命令。

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI, Request, Response
@@ -32,6 +32,8 @@ from app.gateway.routers import (
     mcp_tasks,
     memory,
     models,
+    project_documents,
+    project_thread_files,
     projects,
     runs,
     scheduled_tasks,
@@ -41,7 +43,9 @@ from app.gateway.routers import (
     suggestions,
     thread_runs,
     threads,
+    trash,
     uploads,
+    user_preferences,
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
@@ -192,6 +196,78 @@ async def _warm_memory_retrieval(manager) -> None:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
 
+async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
+    """One trash retention sweep at gateway startup (Phase-2 spec §8.3).
+
+    Runs beside the lazy trigger on the trash listing — no daemon, no
+    scheduler (§15.9). Sweeps every user (``user_id=None``) with the
+    configured retention window, including the full reconciliation. A sweep
+    failure is logged and never blocks gateway readiness; the lifespan runs
+    this as a background task and awaits it (bounded) on shutdown, cancelling
+    it when the budget runs out.
+    """
+    try:
+        from deerflow.config.paths import get_paths
+        from deerflow.config.projects_config import ProjectsConfig
+        from deerflow.projects.trash import run_trash_retention_sweep
+
+        project_document_repo = getattr(app.state, "project_document_repo", None)
+        if project_document_repo is None:
+            return
+        projects_config = getattr(startup_config, "projects", None)
+        retention_days = projects_config.trash_retention_days if projects_config is not None else ProjectsConfig().trash_retention_days
+        sweep_report = await run_trash_retention_sweep(project_document_repo, get_paths(), retention_days=retention_days, user_id=None)
+        if sweep_report.purged or sweep_report.orphans_removed or sweep_report.staging_removed or sweep_report.content_missing:
+            logger.info(
+                "Trash retention sweep: purged=%d failures=%d orphans=%d staging=%d content_missing=%d",
+                sweep_report.purged,
+                sweep_report.purge_failures,
+                sweep_report.orphans_removed,
+                sweep_report.staging_removed,
+                len(sweep_report.content_missing),
+            )
+    except Exception:
+        logger.warning("Trash retention sweep skipped", exc_info=True)
+
+
+async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
+    """Bounded shutdown wait for the background startup sweep (§8.3).
+
+    Waits ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS`` for an in-flight sweep and
+    cancels it when the budget runs out. The shield keeps that wait bounded
+    without killing the sweep, so an overrun must be cancelled here: the
+    all-users reconciliation reads through the document repo and the DB
+    engine, and leaving it running would have it walk rows and files while
+    the teardown below disposes both underneath it.
+    """
+    task = getattr(app.state, "startup_trash_sweep_task", None)
+    if task is None or task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # Cancellation lands at the sweep's next await; ``_run_startup_trash_sweep``
+        # only catches ``Exception``, so ``CancelledError`` propagates. A
+        # ``cancel()`` that returns False means the sweep finished inside the
+        # window between the deadline firing and this call — report that as
+        # the late finish it is, not as a cancellation that never happened.
+        cancelled = task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        if cancelled:
+            logger.warning(
+                "Startup trash sweep exceeded %.1fs during shutdown; cancelled and proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.info(
+                "Startup trash sweep finished just after the %.1fs shutdown budget; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+    except Exception:
+        logger.exception("Startup trash sweep failed during shutdown")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -306,26 +382,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
-        # Start IM channel service if any channels are configured
-        try:
-            from app.channels.service import start_channel_service
-
-            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
-            # below) rather than resolving `app.state.stream_bridge` here
-            # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
-            # once, above, by `langgraph_runtime(app, startup_config)`, so
-            # either shape is safe by construction — the closure is just the
-            # more defensive/consistent-with-precedent form, and it is what
-            # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
-            # uses to reach the same StreamBridge every other run consumer
-            # goes through `get_stream_bridge(request)` for.
-            channel_service = await start_channel_service(
-                startup_config,
-                get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
-            )
-            logger.info("Channel service started: %s", channel_service.get_status())
-        except Exception:
-            logger.exception("No IM channels configured or channel service failed to start")
+        # Phase-2 trash tier (§8.3): one retention sweep at startup, beside
+        # the lazy trigger on the trash listing — no daemon, no scheduler.
+        # Runs after langgraph_runtime so app.state.project_document_repo is
+        # available. The per-user reconciliation walks every row and file, so
+        # it is scheduled as a background task: gateway readiness never waits
+        # on it, a failure is logged by the task itself, and shutdown awaits
+        # the in-flight sweep (bounded, cancelled on overrun) before the
+        # runtime is torn down.
+        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         try:
             from app.gateway.services import launch_scheduled_thread_run
@@ -348,6 +413,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     await scheduled_task_service.start()
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
+            # If an enabled scheduler rejects start(), keep that rejection as a
+            # lifespan failure instead of exposing a half-started service.
+            if startup_config.scheduler.enabled:
+                raise
+
+        # Start IM channel service only after scheduler recovery succeeds, so a
+        # fail-closed scheduler startup cannot strand channel-owned tasks before
+        # the lifespan reaches its normal shutdown boundary.
+        try:
+            from app.channels.service import start_channel_service
+
+            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
+            # above) rather than resolving `app.state.stream_bridge` here
+            # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
+            # once, above, by `langgraph_runtime(app, startup_config)`, so
+            # either shape is safe by construction — the closure is just the
+            # more defensive/consistent-with-precedent form, and it is what
+            # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
+            # uses to reach the same StreamBridge every other run consumer
+            # goes through `get_stream_bridge(request)` for.
+            channel_service = await start_channel_service(
+                startup_config,
+                get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+            )
+            logger.info("Channel service started: %s", channel_service.get_status())
+        except Exception:
+            logger.exception("No IM channels configured or channel service failed to start")
 
         from app.gateway.services import launch_mcp_task_notification_run
         from app.mcp_tasks import McpTaskService
@@ -430,6 +522,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.subagent_batches_available = True
 
         yield
+
+        await _shutdown_startup_trash_sweep(app)
 
         try:
             await auth.close_oidc_service()
@@ -828,6 +922,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(agents.router)
     # Projects API is mounted at /api/projects
     app.include_router(projects.router)
+    # Project document shelf API is mounted at /api/projects/{id}/documents
+    app.include_router(project_documents.router)
+    # Project conversation-files view is mounted at /api/projects/{id}/thread-files
+    app.include_router(project_thread_files.router)
+    # Trash API is mounted at /api/trash
+    app.include_router(trash.router)
 
     # Deployment-level subagent catalog and admin management.
     app.include_router(subagents.router)
@@ -849,6 +949,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
+    app.include_router(user_preferences.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

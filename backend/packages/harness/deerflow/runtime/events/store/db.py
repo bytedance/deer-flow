@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,7 +35,14 @@ class DbRunEventStore(RunEventStore):
         # advisory lock guards cross-process races; this guards the common
         # single-process case where two coroutines interleave between the
         # max(seq) read and the INSERT and would otherwise collide on seq.
-        self._write_locks: dict[str, asyncio.Lock] = {}
+        #
+        # The weak registry preserves one lock generation while an admitted
+        # holder/waiter still references it. A separate pin keeps the historical
+        # one-lock-per-live-thread behavior until delete_by_thread() explicitly
+        # retires that thread; after retirement, outstanding users alone keep
+        # the generation alive until they drain.
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._write_lock_pins: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -42,6 +50,9 @@ class DbRunEventStore(RunEventStore):
         if lock is None:
             lock = asyncio.Lock()
             self._write_locks[thread_id] = lock
+        # A fresh caller after deletion makes the thread live again. Repin the
+        # current generation so normal live-thread registry lifetime is stable.
+        self._write_lock_pins[thread_id] = lock
         return lock
 
     @staticmethod
@@ -486,14 +497,14 @@ class DbRunEventStore(RunEventStore):
             if count > 0:
                 await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
-            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
-            # not grow unbounded over the (long-lived, singleton) store's
-            # lifetime. Only pop when no writer is mid-flight; a later write
-            # recreates the lock lazily and seq restarts correctly from the
-            # now-deleted thread.
-            lock = self._write_locks.get(thread_id)
-            if lock is not None and not lock.locked():
-                self._write_locks.pop(thread_id, None)
+            # Retire the live-thread pin, but never remove the weak registry
+            # entry directly. asyncio.Lock.release() clears ``locked()`` before
+            # a queued waiter resumes, so an unlocked check can observe the
+            # handoff window and split one thread onto two lock generations.
+            # Holders/waiters keep the old generation alive until they drain; a
+            # later caller therefore resolves that same lock instead of racing
+            # it with a fresh one.
+            self._write_lock_pins.pop(thread_id, None)
             return count
 
     async def delete_by_run(

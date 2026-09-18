@@ -34,6 +34,32 @@ PATs require a configured database backend (SQLite/PostgreSQL) — on the
 memory-only backend, Bearer credentials are rejected and PAT management routes
 return `503`.
 
+### Account Preferences
+
+`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
+Both require `X-Expected-User-Id` matching the session user; PATCH also requires
+the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
+authorization credential. PAT, internal, and auth-disabled callers receive
+`403`; a different session user receives `409`.
+
+```json
+{
+  "notification_enabled": false,
+  "model_name": "my-model",
+  "mode": "pro",
+  "reasoning_effort": "high"
+}
+```
+
+All four fields accept `null` to restore the default. `mode` accepts `flash`,
+`thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
+`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+invalid values return `422`. Missing preferences read as `null`. Separate-field
+patches preserve each other's changes, and same-field writes are last-commit-wins.
+Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
+notification permission remains device-local and is not changed by this API.
+
 ### Personal Access Tokens
 
 Base URL: `/api/v1/auth`
@@ -197,8 +223,8 @@ The thread-scoped create, stream, and wait endpoints accept an optional
 and key reuses the existing run instead of executing the input again. The key is
 shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
 thread, so the same key string cannot back two different calls even across those
-endpoints. Reuse is bound to the original `input` and `assistant_id`; a retry
-that changes either returns 409. Generate a new key for every intentional user
+endpoints. Reuse is bound to the original `input`, `assistant_id` and
+`conversation_references`; a retry that changes them returns 409. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
 result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
@@ -265,16 +291,19 @@ for runs without changed outputs keep their existing shape.
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The unified Gateway path defaults to `100` in
-`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
-starting point for plan-mode or subagent-heavy runs. Clients can still set
-`recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. Scheduled-task launches do not take a client body: they
+in a single run. The unified Gateway path uses the top-level `recursion_limit`
+from `config.yaml` (default `100`) when a request does not provide one. Clients
+can still set `recursion_limit` explicitly in the request body, and a valid
+request value takes precedence. Scheduled-task launches do not take a client body: they
 use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
 the web UI). For safety, the Gateway clamps any supplied
-value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
-LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
+LLM cost / DoS); invalid or non-positive request values fall back to the
+configured default. Both top-level fields are read per run, so edits apply to
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -293,6 +322,100 @@ data: {"content": "Hello! I'd be happy to help.", "role": "assistant"}
 event: end
 data: {}
 ```
+
+#### Referencing a previous conversation
+
+With `read_conversation` enabled in `config.yaml` (see [configuration](CONFIGURATION.md#reading-referenced-conversations)),
+Gateway API callers can attach up to three explicit references to create/stream/wait requests:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]
+}
+```
+
+A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` URL
+(also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
+with the same scheme and authority as the run request, without query or fragment.
+URLs are parsed as local selectors and are never fetched. For split-origin clients
+or internal proxies, pass the thread ID. The field is separate from message text:
+links in pasted documents, tool results, or previous messages grant no access.
+The server supplies source IDs to the model as background user-role data and
+binds the reader to this run's references and authenticated identity.
+
+Clients that cannot add top-level fields to a run request (the LangGraph JS SDK
+builds a fixed body and drops unknown keys) may send the same list as
+`context.conversation_references`:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "context": {"conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]}
+}
+```
+
+The Gateway lifts the key out of `context` before the run context is assembled,
+so it has the same bounds and error locations as the top-level field, is
+recorded on the run in the same way, and never reaches the merged run context
+or the checkpointed `configurable`. Sending the top-level field and the context
+key together returns 422. `GET /api/features` reports
+`conversation_references.enabled` (the tool is configured) and `max_references`,
+so a client can hide its entry point on deployments without the tool.
+
+The request requires `runs:read` as well as the normal run-creation permission.
+The tool rechecks source ownership on each read; foreign, deleted and unowned
+legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`
+reads newest-first pages (messages within each page are chronological), at most
+50 visible user/assistant messages, 4,000 characters per message and 20,000 text
+characters per page. Each page also stays within the tool-output budget that
+applies to `read_conversation` (`tool_output.tool_overrides.read_conversation`,
+else `externalize_min_chars`, and `fallback_max_chars`; 12,000 serialized
+characters by default), so results reach the model inline instead of being
+externalized to a file. A message that does not fit starts the next page intact.
+Only a message longer than 4,000 characters, or one whose serialized form alone
+exceeds the budget, is truncated. Such a message carries
+`continuation: {"message_seq", "offset"}`; `read_conversation(thread_id,
+message_seq=..., offset=...)` without a cursor returns the next part of that one
+message (at most 20,000 text characters, sized to the same budget) with its
+`offset`, `text_length` and, while text remains, a new continuation. Offsets
+refer to the source's current text: an offset past its end returns
+`invalid_request`, and a message that is no longer visible is unavailable. If the
+`read_conversation` budget is too small to return any text (below roughly 800
+serialized characters), the result is `output_budget_too_small` rather than a
+continuation that makes no progress.
+Results include message IDs, sequence numbers, continuation, truncation and
+unavailability. Hidden messages, reasoning blocks, raw tool
+results and subagent internals are excluded. Source data is not changed.
+
+**Live reads and retained copies.** Each call reads the source's current visible
+history. Editing or regenerating the source can change subsequent reads, including
+later pages; a reference does not pin an immutable transcript. Text already returned
+to the destination is a copy and is not automatically refreshed by source changes.
+
+Read permission lasts only for this run, including its internal continuation steps.
+Every new run, including resume, regenerate or edit replay, must submit references
+again; checkpoints and old hints never restore permission. A resume can reuse
+IDs already visible in the interrupted conversation, but needs the explicit
+request field again. Missing/expired transcripts are not reconstructed from
+checkpoints or memory.
+
+Permission expiry does not erase excerpts already stored in the destination
+conversation or conclusions derived from them. Deleting the source does not
+retroactively erase those copies either; they follow the destination's own
+retention and deletion behavior. Once the source is unavailable, further source
+reads report unavailability rather than reconstructing it from destination copies.
+
+**Incomplete requirements.** When `truncated` is true, the tool's notice tells
+the agent to read the rest through each cut message's continuation before relying
+on it, and to acknowledge the omission and request the missing material if that
+read is unavailable. `has_more: false` means there are no older messages to page
+through, not that every returned message is complete. This is model guidance, not
+a new confirmation mechanism or a guarantee of model compliance.
+
+This first version adds no frontend picker or link-to-reference conversion. The
+tool is unavailable to bootstrap agents, subagents and embedded clients without
+a host-provided reader. Active tool/skill policies continue to apply.
 
 #### Get Run History
 
@@ -844,7 +967,10 @@ Content-Type: multipart/form-data
   ],
   "message": "Successfully uploaded 1 file(s)"
 }
+
 ```
+
+**Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
 **Supported Document Formats** (auto-converted to Markdown):
 - PDF (`.pdf`)
@@ -910,6 +1036,149 @@ DELETE /api/threads/{thread_id}
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
 
+### Projects
+
+#### Get Projects Config
+
+```http
+GET /api/projects/config
+```
+
+The `projects` config-block knobs the UI needs for client-side validation. Requires the `projects:read` scope (PATs included).
+
+**Response:**
+```json
+{
+  "instructions_max_bytes": 8192,
+  "trash_retention_days": 30
+}
+```
+
+Values come from `projects.instructions_max_bytes` and `projects.trash_retention_days` in `config.yaml`; the documented defaults apply when the block is absent.
+
+### Project Documents
+
+Per-project document shelf (Projects Phase 2). All routes fail closed: a missing or foreign project/document is `404` (never `403`); uploads and individual trash require an active project — archived projects answer `404` for those while keeping reads; a memory-backend deployment answers `503` `"Projects not available"`. Trashed rows are invisible to every route.
+
+#### List Documents
+
+```http
+GET /api/projects/{project_id}/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor.
+
+#### Upload Document
+
+```http
+POST /api/projects/{project_id}/documents
+Content-Type: multipart/form-data
+```
+
+Exactly one file per request (`file` part), plus an optional `name` form field (defaults to the multipart filename). The name is rejected with `400` when empty after normalization, separator-bearing, or over 255 UTF-8 bytes; empty files are `400`; files over `uploads.max_file_size` are `413`.
+
+**Response:** `201 Created` with `{"document": {...}, "deduplicated": false}`. Re-uploading identical content returns the existing row with `200 OK` and `"deduplicated": true` — the first writer's name wins. Re-upload after trash creates a fresh row.
+
+#### Save Thread File to Shelf (from-thread)
+
+```http
+POST /api/projects/{project_id}/documents/from-thread
+Content-Type: application/json
+```
+
+```json
+{"thread_id": "abc123", "kind": "upload", "name": "report.pdf", "shelf_name": "q3-report.pdf"}
+```
+
+Copies one file from the thread's own uploads (`"kind": "upload"`) or outputs (`"kind": "output"`) directory into the shelf as a project-owned snapshot; the source file is never moved. `name` locates the source file inside the thread; `shelf_name` is optional and defaults to the source name, following upload-name validation (`400`). A source that does not resolve inside that thread's directory — separator-bearing names, escapes, missing files, or a missing/foreign thread — is `404`, indistinguishable from absence. Files over `uploads.max_file_size` are `413`; empty files are `400`.
+
+**Response:** same as Upload Document — `201 Created` with `{"document": {...}, "deduplicated": false}`, or `200 OK` on a content dedup hit. The created row records `source_thread_id` / `source_kind` / `source_name` provenance.
+
+#### Attach Document to Thread
+
+```http
+POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread_id}
+```
+
+Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+
+#### Get Document Content
+
+```http
+GET /api/projects/{project_id}/documents/{document_id}/content?download=false
+```
+Serves the converted-markdown companion when present, else inline text when the original samples as text, else an attachment; `download=true` always attaches. Active content (`text/html`, `text/xml`, `application/xml`, `text/xsl`, any `+xml` type such as XHTML/SVG) is always forced to an attachment regardless of `download`, mirroring the artifacts router, so it never executes script on the application origin. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+#### Delete Document (move to trash)
+
+```http
+DELETE /api/projects/{project_id}/documents/{document_id}
+```
+
+**Response:** `204`. Recoverable trash: the row keeps its bytes and a `{project_id, project_name}` origin snapshot. Deleting a project moves its whole shelf to trash in the same transaction. Restore/purge endpoints land with the trash-completion slice.
+
+### Project Thread Files
+
+Read-only conversation-files view over a project's member threads (Projects Phase 2) — the discovery route for Save Thread File to Shelf. Archived projects keep read access; a missing or foreign project is `404`.
+
+#### List Thread Files
+
+```http
+GET /api/projects/{project_id}/thread-files?offset=0&thread_limit=20&file_limit=50
+```
+
+**Query Parameters:** `offset` (member-thread cursor, default 0), `thread_limit` (default 20, 1..50), `file_limit` (per-thread file cap, default 50, 1..200) — out-of-bounds values are `422`.
+
+**Response:** `{"groups": [{"thread_id", "display_name", "updated_at", "truncated", "files": [{"kind": "upload"|"output", "name", "size_bytes", "modified_at", "artifact_url"}]}], "next_offset", "truncated"}`. Member threads are paged in the same non-archived order as the project thread list; `next_offset` is `null` when no threads remain. Each thread contributes up to `file_limit` files across its uploads and outputs; a group's `truncated` is `true` when that thread's listing was cut, and the envelope `truncated` is the OR over the page's groups. Entries disappear when their thread is deleted — the view keeps no storage of its own.
+
+
+### Trash
+
+Recoverable deletion tier for project shelf documents (Projects Phase 2). Trashed rows keep their bytes and a `{project_id, project_name}` origin snapshot for `projects.trash_retention_days` (default 30) before the retention sweep may purge them; permanent purge is a separate action. All routes fail closed: a missing or foreign document/project is `404` (never `403`), restoring into an archived or foreign target is the same `404`, and a memory-backend deployment answers `503` `"Projects not available"`. Purge endpoints carry no confirmation parameter — the "this cannot be undone" step is a UI contract, not a server-enforced handshake.
+
+#### List Trashed Documents
+
+```http
+GET /api/trash/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "trashed_at", "trash_origin": {"project_id", "project_name"} | null}], "total", "limit", "offset"}`, most recently trashed first. The retention sweep runs lazily before the listing (a sweep failure is logged and never blocks it).
+
+#### Restore Document
+
+```http
+POST /api/trash/documents/{document_id}/restore
+Content-Type: application/json
+
+{"project_id": "…"}
+```
+
+**Body:** `project_id` optional. Target = the body value, else `trash_origin.project_id` when that project still exists, is owned, and is active; otherwise `404` (the UI offers the project picker). A foreign or archived target is the same `404` as a missing one.
+
+**Response:** `{"outcome": "restored" | "merged", "document": <ProjectDocumentResponse>}`. `merged` means the target already had an active row with identical bytes: the trash row is deleted and `document` is the surviving active row. Restore re-points the row without moving any file. Missing or size-mismatched content answers `409` `"content_missing"` and leaves the row trashed.
+
+#### Purge Document
+
+```http
+POST /api/trash/documents/{document_id}/purge
+```
+
+**Response:** `204`. Permanently unlinks the original and `derived/converted.md`, then deletes the row, in one row-locked transaction. Already-absent content counts as removed; any other file-cleanup failure rolls back, keeps the trashed row, and answers `500` with a retryable message.
+
+#### Empty Trash
+
+```http
+POST /api/trash/purge
+```
+
+**Response:** `{"purged": <int>}` — permanently deletes every trashed document of the caller, regardless of age: the confirmation covers the whole listing, so the retention cutoff never gates this route. Each row goes through the same guarded row-locked transaction as the single-document purge — bytes first, then the row. A file-cleanup failure other than already-absent content answers `500` with a retryable message, leaving that row and every row not yet visited trashed. Retention expiry is enforced only by the sweep (lazily before `GET /api/trash/documents` and once at gateway startup).
+
 ### Artifacts
 
 #### Get Artifact
@@ -927,7 +1196,7 @@ GET /api/threads/{thread_id}/artifacts/{path}
 **Query Parameters:**
 - `download` (boolean): If `true`, force download with Content-Disposition header
 
-**Response:** File content with appropriate Content-Type
+**Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
 ---
 

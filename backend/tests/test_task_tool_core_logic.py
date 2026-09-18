@@ -36,6 +36,18 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
+def test_parent_loop_middleware_recorder_requires_the_journal_owner_loop():
+    owner_loop = asyncio.new_event_loop()
+    other_loop = asyncio.new_event_loop()
+    journal = SimpleNamespace(_owner_loop=owner_loop)
+    try:
+        with pytest.raises(ValueError, match="must match"):
+            task_tool_module._ParentLoopMiddlewareRecorderProxy(journal, other_loop)
+    finally:
+        owner_loop.close()
+        other_loop.close()
+
+
 def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
     """Subagent middleware events must never call RunJournal from the child loop."""
     calls: list[tuple[object, dict]] = []
@@ -462,6 +474,7 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
     assert kwargs["tool_promotion_recorder"] is proxy
+    assert kwargs["tool_progress_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()
@@ -926,6 +939,82 @@ def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):
         "total_tokens": 120,
     }
     assert running["model_name"] == "ark-model"
+
+
+@pytest.mark.parametrize("context_mode", [None, "isolated", "snapshot"])
+@pytest.mark.parametrize("rejection", ["unknown", "caller-policy", "host-bash"])
+def test_rejected_task_does_not_capture_parent_history(monkeypatch, context_mode, rejection):
+    from langchain_core.messages import HumanMessage
+
+    runtime = _make_runtime()
+    runtime.state["messages"] = [HumanMessage(content="Retained parent history")]
+    if rejection == "caller-policy":
+        runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: [] if rejection == "caller-policy" else ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None if rejection == "unknown" else _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
+    capture = MagicMock(wraps=task_tool_module.ParentContextSnapshot.from_state)
+    monkeypatch.setattr(task_tool_module.ParentContextSnapshot, "from_state", capture)
+    executor = MagicMock()
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", executor)
+
+    kwargs = {"context_mode": context_mode} if context_mode is not None else {}
+    result = _run_task_tool(runtime=runtime, prompt="Do the task", subagent_type="bash" if rejection == "host-bash" else "general-purpose", tool_call_id="tc-rejected", **kwargs)
+
+    assert _task_tool_message(result).additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    capture.assert_not_called()
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize("context_mode", [None, "isolated", "snapshot"])
+def test_task_tool_context_mode_captures_dispatch_time_history(monkeypatch, context_mode):
+    from langchain_core.messages import HumanMessage
+
+    runtime = _make_runtime()
+    runtime.state["messages"] = [HumanMessage(content="Constraint before dispatch")]
+    runtime.state["summary_text"] = "Earlier decisions"
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    def load_tools(**kwargs):
+        # Snapshot must already be detached when child setup begins.
+        runtime.state["messages"][0].content = "Changed during setup"
+        runtime.state["summary_text"] = "Changed summary"
+        return []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", load_tools)
+    kwargs = {"context_mode": context_mode} if context_mode is not None else {}
+    result = _run_task_tool(runtime=runtime, prompt="Do the task", subagent_type="general-purpose", tool_call_id="tc-snapshot", **kwargs)
+    assert _task_tool_message(result).additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    if context_mode == "snapshot":
+        content = str(captured["context_snapshot"].to_message().content)
+        assert "Constraint before dispatch" in content and "Earlier decisions" in content
+        assert "Changed" not in content
+    else:
+        assert captured.get("context_snapshot") is None
+
+
+def test_task_tool_context_mode_schema_rejects_unknown_mode():
+    from pydantic import ValidationError
+
+    schema = task_tool_module.task_tool.tool_call_schema
+    field = schema.model_json_schema()["properties"]["context_mode"]
+    assert field["default"] == "isolated"
+    assert field["enum"] == ["isolated", "snapshot"]
+    with pytest.raises(ValidationError):
+        schema.model_validate({"runtime": None, "prompt": "Task", "subagent_type": "general-purpose", "tool_call_id": "tc", "context_mode": "shared"})
 
 
 def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):

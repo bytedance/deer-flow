@@ -23,12 +23,6 @@ def restore_assistant_payloads(
     restore: AssistantPayloadRestorer,
 ) -> None:
     """Restore provider-specific fields onto serialized assistant payloads."""
-    if len(payload_messages) == len(original_messages):
-        for payload_msg, orig_msg in zip(payload_messages, original_messages):
-            if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
-                restore(payload_msg, orig_msg)
-        return
-
     ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
     assistant_payloads = [m for m in payload_messages if m.get("role") == "assistant"]
     used_ai_indexes: set[int] = set()

@@ -11,8 +11,8 @@ Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
 the existing `deerflow` console script to `extensions/cli.py` and exposes only these
-surfaces: `install SOURCE [--yes]`, `list`, `enable NAME`, `disable NAME`, and
-`remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
+surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list`, `enable NAME`,
+`disable NAME`, and `remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
@@ -53,11 +53,15 @@ and `UV_INSECURE_HOST`, which would remove the TLS validation the HTTPS-only sou
 depends on; index, proxy, cache, and credential-provider settings remain available.
 The `--no-workspace` boundary requires uv 0.8.0 or newer. The stock Docker paths pin uv
 0.11.1, and the manager fails before mutation when the host uv is older.
-All install/remove/enable/disable mutations for a checkout hold the cross-process
+All install/upgrade/remove/enable/disable mutations for a checkout hold the cross-process
 `.deer-flow/extension-manager.lock`; remove deactivates config before changing the package
 declaration, and rollback preserves a concurrent external config edit instead of replacing
-it. The MVP has no in-place upgrade: operators retain private config, remove the old
-package, install the new source pin, and restore that config.
+it. Upgrade replaces a managed local snapshot (or re-pins a package requirement that is already
+in the `extensions` group) and adopts the existing `plugins:` record so private `config`,
+`required`, and `enabled` stay put. It fails closed if that local snapshot, requirement, or Git source is not
+already installed; a plain `install` still refuses an already-snapshotted local directory.
+Failed upgrades restore the previous snapshot even when a concurrent dependency-file edit
+blocks lock/pyproject rollback, then leave that operator edit in place.
 
 Local-directory installs are snapshots, not editable links. The manager validates the
 source, derives the destination from the normalized distribution name, and copies it to
@@ -126,9 +130,9 @@ newer uv can bump `uv.lock`'s `revision` (or make `uv lock --check` disagree wit
 generated elsewhere) while CI stays green, and the pinned uv in the production image then
 fails on the committed lock. `backend/tests/test_ci_uv_version_pin.py` keeps the four
 locations in step, which makes a uv upgrade one deliberate, reviewable change.
-Rebuild the Gateway image after changing the managed set. Every install, enable, disable,
-remove, or config mutation also requires a Gateway restart because plugin loading is
-startup-only.
+Rebuild the Gateway image after changing the managed set. Every install, upgrade, enable,
+disable, remove, or config mutation also requires a Gateway restart because plugin loading
+is startup-only.
 The root management wrappers bootstrap the checkout environment without the extension group
 via `uv run --frozen --no-group extensions`, so a broken or disappeared extension source cannot
 trigger project validation before the operator can list, disable, or remove it, while a
@@ -273,7 +277,29 @@ supplies none.
 
 Gateway services start in registration order after the persistence engine and session
 factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
-app store, projected host policy, and session factory. Start failures are attributed and
+app store, projected host policy, session factory, and optional read-only
+`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
+scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
+be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
+and sort by run id. Deletion is deliberately not represented by a tombstone, so the feed
+covers creations and changes to retained rows only; synchronization consumers must poll
+`get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
+is required. A DB run store preserves positions across restarts, while memory only provides
+process-lifetime ordering. Per-run events retain the event store's thread-scoped
+`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
+and status comes from the authoritative run store. The reader passes its fixed scope to
+event reads explicitly, including global `None`, so ambient request identity cannot
+change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
+fields are frozen, but nested containers remain locally mutable without touching host
+storage. The production Gateway injects one
+app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
+global cross-user visibility because services have no request principal. A host embedding
+the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+already retain `session_factory` and execute with Gateway privileges. Empty pages mean
+caught up or not visible, never unsupported -- absence is represented
+by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
+`NotImplementedError`. Start failures are attributed and
 fail open. The runtime captures `app.state.extensions` once, registers cleanup before the
 start batch, and stops the attempted service prefix in reverse order after run/subagent
 drain but before store, checkpointer, and engine teardown. Each stop has an independent

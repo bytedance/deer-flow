@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,7 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
-        data = row.to_dict()
+        data = row.to_dict(exclude={"last_occurrence_seq"})
         for key in (
             "created_at",
             "updated_at",
@@ -364,17 +366,17 @@ class ScheduledTaskRepository:
     async def release_queued_admission_lease(self, task_id: str) -> bool:
         """Recover a crash after queue insert but before parent-lease release."""
         async with self._sf() as session:
-            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            task = await self._lock_task(session, task_id)
             if task is None or task.status != "running" or task.lease_owner is None:
                 await session.rollback()
                 return False
             queued = await session.scalar(
-                select(ScheduledTaskRunRow.id).where(
+                select(ScheduledTaskRunRow).where(
                     ScheduledTaskRunRow.task_id == task_id,
                     ScheduledTaskRunRow.status == "queued",
                 )
             )
-            if queued is None:
+            if queued is None or not can_project(task, queued):
                 await session.rollback()
                 return False
             task.status = "enabled"
@@ -397,9 +399,10 @@ class ScheduledTaskRepository:
         increment_run_count: bool,
         protect_terminal: bool = False,
         expected_lease_owner: str | None = None,
+        task_run_id: str | None = None,
     ) -> bool:
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            row = await self._lock_task(session, task_id)
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
@@ -411,16 +414,39 @@ class ScheduledTaskRepository:
                 )
                 await session.rollback()
                 return False
-            if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
+            occurrence = None
+            if task_run_id is not None:
+                occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
+                if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, last_run_id):
+                    logger.warning(
+                        "Fenced stale scheduled-task launch update for task %s: occurrence %s does not belong to run %s",
+                        task_id,
+                        task_run_id,
+                        last_run_id,
+                    )
+                    await session.rollback()
+                    return False
+            elif last_run_id is not None:
+                # Preserve direct repository callers that identify the launch
+                # by its durable run id rather than its occurrence id.
+                occurrence = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.run_id == last_run_id).with_for_update())
+            should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
+            if occurrence is not None:
+                if increment_run_count and last_run_id is not None:
+                    account_launch(row, occurrence, last_run_id)
+                should_increment_run_count = False
+                if not can_project(row, occurrence):
+                    await session.commit()
+                    return True
+            if protect_terminal and (row.status in TERMINAL_TASK_STATUSES or (occurrence is not None and occurrence.status in TERMINAL_RUN_STATUSES)):
                 # A fast-failing run can reach handle_run_completion (which
                 # finalizes a `once` task) before this launch-path write
-                # commits; keep the hook's status/error and only record the
-                # launch bookkeeping.
+                # commits. Cron parents stay enabled even after completion,
+                # so also protect the terminal occurrence's status/error.
                 pass
             else:
                 row.status = status
                 row.last_error = last_error
-            should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
             row.next_run_at = _coerce_datetime(next_run_at)
             row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
@@ -430,6 +456,56 @@ class ScheduledTaskRepository:
             row.lease_owner = None
             row.lease_expires_at = None
             row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
+    async def complete_run(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        task_run_id: str,
+        run_id: str,
+        status: str,
+        error: str | None,
+        finished_at: datetime,
+    ) -> bool:
+        """Commit occurrence completion, accounting and eligible parent outcome."""
+        if status not in TERMINAL_RUN_STATUSES:
+            raise ValueError(f"unsupported terminal occurrence status: {status!r}")
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
+            if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
+                await session.rollback()
+                return False
+            occurrence.status = status
+            occurrence.run_id = run_id
+            occurrence.error = error
+            occurrence.finished_at = finished_at
+            occurrence.lease_owner = None
+            occurrence.lease_expires_at = None
+            if task is not None:
+                account_launch(task, occurrence, run_id)
+                if can_project(task, occurrence):
+                    if task.last_run_id != run_id:
+                        # A fast callback can beat launch bookkeeping. Finalize
+                        # its association and schedule before releasing the slot.
+                        launched_at = occurrence.started_at or occurrence.scheduled_for
+                        if launched_at.tzinfo is None:
+                            launched_at = launched_at.replace(tzinfo=UTC)
+                        task.last_run_at = launched_at
+                        task.last_run_id = run_id
+                        task.last_thread_id = occurrence.thread_id
+                        task.next_run_at = compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
+                        task.lease_owner = None
+                        task.lease_expires_at = None
+                    task.last_error = error
+                    if task.schedule_type == "once":
+                        # Only a once task consumes its parent on completion;
+                        # cron parents keep whatever status they already hold.
+                        task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
+                    task.updated_at = finished_at
             await session.commit()
             return True
 
@@ -477,6 +553,97 @@ class ScheduledTaskRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    @staticmethod
+    async def _fetch_latest_run(session: AsyncSession, task_id: str) -> ScheduledTaskRunRow | None:
+        """Return the latest ``scheduled_task_runs`` row for a task (no status filter).
+
+        The caller must not hold a pre-lock snapshot of this row; the outcome
+        used for finalization must come from a fresh read.  ``populate_existing``
+        bypasses the session identity map so a concurrently committed status is
+        read back fresh.
+
+        Once any sequenced row exists, the parent-locked ``occurrence_seq`` is
+        the only recency key and the highest sequence wins: caller clocks never
+        reorder sequenced rows, and unsequenced rows (legacy history or an
+        admission by a pre-upgrade writer) are not consulted, matching the
+        ``can_project`` rule applied by every other parent write.  Only a task
+        whose history is entirely unsequenced keeps the previous timestamp
+        ordering.
+        """
+        base = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        sequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_not(None)).order_by(ScheduledTaskRunRow.occurrence_seq.desc()).limit(1).execution_options(populate_existing=True)
+        sequenced = (await session.execute(sequenced_stmt)).scalars().first()
+        if sequenced is not None:
+            return sequenced
+        legacy_stmt = (
+            base.order_by(
+                ScheduledTaskRunRow.created_at.desc(),
+                ScheduledTaskRunRow.scheduled_for.desc(),
+                ScheduledTaskRunRow.id.desc(),
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        return (await session.execute(legacy_stmt)).scalars().first()
+
+    @staticmethod
+    async def _has_active_occurrence(session: AsyncSession, task_id: str) -> bool:
+        """True while any occurrence row of the task is queued/launching/running.
+
+        ``uq_scheduled_task_run_active`` allows one such row per task, so a live
+        row is the newest admission regardless of its caller clock or whether
+        it carries a sequence.
+        """
+        stmt = (
+            select(ScheduledTaskRunRow.id)
+            .where(
+                ScheduledTaskRunRow.task_id == task_id,
+                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalars().first() is not None
+
+    @staticmethod
+    def _finalise_once_task_from_run(
+        task_row: ScheduledTaskRow,
+        run_row: ScheduledTaskRunRow | None,
+        *,
+        error: str,
+        now: datetime,
+    ) -> bool:
+        """Finalise a stuck ``once`` task parent to match its latest run outcome.
+
+        success -> completed, failed -> failed, interrupted -> cancelled,
+        skipped -> cancelled (no work performed).  An active occurrence
+        (queued/launching/running) is left untouched — a concurrent completion
+        or a later recovery pass will finalize it once the run reaches a
+        terminal state.  When there is no run row at all the parent keeps
+        the original generic cancellation.
+
+        Returns ``True`` if the parent was finalised, ``False`` for an active
+        occurrence that must be retried by a later recovery pass.
+        """
+        if run_row is not None and run_row.status in TERMINAL_RUN_STATUSES:
+            task_row.status = ONCE_TASK_STATUS_BY_RUN_STATUS[run_row.status]
+            if run_row.status == "success":
+                task_row.last_error = None
+            elif run_row.status == "interrupted":
+                task_row.last_error = run_row.error or error
+            else:
+                task_row.last_error = run_row.error
+            task_row.updated_at = now
+            return True
+        if run_row is not None and run_row.status in ACTIVE_RUN_STATUSES:
+            # Active occurrence — leave the parent unchanged.  A concurrent
+            # completion or a later recovery pass will finalize it.
+            return False
+        # No run row, or an unrecognised legacy status — generic cancel.
+        task_row.status = "cancelled"
+        task_row.last_error = error
+        task_row.updated_at = now
+        return True
+
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         """Reconcile ``once`` tasks orphaned in ``running`` by a process crash.
 
@@ -486,22 +653,51 @@ class ScheduledTaskRepository:
         it. After a crash the hook is gone and the task would be stuck forever.
         Tasks still holding a lease are left alone — they were claimed but not
         launched, and expired-lease reclaim recovers them safely.
+
+        Outcome-aware: for each stuck task, looks up the latest
+        ``scheduled_task_runs`` row.  If the run already reached a terminal
+        status the parent task is finalised to match (``success`` →
+        ``completed``, ``failed`` → ``failed``, ``interrupted`` →
+        ``cancelled``, ``skipped`` → ``cancelled``).  While any occurrence
+        row is still active (queued/launching/running), sequenced or not, the
+        parent is left untouched: ``uq_scheduled_task_run_active`` makes that
+        row the task's newest admission.  Tasks whose latest run row is absent
+        receive the generic cancellation.
         """
-        stmt = select(ScheduledTaskRow).where(
+        stmt = select(ScheduledTaskRow.id).where(
             ScheduledTaskRow.schedule_type == "once",
             ScheduledTaskRow.status == "running",
             ScheduledTaskRow.lease_expires_at.is_(None),
         )
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = list(result.scalars())
+            task_ids = list((await session.execute(stmt)).scalars())
+            if not task_ids:
+                return 0
             now = datetime.now(UTC)
-            for row in rows:
-                row.status = "cancelled"
-                row.last_error = error
-                row.updated_at = now
+            reconciled = 0
+            for task_id in task_ids:
+                # Row lock (no SQLite writer emulation, so the race regressions
+                # can still commit concurrently): on Postgres this serialises
+                # against admission, which locks the parent before inserting a
+                # queued occurrence, so no live row can appear between the
+                # probe below and this commit.
+                task_row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+                if task_row is None or task_row.status != "running" or task_row.lease_expires_at is not None:
+                    continue
+                run_row = await self._fetch_latest_run(session, task_id)
+                if await self._has_active_occurrence(session, task_id):
+                    # The live row is the newest admission whatever its clock or
+                    # sequence; its own completion, or a later pass once it is
+                    # terminal, owns the parent.
+                    continue
+                if run_row is not None and not can_project(task_row, run_row):
+                    # Same eligibility rule as every other parent write: a row
+                    # that cannot project leaves the parent untouched.
+                    continue
+                if self._finalise_once_task_from_run(task_row, run_row, error=error, now=now):
+                    reconciled += 1
             await session.commit()
-            return len(rows)
+            return reconciled
 
     async def reconcile_stuck_once_tasks(
         self,
@@ -540,9 +736,10 @@ class ScheduledTaskRepository:
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
-                    # Run takeover commits in its own short transaction. If this
-                    # outer commit fails, the next poll finishes task bookkeeping
-                    # while the underlying run remains safely terminal.
+                    # Run takeover commits the durable RunRow in its own short
+                    # transaction.  Its occurrence projection may remain active
+                    # until reconcile_active_runs runs, so this pass can defer the
+                    # parent and let the next poll finish task bookkeeping.
                     claimed = await self._run_repository.claim_for_takeover(
                         candidate.run_id,
                         grace_seconds=lease_grace_seconds,
@@ -553,10 +750,20 @@ class ScheduledTaskRepository:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
-                task.status = "cancelled"
-                task.last_error = error
-                task.updated_at = datetime.now(UTC)
-                cancelled += 1
+                # Finalise from the latest scheduled_task_run (unconditional lookup).
+                # Filtering by terminal status only could exclude a newer skipped
+                # or active row, causing us to finalise based on an older run.
+                run_row = await self._fetch_latest_run(session, task.id)
+                if await self._has_active_occurrence(session, task.id):
+                    # Any live occurrence, sequenced or not, is the newest
+                    # admission; reconcile_active_runs terminalises it once its
+                    # durable run is gone and the next pass finalises the parent.
+                    continue
+                if run_row is not None and not can_project(task, run_row):
+                    # Same eligibility rule as every other parent write.
+                    continue
+                if self._finalise_once_task_from_run(task, run_row, error=error, now=now):
+                    cancelled += 1
             await session.commit()
             return cancelled
 

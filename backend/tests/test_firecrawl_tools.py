@@ -64,3 +64,51 @@ class TestWebFetchTool:
             "https://example.com",
             formats=["markdown"],
         )
+
+
+class TestFirecrawlBaseUrl:
+    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    def test_fetch_passes_base_url_as_api_url(self, mock_get_app_config, mock_firecrawl_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"base_url": "http://192.168.0.47:3002"}
+
+        def get_tool_config(name):
+            if name == "web_fetch":
+                return fetch_config
+            return None
+
+        mock_get_app_config.return_value.get_tool_config.side_effect = get_tool_config
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Fetched markdown"
+        mock_scrape_result.metadata = MagicMock(title="Fetched Page")
+        mock_firecrawl_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# Fetched Page\n\nFetched markdown"
+        mock_firecrawl_cls.assert_called_once_with(api_key=None, api_url="http://192.168.0.47:3002")
+
+    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    def test_search_passes_base_url_and_api_key(self, mock_get_app_config, mock_firecrawl_cls):
+        search_config = MagicMock()
+        search_config.model_extra = {
+            "api_key": "firecrawl-key",
+            "base_url": "http://192.168.0.47:3002",
+            "max_results": 5,
+        }
+        mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+        mock_result = MagicMock()
+        mock_result.web = []
+        mock_firecrawl_cls.return_value.search.return_value = mock_result
+
+        from deerflow.community.firecrawl.tools import web_search_tool
+
+        web_search_tool.invoke({"query": "test query"})
+
+        mock_firecrawl_cls.assert_called_once_with(api_key="firecrawl-key", api_url="http://192.168.0.47:3002")
