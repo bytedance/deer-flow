@@ -68,6 +68,7 @@ export default function AgentChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
+  const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
 
   const { agent_name } = useParams<{
@@ -469,6 +470,7 @@ export default function AgentChatPage() {
                     onSubmit={handleSubmit}
                     onStop={handleStop}
                     canStopStreaming={canStopStreaming}
+                    canCreateRuns={canCreateRuns}
                   />
                   {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
                     <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">

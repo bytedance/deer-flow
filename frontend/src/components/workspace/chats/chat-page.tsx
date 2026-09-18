@@ -76,6 +76,7 @@ export default function ChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
+  const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
   const searchParams = useSearchParams();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
@@ -557,6 +558,7 @@ export default function ChatPage() {
                       onSubmit={handleSubmit}
                       onStop={handleStop}
                       canStopStreaming={canStopStreaming}
+                      canCreateRuns={canCreateRuns}
                     />
                   ) : (
                     <div

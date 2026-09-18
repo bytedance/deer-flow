@@ -301,6 +301,7 @@ export interface Translations {
     )[];
     pleaseWaitStreaming: string;
     stopStreamingUnavailable: string;
+    startTurnUnavailable: string;
   };
 
   // Sidebar
