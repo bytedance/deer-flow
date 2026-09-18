@@ -149,17 +149,20 @@ export function getMessageGroups(
       // actually arrive. If they do arrive on that same message, it is
       // deliberately reclassified as processing so its tool activity remains
       // visible with the text that introduced it.
+      // Non-empty content arrays can contain only Anthropic thinking blocks.
+      // Require content the answer renderer can actually display.
+      const hasAnswerContent = extractContentFromMessage(message).length > 0;
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
-        hasContent(message) &&
+        hasAnswerContent &&
         !hasToolCalls(message) &&
         // A provider that has already supplied reasoning with answer text is
         // completing an answer, not merely streaming a pre-tool narration.
         // Keep it out of the processing disclosure while the turn is active.
         !hasReasoning(message);
       const becomesAssistantBubble =
-        hasContent(message) &&
+        hasAnswerContent &&
         !hasToolCalls(message) &&
         !isUnresolvedAssistantText;
 

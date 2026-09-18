@@ -379,6 +379,54 @@ test("keeps streaming reasoning-only messages in the processing group", () => {
   expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
 });
 
+test.each([
+  { answerBlocks: [] },
+  { answerBlocks: [{ type: "text", text: "   " }] },
+])(
+  "keeps Anthropic thinking blocks in processing until answer text arrives: %j",
+  ({ answerBlocks }) => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Explain the result" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: [
+          { type: "thinking", thinking: "Still checking." },
+          ...answerBlocks,
+        ],
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+
+    messages[1] = {
+      id: "ai-1",
+      type: "ai",
+      content: [
+        { type: "thinking", thinking: "Still checking." },
+        { type: "text", text: "The answer is ready." },
+      ],
+    } as Message;
+
+    const answeredGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: true,
+    });
+    expect(answeredGroups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant",
+    ]);
+    expect(answeredGroups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+    ]);
+  },
+);
+
 test("keeps post-tool streaming text in the processing group until the turn settles", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Inspect and summarize" },

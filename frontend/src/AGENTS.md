@@ -45,6 +45,8 @@
    as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
+AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
+
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
 
 Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display anchored after the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time; reasoning disclosure and run activity/duration are rendered separately.
