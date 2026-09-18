@@ -941,6 +941,31 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** Heal databases that silently skipped the run-change clock
+  schema. `0023_run_change_seq` was inserted ahead of the already-shipped
+  `0023_user_preferences` revision, so databases stamped at that revision (or
+  later) treat it as an applied ancestor and never execute it — leaving the
+  `run_change_clock` table and the `runs.change_seq` column permanently
+  missing, and the first thread deletion (any run-store change-clock bump)
+  fails with `no such table: run_change_clock`. The new
+  `0025_repair_run_change_seq` revision re-applies the same guarded DDL on
+  upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
+  `UserPreferenceRow` are also registered in the ORM model registry so
+  `create_all` and autogenerate see every table through explicit imports
+  instead of module side effects.
+- **nginx:** Extend the 600-second read timeout to the two remaining locations
+  whose routes wait on the Gateway, both left on nginx's 60-second default by
+  the thread-route fix. Behind the `/api/` catch-all, the stateless
+  `POST /api/runs/wait` blocks on the same run-completion wait and cancels its
+  run when the client disconnects, so an API consumer waiting on a run longer
+  than 60 seconds got a 504 *and* a cancelled run, and the composer's
+  `POST /api/input-polish` waits for a one-shot model call. Behind
+  `/api/skills`, installing a `.skill` archive runs one LLM security scan per
+  file in it, and a custom-skill edit or rollback runs one more; none of them
+  sets its own timeout, and only the sibling `/api/skills/install/upload`
+  endpoint had been given the longer timeout, so the same install through
+  `POST /api/skills/install` failed at 60 seconds. Applied to the Docker,
+  local, and Helm configs. ([#5524])
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
@@ -4255,3 +4280,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
+[#5524]: https://github.com/bytedance/deer-flow/pull/5524

@@ -44,16 +44,9 @@ export function getMessageGroups(
   }
 
   const groups: MessageGroup[] = [];
-  let currentTurnStartIndex = -1;
-  if (isCurrentTurnLoading) {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
-        currentTurnStartIndex = index;
-        break;
-      }
-    }
-  }
+  const currentTurnStartIndex = isCurrentTurnLoading
+    ? findCurrentTurnStartIndex(messages)
+    : -1;
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
@@ -147,13 +140,24 @@ export function getMessageGroups(
       // same message later. Keep that unresolved message in the processing
       // group so its visible text does not jump from an assistant bubble into
       // the steps panel when the tool call arrives (#4304).
+      // A reasoning-bearing answer is treated as terminal until tool calls
+      // actually arrive. If they do arrive on that same message, it is
+      // deliberately reclassified as processing so its tool activity remains
+      // visible with the text that introduced it.
+      // Non-empty content arrays can contain only Anthropic thinking blocks.
+      // Require content the answer renderer can actually display.
+      const hasAnswerContent = extractContentFromMessage(message).length > 0;
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
-        hasContent(message) &&
-        !hasToolCalls(message);
+        hasAnswerContent &&
+        !hasToolCalls(message) &&
+        // A provider that has already supplied reasoning with answer text is
+        // completing an answer, not merely streaming a pre-tool narration.
+        // Keep it out of the processing disclosure while the turn is active.
+        !hasReasoning(message);
       const becomesAssistantBubble =
-        hasContent(message) &&
+        hasAnswerContent &&
         !hasToolCalls(message) &&
         !isUnresolvedAssistantText;
 
@@ -740,7 +744,7 @@ export function hasReasoning(message: Message) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
-    return true;
+    return message.additional_kwargs.reasoning_content.trim().length > 0;
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
@@ -766,6 +770,25 @@ export function hasPresentFiles(message: Message) {
     message.type === "ai" &&
     message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
   );
+}
+
+/** The latest visible user input or clarification result delimits a run. */
+export function findCurrentTurnStartIndex(
+  messages: readonly Message[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    // Clarification replies are hidden: the result, rather than the last
+    // visible human, separates completed answers from their continuation.
+    if (
+      message &&
+      !isHiddenFromUIMessage(message) &&
+      (message.type === "human" || isClarificationToolMessage(message))
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 export function isClarificationToolMessage(message: Message) {

@@ -24,7 +24,7 @@ import {
   serializeCron,
   utcToZonedLocalInput,
   WEEKDAYS,
-  zonedLocalToUtcIso,
+  validZonedLocalToUtcIso,
   type CronParts,
   type CronPreset,
   type IntervalUnit,
@@ -150,6 +150,11 @@ export function ScheduledTaskScheduleInput({
   );
   const [intervalEdited, setIntervalEdited] = useState(false);
 
+  const onceRunAt = runAtLocal
+    ? validZonedLocalToUtcIso(runAtLocal, timezone)
+    : null;
+  const invalidOnceTime = scheduleType === "once" && !!runAtLocal && !onceRunAt;
+
   // Hold the latest onChange in a ref so the effect below does not depend on
   // it. This avoids a re-render loop: if the parent passes an inline
   // onChange (new reference each render), depending on it directly would
@@ -164,11 +169,7 @@ export function ScheduledTaskScheduleInput({
     if (scheduleType === "once") {
       const unchanged =
         runAtLocal === initialOnce?.local && timezone === initialOnce.timezone;
-      const runAt = unchanged
-        ? initialOnce.runAt
-        : runAtLocal
-          ? zonedLocalToUtcIso(runAtLocal, timezone)
-          : "";
+      const runAt = unchanged ? initialOnce.runAt : onceRunAt;
       onChangeRef.current({
         schedule_type: "once",
         schedule_spec: runAt ? { run_at: runAt } : {},
@@ -203,6 +204,7 @@ export function ScheduledTaskScheduleInput({
     scheduleType,
     preset,
     parts,
+    onceRunAt,
     runAtLocal,
     timezone,
     initialOnce,
@@ -451,6 +453,7 @@ export function ScheduledTaskScheduleInput({
           value={runAtLocal}
           onChange={(e) => setRunAtLocal(e.target.value)}
           aria-label={labels.fields.runAt}
+          aria-invalid={invalidOnceTime}
         />
       )}
 
@@ -467,6 +470,11 @@ export function ScheduledTaskScheduleInput({
         </SelectContent>
       </Select>
 
+      {invalidOnceTime && (
+        <p role="alert" className="text-destructive text-sm">
+          {labels.fields.invalidRunAt}
+        </p>
+      )}
       <div
         className="text-muted-foreground text-sm"
         data-testid="schedule-preview"

@@ -287,6 +287,146 @@ test("keeps unresolved streaming text in the processing group when tool calls ar
   );
 });
 
+test("keeps streaming reasoning and answer text out of the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "The final answer is ready.",
+      additional_kwargs: {
+        reasoning_content: "I checked the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+});
+
+test("moves a reasoning-bearing message into processing when it gains tool calls", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will verify that with a source.",
+      additional_kwargs: {
+        reasoning_content: "I should verify the answer before replying.",
+      },
+    },
+  ] as Message[];
+
+  expect(
+    getMessageGroups(messages, { isCurrentTurnLoading: true }).map(
+      (group) => group.type,
+    ),
+  ).toEqual(["human", "assistant"]);
+
+  messages[1] = {
+    ...messages[1],
+    tool_calls: [{ id: "call-1", name: "web_search", args: {} }],
+  } as Message;
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps content with empty reasoning metadata in the processing group while streaming", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will check the result first.",
+      additional_kwargs: { reasoning_content: "" },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+});
+
+test("keeps streaming reasoning-only messages in the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: {
+        reasoning_content: "I am still checking the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test.each([
+  { answerBlocks: [] },
+  { answerBlocks: [{ type: "text", text: "   " }] },
+])(
+  "keeps Anthropic thinking blocks in processing until answer text arrives: %j",
+  ({ answerBlocks }) => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Explain the result" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: [
+          { type: "thinking", thinking: "Still checking." },
+          ...answerBlocks,
+        ],
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+
+    messages[1] = {
+      id: "ai-1",
+      type: "ai",
+      content: [
+        { type: "thinking", thinking: "Still checking." },
+        { type: "text", text: "The answer is ready." },
+      ],
+    } as Message;
+
+    const answeredGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: true,
+    });
+    expect(answeredGroups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant",
+    ]);
+    expect(answeredGroups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+    ]);
+  },
+);
+
 test("keeps post-tool streaming text in the processing group until the turn settles", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Inspect and summarize" },
@@ -1481,5 +1621,67 @@ describe("orphan tool messages", () => {
     const t1b = allMessages.find((m) => m.id === "t-1b");
     expect(t1b).toBeDefined();
     expect(t1b?.type).toBe("tool");
+  });
+});
+
+describe("clarification run boundaries", () => {
+  const beforeReply = [
+    { id: "human", type: "human", content: "Plan the deployment" },
+    { id: "plan", type: "ai", content: "The completed deployment plan." },
+    {
+      id: "ask",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call",
+      content: "Which environment?",
+    },
+  ] as Message[];
+
+  test("keeps completed text outside processing when the request arrives and during hidden-reply continuation", () => {
+    const reply = {
+      id: "reply",
+      type: "human",
+      content: "staging",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const continuation = {
+      id: "next",
+      type: "ai",
+      content: "Deploying now.",
+    } as Message;
+    for (const messages of [
+      beforeReply,
+      [...beforeReply, reply, continuation],
+    ]) {
+      const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+      expect(groups.find((group) => group.id === "plan")?.type).toBe(
+        "assistant",
+      );
+      expect(groups.filter((group) => group.type === "human")).toHaveLength(1);
+    }
+    const groups = getMessageGroups([...beforeReply, reply, continuation], {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups.find((group) => group.id === "next")?.type).toBe(
+      "assistant:processing",
+    );
+    expect(
+      getMessageGroups([...beforeReply, reply, continuation]).find(
+        (group) => group.id === "next",
+      )?.type,
+    ).toBe("assistant");
+  });
+
+  test("recognizes a clarification boundary without a loaded visible human message", () => {
+    const groups = getMessageGroups(beforeReply.slice(1), {
+      isCurrentTurnLoading: true,
+    });
+    expect(groups[0]?.type).toBe("assistant");
   });
 });

@@ -727,6 +727,14 @@
 
 ### 修复
 
+- **nginx：** 把 600 秒读取超时扩展到其余两个会等待 Gateway 的 location，它们在线程路由的修复
+  之后仍沿用 nginx 默认的 60 秒。`/api/` 兜底 location 之后：无状态的 `POST /api/runs/wait`
+  阻塞在同一套运行完成等待上，并在客户端断开时取消该运行，因此等待超过 60 秒的 API 调用方会
+  同时收到 504 **并且**运行被取消；输入框的 `POST /api/input-polish` 则等待一次性模型调用。
+  `/api/skills` 之后：安装 `.skill` 压缩包会对其中每个文件各做一次 LLM 安全扫描，自定义技能的
+  编辑与回滚各再做一次，它们都没有自己的超时；此前只有同级的 `/api/skills/install/upload`
+  拿到了更长的超时，因此同样的安装经由 `POST /api/skills/install` 会在 60 秒失败。
+  Docker、本地开发与 Helm 配置均已应用。([#5524])
 - **nginx：** 需要等待模型调用的线程路由不再在 60 秒时失败。浏览器直接调用 `/api/threads/*`，
   而该 location 没有设置 `proxy_read_timeout`，因此沿用 nginx 默认的 60 秒，而 `/api/langgraph/`
   允许 600 秒。较慢的 `/compact` 会返回 504，但 Gateway 仍会继续执行并保存压缩结果，于是 UI
@@ -3483,3 +3491,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
+[#5524]: https://github.com/bytedance/deer-flow/pull/5524

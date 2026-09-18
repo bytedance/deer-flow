@@ -231,3 +231,33 @@ test("empty timezone uses a non-UTC browser zone without changing the instant", 
     detectedZone.mockRestore();
   }
 });
+
+test.each([
+  ["2026-11-01T06:30:00Z", "2026-11-01T01:30"],
+  ["2027-06-01T12:30:45.123Z", "2027-06-01T08:30"],
+])(
+  "rejects a gap edit and restores the exact original instant: %s",
+  (runAt, local) => {
+    const initial = once(runAt);
+    const onChange = rs.fn();
+    const ui = render(
+      <ScheduledTaskScheduleInput
+        initial={initial}
+        onChange={onChange}
+        scheduleTypeLocked
+      />,
+    );
+    const input = ui.getByLabelText("Run at");
+    fireEvent.change(input, { target: { value: "2027-03-14T02:30" } });
+    expect(ui.getByRole("alert").textContent).toContain(
+      "This local time does not exist",
+    );
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...initial,
+      schedule_spec: {},
+    });
+    fireEvent.change(input, { target: { value: local } });
+    expect(ui.queryByRole("alert")).toBeNull();
+    expect(onChange).toHaveBeenLastCalledWith(initial);
+  },
+);

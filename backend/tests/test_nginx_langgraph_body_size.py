@@ -160,6 +160,22 @@ def test_threads_route_outlasts_blocking_gateway_calls(path):
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_api_catchall_outlasts_blocking_gateway_calls(path):
+    """The routes that wait on Gateway are not all under ``/api/threads``.
+    The stateless ``POST /api/runs/wait`` blocks on the same
+    ``wait_for_run_completion`` and cancels its run when the client
+    disconnects, and the composer's ``POST /api/input-polish`` waits for a
+    one-shot model call. Both fall through to this catch-all, so it needs the
+    same read timeout as the thread routes."""
+    content = _read(path)
+    block = _extract_location_block(content, "/api/")
+
+    timeout_seconds = _parse_read_timeout_seconds(block)
+
+    assert timeout_seconds >= _MIN_BLOCKING_READ_TIMEOUT_SECONDS, f"{path}: the /api/ catch-all allows {timeout_seconds}s, expected at least {_MIN_BLOCKING_READ_TIMEOUT_SECONDS}s like /api/langgraph/ and /api/threads"
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
 def test_skills_upload_route_allows_archive_plus_multipart_framing(path):
     """The upload route must stream archives and allow slow validation."""
     content = _read(path)
@@ -168,6 +184,21 @@ def test_skills_upload_route_allows_archive_plus_multipart_framing(path):
     assert "client_max_body_size 101M;" in block
     assert "proxy_request_buffering off;" in block
     assert "proxy_read_timeout 600s;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_skills_prefix_outlasts_the_llm_security_scan(path):
+    """Installing a ``.skill`` archive runs one LLM security scan per file in
+    it, and editing or rolling back a custom skill runs one more; none of them
+    sets an application-level timeout. The upload endpoint above already gets
+    600s, but ``POST /api/skills/install`` and the custom-skill writes land
+    here, so this prefix needs it too."""
+    content = _read(path)
+    block = _extract_location_block(content, "/api/skills")
+
+    timeout_seconds = _parse_read_timeout_seconds(block)
+
+    assert timeout_seconds >= _MIN_BLOCKING_READ_TIMEOUT_SECONDS, f"{path}: /api/skills allows {timeout_seconds}s, expected at least {_MIN_BLOCKING_READ_TIMEOUT_SECONDS}s like its own /api/skills/install/upload endpoint"
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
