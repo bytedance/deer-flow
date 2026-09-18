@@ -2244,50 +2244,6 @@ async def _wait_for_compensation_tasks_to_clear(service: McpTaskService) -> None
 
 
 @pytest.mark.asyncio
-async def test_settled_cancellation_compensation_can_stop_without_losing_release():
-    release_started = asyncio.Event()
-    release_gate = asyncio.Event()
-
-    async def release():
-        release_started.set()
-        await release_gate.wait()
-
-    service = McpTaskService(
-        repository=SimpleNamespace(),
-        drivers=McpTaskDriverRegistry(),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_polls=3,
-    )
-    caller = asyncio.create_task(
-        service._drain_cancellation_compensation(
-            release(),
-            action="release late claim",
-            task_id="task-1",
-            settle=True,
-        )
-    )
-    await release_started.wait()
-    caller.cancel("service shutdown")
-
-    try:
-        await asyncio.sleep(0)
-        assert caller.done()
-        with pytest.raises(asyncio.CancelledError) as caught:
-            await caller
-        assert caught.value.args == ("service shutdown",)
-        assert len(service._compensation_tasks) == 1
-
-        release_gate.set()
-        await _wait_for_compensation_tasks_to_clear(service)
-    finally:
-        release_gate.set()
-        if not caller.done():
-            await caller
-        await _wait_for_compensation_tasks_to_clear(service)
-
-
-@pytest.mark.asyncio
 async def test_cancelled_hung_claim_returns_then_releases_delayed_result(monkeypatch):
     monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
     claim_started = asyncio.Event()
@@ -2299,8 +2255,7 @@ async def test_cancelled_hung_claim_returns_then_releases_delayed_result(monkeyp
         await claim_gate.wait()
         return [_claimed_row()]
 
-    async def release(record, *, settle=False):
-        assert settle is False
+    async def release(record):
         release_calls.append(record["id"])
 
     service = McpTaskService(
