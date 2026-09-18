@@ -1,6 +1,13 @@
-import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
@@ -183,5 +190,65 @@ describe("InputBox agent skill draft hydration", () => {
         screen.getByRole("button", { name: "Remove /research" }),
       ).toBeTruthy();
     });
+  });
+});
+
+describe("InputBox agent skill picker scope", () => {
+  const originalSkills = skillState.skills;
+
+  beforeEach(() => {
+    skillState.skills = [
+      {
+        name: "research",
+        description: "Research a topic",
+        category: "general",
+        license: "MIT",
+        enabled: true,
+        editable: false,
+      },
+      {
+        name: "writer",
+        description: "Draft a document",
+        category: "general",
+        license: "MIT",
+        enabled: true,
+        editable: false,
+      },
+    ];
+  });
+
+  afterEach(() => {
+    skillState.skills = originalSkills;
+  });
+
+  it("offers only the agent's scoped skills in the picker catalog", async () => {
+    // Every other skill consumer in the composer (slash suggestions, draft
+    // hydration, enabledSkillNames) reads the agent-scoped catalog. The
+    // picker must agree: a skill outside the active agent's scope cannot
+    // activate, so offering it would hand the model literal text instead.
+    renderComposer({
+      agentSkillsLoading: false,
+      agentSkillNames: ["research"],
+    });
+
+    fireEvent.click(screen.getByTestId("skill-picker-button"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("/research")).toBeTruthy();
+    expect(within(dialog).queryByText("/writer")).toBeNull();
+  });
+
+  it("keeps the picker disabled until the agent scope resolves", () => {
+    // While the scope is loading the scoped catalog is empty — the same
+    // contract as the slash suggestions, which also stay empty until
+    // loading clears.
+    renderComposer({
+      agentSkillsLoading: true,
+      agentSkillNames: undefined,
+    });
+
+    expect(
+      screen.getByTestId("skill-picker-button").getAttribute("disabled"),
+    ).not.toBeNull();
   });
 });

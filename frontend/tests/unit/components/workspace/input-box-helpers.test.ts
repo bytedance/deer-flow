@@ -448,6 +448,23 @@ describe("getMatchingSkillSuggestions", () => {
     expect(slashOffered).toEqual(selectable);
   });
 
+  it("keeps a context-named skill offerable on both surfaces", () => {
+    // Only the exact `/context compact` alias is reserved; `/context <task>`
+    // activates a same-named skill. The picker and the slash suggestions
+    // must agree on that exception — one rule, two surfaces.
+    const skills = [makeSkill("context")];
+    const selectable = getSelectableSkills(skills).map((skill) => skill.name);
+    const slashOffered = getMatchingSkillSuggestions(
+      skills,
+      "context",
+      builtins,
+    )
+      .filter((s) => s.kind === "skill")
+      .map((s) => s.name);
+    expect(selectable).toEqual(["context"]);
+    expect(slashOffered).toEqual(["context"]);
+  });
+
   it("caps the number of suggestions", () => {
     const skills = Array.from({ length: 10 }, (_, i) =>
       makeSkill(`skill-${i}`),

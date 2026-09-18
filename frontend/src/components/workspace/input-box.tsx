@@ -2495,7 +2495,7 @@ export function InputBox({
               uploadLimits={uploadLimits}
             />
             <ComposerSkillPicker
-              skills={skills}
+              skills={agentScopedSkills}
               disabled={composerLocked}
               onPick={(skill) => {
                 // Selecting from the picker must not discard a draft the user
