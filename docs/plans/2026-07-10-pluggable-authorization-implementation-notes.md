@@ -438,6 +438,51 @@ Phase 1 最低验证要求：
   event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
   `aauthorize()` 验证仍是同一个 loop。
 
+### 2026-09-17 — Phase 4 / PR #5489 Skills listing visibility (list / detail)
+
+- **背景：** Phase 4 PR 1（#5228 `/me` route permissions）与 PR 2（#5294 前端权限门控）
+  合并后，模型已有 per-caller listing/use 授权（#4540），sandbox 已有 execute 授权
+  （#4911），但 skill 列表表面仍对全部已认证用户开放——`GET /api/skills`、
+  `GET /api/skills/custom`、`GET /api/skills/{name}` 不检查角色，是 Phase 3 资源类型
+  清单里最后未收口的 listing 面。
+- **决策（表面清单）：** 恰好三个非管理 GET 表面接入 per-caller 可见过滤：`list_skills`、
+  `list_custom_skills`、`get_skill`，共享 `_filter_visible_skills(request, config, skills)`
+  helper，语义镜像 `list_models`：`provider.filter_resources(principal, "skill", names)`
+  批量过滤；provider 解析失败 → `_AuthorizationUnavailable`（携带 `fail_closed` 标志）；
+  provider 抛错或返回非 `list[str]` → 空（fail-closed）或全量（fail-open）。skills.py
+  其余全部路由维持 `require_admin_user` 门控，不在本层重复过滤。
+- **决策（detail 404 而非 403）：** `get_skill` 对被过滤 skill 返回与真实缺失逐字一致的
+  404，而非 `get_model` 的 403。理由：`get_model` 执行的是 `authorize("model", "use")`
+  使用决策（模型存在但角色无权使用 → 403 合理）；本层只有 listing visibility，没有
+  skill 执行决策的对应物，403 会让 detail 端点变成过滤清单刚关掉的 existence oracle。
+- **决策（resolver 结构）：** 从 `resolve_model_authorization` 提取共享核心
+  `_resolve_route_scoped_authorization(user, *, is_internal)`，
+  `resolve_skill_authorization` 与 model 版本互为薄封装（含 `INTERNAL_SYSTEM_ROLE → None`
+  pop 与 internal-caller 语义）。RBAC `_RESOURCE_POLICY_KEYS` 已含 `"skill": "skills"`
+  （rbac.py），roles 的 `skills: {allow: [...]}` 直接生效，无 schema 变更。
+- **否决方案：** 不为 skill 引入 `authorize("skill", "read")` 逐名授权——listing 表面
+  用批量 `filter_resources` 一次往返即可，逐名决策增加配置面且与 `list_models` 不对称。
+  不只过滤 `/skills` 主列表——自审发现 `/skills/custom` 与 `/skills/{name}` 会原样
+  泄露主列表隐藏的名字，三个表面必须同批收口。
+- **兼容性：** `authorization.enabled: false` 时三表面均 no-op（返回全量）。匿名请求
+  （user=None）不过滤——生产 auth 开启时 `AuthMiddleware` 先行 401，该分支实际只覆盖
+  auth-disabled 本地模式，与 `list_models` 对齐。skill 管理端点（install/edit/export/
+  delete 等）保持 `require_admin_user`，不受本过滤影响。RBAC 缺 `skills` 键 = 放行，
+  `allow: []` = 全拒（与 `models` 键同语义）。
+- **证据：** `tests/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
+  allow/deny/wildcard/absent-policy、custom+public 一致过滤、provider error/unavailable/
+  坏返回类型 × fail-closed/fail-open、`("skill", [...])` 契约、custom 列表绕过封闭、
+  detail 404 与真实缺失逐字一致；`test_skills_router_authz.py` 与
+  `test_skills_custom_router.py` 的 fake config 补 `AuthorizationConfig`（含
+  `_make_test_app` 回填 shim）。review（willem-bd）在 head tree 执行验证：4 套件
+  78 tests 通过，且移除 custom-listing 过滤的突变使
+  `test_list_custom_skills_rbac_filters_by_deny` 变红，守护测试真实。
+- **延期：** #4541（Phase 3 执行层：assembly 过滤 + slash-activation 授权）与本 PR
+  互补（本 PR 管 listing visibility，#4541 管 runtime use），其 rebase 时需双向调和：
+  `config.example.yaml` roles 注释段两 PR 均改；本文件决策日志两 PR 也在同一插入点
+  各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
+  迁移（沿袭前阶段延期项）。
+
 ### 新记录模板
 
 ```markdown

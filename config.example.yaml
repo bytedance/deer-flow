@@ -854,6 +854,11 @@ tools:
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool
   #   max_results: 5
+  #   # Optional search-source filters; omit or use [] for no restriction of that kind.
+  #   # include_domains:
+  #   #   - docs.python.org
+  #   #   - developer.mozilla.org
+  #   # exclude_domains: []
   #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
@@ -2818,17 +2823,23 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # `models` / `skills` govern the per-caller listing/detail surfaces
+#       # (which models/skills the caller sees on GET /api/models and the
+#       # GET /api/skills[.../custom, /{name}] skill routes); skill
+#       # management endpoints (install/edit/export) stay admin-gated.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2838,6 +2849,7 @@ run_ownership:
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
+#           skills: {allow: []}      # no skills visible in the listing
 authorization:
   enabled: false
 

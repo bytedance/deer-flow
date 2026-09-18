@@ -380,6 +380,9 @@ describe("getMatchingSkillSuggestions", () => {
     // these names, so such a skill can never activate — picking it would send
     // literal text to the model with nothing loaded.
     for (const reserved of RESERVED_SLASH_SKILL_NAMES) {
+      if (reserved === "context") {
+        continue;
+      }
       const result = getMatchingSkillSuggestions(
         [makeSkill(reserved), makeSkill(`${reserved}-helper`)],
         reserved,
@@ -396,6 +399,18 @@ describe("getMatchingSkillSuggestions", () => {
     const result = getMatchingSkillSuggestions([makeSkill("status")], "", []);
 
     expect(result).toEqual([]);
+  });
+
+  it("keeps a context skill available because only its compact alias is reserved", () => {
+    const result = getMatchingSkillSuggestions(
+      [makeSkill("context")],
+      "context",
+      [],
+    );
+
+    expect(
+      result.map((suggestion) => `${suggestion.kind}:${suggestion.name}`),
+    ).toEqual(["skill:context"]);
   });
 
   it("caps the number of suggestions", () => {

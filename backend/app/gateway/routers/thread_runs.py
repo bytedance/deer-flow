@@ -590,7 +590,7 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -677,7 +677,7 @@ def _run_status_value(record: Any) -> str | None:
 
 async def _require_successful_source_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None:
         # The run-event journal is the authoritative lookup above. This fallback
@@ -704,7 +704,7 @@ async def _find_interrupted_target_run_id(
         return None
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     record = await run_mgr.get(source_run_id, user_id=user_id)
     if record is None:
         records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
@@ -1062,7 +1062,22 @@ def _parse_run_page_created_at(value: str) -> str:
     return normalized
 
 
-async def _run_scope_user_id(request: Request) -> str | None:
+async def _thread_ownership_established(request: Request, thread_id: str) -> bool:
+    """Whether an existing meta row with a concrete owner covers ``thread_id``.
+
+    Missing rows (legacy compatibility) and NULL-owner rows (shared/pre-auth
+    data) do **not** establish ownership, even though ``owner_check=True``
+    still authorizes access to them.
+    """
+    thread_store = getattr(request.app.state, "thread_store", None)
+    if thread_store is None:
+        return False
+    meta = await thread_store.get(thread_id, user_id=None)
+    meta_owner = meta.get("user_id") if isinstance(meta, dict) else getattr(meta, "user_id", None)
+    return meta is not None and bool(meta_owner)
+
+
+async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     """Resolve the data-filter id for run and message reads, not for authorization.
 
     Thread visibility on these endpoints is already authorized by
@@ -1071,10 +1086,17 @@ async def _run_scope_user_id(request: Request) -> str | None:
     without an owner header, or the ``make_safe_user_id``-normalized owner
     otherwise — while ``start_run`` stamps run rows and run-event rows with
     the raw trusted-owner value. Filtering by the authorization identity
-    therefore never matches the persisted rows (#5437), so internal callers
-    read the authorized thread's runs, event-store messages, hidden-run
-    lookups, turn durations and feedback unfiltered; browser/API sessions
-    keep the per-user filter.
+    therefore never matches the persisted rows (#5437).
+
+    Owner isolation (#5448 review P1): ``owner_check=True`` also authorizes
+    threads whose meta row is missing (legacy compatibility) or NULL-owner
+    (shared/pre-auth data). On those, an unfiltered read would expose other
+    users' persisted runs to the acting owner's internal caller, so the
+    per-user filter is only dropped when the thread's meta row exists with an
+    established owner; otherwise the raw trusted owner — the exact value
+    ``start_run`` stamps — is retained as the filter. Browser/API sessions
+    always keep the per-user filter. The thread token-usage aggregate is
+    scoped the same way.
 
     Feedback note: an explicit ``None`` also skips the ``user_id`` WHERE in
     ``FeedbackRepository``, so on shared/NULL-owner threads several users'
@@ -1082,10 +1104,48 @@ async def _run_scope_user_id(request: Request) -> str | None:
     / ``list_by_run_ids`` order deterministically (latest wins, ``feedback_id``
     breaks ties) to keep that well-defined.
     """
-    user = getattr(request.state, "user", None)
-    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+    # Tolerate state-less request stand-ins used by focused unit tests.
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
+    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        return await get_current_user(request)
+    if await _thread_ownership_established(request, thread_id):
         return None
+    # Missing or NULL-owner meta row: ownership was never established, so the
+    # isolation boundary is the acting owner's raw stamp (the exact value
+    # start_run writes) — or, without an owner header, the synthetic
+    # "default" identity, which only matches legacy default-stamped rows.
+    owner = get_trusted_internal_owner_user_id(request)
+    if owner is not None:
+        return owner
     return await get_current_user(request)
+
+
+async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Request) -> None:
+    """Gate run-scoped sub-resource reads and writes (events, messages, join,
+    stream, cancel, artifact archive).
+
+    These routes query or mutate by ``(thread_id, run_id)`` without a
+    per-user filter of their own. For trusted internal callers on threads
+    without established ownership, that let an internal caller acting for
+    owner A read or cancel owner B's run by id (#5448 review P1 follow-up).
+    The run's own stamp must therefore match the acting owner's raw value (or
+    the legacy ``"default"`` stamp); every other caller and every
+    established-ownership thread keeps its existing semantics.
+    """
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
+    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        return
+    if await _thread_ownership_established(request, thread_id):
+        return
+    scope = get_trusted_internal_owner_user_id(request) or "default"
+    record = await get_run_manager(request).get(run_id)
+    if record is None:
+        return
+    record_owner = getattr(record, "user_id", None) or "default"
+    if record.thread_id != thread_id or record_owner != scope:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
@@ -1093,7 +1153,7 @@ async def _run_scope_user_id(request: Request) -> str | None:
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
@@ -1121,7 +1181,7 @@ async def list_runs_page(
         before_created_at = _parse_run_page_created_at(before_created_at)
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(
         thread_id,
         user_id=user_id,
@@ -1145,7 +1205,7 @@ async def list_runs_page(
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -1172,6 +1232,7 @@ async def cancel_run(
     durably notifies the owner when its lease is live, or takes over and
     terminalizes the run when that lease has expired.
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1216,6 +1277,7 @@ async def cancel_run(
 @require_permission("runs", "read", owner_check=True)
 async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1268,6 +1330,7 @@ async def _stream_existing_run(
     """
     require_cancel_permission_when_action(request, action)
 
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1368,10 +1431,11 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
-    # Resolve the data-filter id once (None for internal callers — same
-    # rationale as the runs endpoints above); it scopes the feedback query,
-    # the hidden-run lookup, the event-store scan and turn-duration injection.
-    user_id = await _run_scope_user_id(request)
+    # Resolve the data-filter id once (None for internal callers on threads
+    # with established ownership — see `_run_scope_user_id`); it scopes the
+    # feedback query, the hidden-run lookup, the event-store scan and
+    # turn-duration injection.
+    user_id = await _run_scope_user_id(request, thread_id)
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     messages, _ = await _scan_visible_thread_messages(
@@ -1509,7 +1573,7 @@ async def list_thread_messages_page(
     if "after_seq" in request.query_params:
         raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
 
-    user_id = await _run_scope_user_id(request)
+    user_id = await _run_scope_user_id(request, thread_id)
     rows, has_more = await _scan_thread_message_page(
         thread_id,
         limit=limit,
@@ -1539,6 +1603,7 @@ async def list_run_messages(
 
     Response: { data: [...], has_more: bool }
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1645,6 +1710,7 @@ async def get_run_artifact_archive_manifest(
     request: Request,
 ) -> ArtifactArchiveManifestResponse:
     """Return the verified terminal delivery count used by the archive."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
     return ArtifactArchiveManifestResponse(file_count=len(dict.fromkeys(presented_paths)))
 
@@ -1657,6 +1723,7 @@ async def create_run_artifact_archive(
     request: Request,
 ) -> StreamingResponse:
     """Download the current contents of the files presented by one terminal run."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
@@ -1723,6 +1790,7 @@ async def list_run_events(
     ``task_id`` + ``after_seq`` let the subtask card page through one subagent
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     events = await event_store.list_events(
@@ -1754,6 +1822,7 @@ async def get_run_workspace_changes(
     include_diff: bool = Query(default=True),
 ) -> dict:
     """Return workspace/output file changes recorded for one run."""
+    await _require_run_visible_to_scope(run_id, thread_id, request)
     event_store = get_run_event_store(request)
     return await get_workspace_changes_response(
         event_store,
@@ -1773,9 +1842,10 @@ async def thread_token_usage(
 ) -> ThreadTokenUsageResponse:
     """Thread-level token usage aggregation."""
     run_store = get_run_store(request)
+    scope_user_id = await _run_scope_user_id(request, thread_id)
     if include_active:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True, user_id=scope_user_id)
     else:
-        agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    context_usage = await build_context_usage(request, thread_id, run_store)
+        agg = await run_store.aggregate_tokens_by_thread(thread_id, user_id=scope_user_id)
+    context_usage = await build_context_usage(request, thread_id, run_store, user_id=scope_user_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)
