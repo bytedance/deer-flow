@@ -777,10 +777,10 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     except Exception:
         logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
 
-    # Remove feedback (best-effort). Historical runs are gone by now and new
-    # feedback writes validate the referenced run first, so this cannot race a
-    # fresh write into a dangling row. The memory backend legitimately sets
-    # ``feedback_repo = None``, so the optional accessor is used here.
+    # Remove persisted feedback best-effort. This cleans existing rows; fencing
+    # already-admitted writes across thread deletion is a separate lifecycle
+    # concern. The memory backend legitimately sets ``feedback_repo = None``, so
+    # the optional accessor is used here.
     try:
         feedback_repo = getattr(request.app.state, "feedback_repo", None)
         if feedback_repo is not None:
