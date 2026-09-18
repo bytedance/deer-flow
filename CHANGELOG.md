@@ -2770,6 +2770,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **frontend:** Tool steps no longer turn non-web URLs into links. The
+  `web_fetch` URL and `web_search` / `image_search` result links in the
+  chain-of-thought panel skipped the scheme allowlist that markdown links use,
+  so a prompt-injected tool call could put a `file:` or OS protocol-handler
+  link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
+  and show an unsafe URL with the same "Unsafe link omitted" marker as
+  markdown links. A tool call whose args are missing, or whose `web_fetch` URL
+  is not a string, no longer crashes the message list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it
@@ -4281,3 +4289,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5526]: https://github.com/bytedance/deer-flow/pull/5526

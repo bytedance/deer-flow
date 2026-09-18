@@ -1,4 +1,4 @@
-import type { AnchorHTMLAttributes } from "react";
+import type { AnchorHTMLAttributes, ComponentProps } from "react";
 
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
 import { cn } from "@/lib/utils";
@@ -49,6 +49,30 @@ export function isSafeHref(href: string | undefined): boolean {
   }
 }
 
+/**
+ * Inert stand-in for a link whose href failed `isSafeHref`. It keeps the
+ * visible label and marks the omission on hover and for assistive tech, so
+ * every surface that applies the allowlist degrades the same way. Extra props
+ * pass through for wrappers such as Radix `asChild` triggers.
+ */
+export function UnsafeLink({
+  href,
+  className,
+  ...props
+}: ComponentProps<"span"> & { href: string }) {
+  return (
+    <span
+      {...props}
+      className={cn(
+        "text-muted-foreground cursor-not-allowed underline decoration-dotted underline-offset-2",
+        className,
+      )}
+      aria-label="Unsafe link omitted"
+      title={`Unsafe link scheme in ${href}`}
+    />
+  );
+}
+
 function isExternalUrl(href: string | undefined): boolean {
   if (typeof href !== "string") {
     return false;
@@ -78,16 +102,9 @@ export function createMarkdownLinkComponent(threadId?: string) {
       // <span> and would trigger React DOM warnings.
       const { className, children } = props;
       return (
-        <span
-          className={cn(
-            "text-muted-foreground cursor-not-allowed underline decoration-dotted underline-offset-2",
-            className,
-          )}
-          aria-label="Unsafe link omitted"
-          title={`Unsafe link scheme in ${href}`}
-        >
+        <UnsafeLink href={href} className={className}>
           {children}
-        </span>
+        </UnsafeLink>
       );
     }
     // Safe-href check passed — citation links now route through CitationLink.
