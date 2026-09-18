@@ -198,7 +198,9 @@
         "type": "object",
         "required": ["content_sha256"],
         "properties": {
-          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "project_context_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "project_shelf_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
         },
         "additionalProperties": true
       },
