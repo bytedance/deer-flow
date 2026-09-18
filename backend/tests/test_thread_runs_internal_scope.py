@@ -742,3 +742,39 @@ def test_token_usage_narrowed_for_browser_sessions_without_meta() -> None:
 
     assert response.status_code == 200
     assert response.json()["total_tokens"] == 222
+
+
+def test_token_usage_unfiltered_on_established_ownership_for_internal_callers() -> None:
+    """Established meta ownership keeps the unfiltered aggregate.
+
+    Pins the other half of the scoping contract: on an established thread the
+    internal caller's aggregate folds runs stamped by different identities
+    (the store must receive ``user_id=None``), mirroring
+    ``test_established_ownership_still_reads_thread_runs_unfiltered``.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=OWNER_RAW))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-legacy-default", user_id="default", status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-legacy-default"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 55}}
+    run_store._runs["run-legacy-default"]["total_tokens"] = 55
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/token-usage",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_tokens"] == 166  # both stamps fold when ownership is established
