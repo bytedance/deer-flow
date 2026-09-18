@@ -170,6 +170,19 @@ with one complete thread-log read because each JSONL page would otherwise
 rescan every run file. The default and JSONL paths share the public
 `normalize_message_ids()` and `match_ai_message_run_id()` helpers from
 `events/store/base.py`. Database owner filtering is inherited on every page.
+
+**Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
+`put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
+one serialization domain: the per-thread `asyncio` lock, plus (on PostgreSQL) the
+transaction-scoped advisory lock keyed by `thread_id` that
+`DbRunEventStore._acquire_thread_mutation_fence()` takes before any read or write.
+Deletion therefore cannot interleave with an admitted writer and re-create rows for
+a deleted thread, and all backends accept the same owner-scoped delete signature
+(`user_id` filters on the DB store; memory/JSONL accept it for parity). This is
+serialization, not an incarnation fence: a mutation already admitted before a
+deletion may still run afterwards, and preventing old-incarnation resurrection
+needs a separate durable generation contract. `JsonlRunEventStore` keeps its own
+equivalent guarantee through `_run_mutation`.
 Callers may use a missing key as proof that no valid AI event exists only after
 an ordinary return, never after an exception. A caller that crosses a run or
 checkpoint-write admission boundary must repeat the complete audit after
