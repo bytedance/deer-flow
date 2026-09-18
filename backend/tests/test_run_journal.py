@@ -372,6 +372,107 @@ async def test_close_without_flush_detaches_when_cancellation_interrupts_pending
     assert journal._pending_flush_tasks == set()
 
 
+@pytest.mark.anyio
+async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypatch):
+    """Cancellation while ``close(flush=True)`` drains a detached write must still detach.
+
+    Reproduces the reviewer's scenario: an earlier bounded ``flush()`` left one
+    ambiguous durable write detached, a best-effort progress snapshot is in
+    flight, and the caller cancels while ``close`` drains that detached write.
+    ``close`` must cancel/retain the progress snapshot and detach runtime
+    dependencies before re-raising, while still observing the detached write's
+    eventual outcome.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    class HangingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def put_batch(self, batch):
+            self.started.set()
+            await self.release.wait()
+            return list(batch)
+
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    store = HangingStore()
+    journal = RunJournal(
+        "r-close-detach",
+        "t-close-detach",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="before.detach", category="trace", content="first")
+
+    flush_task = asyncio.create_task(journal.flush())
+    flush_task_added = False
+    progress_task = None
+    try:
+        await asyncio.wait_for(store.started.wait(), timeout=0.2)
+        flush_task_added = True
+        assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+        assert len(journal._detached_write_tasks) == 1
+
+        journal._schedule_progress_flush()
+        await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+        progress_task = journal._pending_progress_task
+        assert progress_task is not None
+
+        close_task = asyncio.create_task(journal.close())
+        # Let ``close`` reach the detached-write drain, then interrupt it there.
+        await asyncio.sleep(0.02)
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # Detach ran even though the caller cancellation was re-raised.
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+
+        # The best-effort snapshot was cancelled and globally retained until settle.
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        assert progress_task in journal_module._cancelling_progress_tasks
+
+        # The ambiguous durable write stays supervised and its outcome is observed.
+        assert len(journal._detached_write_tasks) == 1
+        feed_before = journal.feed_generation
+        store.release.set()
+        await asyncio.gather(*tuple(journal._detached_write_tasks), return_exceptions=True)
+        assert journal._detached_write_tasks == {}
+        assert journal.feed_generation == feed_before + 1
+    finally:
+        store.release.set()
+        if flush_task_added:
+            await asyncio.gather(flush_task, return_exceptions=True)
+        if progress_task is not None and not progress_task.done():
+            progress_task.cancel()
+        release_progress.set()
+        if progress_task is not None:
+            await asyncio.gather(progress_task, return_exceptions=True)
+        detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+        if detached:
+            await asyncio.gather(*detached, return_exceptions=True)
+
+
 @pytest.fixture
 def journal_setup():
     store = MemoryRunEventStore()

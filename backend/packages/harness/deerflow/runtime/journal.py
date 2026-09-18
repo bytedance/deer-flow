@@ -1398,7 +1398,22 @@ class RunJournal(BaseCallbackHandler):
             # A failed terminal write returns its batch to ``_buffer``. Keep the
             # store and all buffered state attached so a later close/flush can retry
             # instead of silently discarding the tail of the run event stream.
-            await self.flush_until_settled()
+            #
+            # A caller cancellation is different: ``flush_until_settled`` re-raises
+            # it only after the write's outcome is handled, and that must still
+            # detach runtime dependencies. Cancel and globally retain any
+            # best-effort progress snapshot first (it must never block teardown),
+            # then detach and re-raise. An ordinary write failure is an
+            # ``Exception`` and deliberately falls through with the store and
+            # buffer attached for a later retry.
+            try:
+                await self.flush_until_settled()
+            except asyncio.CancelledError:
+                progress_task = self._pending_progress_task
+                if progress_task is not None and not progress_task.done():
+                    self._cancel_and_retain_progress_task(progress_task)
+                self._detach_runtime_dependencies()
+                raise
             self._detach_runtime_dependencies()
             return
 

@@ -4,54 +4,26 @@ Memory and Redis bridges take their default idle heartbeat cadence from the star
 
 ### RunJournal Write Ownership
 
-`runtime/journal.py` owns event-store writes independently of the run lifecycle.
-Keep these invariants together when changing its buffer or progress handling:
+`runtime/journal.py` owns event-store writes independently of the run lifecycle:
 
-- **In-flight owner:** a threshold flush owns its detached batch until the
-  wrapper starts; after that, the exact `put_batch` task owns the batch.
-  `_pending_flush_tasks` supervises wrappers, `_active_write_tasks` fences a
-  write started by an explicit `flush()` from the moment it is created until the
-  owner applies its terminal outcome (no task-completion callback releases it
-  early), and `_detached_write_tasks` supervises writes that outlived the flush
-  deadline. `_flush_lock` serializes explicit flushes, and
-  `_explicit_flush_in_progress` keeps the whole `flush()` call fenced from the
-  threshold path until it returns. A progress snapshot remains owned by the
-  journal and the module-level cancellation registry until its task settles.
-- **Deadline:** ordinary `flush()` waits at most the fixed cancellation-drain
-  deadline for a write or in-flight progress snapshot. An unresolved write stays
-  owned and its successors stay buffered; a hung progress snapshot is cancelled
-  because it is best-effort. `flush_until_settled()` and `close(flush=True)` wait
-  for every predecessor outcome before detaching runtime dependencies. `flush()`
-  returns `False` when the deadline is reached with a predecessor still in
-  flight, so a caller that must order a downstream durable write can observe the
-  gap instead of treating the flush as complete.
-- **Terminal outcomes:** write success advances `feed_generation` once; explicit
-  failure or write-task cancellation prepends the batch once; an unresolved
-  write remains non-terminal and is never requeued. Caller cancellation is
-  re-raised after the same outcome handling and does not cancel the store write.
-- **Lost-lease teardown:** `close(flush=False)` intentionally stops starting new
-  durable writes, but it does not drop supervision of a write already in flight.
-  `_active_write_tasks` / `_detached_write_tasks` are preserved so a late result
-  still advances `feed_generation` (or re-buffers a failure) instead of being
-  silently forgotten. Best-effort progress snapshots are cancelled and retained
-  globally rather than awaited to completion, so a stubborn reporter can never
-  block a fenced worker from tearing down.
-- **Stale-work fence:** ordinary journal events have no durable lease token or
-  idempotency key. Their safety fence is therefore to retain and observe the one
-  original write task and never retry an ambiguous outcome. Successors cannot
-  overtake it. A process loss also destroys that task and its volatile buffer;
-  only explicitly failed in-process writes are eligible for retry. Write outcome
-  transitions are centralized: a write that settles within the deadline is
-  resolved by `_put_batch_cancellation_safe`, one that times out is resolved by
-  `_resolve_detached_write`. The only pre-write re-buffer path is `_on_flush_done`,
-  which restores a threshold batch whose wrapper was cancelled before its store
-  write started; once a store write has started, no other code may bump
-  `feed_generation` or re-buffer a batch outside those two resolvers.
-
-The shared `runtime/cancellation.py::wait_for_task_until` helper absorbs repeated
-caller cancellation only within one absolute deadline. Compare
-`Task.cancelling()` on entry and exit so a previously handled cancellation is
-not mistaken for a new request.
+- **In-flight owner.** The exact `put_batch` task that started owns an ambiguous
+  write until its outcome is applied; no successor may overtake it, and no
+  completion callback releases it early. A best-effort progress snapshot stays
+  owned by the journal and the module-level cancellation registry until settle.
+- **Deadline.** Ordinary `flush()` is bounded: it keeps an unresolved write owned
+  with successors buffered, cancels a hung best-effort progress snapshot, and
+  returns `False` while a predecessor is in flight. `flush_until_settled()` and
+  `close(flush=True)` wait without a deadline and raise instead of returning
+  `False`.
+- **Terminal outcomes.** Success advances `feed_generation`; only an explicitly
+  failed or cancelled write prepends its batch once for retry; an unresolved
+  write is never requeued. Caller cancellation is re-raised after the outcome is
+  handled and never cancels the store write.
+- **Teardown.** `close(flush=False)` stops new durable writes but preserves
+  supervision of one already in flight. `close(flush=True)` detaches runtime
+  dependencies on success and on caller cancellation (cancelling and retaining
+  any in-flight progress snapshot first) before re-raising; only an ordinary
+  write failure leaves the store and buffer attached for a later retry.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 
