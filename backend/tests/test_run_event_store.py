@@ -1072,19 +1072,16 @@ class TestDbRunEventStoreWriteLock:
 
         # Simulate a writer mid-flight by holding the lock. Deletion now shares
         # the fence, so it must queue behind the in-flight writer instead of
-        # running concurrently with it.
+        # running concurrently with it. The strict ordering guarantee is pinned
+        # without wall-clock timing by the Event-driven tests in
+        # tests/test_db_event_store_lock_lifecycle.py; this test covers the real
+        # SQLite deletion path and the registry state it leaves behind.
         lock = s._get_write_lock("t1")
         await lock.acquire()
 
         delete_task = asyncio.create_task(s.delete_by_thread("t1"))
-        try:
-            # Pre-fix the deletion bypasses the lock and finishes inside this
-            # window; post-fix it can only complete after the release below.
-            await asyncio.wait_for(asyncio.shield(delete_task), timeout=0.2)
-            completed_while_lock_held = True
-        except TimeoutError:
-            completed_while_lock_held = False
-        assert not completed_while_lock_held, "deletion must queue behind the in-flight writer"
+        await asyncio.sleep(0)
+        assert not delete_task.done()
 
         lock.release()
 
