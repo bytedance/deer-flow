@@ -2764,8 +2764,8 @@ This release closes that milestone with **765 merged pull requests**.
   so a prompt-injected tool call could put a `file:` or OS protocol-handler
   link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
   and show an unsafe URL with the same "Unsafe link omitted" marker as
-  markdown links; a non-string `web_fetch` URL no longer crashes the message
-  list. ([#5526])
+  markdown links. A tool call whose args are missing, or whose `web_fetch` URL
+  is not a string, no longer crashes the message list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it

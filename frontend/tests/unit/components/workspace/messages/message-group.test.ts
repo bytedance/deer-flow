@@ -611,6 +611,37 @@ describe("MessageGroup tool links", () => {
     expect(html).toContain("View web page");
     expect(html).not.toContain("<a");
   });
+
+  // Persisted or mid-stream tool calls can arrive without an args object;
+  // every specialized branch reads args, so none may throw on its absence.
+  it.each([
+    "web_fetch",
+    "web_search",
+    "image_search",
+    "ls",
+    "read_file",
+    "write_file",
+    "str_replace",
+    "bash",
+    "ask_clarification",
+    "write_todos",
+    "browser_navigate",
+    "mcp_lookup",
+  ])("renders a %s step whose tool call has no args", (name) => {
+    for (const args of [undefined, null]) {
+      const render = () =>
+        renderGroup([
+          {
+            id: "ai-1",
+            type: "ai",
+            content: "",
+            tool_calls: [{ id: "call-1", name, args }],
+          } as unknown as Message,
+        ]);
+
+      expect(render).not.toThrow();
+    }
+  });
 });
 
 function renderToolCall(

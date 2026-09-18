@@ -1084,7 +1084,9 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          // Persisted or mid-stream tool calls can omit args (or send null);
+          // every ToolCall branch reads them, so normalize once here.
+          args: tool_call.args ?? {},
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
