@@ -28,6 +28,10 @@ Scope model (mirrors the structural guardrails):
 * NOT covered in v1: the memory-extraction path (follow-up slice per the issue
   discussion) and tool outputs externalized to disk by
   ``ToolOutputBudgetMiddleware`` (they are not model-bound).
+* The compaction and durable-context seams run outside ``wrap_model_call``;
+  :func:`redact_text` is the shared entry point they call, wired from
+  SummarizationMiddleware (compaction input) and DurableContextMiddleware
+  (reinjected ``summary_text``).
 
 Detector order is fixed and pinned by a regression test; email → api_key →
 national_id → credit_card → phone. Checksum-gated national IDs run *before*
@@ -151,19 +155,22 @@ _API_KEY_PATTERN = re.compile(
     r")\b"
 )
 
-_CREDIT_CARD_PATTERN = re.compile(r"\b(?:\d{4}[ -]){3}\d{1,7}\b|\b\d{13,19}\b")
+# Digit-anchored patterns use digit-aware lookarounds instead of Unicode \b:
+# CJK characters are word characters, so \b fails between a Chinese label and
+# the identifier and the match is lost entirely ("身份证110105…").
+_CREDIT_CARD_PATTERN = re.compile(r"(?<!\d)(?:\d{4}[ -]){3}\d{1,7}(?!\d)|(?<!\d)\d{13,19}(?!\d)")
 
 _PHONE_PATTERN = re.compile(
-    r"\+\d{1,3}[\s-]?(?:\d{2,4}[\s-]?){2,4}\d{2,4}"  # international +CC form
-    r"|\b1[3-9]\d{9}\b"  # CN mobile
-    r"|\(\d{3}\)\s?\d{3}[-.]?\d{4}\b"  # US formatted
+    r"(?<!\d)\+\d{1,3}(?:[ \-]?\d{1,4}){3,6}(?!\d)"  # international +CC form; single-char separators so a candidate cannot run across a newline
+    r"|(?<!\d)1[3-9]\d{9}(?!\d)"  # CN mobile
+    r"|\(\d{3}\) ?\d{3}[-.]?\d{4}(?!\d)"  # US formatted
 )
 
 _NATIONAL_ID_PATTERN = re.compile(
-    r"\b\d{17}[\dXx]\b"  # CN resident ID (checksum-validated)
-    r"|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b"  # CPF (checksum-validated)
-    r"|\b\d{2}-\d{10}-\d\b"  # CUIT (format-only)
-    r"|\b[A-ZÑ&]{4}\d{6}[0-9A-Z]{3}\b"  # RFC with homoclave (format-only)
+    r"(?<![\dXx])\d{17}[\dXx](?![\dXx])"  # CN resident ID (checksum-validated)
+    r"|(?<!\d)\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)"  # CPF (checksum-validated)
+    r"|(?<!\d)\d{2}-\d{8}-\d(?!\d)"  # CUIT, 2+8+1 digits (format-only)
+    r"|(?<![A-Z0-9Ñ&])[A-ZÑ&]{4}\d{6}[0-9A-Z]{3}(?![A-Z0-9Ñ&])"  # RFC with homoclave (format-only)
 )
 
 _DETECTORS: tuple[_Detector, ...] = (
@@ -173,6 +180,27 @@ _DETECTORS: tuple[_Detector, ...] = (
     _Detector("credit_card", _CREDIT_CARD_PATTERN, _luhn_valid),
     _Detector("phone", _PHONE_PATTERN, lambda value: 8 <= len(re.sub(r"\D", "", value)) <= 15),
 )
+
+
+def active_pii_detectors(config: PiiRedactionConfig | None) -> tuple[_Detector, ...]:
+    """Detectors active under *config*; empty when the feature is off."""
+    if config is None or not config.enabled:
+        return ()
+    return tuple(d for d in _DETECTORS if getattr(config, f"redact_{d.name}"))
+
+
+def redact_text(text: str | None, config: PiiRedactionConfig | None) -> str | None:
+    """Redact PII from *text* under *config*; ``None``/disabled leaves it unchanged.
+
+    Shared entry point for the seams that sit *outside* this middleware's
+    ``wrap_model_call`` wrapper — SummarizationMiddleware invokes its summary
+    model directly from ``before_model``, and DurableContextMiddleware injects
+    its durable-context block inner of it — so compaction input and reinjected
+    summaries get the same treatment as model-bound messages.
+    """
+    if config is None or not config.enabled or not isinstance(text, str) or not text:
+        return text
+    return _Redactor(active_pii_detectors(config)).redact(text)
 
 
 class _Redactor:
@@ -251,7 +279,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
     """
 
     def __init__(self, config: PiiRedactionConfig) -> None:
-        self._detectors = tuple(d for d in _DETECTORS if getattr(config, f"redact_{d.name}"))
+        self._detectors = active_pii_detectors(config)
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare the behaviour-affecting settings (middleware module guide)."""

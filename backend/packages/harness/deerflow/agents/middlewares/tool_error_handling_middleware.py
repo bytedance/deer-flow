@@ -516,6 +516,7 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            pii_redaction_config=getattr(app_config, "pii_redaction", None),
         )
     )
 

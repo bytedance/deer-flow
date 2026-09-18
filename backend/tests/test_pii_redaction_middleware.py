@@ -7,7 +7,7 @@ and the pinned detector registry.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -16,6 +16,7 @@ from langgraph.types import Command
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
     PiiRedactionMiddleware,
+    redact_text,
 )
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY
@@ -149,6 +150,39 @@ class TestDetectors:
         original = "id 110105194912310020"
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage(original)])
         assert messages[0].content == original
+
+    def test_willem_vector_numeric_check_digit_redacted(self):
+        # Review vector on #5527: numeric-check-digit resident ID whose digits
+        # also pass Luhn must render NATIONAL_ID, not CREDIT_CARD.
+        messages, _ = _run_model_call(_make_middleware(), [HumanMessage("id 110105197506150239")])
+        assert "id [NATIONAL_ID_1]" in messages[0].content
+
+    def test_cuit_valid_form_redacted(self):
+        messages, _ = _run_model_call(_make_middleware(), [HumanMessage("CUIT 20-12345678-6")])
+        assert "CUIT [NATIONAL_ID_1]" in messages[0].content
+
+    def test_cuit_wrong_digit_count_untouched(self):
+        original = "CUIT 20-1234567890-6"
+        messages, _ = _run_model_call(_make_middleware(), [HumanMessage(original)])
+        assert messages[0].content == original
+
+    def test_cjk_adjacent_identifiers_redacted(self):
+        # Python \b treats CJK as word characters; the digit-aware lookarounds
+        # must still catch identifiers glued to Chinese labels.
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [HumanMessage("身份证11010519491231002X 手机号13800138000 信用卡4111 1111 1111 1111")],
+        )
+        content = messages[0].content
+        assert "[NATIONAL_ID_1]" in content and "[PHONE_1]" in content and "[CREDIT_CARD_1]" in content
+        assert "11010519491231002X" not in content and "13800138000" not in content and "4111" not in content
+
+    def test_international_phone_does_not_consume_next_line(self):
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [HumanMessage("Call +1 415 555 2671\n20260918")],
+        )
+        assert messages[0].content == "Call [PHONE_1]\n20260918"
 
     def test_cpf_valid_redacted(self):
         messages, _ = _run_model_call(
@@ -416,3 +450,92 @@ class TestChainWiring:
             app_config=_wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True)),
         )
         assert PiiRedactionMiddleware in [type(m) for m in middlewares]
+
+
+# ---------------------------------------------------------------------------
+# Shared seams: compaction input + durable-context reinjection (#3190 review)
+# ---------------------------------------------------------------------------
+
+
+class TestRedactTextSharedSeam:
+    def test_none_config_returns_text_unchanged(self):
+        assert redact_text("alice@example.com", None) == "alice@example.com"
+
+    def test_disabled_config_returns_text_unchanged(self):
+        assert redact_text("alice@example.com", PiiRedactionConfig(enabled=False)) == "alice@example.com"
+
+    def test_enabled_config_redacts(self):
+        assert redact_text("call alice@example.com", PiiRedactionConfig(enabled=True)) == "call [EMAIL_1]"
+
+    def test_non_string_passthrough(self):
+        assert redact_text(None, PiiRedactionConfig(enabled=True)) is None
+
+
+class _StateRequest:
+    """Duck-typed ModelRequest carrying .state, .messages and .override()."""
+
+    def __init__(self, state, messages):
+        self.state = state
+        self.messages = list(messages)
+
+    def override(self, **kwargs):
+        copy = object.__new__(type(self))
+        copy.state = self.state
+        copy.messages = kwargs.get("messages", self.messages)
+        return copy
+
+
+class TestDurableContextReinjection:
+    def _make_dc(self, config):
+        from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+        return DurableContextMiddleware(pii_redaction_config=config)
+
+    def test_reinjected_summary_redacted(self):
+        mw = self._make_dc(PiiRedactionConfig(enabled=True))
+        request = _StateRequest({"summary_text": "summary of alice@example.com"}, [HumanMessage("hi")])
+        final = mw._inject(request)
+        # insert_after_leading_system_messages puts the injected pair up front:
+        # [authority SystemMessage, durable-context data block, original…].
+        block = final.messages[1].content
+        assert "[EMAIL_1]" in block and "alice@example.com" not in block
+
+    def test_reinjected_summary_untouched_without_config(self):
+        mw = self._make_dc(None)
+        request = _StateRequest({"summary_text": "summary of alice@example.com"}, [HumanMessage("hi")])
+        final = mw._inject(request)
+        assert "alice@example.com" in final.messages[1].content
+
+    def test_policy_declares_pii_gate(self):
+        enabled = self._make_dc(PiiRedactionConfig(enabled=True)).release_policy_parameters()
+        disabled = self._make_dc(None).release_policy_parameters()
+        assert enabled["pii_redaction_enabled"] is True
+        assert disabled["pii_redaction_enabled"] is False
+
+
+class TestSummarizationCompactionInput:
+    def _middleware(self, pii_config):
+        from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+        model = MagicMock()
+        model.invoke.return_value = SimpleNamespace(text="compressed")
+        model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed"))
+        model.with_config.return_value = model
+        return DeerFlowSummarizationMiddleware(
+            model=model,
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=len,
+            app_config=SimpleNamespace(pii_redaction=pii_config),
+        )
+
+    def test_compaction_input_redacted(self):
+        mw = self._middleware(PiiRedactionConfig(enabled=True))
+        prompt = mw._build_summary_prompt([HumanMessage("reach alice@example.com")], previous_summary=None)
+        assert prompt is not None
+        assert "[EMAIL_1]" in prompt and "alice@example.com" not in prompt
+
+    def test_compaction_input_untouched_when_disabled(self):
+        mw = self._middleware(PiiRedactionConfig(enabled=False))
+        prompt = mw._build_summary_prompt([HumanMessage("reach alice@example.com")], previous_summary=None)
+        assert "alice@example.com" in prompt
