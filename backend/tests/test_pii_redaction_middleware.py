@@ -321,6 +321,17 @@ class TestToolBoundary:
         _run_tool_call(_make_middleware(), "web_search", result)
         assert result.content == "alice@example.com"
 
+    def test_command_placeholder_numbering_continues_across_messages(self):
+        # One redactor spans the whole Command result, so placeholder numbers
+        # stay continuous across the ToolMessages it carries (review follow-up).
+        first = ToolMessage(content="alice@example.com", tool_call_id="c1", name="web_fetch")
+        second = ToolMessage(content="then bob@example.org and alice@example.com", tool_call_id="c2", name="web_fetch")
+        result = Command(update={"messages": [first, second]})
+        final = _run_tool_call(_make_middleware(), "web_fetch", result)
+        messages = final.update["messages"]
+        assert messages[0].content == "[EMAIL_1]"
+        assert messages[1].content == "then [EMAIL_2] and [EMAIL_1]"
+
     def test_placeholder_restarts_per_result(self):
         middleware = _make_middleware()
         first = _run_tool_call(

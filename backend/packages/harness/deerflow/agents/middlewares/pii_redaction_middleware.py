@@ -330,21 +330,24 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
 
         Direct ``ToolMessage`` results are redacted; ``Command`` results carry
         their ToolMessages inside ``update.messages`` and are rebuilt with
-        ``dc_replace`` only when one of them actually changed.
+        ``dc_replace`` only when one of them actually changed. One redactor
+        spans the whole result, so placeholder numbering stays continuous
+        across every ToolMessage the result carries.
         """
+        redactor = _Redactor(self._detectors)
         if isinstance(result, ToolMessage):
-            return self._redact_tool_message(result)
+            return self._redact_tool_message(result, redactor)
         update = getattr(result, "update", None)
         if isinstance(update, dict):
             messages = update.get("messages")
             if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
-                new_messages = [self._redact_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages]
+                new_messages = [self._redact_tool_message(m, redactor) if isinstance(m, ToolMessage) else m for m in messages]
                 if new_messages != messages:
                     return dc_replace(result, update={**update, "messages": new_messages})
         return result
 
-    def _redact_tool_message(self, message: ToolMessage) -> ToolMessage:
-        content, changed = _redact_content(message.content, _Redactor(self._detectors))
+    def _redact_tool_message(self, message: ToolMessage, redactor: _Redactor) -> ToolMessage:
+        content, changed = _redact_content(message.content, redactor)
         if not changed:
             return message
         additional_kwargs = dict(message.additional_kwargs or {})
