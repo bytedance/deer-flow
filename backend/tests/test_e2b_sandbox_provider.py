@@ -2367,6 +2367,85 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     assert "sb-existing" in p._owned_sandbox_ids
 
 
+def test_reconcile_never_probes_or_adopts_a_warm_pool_sandbox(monkeypatch):
+    # Regression for #5550: a warm-pool sandbox is locally tracked, so
+    # reconciliation must not connect() to it (connect refreshes the remote
+    # expiry and keeps the idle VM alive) nor adopt it back into _sandboxes.
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-warm", "u1", "t1")]
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert fake_cls.connect_calls == []
+    assert stats.discovered == 1
+    assert stats.adopted == 0
+    assert "sb-warm" in p._warm_pool
+    assert "sb-warm" not in p._sandboxes
+    assert p._thread_sandboxes == {}
+
+
+def test_reconcile_never_probes_a_locally_active_sandbox(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-active")
+    p._sandboxes["sb-active"] = _make_sandbox(client, sandbox_id="sb-active")
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-active"
+    fake_cls.list_return = [_info("sb-active", "u1", "t1")]
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert fake_cls.connect_calls == []
+    assert stats.adopted == 0
+    assert p._sandboxes["sb-active"].client is client
+
+
+def test_reconcile_kills_remote_duplicate_of_a_warm_pool_sandbox(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [
+        _info("sb-warm", "u1", "t1"),
+        _info("sb-duplicate", "u1", "t1"),
+    ]
+    duplicate = FakeClient(sandbox_id="sb-duplicate")
+    fake_cls.connect_factory = lambda sid, **_kw: duplicate if sid == "sb-duplicate" else FakeClient(sandbox_id=sid)
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), time.time())
+    p._config["reconciliation_grace_seconds"] = 0.0
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert [call[0] for call in fake_cls.connect_calls] == ["sb-duplicate"]
+    assert duplicate.killed is True
+    assert stats.killed == 1
+    assert stats.duplicates == 1
+    assert stats.adopted == 0
+    assert "sb-warm" in p._warm_pool
+    assert "sb-warm" not in p._sandboxes
+
+
+def test_reconcile_adoption_recheck_treats_warm_pool_as_local(monkeypatch):
+    # A sandbox released into the warm pool while reconciliation is mid-probe
+    # must not be promoted back to active by the adoption path.
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-race", "u1", "t1")]
+    client = FakeClient(sandbox_id="sb-race")
+
+    def connect_and_park(sid, **_kw):
+        p._warm_pool[sid] = (p._stable_seed("t1", "u1"), time.time())
+        return client
+
+    fake_cls.connect_factory = connect_and_park
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert stats.adopted == 0
+    assert "sb-race" in p._warm_pool
+    assert "sb-race" not in p._sandboxes
+    assert client.closed is True
+
+
 def test_reconcile_bootstrap_failure_clears_inflight_after_peer_take(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
