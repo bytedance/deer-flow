@@ -129,15 +129,33 @@ class SubagentRuntime:
             self._batch_started = True
 
     async def stop(self) -> None:
-        """Stop the owned worker and hide its bound tools from new graphs."""
+        """Stop the owned worker before propagating caller cancellation."""
 
-        if self._owned_batch_service is None:
+        service = self._owned_batch_service
+        if service is None:
             return
         async with self._lifecycle_lock:
             if not self._batch_started:
                 return
+            # Hide the submitter immediately, but keep this lifecycle operation
+            # alive until the owned worker has actually finished stopping.
             self._batch_started = False
-            await self._owned_batch_service.stop()
+            stop_task = asyncio.create_task(service.stop(), name="subagent-runtime-batch-stop")
+            cancellation: asyncio.CancelledError | None = None
+            while not stop_task.done():
+                try:
+                    await asyncio.shield(stop_task)
+                except asyncio.CancelledError as exc:
+                    if cancellation is None:
+                        cancellation = exc
+
+            if cancellation is not None:
+                try:
+                    stop_task.result()
+                except Exception as exc:
+                    raise cancellation from exc
+                raise cancellation
+            stop_task.result()
 
     async def __aenter__(self) -> SubagentRuntime:
         await self.start()

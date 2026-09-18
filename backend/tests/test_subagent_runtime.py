@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -75,3 +76,53 @@ async def test_runtime_owns_batch_worker_lifecycle_and_shared_capacity() -> None
     )
     service.start.assert_awaited_once_with()
     service.stop.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_drains_owned_batch_worker_across_repeated_cancellation() -> None:
+    stop_started = asyncio.Event()
+    allow_stop = asyncio.Event()
+
+    async def blocking_stop() -> None:
+        stop_started.set()
+        await allow_stop.wait()
+
+    service = MagicMock()
+    service.start = AsyncMock()
+    service.stop = AsyncMock(side_effect=blocking_stop)
+    repository = MagicMock()
+    app_config = MagicMock()
+
+    with patch(
+        "deerflow.subagents.batch_service.SubagentBatchService",
+        return_value=service,
+    ):
+        runtime = SubagentRuntime(
+            SubagentRuntimeConfig(max_running=1),
+            batch_repository=repository,
+            batch_config=SubagentBatchesConfig(enabled=True),
+            app_config=app_config,
+        )
+        await runtime.start()
+
+        stop_task = asyncio.create_task(runtime.stop())
+        await asyncio.wait_for(stop_started.wait(), timeout=1)
+
+        stop_task.cancel()
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert runtime.batch_submitter is None
+        assert not stop_task.done(), "runtime stop released ownership after the first cancellation"
+
+        stop_task.cancel()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not stop_task.done(), "runtime stop released ownership after repeated cancellation"
+
+        allow_stop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        service.stop.assert_awaited_once_with()
+        assert runtime.batch_submitter is None
