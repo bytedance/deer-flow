@@ -428,7 +428,14 @@ class JsonlRunEventStore(RunEventStore):
                     break
         return found
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(self, thread_id, *, user_id: str | None | _AutoSentinel = AUTO):
+        """Delete every event of a thread.
+
+        Run files are keyed by thread, not by owner, so ``user_id`` is accepted
+        for interface parity with the user-scoped backends and ignored — the same
+        convention as this store's read methods.
+        """
+
         async def mutate():
             all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
             count = len(all_events)
@@ -440,7 +447,9 @@ class JsonlRunEventStore(RunEventStore):
 
         return await self._run_mutation(thread_id, mutate)
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id: str | None | _AutoSentinel = AUTO):
+        """Delete one run's events; ``user_id`` is accepted for parity only."""
+
         async def mutate():
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             count = len(events)

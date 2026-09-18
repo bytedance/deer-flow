@@ -45,6 +45,7 @@ class FakeRAGFlowClient:
         retrieval_by_dataset_ids: Mapping[tuple[str, ...], dict] | None = None,
         retrieval_errors_by_dataset_ids: Mapping[tuple[str, ...], Exception] | None = None,
         error: Exception | None = None,
+        documents_by_dataset_id: Mapping[str, list[dict]] | None = None,
     ) -> None:
         self.datasets_by_id = dict(datasets_by_id or {})
         self.dataset_errors_by_id = dict(dataset_errors_by_id or {})
@@ -53,7 +54,9 @@ class FakeRAGFlowClient:
         self.retrieval_by_dataset_ids = dict(retrieval_by_dataset_ids or {})
         self.retrieval_errors_by_dataset_ids = dict(retrieval_errors_by_dataset_ids or {})
         self.error = error
+        self.documents_by_dataset_id = dict(documents_by_dataset_id or {})
         self.list_calls: list[str | None] = []
+        self.document_list_calls: list[tuple[str, list[tuple[str, str]]]] = []
         self.retrieve_calls: list[tuple[str, dict]] = []
 
     async def list_datasets(self, *, dataset_id: str | None = None) -> list[dict]:
@@ -65,6 +68,22 @@ class FakeRAGFlowClient:
         if error := self.dataset_errors_by_id.get(dataset_id):
             raise error
         return self.datasets_by_id.get(dataset_id, [])
+
+    async def list_documents(
+        self,
+        dataset_id: str,
+        *,
+        params: list[tuple[str, str]],
+    ) -> dict:
+        self.document_list_calls.append((dataset_id, params))
+        requested_ids = [value for key, value in params if key == "ids"]
+        documents = self.documents_by_dataset_id.get(dataset_id, [])
+        if requested_ids:
+            documents = [document for document in documents if document.get("id") in requested_ids]
+        return {
+            "code": 0,
+            "data": {"docs": documents, "total": len(documents)},
+        }
 
     async def retrieve(self, query: str, **kwargs: object) -> dict:
         if self.error is not None:
@@ -410,6 +429,114 @@ async def test_grouped_retrieval_limits_concurrency_to_four(monkeypatch: pytest.
 
 
 @pytest.mark.anyio
+async def test_selected_scope_dataset_validation_is_bounded_and_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_ids = [f"dataset-{index}" for index in range(5)]
+
+    class ConcurrencyTrackingClient(FakeRAGFlowClient):
+        def __init__(self) -> None:
+            super().__init__(datasets_by_id={dataset_id: [_dataset(dataset_id, f"Dataset {index}")] for index, dataset_id in enumerate(dataset_ids)})
+            self.active_dataset_lists = 0
+            self.max_active_dataset_lists = 0
+
+        async def list_datasets(self, *, dataset_id: str | None = None) -> list[dict]:
+            self.list_calls.append(dataset_id)
+            self.active_dataset_lists += 1
+            self.max_active_dataset_lists = max(
+                self.max_active_dataset_lists,
+                self.active_dataset_lists,
+            )
+            try:
+                await asyncio.sleep(0.05)
+                return self.datasets_by_id.get(dataset_id or "", [])
+            finally:
+                self.active_dataset_lists -= 1
+
+    fake = ConcurrencyTrackingClient()
+    _install(monkeypatch, fake, config=_config(datasets=dataset_ids))
+
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": dataset_ids,
+        },
+    )
+
+    assert result == "No relevant content found."
+    assert fake.max_active_dataset_lists == 4
+
+
+@pytest.mark.anyio
+async def test_selected_scope_document_validation_is_bounded_and_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_ids = [f"dataset-{index}" for index in range(5)]
+    document_ids = [f"document-{index}" for index in range(5)]
+
+    class ConcurrencyTrackingClient(FakeRAGFlowClient):
+        def __init__(self) -> None:
+            super().__init__(
+                datasets_by_id={dataset_id: [_dataset(dataset_id, f"Dataset {index}")] for index, dataset_id in enumerate(dataset_ids)},
+                documents_by_dataset_id={
+                    dataset_id: [
+                        {
+                            "id": document_ids[index],
+                            "name": f"Document {index}",
+                            "run": "DONE",
+                            "chunk_count": 1,
+                        }
+                    ]
+                    for index, dataset_id in enumerate(dataset_ids)
+                },
+            )
+            self.active_document_lists = 0
+            self.max_active_document_lists = 0
+
+        async def list_documents(
+            self,
+            dataset_id: str,
+            *,
+            params: list[tuple[str, str]],
+        ) -> dict:
+            self.document_list_calls.append((dataset_id, params))
+            self.active_document_lists += 1
+            self.max_active_document_lists = max(
+                self.max_active_document_lists,
+                self.active_document_lists,
+            )
+            try:
+                await asyncio.sleep(0.05)
+                documents = self.documents_by_dataset_id[dataset_id]
+                return {
+                    "code": 0,
+                    "data": {"docs": documents, "total": len(documents)},
+                }
+            finally:
+                self.active_document_lists -= 1
+
+    fake = ConcurrencyTrackingClient()
+    _install(monkeypatch, fake, config=_config(datasets=dataset_ids))
+
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": dataset_ids,
+            "document_filters": [
+                {
+                    "dataset_id": dataset_id,
+                    "document_ids": [document_ids[index]],
+                }
+                for index, dataset_id in enumerate(dataset_ids)
+            ],
+        },
+    )
+
+    assert result == "No relevant content found."
+    assert fake.max_active_document_lists == 4
+
+
+@pytest.mark.anyio
 async def test_dataset_without_embedding_metadata_returns_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(all_datasets=[{"id": DATASET_ID_1, "name": "Broken", "chunk_count": 1}])
     _install(monkeypatch, fake, config=_config(datasets=None))
@@ -436,6 +563,151 @@ async def test_group_failure_remains_strict_and_redacts_secret_and_dataset_id(mo
 
     assert result == "Error: dataset [DATASET_ID] rejected [REDACTED]"
     assert len(fake.retrieve_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_selected_scope_intersects_operator_allowlist_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_id={
+            DATASET_ID_1: [_dataset(DATASET_ID_1, "Allowed")],
+            DATASET_ID_2: [_dataset(DATASET_ID_2, "Not allowed")],
+        },
+    )
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1]))
+
+    result = await ragflow_tools.knowledge_search(
+        "leave",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": [DATASET_ID_2],
+        },
+    )
+
+    assert result == ("Error: The selected knowledge scope is no longer available; choose the knowledge bases again.")
+    assert fake.list_calls == []
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_selected_document_scope_validates_membership_and_splits_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_id={
+            DATASET_ID_1: [_dataset(DATASET_ID_1, "All files")],
+            DATASET_ID_2: [_dataset(DATASET_ID_2, "One file")],
+        },
+        documents_by_dataset_id={
+            DATASET_ID_2: [
+                {
+                    "id": "doc-1",
+                    "name": "guide.pdf",
+                    "run": "DONE",
+                    "chunk_count": 3,
+                }
+            ]
+        },
+    )
+    _install(
+        monkeypatch,
+        fake,
+        config=_config(datasets=[DATASET_ID_1, DATASET_ID_2]),
+    )
+
+    result = await ragflow_tools.knowledge_search(
+        "rice",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": [DATASET_ID_1, DATASET_ID_2],
+            "document_filters": [{"dataset_id": DATASET_ID_2, "document_ids": ["doc-1"]}],
+        },
+    )
+
+    assert result == "No relevant content found."
+    assert [call[1] for call in fake.retrieve_calls] == [
+        {
+            "dataset_ids": [DATASET_ID_1],
+            "page_size": 8,
+            "similarity_threshold": 0.2,
+            "vector_similarity_weight": 0.3,
+            "top_k": 256,
+        },
+        {
+            "dataset_ids": [DATASET_ID_2],
+            "document_ids": ["doc-1"],
+            "page_size": 8,
+            "similarity_threshold": 0.2,
+            "vector_similarity_weight": 0.3,
+            "top_k": 256,
+        },
+    ]
+    assert fake.document_list_calls == [
+        (
+            DATASET_ID_2,
+            [
+                ("page", "1"),
+                ("page_size", "1"),
+                ("ids", "doc-1"),
+            ],
+        )
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "documents",
+    [
+        [],
+        [{"id": "other", "run": "DONE", "chunk_count": 1}],
+        [{"id": "doc-1", "run": "RUNNING", "chunk_count": 0}],
+        [{"id": "doc-1", "run": "DONE", "chunk_count": 0}],
+    ],
+)
+async def test_invalid_or_unsearchable_document_selection_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    documents: list[dict],
+) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_id={
+            DATASET_ID_1: [_dataset(DATASET_ID_1, "Selected")],
+        },
+        documents_by_dataset_id={DATASET_ID_1: documents},
+    )
+    _install(monkeypatch, fake)
+
+    result = await ragflow_tools.knowledge_search(
+        "rice",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": [DATASET_ID_1],
+            "document_filters": [{"dataset_id": DATASET_ID_1, "document_ids": ["doc-1"]}],
+        },
+    )
+
+    assert result == ("Error: The selected knowledge scope is no longer available; choose the knowledge bases or files again.")
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_disabled_scope_rejects_direct_tool_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeRAGFlowClient()
+    _install(monkeypatch, fake)
+
+    result = await ragflow_tools.knowledge_search(
+        "rice",
+        knowledge_scope={"version": 1, "mode": "disabled"},
+    )
+
+    assert result == "Error: Knowledge search is disabled for this turn."
+    assert fake.list_calls == []
+    assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
@@ -691,6 +963,27 @@ def test_retrieval_settings_allow_omitting_dataset_ids(monkeypatch: pytest.Monke
     assert config.datasets is None
 
 
+def test_retrieval_settings_do_not_fall_back_to_knowledge_capability_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_global = SimpleNamespace(
+        enabled=True,
+        base_url="http://legacy-ragflow.test",
+        api_key="legacy-secret",
+        timeout=60,
+    )
+    app_config = SimpleNamespace(
+        knowledge_base=legacy_global,
+        get_tool_config=lambda _name: None,
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: app_config)
+
+    settings, error = ragflow_tools._settings_or_error()
+
+    assert settings is None
+    assert error == "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
+
+
 @pytest.mark.anyio
 async def test_explicitly_empty_dataset_allowlist_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(all_datasets=[_dataset(DATASET_ID_1, "Must remain inaccessible")])
@@ -703,12 +996,15 @@ async def test_explicitly_empty_dataset_allowlist_fails_closed(monkeypatch: pyte
     assert fake.retrieve_calls == []
 
 
-def test_agent_exposes_only_query_on_single_search_tool() -> None:
-    assert not hasattr(ragflow_tools, "list_knowledge_bases_tool")
-    assert not hasattr(ragflow_tools, "list_knowledge_bases")
+def test_agent_exposes_search_and_name_listing_tools() -> None:
+    assert hasattr(ragflow_tools, "list_knowledge_bases_tool")
+    assert hasattr(ragflow_tools, "list_knowledge_bases")
     assert ragflow_tools.knowledge_search_tool.name == "knowledge_search"
     assert ragflow_tools.knowledge_search_tool.coroutine is not None
     assert set(ragflow_tools.knowledge_search_tool.tool_call_schema.model_fields) == {"query"}
+    assert ragflow_tools.list_knowledge_bases_tool.name == "list_knowledge_bases"
+    assert ragflow_tools.list_knowledge_bases_tool.coroutine is not None
+    assert not ragflow_tools.list_knowledge_bases_tool.tool_call_schema.model_fields
 
 
 def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -723,6 +1019,7 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     )
     config = SimpleNamespace(
         tools=[tool_config],
+        knowledge_base=SimpleNamespace(enabled=True),
         sandbox=SimpleNamespace(use="example.remote:Sandbox"),
         skill_evolution=SimpleNamespace(enabled=False),
         models=[],
@@ -739,6 +1036,29 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     assert DATASET_ID_2 not in assembled.description
     assert "ragflow-secret" not in assembled.description
     assert {tool.name for tool in tools}.isdisjoint({"list_knowledge_bases"})
+
+
+def test_tool_assembly_hides_configured_knowledge_provider_when_capability_is_disabled() -> None:
+    tool_config = ToolConfig(
+        name="knowledge_search",
+        group="knowledge",
+        use="deerflow.community.ragflow.tools:knowledge_search_tool",
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+    )
+    config = SimpleNamespace(
+        tools=[tool_config],
+        knowledge_base=SimpleNamespace(enabled=False),
+        sandbox=SimpleNamespace(use="example.remote:Sandbox"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        models=[],
+        acp_agents={},
+        get_model_config=lambda _name: None,
+    )
+
+    tools = get_available_tools(include_mcp=False, app_config=config)
+
+    assert {tool.name for tool in tools}.isdisjoint({"knowledge_search"})
 
 
 def test_ragflow_package_has_explicit_init_file() -> None:

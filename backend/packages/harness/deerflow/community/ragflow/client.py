@@ -157,11 +157,21 @@ class RAGFlowClient:
 
         raise RAGFlowProtocolError(f"RAGFlow dataset listing exceeded {_MAX_DATASET_PAGES} pages.")
 
+    async def list_documents(
+        self,
+        dataset_id: str,
+        *,
+        params: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Proxy one document-list request for a dataset."""
+        return await self._request("GET", f"/datasets/{dataset_id}/documents", params=params)
+
     async def retrieve(
         self,
         query: str,
         *,
         dataset_ids: list[str],
+        document_ids: list[str] | None = None,
         page_size: int = 8,
         similarity_threshold: float = 0.2,
         vector_similarity_weight: float = 0.3,
@@ -170,6 +180,8 @@ class RAGFlowClient:
         """Retrieve chunks from an explicit, non-empty dataset allowlist."""
         if not dataset_ids or not all(isinstance(dataset_id, str) and dataset_id.strip() for dataset_id in dataset_ids):
             raise ValueError("dataset_ids must contain at least one dataset ID")
+        if document_ids is not None and (not document_ids or not all(isinstance(document_id, str) and document_id.strip() for document_id in document_ids)):
+            raise ValueError("document_ids must be omitted or non-empty")
 
         request_body: dict[str, object] = {
             "question": query,
@@ -179,6 +191,8 @@ class RAGFlowClient:
             "vector_similarity_weight": vector_similarity_weight,
             "top_k": top_k,
         }
+        if document_ids is not None:
+            request_body["document_ids"] = document_ids
 
         payload = await self._request("POST", "/retrieval", json=request_body)
         data = payload.get("data")

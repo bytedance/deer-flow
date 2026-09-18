@@ -91,7 +91,10 @@ test.describe("Agent chat", () => {
     await textarea.fill("Review this code");
     await textarea.press("Enter");
     await expect.poll(() => streamBody).toBeDefined();
-    expect(streamBody).toMatchObject({ context: { agent_name: "test-agent" } });
+    expect(streamBody).toMatchObject({
+      assistant_id: "test-agent",
+      context: { agent_name: "test-agent" },
+    });
   });
 
   test("agent gallery page loads and shows agents", async ({ page }) => {

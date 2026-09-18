@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -17,6 +18,9 @@ def _app_with_config(
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
     conversation_references_enabled: bool = False,
+    knowledge_base_enabled: bool = False,
+    scope_selection_enabled: bool = False,
+    knowledge_search_provider: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -34,7 +38,13 @@ def _app_with_config(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
+        knowledge_base=SimpleNamespace(
+            enabled=knowledge_base_enabled,
+            scope_selection_enabled=scope_selection_enabled,
+        ),
     )
+    search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
+    fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
     app.dependency_overrides[get_config] = lambda: fake_config
     return app
 
@@ -54,6 +64,9 @@ def test_features_reports_agents_api_enabled() -> None:
             "max_running": 3,
         },
         "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {
+            "scope_selection_enabled": False,
+        },
     }
 
 
@@ -72,6 +85,9 @@ def test_features_reports_agents_api_disabled() -> None:
             "max_running": 3,
         },
         "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {
+            "scope_selection_enabled": False,
+        },
     }
 
 
@@ -80,6 +96,48 @@ def test_features_reports_conversation_references_when_the_tool_is_configured() 
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["conversation_references"] == {"enabled": True, "max_references": 3}
+
+
+def test_features_enables_scope_selection_only_for_exact_ragflow_provider() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=True,
+            scope_selection_enabled=True,
+            knowledge_search_provider=("deerflow.community.ragflow.tools:knowledge_search_tool"),
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("knowledge_base_enabled", "provider"),
+    [
+        (False, "deerflow.community.ragflow.tools:knowledge_search_tool"),
+        (True, "deerflow.community.lightrag.tools:knowledge_search_tool"),
+        (True, "custom.provider:knowledge_search_tool"),
+        (True, None),
+    ],
+)
+def test_features_scope_selection_fails_closed(
+    knowledge_base_enabled: bool,
+    provider: str | None,
+) -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=knowledge_base_enabled,
+            scope_selection_enabled=True,
+            knowledge_search_provider=provider,
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is False
 
 
 def test_features_reports_mcp_tasks_startup_capability() -> None:
