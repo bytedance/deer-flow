@@ -2,7 +2,7 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
@@ -432,6 +432,96 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    return app
+
+
+def test_delete_thread_route_cleans_persisted_records(tmp_path):
+    """run_events, historical runs and feedback are cleaned under the reservation."""
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+    user_id = get_effective_user_id()
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=2)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    run_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    event_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    feedback_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+
+
+def test_delete_thread_route_isolates_failing_persistence_cleanup(tmp_path):
+    """One failing store must not stop the remaining cleanup attempts."""
+    paths = Paths(tmp_path)
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(side_effect=RuntimeError("simulated cleanup failure"))
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
+    feedback_repo.delete_by_thread.assert_awaited_once()
+
+
+def test_delete_thread_route_tolerates_store_without_bulk_cleanup(tmp_path):
+    """Third-party RunStore implementations without the capability stay usable."""
+    paths = Paths(tmp_path)
+    run_store = SimpleNamespace()  # no delete_by_thread attribute
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=0)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):

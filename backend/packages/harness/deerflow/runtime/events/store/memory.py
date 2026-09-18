@@ -211,7 +211,13 @@ class MemoryRunEventStore(RunEventStore):
                     break
         return found
 
-    async def delete_by_thread(self, thread_id):
+    async def delete_by_thread(self, thread_id, *, user_id: str | None | _AutoSentinel = AUTO):
+        """Delete every event of a thread.
+
+        Events live in process memory without an owner column, so ``user_id`` is
+        accepted for interface parity with the user-scoped backends and ignored
+        — the same convention as this store's read methods.
+        """
         events = self._events.pop(thread_id, [])
         self._messages.pop(thread_id, None)
         self._events_by_run.pop(thread_id, None)
@@ -219,7 +225,8 @@ class MemoryRunEventStore(RunEventStore):
         self._seq_counters.pop(thread_id, None)
         return len(events)
 
-    async def delete_by_run(self, thread_id, run_id):
+    async def delete_by_run(self, thread_id, run_id, *, user_id: str | None | _AutoSentinel = AUTO):
+        """Delete one run's events; ``user_id`` is accepted for parity only."""
         all_events = self._events.get(thread_id, [])
         if not all_events:
             return 0

@@ -458,6 +458,31 @@ class TestDelete:
         assert messages[0]["run_id"] == "r1"
 
     @pytest.mark.anyio
+    async def test_delete_by_thread_accepts_owner_scope(self, store):
+        """Every backend accepts the owner scope the Gateway passes (#2803 wiring).
+
+        User-scoped backends apply the filter; the in-memory store is not
+        user-scoped and accepts it for interface parity.
+        """
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+
+        count = await store.delete_by_thread("t1", user_id="alice")
+
+        assert count == 1
+        assert await store.count_messages("t1") == 0
+
+    @pytest.mark.anyio
+    async def test_delete_by_run_accepts_owner_scope(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+
+        count = await store.delete_by_run("t1", "r1", user_id="alice")
+
+        assert count == 1
+        messages = await store.list_messages("t1")
+        assert [message["run_id"] for message in messages] == ["r2"]
+
+    @pytest.mark.anyio
     async def test_delete_nonexistent_thread_returns_zero(self, store):
         assert await store.delete_by_thread("nope") == 0
 
