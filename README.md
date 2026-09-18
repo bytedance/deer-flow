@@ -372,6 +372,17 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
+Gateway SSE responses send `Cache-Control: no-cache, no-transform` to prohibit body
+transformations, including compression, by compliant intermediaries.
+`X-Accel-Buffering: no` requests that nginx disable response buffering; the bundled
+nginx configurations also disable proxy buffering. These headers do not disable
+arbitrary buffering elsewhere in the delivery path.
+
+The [transport regression](backend/tests/test_sse_transport.py) verifies early-frame
+delivery through a controlled local HTTP proxy that honors `no-transform` and
+otherwise gzip-compresses without flushing until the response ends. This is not
+verification of a particular CDN or downstream production deployment.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Option 2: Local Development

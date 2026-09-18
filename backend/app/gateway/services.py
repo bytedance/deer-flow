@@ -1951,6 +1951,14 @@ async def launch_mcp_task_notification_run(
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
+# SSE body-transform policy for compliant intermediaries, plus nginx's
+# buffering hint. Connection management belongs to the HTTP server/proxy.
+SSE_RESPONSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
 async def sse_consumer(
     bridge: StreamBridge,
     record: RunRecord,

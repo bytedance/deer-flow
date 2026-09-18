@@ -51,7 +51,7 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import SSE_RESPONSE_HEADERS, abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
@@ -982,9 +982,7 @@ async def stream_run(
         ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+            **SSE_RESPONSE_HEADERS,
             # LangGraph Platform includes run metadata in this header.
             # The SDK uses a greedy regex to extract the run id from this path,
             # so it must point at the canonical run resource without extra suffixes.
@@ -1291,11 +1289,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_RESPONSE_HEADERS,
     )
 
 
@@ -1380,11 +1374,7 @@ async def _stream_existing_run(
         # must not fire because a joiner closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_RESPONSE_HEADERS,
     )
 
 

@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+SSE responses reuse `services.SSE_RESPONSE_HEADERS`: `no-transform` prohibits body transformations by compliant intermediaries, and `X-Accel-Buffering: no` is an nginx-specific buffering hint. Leave connection management to the HTTP server/proxy. Preserve the canonical run resource in creation responses' `Content-Location` for SDK run-id extraction. Header coverage lives in `tests/test_sse_response_headers.py`; `tests/test_sse_transport.py` verifies early-frame delivery through a controlled gzip proxy, not arbitrary production buffering.
+
 `conversation_access.py` binds an opt-in read-only tool to a run request's
 explicit `conversation_references` and effective `runs:read` permission. Never
 derive grants from message contents or checkpoints. The callback travels through
