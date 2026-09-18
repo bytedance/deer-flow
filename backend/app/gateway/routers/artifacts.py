@@ -25,23 +25,15 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 
-# Exact matches only; ``_is_active_content_mime_type`` also treats every
-# ``+xml`` subtype as active content.
-ACTIVE_CONTENT_MIME_TYPES = {
-    "text/html",
-    "application/xhtml+xml",
-    "image/svg+xml",
-    "text/xml",
-    "application/xml",
-    "text/xsl",
-}
-
+# Active-content MIME classification (``_is_active_content_mime_type``) lives
+# in ``deerflow.utils.text_detection``, shared with the project-document shelf.
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -166,7 +158,9 @@ def _build_content_disposition(disposition_type: str, filename: str) -> str:
 
 
 def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
-    headers = {"Content-Disposition": _build_content_disposition("attachment", filename)}
+    # nosniff: a declared binary/document type must never be reinterpreted as
+    # HTML — the transport-level guarantee behind unsandboxed PDF preview.
+    headers = {"Content-Disposition": _build_content_disposition("attachment", filename), "X-Content-Type-Options": "nosniff"}
     if extra_headers:
         headers.update(extra_headers)
     return headers
@@ -215,32 +209,6 @@ def _slice_byte_range(content: bytes, range_header: str | None) -> tuple[bytes, 
         }
     )
     return ranged_content, 206, headers
-
-
-def _is_active_content_mime_type(mime_type: str | None) -> bool:
-    """Return whether a browser can run script when rendering *mime_type* inline.
-
-    Beyond HTML, this covers every WHATWG XML MIME type (``text/xml``,
-    ``application/xml``, or a ``+xml`` subtype) plus ``text/xsl``, which Blink
-    also renders as XML: any XML document can carry an XHTML-namespaced
-    ``<script>``, so ``report.xml`` or ``feed.rss`` is as dangerous as
-    ``page.html`` when opened in the application origin.
-    """
-    if mime_type is None:
-        return False
-    mime_type = mime_type.lower()
-    return mime_type in ACTIVE_CONTENT_MIME_TYPES or mime_type.endswith("+xml")
-
-
-def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
-    """Check if file is text by examining content for null bytes."""
-    try:
-        with open(path, "rb") as f:
-            chunk = f.read(sample_size)
-            # Text files shouldn't contain null bytes
-            return b"\x00" not in chunk
-    except Exception:
-        return False
 
 
 def _read_skill_archive_member(zip_ref: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
@@ -439,6 +407,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         inline_headers = {
             **cache_headers,
             **range_headers,
+            "X-Content-Type-Options": "nosniff",
             # Real SHA-256 so the browser can skip crypto.subtle (unavailable on
             # non-secure contexts) when previewing / editing artifacts (#4864).
             "ETag": f'"{hashlib.sha256(content).hexdigest()}"',
@@ -489,8 +458,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     if kind == "inline_file":
         # FileResponse honors byte-Range requests for large text previews and
-        # media seeking without buffering the full artifact in the Gateway.
-        headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name)}
+        headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), "X-Content-Type-Options": "nosniff"}
         file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
         if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
             # Real SHA-256 so the browser can skip crypto.subtle (unavailable

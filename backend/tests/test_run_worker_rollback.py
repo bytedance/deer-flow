@@ -649,6 +649,53 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
 
 
+def test_build_runtime_context_ignores_caller_project_context_key():
+    """The worker merge refuses a caller-supplied pinned project snapshot (§12)."""
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    ctx = _build_runtime_context("thread-1", "run-1", {PROJECT_CONTEXT_KEY: {"project_id": "forged"}, "agent_name": "kept"})
+
+    assert PROJECT_CONTEXT_KEY not in ctx
+    assert ctx["agent_name"] == "kept"
+
+
+def test_install_runtime_context_removes_caller_project_context_key_when_unpinned():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    config = {"context": {PROJECT_CONTEXT_KEY: {"project_id": "forged"}}}
+
+    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1"})
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+
+
+def test_install_runtime_context_preserves_the_pinned_project_context():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    stamped = {"project_id": "p-1", "name": "Roadmap", "instructions": "x"}
+    config = {"context": {PROJECT_CONTEXT_KEY: stamped}}
+
+    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1", PROJECT_CONTEXT_KEY: stamped})
+
+    assert config["context"][PROJECT_CONTEXT_KEY] is stamped
+
+
+def test_pin_admission_project_context_hoists_only_the_stamped_value():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+    from deerflow.runtime.runs.worker import _pin_admission_project_context
+
+    stamped = {"project_id": "p-1", "name": "Roadmap", "instructions": "x"}
+    runtime_ctx = {"thread_id": "record-thread", "run_id": "run-1"}
+    _pin_admission_project_context({"context": {PROJECT_CONTEXT_KEY: stamped}}, runtime_ctx)
+    assert runtime_ctx[PROJECT_CONTEXT_KEY] is stamped
+
+    empty = {"thread_id": "record-thread", "run_id": "run-1"}
+    _pin_admission_project_context({"context": {}}, empty)
+    _pin_admission_project_context({}, empty)
+    _pin_admission_project_context({"context": "not-a-mapping"}, empty)
+    assert PROJECT_CONTEXT_KEY not in empty
+
+
 @pytest.mark.parametrize(
     ("stream_modes", "emit_values"),
     [
