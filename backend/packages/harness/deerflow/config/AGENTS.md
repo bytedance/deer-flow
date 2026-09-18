@@ -24,6 +24,13 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
+The v46 upgrade treats an existing `tools[]` entry in the `knowledge` group as
+pre-gate enablement and sets `knowledge_base.enabled: true` only when that flag
+was absent. Explicit `true` or `false` values remain authoritative. Moving
+legacy provider settings out of `knowledge_base` remains specific to the
+RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
+their tool-local settings unchanged.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.

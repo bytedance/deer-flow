@@ -94,7 +94,12 @@ def migrate_knowledge_provider_settings(data):
     knowledge_base = data.get('knowledge_base')
     tools = data.get('tools')
     target = None
+    has_configured_knowledge_tool = False
     if isinstance(tools, list):
+        has_configured_knowledge_tool = any(
+            isinstance(tool, dict) and tool.get('group') == 'knowledge'
+            for tool in tools
+        )
         target = next(
             (
                 tool
@@ -109,16 +114,17 @@ def migrate_knowledge_provider_settings(data):
     changes = []
     # Before the capability gate shipped, a tools-only knowledge configuration
     # was valid and enabled by the presence of the provider tool itself. Preserve
-    # that behavior when the merge adds the example's ``enabled: false`` gate.
+    # that provider-neutral behavior when the merge adds the example's
+    # ``enabled: false`` gate. Explicit operator values still win.
     if not isinstance(knowledge_base, dict):
-        if target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
-            data['knowledge_base'] = {'enabled': True}
-            changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
-        return changes
+        if not has_configured_knowledge_tool:
+            return changes
+        knowledge_base = data['knowledge_base'] = {'enabled': True}
+        changes.append('knowledge_base.enabled set to true (preserved configured knowledge tools)')
 
-    if 'enabled' not in knowledge_base and target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
+    if 'enabled' not in knowledge_base and has_configured_knowledge_tool:
         knowledge_base['enabled'] = True
-        changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
+        changes.append('knowledge_base.enabled set to true (preserved configured knowledge tools)')
 
     for key in RAGFLOW_PROVIDER_KEYS:
         if key not in knowledge_base:
@@ -145,7 +151,7 @@ MIGRATIONS = {
         ],
     },
     46: {
-        'description': 'Move provider-specific RAGFlow settings from knowledge_base to the knowledge_search tool',
+        'description': 'Preserve configured knowledge providers and move RAGFlow settings to the knowledge_search tool',
         'data_transform': migrate_knowledge_provider_settings,
     },
 }
