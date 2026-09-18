@@ -200,13 +200,13 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
 
 
 def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
-    """The v42 migration keeps provider settings on the RAGFlow tool entry."""
+    """The v46 migration keeps provider settings on the RAGFlow tool entry."""
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
-    assert expected_version >= 42
+    assert expected_version >= 46
 
     config_path = tmp_path / "config.yaml"
     legacy = {
@@ -260,7 +260,7 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
     expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
-    assert expected_version >= 42
+    assert expected_version >= 46
 
     config_path = tmp_path / "config.yaml"
     legacy = {
@@ -282,6 +282,55 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
         ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "knowledge_base.enabled set to true" in result.stdout
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": False,
+    }
+    assert upgraded["tools"][0]["base_url"] == "http://legacy-ragflow:9380"
+
+
+def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path):
+    """The knowledge migration must run for configs at the former base version."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version > 45
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 45,
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                        "base_url": "http://legacy-ragflow:9380",
+                        "api_key": "$RAGFLOW_API_KEY",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,

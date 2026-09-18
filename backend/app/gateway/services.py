@@ -40,7 +40,7 @@ from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
-from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME
+from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -1494,12 +1494,15 @@ def _message_additional_kwargs(message: Any) -> Mapping[str, Any]:
     return {}
 
 
-def _is_human_message(message: Any) -> bool:
+def _is_scope_source_human_message(message: Any) -> bool:
+    """Return whether a checkpoint message can originate a recovered scope."""
     if isinstance(message, HumanMessage):
-        return True
+        return is_genuine_user_message(message)
     if not isinstance(message, Mapping):
         return False
-    return message.get("type") == "human" or message.get("role") in {"human", "user"}
+    if message.get("type") != "human" and message.get("role") not in {"human", "user"}:
+        return False
+    return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
 
 
 async def _recover_run_knowledge_scope(
@@ -1531,14 +1534,14 @@ async def _recover_run_knowledge_scope(
         )
         if target_index is not None:
             source = next(
-                (message for message in reversed(messages[:target_index]) if _is_human_message(message)),
+                (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
                 None,
             )
         else:
             # Interrupted assistant output may never reach a checkpoint. Its
             # source is still the terminal HumanMessage of the latest state.
             source = next(
-                (message for message in reversed(messages) if _is_human_message(message)),
+                (message for message in reversed(messages) if _is_scope_source_human_message(message)),
                 None,
             )
         if source is None:
@@ -1548,7 +1551,7 @@ async def _recover_run_knowledge_scope(
             )
     else:
         source = next(
-            (message for message in reversed(messages) if _is_human_message(message)),
+            (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
         )
     if source is None:

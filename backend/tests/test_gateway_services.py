@@ -2126,6 +2126,54 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
 
 
 @pytest.mark.parametrize(
+    "target_message_id",
+    ["assistant-answer", "missing-assistant", None],
+    ids=["regenerate", "interrupted-regenerate-fallback", "resume-fallback"],
+)
+@pytest.mark.asyncio
+async def test_recover_knowledge_scope_skips_hidden_conversation_reference_message(target_message_id):
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import _recover_run_knowledge_scope
+
+    source_scope = {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-source"],
+    }
+    messages = [
+        HumanMessage(
+            id="user-source",
+            content="Search only the selected dataset",
+            additional_kwargs={"knowledge_scope": source_scope},
+        ),
+        HumanMessage(
+            id="conversation-references",
+            content='Read-only conversation references for this run: ["thread-source"]',
+            additional_kwargs={"hide_from_ui": True},
+        ),
+        AIMessage(id="assistant-answer", content="Scoped answer"),
+    ]
+    accessor = SimpleNamespace(
+        aget=AsyncMock(return_value=SimpleNamespace(values={"messages": messages})),
+    )
+
+    with patch(
+        "app.gateway.services.build_thread_checkpoint_state_accessor",
+        new=AsyncMock(return_value=(accessor, {})),
+    ):
+        recovered = await _recover_run_knowledge_scope(
+            SimpleNamespace(),
+            thread_id="thread-scope-recovery",
+            target_message_id=target_message_id,
+        )
+
+    assert recovered == source_scope
+
+
+@pytest.mark.parametrize(
     ("include_current_scope", "expected_scope", "recovery_calls"),
     [
         (

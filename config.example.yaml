@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 45
+config_version: 46
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:

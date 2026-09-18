@@ -107,9 +107,9 @@ def migrate_knowledge_provider_settings(data):
         )
 
     changes = []
-    # Before v42, a tools-only knowledge configuration was valid and enabled by
-    # the presence of the provider tool itself. Preserve that behavior when the
-    # v42 merge would otherwise add the example's ``enabled: false`` gate.
+    # Before the capability gate shipped, a tools-only knowledge configuration
+    # was valid and enabled by the presence of the provider tool itself. Preserve
+    # that behavior when the merge adds the example's ``enabled: false`` gate.
     if not isinstance(knowledge_base, dict):
         if target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
             data['knowledge_base'] = {'enabled': True}
@@ -144,7 +144,7 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
-    42: {
+    46: {
         'description': 'Move provider-specific RAGFlow settings from knowledge_base to the knowledge_search tool',
         'data_transform': migrate_knowledge_provider_settings,
     },
