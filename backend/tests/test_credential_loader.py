@@ -331,3 +331,19 @@ def test_load_codex_cli_credential_supports_legacy_top_level_shape(tmp_path, mon
     assert cred is not None
     assert cred.access_token == "legacy-access-token"
     assert cred.account_id == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        "codex-access-token",
+        5,
+    ],
+)
+def test_load_codex_cli_credential_ignores_malformed_top_level_container(tmp_path, monkeypatch, payload):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None

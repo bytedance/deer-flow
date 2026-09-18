@@ -92,10 +92,17 @@ def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Failed to read {label}: {e}")
         return None
+
+    if not isinstance(data, dict):
+        # json.loads accepts any top-level JSON value, but callers read keys off this result.
+        logger.warning(f"{label} does not contain a JSON object, got {type(data).__name__}: {path}")
+        return None
+
+    return data
 
 
 def _read_secret_from_file_descriptor(env_var: str) -> str | None:
