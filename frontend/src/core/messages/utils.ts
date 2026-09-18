@@ -44,16 +44,9 @@ export function getMessageGroups(
   }
 
   const groups: MessageGroup[] = [];
-  let currentTurnStartIndex = -1;
-  if (isCurrentTurnLoading) {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
-        currentTurnStartIndex = index;
-        break;
-      }
-    }
-  }
+  const currentTurnStartIndex = isCurrentTurnLoading
+    ? findCurrentTurnStartIndex(messages)
+    : -1;
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
@@ -766,6 +759,25 @@ export function hasPresentFiles(message: Message) {
     message.type === "ai" &&
     message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
   );
+}
+
+/** The latest visible user input or clarification result delimits a run. */
+export function findCurrentTurnStartIndex(
+  messages: readonly Message[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    // Clarification replies are hidden: the result, rather than the last
+    // visible human, separates completed answers from their continuation.
+    if (
+      message &&
+      !isHiddenFromUIMessage(message) &&
+      (message.type === "human" || isClarificationToolMessage(message))
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 export function isClarificationToolMessage(message: Message) {

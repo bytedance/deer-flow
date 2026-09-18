@@ -210,6 +210,8 @@ def _assemble_from_features(
       3.   DanglingToolCallMiddleware (always)
       4.   GuardrailMiddleware (guardrail feature)
       5.   ToolErrorHandlingMiddleware (always)
+      5a.  DurableContextMiddleware (always)
+      5b.  SystemMessageCoalescingMiddleware (always)
       6.   SummarizationMiddleware (summarization feature)
       7.   TodoMiddleware (plan_mode parameter)
       8.   TitleMiddleware (auto_title feature)
@@ -257,6 +259,20 @@ def _assemble_from_features(
 
     # --- [5] ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
+
+    # --- [5a] DurableContext (always) ---
+    # Summarization moves compacted history into ``summary_text``, and
+    # SubagentLimitMiddleware counts the run's delegations from the
+    # ``delegations`` ledger. This middleware writes that ledger and projects
+    # both into model requests. It sits ahead of summarization, as in
+    # make_lead_agent, so delegations are captured before they are compacted.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+
+    chain.append(DurableContextMiddleware())
+    # DurableContext adds its authority contract as a second SystemMessage; strict backends
+    # (vLLM, SGLang, Qwen, Anthropic) reject that, so merge them into one leading message.
+    chain.append(SystemMessageCoalescingMiddleware())
 
     # --- [6] Summarization ---
     if feat.summarization is not False:
@@ -390,7 +406,8 @@ def _assemble_from_features(
             from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
             from deerflow.config.token_budget_config import TokenBudgetConfig
 
-            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
+            # ``enabled`` defaults to False for config.yaml; ``token_budget=True`` is the opt-in.
+            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True)))
 
     # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

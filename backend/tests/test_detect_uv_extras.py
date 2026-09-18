@@ -125,6 +125,25 @@ def test_section_value_does_not_descend_into_grandchildren():
     assert detect.section_value(yaml_lines, "database", "backend") == "sqlite"
 
 
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+@pytest.mark.parametrize(
+    ("config_text", "expected"),
+    [
+        ("database:\n  backend: postgres\n", ["postgres"]),
+        ("tools:\n  - name: browser_navigate\n", ["browser"]),
+        ("models:\n  - use: langchain_ollama:ChatOllama\n", ["ollama"]),
+        ("database:\n  backend: sqlite\n", []),
+        ("# database:\n#   backend: postgres\n", []),
+    ],
+    ids=["postgres", "browser", "ollama", "sqlite", "commented"],
+)
+def test_detect_from_config_utf8_with_optional_bom(tmp_path, encoding, config_text, expected):
+    """A UTF-8 BOM must not hide the first section or enable inactive extras."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(config_text, encoding=encoding)
+    assert detect.detect_from_config(cfg) == expected
+
+
 def test_detect_from_config_postgres_via_database(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\n  postgres_url: $DATABASE_URL\n")

@@ -854,6 +854,11 @@ tools:
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool
   #   max_results: 5
+  #   # Optional search-source filters; omit or use [] for no restriction of that kind.
+  #   # include_domains:
+  #   #   - docs.python.org
+  #   #   - developer.mozilla.org
+  #   # exclude_domains: []
   #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
@@ -1538,7 +1543,12 @@ sandbox:
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
+#   # AIO semver images default MAX_SHELL_SESSIONS to 10. DeerFlow leaves that
+#   # image default unchanged while subagent_runtime.max_running + 1 fits, and
+#   # otherwise injects the required value for local and provisioner sandboxes.
+#   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
+#   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
@@ -1703,7 +1713,9 @@ subagent_runtime:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
 #   timeout_seconds: 1800
-#   # Optional global max-turn override for all subagents.
+#   # Optional global max-turn override for all subagents. One turn is one
+#   # model call plus the tools it runs; the turn count is converted into
+#   # LangGraph's step budget, so this is the number of turns you actually get.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
@@ -2793,17 +2805,23 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # `models` / `skills` govern the per-caller listing/detail surfaces
+#       # (which models/skills the caller sees on GET /api/models and the
+#       # GET /api/skills[.../custom, /{name}] skill routes); skill
+#       # management endpoints (install/edit/export) stay admin-gated.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2813,6 +2831,7 @@ run_ownership:
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
+#           skills: {allow: []}      # no skills visible in the listing
 authorization:
   enabled: false
 

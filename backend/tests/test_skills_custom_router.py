@@ -15,6 +15,7 @@ from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
+from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.skills.security_static_scanner import StaticScannerError
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill
@@ -51,6 +52,13 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
 
 
 def _make_test_app(config) -> FastAPI:
+    # The listing/detail routes read config.authorization.fail_closed even
+    # when authorization is disabled (mirroring list_models). Many tests here
+    # build minimal SimpleNamespace configs; backfill the real disabled
+    # shape once so each of them exercises the unfiltered path instead of
+    # crashing on a missing attribute.
+    if not hasattr(config, "authorization"):
+        config.authorization = AuthorizationConfig(enabled=False)
     app = make_authed_test_app(user_factory=_make_admin_user)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
@@ -1122,6 +1130,11 @@ class TestMultiUserSkillIsolation:
                 use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
             ),
             skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+            # list_skills reads config.authorization.fail_closed even when
+            # authorization is disabled (mirroring list_models); give the
+            # fake the real disabled shape so the isolation path (no
+            # provider filtering) stays exercised.
+            authorization=AuthorizationConfig(enabled=False),
         )
         return alice_storage, bob_storage, config
 
@@ -1322,6 +1335,9 @@ class TestMultiUserSkillIsolation:
                 use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
             ),
             skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+            # Same shape note as _setup_two_user_env: list_skills reads
+            # config.authorization.fail_closed even when disabled.
+            authorization=AuthorizationConfig(enabled=False),
         )
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
         monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "alice")
