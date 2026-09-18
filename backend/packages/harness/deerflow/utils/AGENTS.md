@@ -1,3 +1,10 @@
 ### Agent / Tool Assembly Off-Load
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
+
+### Uploaded Document Summaries
+
+`file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
+optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
+occupy a preview line. Preserve physical line numbers, embedded U+FEFF
+characters, and the original file bytes.
