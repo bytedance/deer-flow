@@ -325,6 +325,8 @@ runs by default.
   `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
   legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
   content cannot replace missing terms or saturate a partial match.
+  Prefix matching requires one complete token to prefix the other; a shared
+  four-character bucket alone is not a match (Postman is not PostgreSQL).
 - DeerMem injection builds IDF once from the selected user/agent fact scope,
   before guaranteed/regular partitioning, using the same bounded tokenizer as
   search. No IDF work runs without an active lexical query. Category-filtered
@@ -335,5 +337,8 @@ runs by default.
   `MemoryManager.get_context` / `aget_context`. Shared signature inspection
   omits `query` when it is `None` or the backend is old/uninspectable, preserving
   forwarding wrappers' absent-hint contract; backend errors never cause retries.
+  Query extraction prefers preserved `original_user_content` before applying
+  the character cap, so upload descriptions never displace the user's request.
+  Attachment-only messages with an empty preserved request stay query-less.
 - Ranking must be deterministic, network-free, and mutation-free: caller-owned
   fact dicts are read-only inputs.

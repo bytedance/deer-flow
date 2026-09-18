@@ -134,6 +134,29 @@ def test_rare_query_terms_keep_more_weight_than_common_terms():
     assert lexical_relevance("python database migration", "database", idf=idf) > lexical_relevance("python database migration", "python", idf=idf)
 
 
+@pytest.mark.parametrize("query,content", [("PostgreSQL", "Postman collections"), ("authorization", "authentication settings"), ("database", "dataframe columns")])
+def test_shared_four_character_prefix_is_not_a_lexical_match(query, content):
+    assert lexical_relevance(query, content) == 0.0
+
+
+@pytest.mark.parametrize("query,content", [("database", "databases"), ("databases", "database"), ("migration", "migrations"), ("migrations", "migration")])
+def test_complete_token_prefixes_still_match(query, content):
+    assert lexical_relevance(query, content) == 1.0
+
+
+@pytest.mark.parametrize("unrelated_first", [False, True])
+def test_search_prefers_exact_token_over_shared_prefix(unrelated_first):
+    facts = [
+        {"id": "unrelated", "content": "Postman collections", "confidence": 0.7, "category": "context"},
+        {"id": "exact", "content": "PostgreSQL database", "confidence": 0.7, "category": "context"},
+    ]
+    if not unrelated_first:
+        facts.reverse()
+    manager = DeerMem(backend_config={"retrieval_relevance_enabled": True, "retrieval_relevance_weight": 1.0})
+    manager._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: {"facts": facts})
+    assert manager.search("PostgreSQL", top_k=1)[0]["id"] == "exact"
+
+
 def test_absent_query_keeps_forwarding_wrapper_legacy_contract(monkeypatch):
     calls = []
     inner = _LegacyBackend()

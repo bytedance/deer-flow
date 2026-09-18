@@ -1612,7 +1612,10 @@ Set `memory.backend_config.retrieval_relevance_enabled: true` to opt into determ
 
 Lexical relevance measures IDF-weighted coverage of distinct query terms, so
 repeated partial matches cannot tie a complete match merely by saturating the
-score. Older custom memory backends can keep their existing `get_context`
+score. Prefix matches require one complete token to prefix the other, not just
+four shared characters. For uploads, query-aware injection uses the preserved
+user request rather than the prepended file descriptions; attachment-only
+messages retain query-less injection. Older custom memory backends can keep their existing `get_context`
 signature: prompt injection and the inherited async wrapper pass `query` only
 when that callable supports the keyword and the hint is not `None`.
 Search and automatic injection use the same IDF weighting for the same

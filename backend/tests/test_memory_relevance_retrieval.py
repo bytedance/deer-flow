@@ -357,7 +357,9 @@ class TestRelevanceSearch:
             },
         )
 
-        results = mgr.search("linting", top_k=2)
+        # Both "lints" and "linting" extend this complete query token, so
+        # the test isolates diversity rather than arbitrary shared stems.
+        results = mgr.search("lint", top_k=2)
         assert len(results) == 2
         assert "CI lints on every pull request" in [fact["content"] for fact in results]
 
@@ -496,6 +498,34 @@ class TestGetContextQuery:
 
 
 class TestMiddlewareQueryWiring:
+    @pytest.mark.parametrize("multimodal", [False, True])
+    @pytest.mark.parametrize("user_text", ["Use my PostgreSQL preferences to analyze these reports.", "", "PostgreSQL " * 200], ids=["request", "attachment_only", "bounded_request"])
+    def test_upload_context_does_not_replace_original_query(self, monkeypatch, tmp_path, multimodal, user_text):
+        from unittest import mock
+
+        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        uploads = UploadsMiddleware(base_dir=str(tmp_path))
+        files = [{"filename": f"report-{i}.csv", "size": 1024, "path": f"/mnt/user-data/uploads/report-{i}.csv", "extension": ".csv"} for i in range(5)]
+        monkeypatch.setattr(uploads, "_files_from_kwargs", lambda *_: files)
+        content = [{"type": "text", "text": user_text}] if multimodal else user_text
+        runtime = SimpleNamespace(context={})
+        update = uploads.before_agent({"messages": [HumanMessage(content=content, id="msg-1")]}, runtime)
+        uploaded_message = update["messages"][0]
+        assert uploaded_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == user_text
+        with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="") as get_context:
+            DynamicContextMiddleware().before_agent({"messages": [uploaded_message]}, runtime)
+        get_context.assert_called_once()
+        assert get_context.call_args.kwargs["query"] == (user_text.strip()[:1000] or None)
+
+    def test_invalid_original_content_metadata_uses_message_text(self):
+        from deerflow.agents.middlewares.dynamic_context_middleware import _derive_injection_query
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        message = HumanMessage(content="database migration", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ["not a string"]})
+        assert _derive_injection_query(message) == "database migration"
+
     def test_first_turn_passes_current_query_to_memory_context(self):
         from unittest import mock
 

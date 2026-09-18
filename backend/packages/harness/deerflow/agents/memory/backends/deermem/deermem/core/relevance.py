@@ -122,7 +122,10 @@ def _lexical_relevance(query_text: str, query_tokens: list[str], content: str, *
 
     weights = idf or {}
     content_set = set(content_tokens)
-    prefixes = {token[:_PREFIX_MATCH_MIN_CHARS] for token in content_set if len(token) >= _PREFIX_MATCH_MIN_CHARS}
+    prefix_buckets: dict[str, list[str]] = {}
+    for content_token in content_set:
+        if len(content_token) >= _PREFIX_MATCH_MIN_CHARS:
+            prefix_buckets.setdefault(content_token[:_PREFIX_MATCH_MIN_CHARS], []).append(content_token)
     # Each distinct query token contributes its squared IDF at most once.
     # Compare the matched-query norm to the complete-query norm: repetition
     # cannot replace missing terms, and the result needs no clipping. The
@@ -131,7 +134,9 @@ def _lexical_relevance(query_text: str, query_tokens: list[str], content: str, *
     for token in dict.fromkeys(query_tokens):
         weight = weights.get(token, 1.0) ** 2
         total_weight += weight
-        if token in content_set or (len(token) >= _PREFIX_MATCH_MIN_CHARS and token[:_PREFIX_MATCH_MIN_CHARS] in prefixes):
+        # Sharing four characters only narrows the candidate set. Count a
+        # match only when one complete token is a prefix of the other.
+        if token in content_set or (len(token) >= _PREFIX_MATCH_MIN_CHARS and any(token.startswith(candidate) or candidate.startswith(token) for candidate in prefix_buckets.get(token[:_PREFIX_MATCH_MIN_CHARS], ()))):
             matched_weight += weight
     return math.sqrt(matched_weight / total_weight) if total_weight > 0.0 else 0.0
 

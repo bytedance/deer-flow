@@ -47,7 +47,7 @@ import os
 import posixpath
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -61,7 +61,7 @@ from langgraph.runtime import Runtime
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
+from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -328,11 +328,16 @@ class SubagentDateContextMiddleware(AgentMiddleware):
 def _derive_injection_query(message: object) -> str | None:
     """Extract a bounded text query from the user message being injected on.
 
-    Handles plain-string content and multimodal content lists (joining the
-    text parts). Returns ``None`` when no text is present so callers keep
-    the legacy query-less memory path.
+    Prefer the original user text preserved by UploadsMiddleware so file
+    descriptions cannot consume the query budget. Otherwise handle plain
+    text and multimodal lists. An empty original request remains query-less.
     """
     content = getattr(message, "content", None)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, Mapping):
+        original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+        if isinstance(original_content, str):
+            content = original_content
     if isinstance(content, str):
         text = content
     elif isinstance(content, list):
