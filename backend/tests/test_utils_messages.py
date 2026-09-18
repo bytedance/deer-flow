@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text, message_to_text, restore_original_human_message
@@ -80,6 +81,11 @@ def test_message_content_to_text_none_content_is_empty_not_literal_none():
     # survives the ``text if text else ...`` fallbacks in the subagent executor and archive.
     assert message_content_to_text(None) == ""
     assert message_content_to_text(None) == message_to_text(SimpleNamespace(content=None))
+
+
+@pytest.mark.parametrize("content, expected", [("None", "None"), (0, "0"), (False, "False")])
+def test_message_content_to_text_preserves_non_none_values(content, expected):
+    assert message_content_to_text(content) == expected
 
 
 # ---------- restore_original_human_message ----------
