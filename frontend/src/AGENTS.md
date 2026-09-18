@@ -81,6 +81,8 @@
    as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
+AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
+
 Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
 variants after the write succeeds, merge only `deerflow_project_id`, then
 invalidate/refetch that metadata prefix. This fences delayed pre-move reads and
@@ -175,3 +177,15 @@ Array previews coalesce consecutive generated markers only at the end into one o
   frame path for older clients.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
+
+Clarification ToolMessages delimit completed runs for streaming message grouping,
+including continuations submitted with hidden human replies. Do not classify all
+messages after the last visible human as unresolved once a clarification result
+has arrived. The processing renderer keeps tool-calling messages intact for
+association and usage accounting, but renders text accompanying
+`ask_clarification` outside the execution panel (including mixed tool calls).
+
+`findCurrentTurnStartIndex` owns the boundary rule for both full and incremental
+message grouping. Incremental prefix/tail splitting applies only at human
+boundaries; clarification results also belong to the preceding processing group,
+so derive the full grouping and stabilize references at clarification boundaries.
