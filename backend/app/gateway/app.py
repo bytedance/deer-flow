@@ -28,6 +28,7 @@ from app.gateway.routers import (
     github_webhooks,
     input_polish,
     integrations,
+    knowledge,
     mcp,
     mcp_tasks,
     memory,
@@ -52,6 +53,7 @@ from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
+from deerflow.utils.file_io import await_drained
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -194,6 +196,39 @@ async def _warm_memory_retrieval(manager) -> None:
             logger.warning("Memory retrieval index rebuild failed; scoped searches will retry lazily")
     except Exception:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+
+
+async def _shutdown_memory_backend(*, retrieval_warm_finished: bool) -> None:
+    """Resolve, drain, and close memory within the caller's cancellation shield.
+
+    Backend ``close()`` overrides must be quick or internally bounded: unlike
+    ``shutdown_flush``, close has no host timeout and is drained even on cancellation.
+    """
+    manager = None
+    try:
+        app_cfg: AppConfig = await asyncio.to_thread(get_app_config)
+        if app_cfg.memory.enabled:
+            from deerflow.agents.memory import get_memory_manager
+
+            manager = await asyncio.to_thread(get_memory_manager)
+            flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
+            completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
+            if completed:
+                logger.info("Memory queue flush completed within %.1fs", flush_timeout)
+            else:
+                logger.warning(
+                    "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
+                    flush_timeout,
+                )
+    except Exception:
+        logger.exception("Failed to flush memory queue on shutdown")
+    finally:
+        close = getattr(manager, "close", None)
+        if callable(close) and retrieval_warm_finished:
+            try:
+                await asyncio.to_thread(close)
+            except Exception:
+                logger.exception("Failed to close memory backend on shutdown")
 
 
 async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
@@ -614,9 +649,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
         # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # session close + the brief retrieval-warm wait + config/backend
+        # resolution + this drain + backend close + buffer),
         # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
         # mid-flight and the loss this is fixing is silently re-introduced.
+        # Backend close has no host timeout: overrides must be quick or
+        # internally bounded, since cancellation waits for that worker too.
         # The retrieval index is derived from canonical memory files, so its
         # wait is independently capped and never consumes the flush budget.
         retrieval_warm_finished = True
@@ -633,9 +671,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 retrieval_warm_finished = False
                 logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
 
-        manager = None
         try:
-            # Memory shutdown runs on a worker thread and can trigger detached
+            # Memory shutdown runs on worker threads and can trigger detached
             # system-model callbacks. Stop accepting those callbacks before
             # flushing, while keeping the registered loop alive for awaited
             # task hooks until langgraph_runtime drains runs and subagents.
@@ -645,30 +682,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
 
-        try:
-            app_cfg = get_app_config()
-            if app_cfg.memory.enabled:
-                from deerflow.agents.memory import get_memory_manager
-
-                manager = await asyncio.to_thread(get_memory_manager)
-                flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
-                completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
-                if completed:
-                    logger.info("Memory queue flush completed within %.1fs", flush_timeout)
-                else:
-                    logger.warning(
-                        "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
-                        flush_timeout,
-                    )
-        except Exception:
-            logger.exception("Failed to flush memory queue on shutdown")
-        finally:
-            close = getattr(manager, "close", None)
-            if callable(close) and retrieval_warm_finished:
-                try:
-                    await asyncio.to_thread(close)
-                except Exception:
-                    logger.exception("Failed to close memory backend on shutdown")
+        # ``asyncio.to_thread`` cancellation only detaches the awaiter; the
+        # worker keeps running. Treat resolve + flush + close as one owned
+        # shutdown operation so lifespan cancellation cannot close the backend
+        # underneath an in-flight flush or return while either worker is live.
+        await await_drained(
+            _shutdown_memory_backend(
+                retrieval_warm_finished=retrieval_warm_finished,
+            )
+        )
 
     logger.info("Shutting down API Gateway")
 
@@ -905,6 +927,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)
+
+    # Read-only RAGFlow catalog for chat knowledge-scope selection.
+    app.include_router(knowledge.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
