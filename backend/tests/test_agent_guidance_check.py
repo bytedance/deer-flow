@@ -26,6 +26,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/mcp/AGENTS.md",
     "backend/packages/harness/deerflow/models/AGENTS.md",
+    "backend/packages/harness/deerflow/persistence/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/migrations/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/user/AGENTS.md",
     "backend/packages/harness/deerflow/reflection/AGENTS.md",
@@ -94,9 +95,7 @@ def test_effective_ancestor_chain_can_fail_when_each_file_is_valid(tmp_path: Pat
             "backend/app/gateway/AGENTS.md": "g" * (47 * 1024),
         }
     )
-
     findings = checker.analyze(tmp_path, files)
-
     assert "AG001" not in _codes(findings, "error")
     assert "AG002" in _codes(findings, "error")
 
@@ -105,10 +104,8 @@ def test_legacy_hard_violation_may_shrink_but_may_not_grow(tmp_path: Path) -> No
     base = _files(**{"AGENTS.md": "x" * (20 * 1024)})
     smaller = _files(**{"AGENTS.md": "x" * (20 * 1024 - 1)})
     grown = _files(**{"AGENTS.md": "x" * (20 * 1024 + 1)})
-
     smaller_findings = checker.analyze(tmp_path, smaller, base_files=base)
     grown_findings = checker.analyze(tmp_path, grown, base_files=base)
-
     assert "AG001" not in _codes(smaller_findings, "error")
     assert "AG001" in _codes(grown_findings, "error")
 
@@ -120,7 +117,6 @@ def test_discovery_uses_exact_agents_basename() -> None:
         PurePosixPath("backend/CLAUDE.md"),
         PurePosixPath("backend/docs/GITHUB_AGENTS.md"),
     ]
-
     assert checker.guidance_paths(paths) == {
         PurePosixPath("AGENTS.md"),
         PurePosixPath("backend/AGENTS.md"),
@@ -129,7 +125,6 @@ def test_discovery_uses_exact_agents_basename() -> None:
 
 def test_repository_has_the_approved_scoped_guidance_shape() -> None:
     actual = {path.as_posix() for path in checker.guidance_paths(checker._worktree_paths(REPO_ROOT))}
-
     assert actual == EXPECTED_GUIDANCE_PATHS
 
 
@@ -166,7 +161,6 @@ def test_local_guidance_files_contain_the_split_original_sections() -> None:
         "backend/packages/harness/deerflow/tui/AGENTS.md": "### Terminal Workbench / TUI",
         "frontend/src/AGENTS.md": "### Data Flow",
     }
-
     for relative_text, heading in expected_headings.items():
         text = (REPO_ROOT / relative_text).read_text(encoding="utf-8")
         assert heading in text, relative_text
@@ -176,7 +170,6 @@ def test_local_guidance_files_contain_the_split_original_sections() -> None:
 def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     workflow = (REPO_ROOT / ".github" / "workflows" / "lint-check.yml").read_text(encoding="utf-8")
-
     assert "check-agent-guidance:" in makefile
     assert "scripts/check_agent_guidance.py" in makefile
     assert workflow.count("agent-guidance:") == 1
