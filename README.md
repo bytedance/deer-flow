@@ -347,6 +347,11 @@ For persistent deployments, configure `database.backend` as `sqlite` or
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
 section, when present, overrides the first two for backward compatibility.
 
+Gateway startup automatically repairs the missing run-change schema affecting
+some existing databases (#5516). The repair preserves run history and existing
+change positions; downgrading the repair to its predecessor also retains the
+schema and positions required by that version.
+
 For lightweight single-process event persistence, `run_events.backend: jsonl`
 keeps Unicode message content intact, including line and paragraph separators.
 Existing valid JSONL records remain readable without rewriting the files.
@@ -1090,6 +1095,65 @@ reuse the search entry's key, so search can use a different provider. If you
 previously configured a shared Tavily key only under `web_search`, also set it
 under `web_fetch` or use `TAVILY_API_KEY` for both.
 
+### Private Knowledge Retrieval (RAGFlow)
+
+Answers can cite retrieved RAGFlow evidence with clickable knowledge citations.
+Click a citation, or an entry in the answer's knowledge sources list, to see the
+original retrieved excerpt, dataset and document names, and page numbers when
+RAGFlow supplies them. These are retrieval-time snapshots retained with the
+conversation, including sources forwarded by ordinary `task` subagents; they
+remain inspectable after reloading the conversation. An excerpt is not a live
+copy of the full document: changes in RAGFlow do not rewrite past evidence.
+Missing source records are shown as unavailable rather than turned into guessed
+links. Source snapshots do not add a knowledge-management page or expose the
+RAGFlow API key. Durable batch exports and standalone Markdown files do not
+carry these interactive conversation source records.
+Ordinary document-title links in a Sources section open the same evidence as
+inline citations. When a tool-output budget applies, only complete evidence
+entries that fit remain citable; omitted sources are reported rather than
+retaining a source record for a cut-off excerpt.
+
+DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
+`knowledge_search` Agent tool resolves the configured dataset scope, groups
+datasets by embedding model, and retrieves those groups in parallel so mixed
+embedding models do not cause a provider error. Dataset IDs and API keys are
+never exposed to the model. The optional `list_knowledge_bases` tool returns
+names only.
+
+Main and custom-agent chats can optionally expose a page-local, icon-only
+**Knowledge** selector beside the mode control. Its persistent highlight
+indicates that knowledge retrieval is active; the neutral state means retrieval
+is off. Set `knowledge_base.scope_selection_enabled: true` in `config.yaml`
+while using the built-in RAGFlow `knowledge_search` provider to allow all
+permitted datasets, selected datasets/files, or no retrieval for a turn. The
+same config flag controls both chat types; when disabled, neither composer
+shows the selector or submits a scope. The choice resets to all when the page
+is refreshed or another conversation is opened; each sent human message keeps
+an immutable scope snapshot for replay and history. The Gateway validates
+every snapshot, intersects it with the operator's dataset allowlist, propagates
+the execution-only scope to native and durable subagents, and removes it from
+model inputs and external traces. Client-supplied internal runtime controls
+and credentials are also stripped from run context before execution or
+checkpoint persistence. Idempotent retries accept both canonical snapshots and
+legacy raw run inputs, preserving retry compatibility across upgrades.
+The `knowledge_base` block is provider-neutral and only controls whether the
+knowledge capability and selector are enabled. RAGFlow connection, dataset
+allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
+`page_size`, thresholds, and output limits) must be configured on the
+`tools[].name: knowledge_search` entry; they are never read from
+`knowledge_base`.
+Custom-agent chat requests carry the selected agent name as both `assistant_id`
+and `context.agent_name`, so Gateway scope admission and runtime agent loading
+use the same identity. Main chat requests use `lead_agent`; both identities are
+admitted only when the shared configuration enables the RAGFlow provider.
+When answering a pending clarification, an explicitly submitted current
+selector snapshot wins; clients that omit it inherit the prior turn's accepted
+scope. Edit-and-regenerate follows the same fallback, and the file catalog is
+loaded only after a dataset is switched from all files to selected files.
+This release does not add an independent Knowledge item to the workspace
+sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
+delete datasets and documents directly in RAGFlow.
+
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.
@@ -1408,6 +1472,8 @@ async with runtime:
     # Serve or invoke graph while the durable worker is running.
 ```
 
+`SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
 The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
 
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
@@ -1466,6 +1532,8 @@ The built-in `grep` tool searches either one text file or all matching text file
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
+UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
+outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
@@ -1571,6 +1639,14 @@ in the composer and in the transcript. There is no automatic history search. See
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
+
+Gateway shutdown drains memory updates before closing the backend, even when
+shutdown is cancelled. Config reload failures are logged without aborting runtime
+teardown. For Kubernetes, budget `terminationGracePeriodSeconds` for all shutdown
+hooks, config/backend resolution, `memory.shutdown_flush_timeout_seconds`, and
+backend close plus a safety margin. The flush timeout does not bound `close()`:
+custom backends must make close quick or internally bounded, or shutdown can wait
+until the process is forcibly terminated.
 
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 

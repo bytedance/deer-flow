@@ -2091,6 +2091,17 @@
 
 ### 安全
 
+- **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
+  放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
+  `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
+  删除的是请求的文件名。现在符号链接返回 404，与上传列表一致；指向 uploads 目录之外的
+  链接仍以 400 拒绝。([#5547])
+- **前端：** 工具步骤不再把非 Web URL 渲染为链接。思维链面板中的 `web_fetch` URL 与
+  `web_search` / `image_search` 结果链接此前绕过了 Markdown 链接使用的协议白名单，
+  被提示注入的工具调用可在聊天中放入 `file:` 或系统协议处理程序链接（`ms-msdt:`、
+  `vscode:` 等）。现在它们会经过 `isSafeHref`，不安全的 URL 与 Markdown 链接一样显示
+  “Unsafe link omitted” 标记；缺少 args 的工具调用或非字符串的 `web_fetch` URL 也不再导致
+  消息列表崩溃。([#5526])
 - **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
   文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
   `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
@@ -3498,4 +3509,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5526]: https://github.com/bytedance/deer-flow/pull/5526
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
+[#5547]: https://github.com/bytedance/deer-flow/pull/5547

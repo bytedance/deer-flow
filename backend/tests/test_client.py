@@ -4341,6 +4341,30 @@ class TestUploadDeleteSymlink:
             # The outside file must NOT have been deleted.
             assert outside.exists()
 
+    def test_delete_upload_symlink_to_sibling_upload(self, client):
+        """A symlink aliasing another upload is not followed to delete that upload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+
+            victim = uploads_dir / "victim.txt"
+            victim.write_text("keep me")
+
+            link = uploads_dir / "alias.txt"
+            try:
+                link.symlink_to(victim.name)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(FileNotFoundError):
+                    client.delete_upload("thread-1", "alias.txt")
+
+            assert victim.read_text() == "keep me"
+            assert link.is_symlink()
+
     def test_upload_filename_with_spaces_and_unicode(self, client):
         """Files with spaces and unicode characters in names upload correctly."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -185,6 +185,12 @@ export interface Translations {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => string;
+    sourcePages: (pages: string) => string;
+    retrievedExcerpt: string;
+    excerptTruncated: string;
+    sourceUnavailable: string;
+    knowledgeSourcesSummary: (count: number) => string;
     sourcesSummary: (count: number) => string;
     citeCount: (count: number) => string;
     copyReference: (title: string) => string;
@@ -415,6 +421,40 @@ export interface Translations {
     emptyTrashTitle: string;
     emptyTrashConfirm: (count: number) => string;
     emptyTrashFailed: string;
+  };
+
+  // Knowledge scope for custom-agent chat
+  knowledge: {
+    scope: {
+      title: string;
+      description: string;
+      buttonAll: string;
+      buttonDisabled: string;
+      buttonDatasets: (datasets: number) => string;
+      buttonDatasetsAndDocuments: (
+        datasets: number,
+        documents: number,
+      ) => string;
+      allDatasets: string;
+      selectedDatasets: string;
+      disabled: string;
+      allDocuments: string;
+      selectedDocuments: string;
+      searchDatasets: string;
+      searchDocuments: string;
+      selectedCount: (count: number) => string;
+      files: string;
+      notSearchable: string;
+      loadFailed: string;
+      selectionInvalid: string;
+      previous: string;
+      next: string;
+      agentUnavailable: string;
+      apply: string;
+      historyAll: string;
+      historyDisabled: string;
+      historySelected: (datasets: number, documents: number) => string;
+    };
   };
 
   // Thread-scoped MCP background tasks
