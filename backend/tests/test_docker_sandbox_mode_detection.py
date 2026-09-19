@@ -321,6 +321,9 @@ def test_logs_prod_targets_production_stack(args):
     while the dev default is project `deer-flow-dev`, so `make docker-logs`
     after `make up` printed nothing (#5529). The production entry point must
     target the same project and interpolate the same .env.
+
+    Compose detection is NOT stubbed here: it rebuilds COMPOSE_CMD, and the
+    appended `--env-file` must survive that rebuild (#5538 review).
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_root = Path(tmpdir)
@@ -332,8 +335,11 @@ def test_logs_prod_targets_production_stack(args):
 source '{SCRIPT_PATH}'
 PROJECT_ROOT='{tmp_root}'
 DOCKER_DIR='{tmp_root}'
-require_compose_version() {{ :; }}
 docker() {{
+  if [ "$1" = compose ] && [ "$2" = version ]; then
+    echo '2.41.0'
+    return 0
+  fi
   if [ "$1" = compose ]; then
     printf '%s\\n' "$*" "DEER_FLOW_HOME=${{DEER_FLOW_HOME:-unset}}" > '{marker}'
     return 0

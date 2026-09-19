@@ -447,14 +447,10 @@ logs() {
     done
 
     if [ "$is_prod" = 1 ]; then
-        # Target the same project deploy.sh started, and interpolate variables
-        # from the same .env. Relative paths: this runs with cwd=$DOCKER_DIR.
+        # Target the same project deploy.sh started. Relative paths: this
+        # runs with cwd=$DOCKER_DIR.
         COMPOSE_FILE="docker-compose.yaml"
         COMPOSE_PROJECT="deer-flow"
-        _refresh_compose_cmd
-        if [ -f "$PROJECT_ROOT/.env" ]; then
-            COMPOSE_CMD="$COMPOSE_CMD --env-file ../.env"
-        fi
         # deploy.sh exports these before every compose invocation so the
         # volume specs in docker-compose.yaml interpolate; without them even
         # `logs` fails to parse the file on checkouts without a .env.
@@ -475,6 +471,12 @@ logs() {
     fi
 
     compose_preflight
+
+    # Append --env-file only after compose_preflight(): its Compose detection
+    # may rebuild COMPOSE_CMD, which would drop anything appended before it.
+    if [ "$is_prod" = 1 ] && [ -f "$PROJECT_ROOT/.env" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --env-file ../.env"
+    fi
 
     if [ -n "$service" ]; then
         echo -e "${BLUE}Viewing $service logs...${NC}"
