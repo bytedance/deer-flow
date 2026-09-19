@@ -14,6 +14,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -212,6 +213,8 @@ async def batch_task(
         "is_internal": context.get("is_internal") is True,
         "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
     }
+    if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:
+        execution_spec["knowledge_scope"] = execution_scope(context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
     try:
         batch = await submitter.submit(
             BatchSubmitRequest(

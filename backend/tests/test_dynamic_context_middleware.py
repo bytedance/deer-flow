@@ -48,6 +48,30 @@ def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
     )
 
 
+class _FakeRequest:
+    """Minimal ModelRequest stand-in for the wrap_model_call hooks."""
+
+    def __init__(self, messages, runtime):
+        self.messages = list(messages)
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return _FakeRequest(kwargs.get("messages", self.messages), self.runtime)
+
+
+def _drive_first_model_call(mw: DynamicContextMiddleware, messages, runtime):
+    """Run the first model-request assembly (wrap_model_call) and capture the request."""
+    captured: dict = {}
+
+    def _handler(request):
+        captured["messages"] = list(request.messages)
+        return "response"
+
+    result = mw.wrap_model_call(_FakeRequest(messages, runtime), _handler)
+    assert result == "response"
+    return captured["messages"]
+
+
 def _date_reminder_msg(date_str: str, msg_id: str) -> SystemMessage:
     """Build a persisted date reminder in the current production shape.
 
@@ -231,26 +255,38 @@ def test_memory_lookup_uses_runtime_user_id():
         None,
         app_config=None,
         user_id="runtime-user",
+        query="Hi",
     )
 
 
 def test_first_run_records_exact_effective_memory():
+    """The run's context event fires at the first model-request assembly, once
+    injection results are known — not during ``before_agent``."""
+    from langgraph.graph.message import add_messages
+
     journal = mock.MagicMock()
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
     context = "<memory>\nUser prefers Python.\n</memory>\n"
+    runtime = _fake_runtime(journal)
 
     with (
         mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=context),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
-        result = mw.before_agent(state, _fake_runtime(journal))
+        result = mw.before_agent(state, runtime)
 
     memory_message = result["messages"][1]
     assert memory_message.content == context.strip()
+    journal.record_memory_context.assert_not_called()  # nothing delivered to a model call yet
+
+    _drive_first_model_call(mw, add_messages(state["messages"], result["messages"]), runtime)
+
     journal.record_memory_context.assert_called_once_with(
         content_sha256=hashlib.sha256(memory_message.content.encode("utf-8")).hexdigest(),
+        project_context_revision=None,
+        project_shelf_revision=None,
     )
 
 
@@ -274,6 +310,7 @@ def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloa
             HumanMessage(content="Follow-up", id="msg-2"),
         ]
     }
+    runtime = _fake_runtime(journal, pre_existing_message_ids={"msg-1__memory"})
 
     with (
         mock.patch(
@@ -283,14 +320,14 @@ def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloa
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
-        result = mw.before_agent(
-            state,
-            _fake_runtime(journal, pre_existing_message_ids={"msg-1__memory"}),
-        )
+        result = mw.before_agent(state, runtime)
 
     assert result is None
+    _drive_first_model_call(mw, state["messages"], runtime)
     journal.record_memory_context.assert_called_once_with(
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+        project_context_revision=None,
+        project_shelf_revision=None,
     )
 
 
@@ -311,20 +348,25 @@ def test_state_memory_without_checkpoint_proof_cannot_forge_context_event():
             HumanMessage(content="Follow-up", id="msg-2"),
         ]
     }
+    runtime = _fake_runtime(journal)
 
     with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
-        result = mw.before_agent(state, _fake_runtime(journal))
+        result = mw.before_agent(state, runtime)
 
     assert result is None
+    _drive_first_model_call(mw, state["messages"], runtime)
     journal.record_memory_context.assert_not_called()
 
 
 def test_context_event_failure_does_not_block_memory_injection():
+    from langgraph.graph.message import add_messages
+
     journal = mock.MagicMock()
     journal.record_memory_context.side_effect = RuntimeError("event store unavailable")
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+    runtime = _fake_runtime(journal)
 
     with (
         mock.patch(
@@ -334,10 +376,14 @@ def test_context_event_failure_does_not_block_memory_injection():
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
-        result = mw.before_agent(state, _fake_runtime(journal))
+        result = mw.before_agent(state, runtime)
 
     assert result is not None
     assert result["messages"][1].content == "<memory>\nUseful context\n</memory>"
+
+    # The record failure is swallowed at assembly: the model call still proceeds.
+    assembled = _drive_first_model_call(mw, add_messages(state["messages"], result["messages"]), runtime)
+    assert any(isinstance(m, HumanMessage) and m.content == "<memory>\nUseful context\n</memory>" for m in assembled)
 
 
 # ---------------------------------------------------------------------------
@@ -720,7 +766,7 @@ def test_memory_message_carries_reminder_key_for_title_eligibility():
 
     Without it, title_middleware._is_user_message_for_title counts the memory
     block as a second user message and skips title generation entirely.
-    Similarly, summarization_middleware._preserve_dynamic_context_reminders
+    Similarly, summarization_middleware._preserve_required_context
     would not rescue the memory block from summary compression.
     """
     from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
@@ -963,23 +1009,33 @@ def _declared_date_timezone_policies():
     ]
 
 
+def _expected_policies(tz_name: str):
+    """The DynamicContext declaration also carries the shelf index's effective
+    rendering caps (no app config here ⇒ ProjectsConfig defaults); the
+    SubagentDateContext declaration is the timezone alone."""
+    from deerflow.config.projects_config import ProjectsConfig
+
+    defaults = ProjectsConfig()
+    return [
+        {
+            "current_date_timezone": tz_name,
+            "memory_enabled": True,
+            "shelf_index_max_entries": defaults.shelf_index_max_entries,
+            "shelf_index_max_bytes": defaults.shelf_index_max_bytes,
+        },
+        {"current_date_timezone": tz_name},
+    ]
+
+
 def test_date_middlewares_declare_configured_timezone(monkeypatch):
     """Assembly identity must reflect the zone the injected date follows."""
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
-
-    assert _declared_date_timezone_policies() == [
-        {"current_date_timezone": "Asia/Shanghai", "memory_enabled": True},
-        {"current_date_timezone": "Asia/Shanghai"},
-    ]
+    assert _declared_date_timezone_policies() == _expected_policies("Asia/Shanghai")
 
 
 def test_date_middlewares_declare_utc_timezone(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
-
-    assert _declared_date_timezone_policies() == [
-        {"current_date_timezone": "UTC", "memory_enabled": True},
-        {"current_date_timezone": "UTC"},
-    ]
+    assert _declared_date_timezone_policies() == _expected_policies("UTC")
 
 
 def test_dynamic_context_release_policy_includes_memory_opt_out(monkeypatch):
@@ -987,9 +1043,14 @@ def test_dynamic_context_release_policy_includes_memory_opt_out(monkeypatch):
 
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
 
+    from deerflow.config.projects_config import ProjectsConfig
+
+    defaults = ProjectsConfig()
     assert DynamicContextMiddleware(memory_enabled=False).release_policy_parameters() == {
         "current_date_timezone": "UTC",
         "memory_enabled": False,
+        "shelf_index_max_entries": defaults.shelf_index_max_entries,
+        "shelf_index_max_bytes": defaults.shelf_index_max_bytes,
     }
 
 
@@ -999,13 +1060,10 @@ def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
     from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
 
     monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
-    date_policy = {"current_date_timezone": _effective_date_timezone_name()}
-    assert date_policy["current_date_timezone"]
+    expected_zone = _effective_date_timezone_name()
+    assert expected_zone
 
-    assert _declared_date_timezone_policies() == [
-        {**date_policy, "memory_enabled": True},
-        date_policy,
-    ]
+    assert _declared_date_timezone_policies() == _expected_policies(expected_zone)
 
 
 def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatch, caplog):
@@ -1013,12 +1071,7 @@ def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatc
     from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
 
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
-    date_policy = {"current_date_timezone": _effective_date_timezone_name()}
-
-    assert _declared_date_timezone_policies() == [
-        {**date_policy, "memory_enabled": True},
-        date_policy,
-    ]
+    assert _declared_date_timezone_policies() == _expected_policies(_effective_date_timezone_name())
     assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
 
 

@@ -344,6 +344,25 @@ links in pasted documents, tool results, or previous messages grant no access.
 The server supplies source IDs to the model as background user-role data and
 binds the reader to this run's references and authenticated identity.
 
+Clients that cannot add top-level fields to a run request (the LangGraph JS SDK
+builds a fixed body and drops unknown keys) may send the same list as
+`context.conversation_references`:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "context": {"conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]}
+}
+```
+
+The Gateway lifts the key out of `context` before the run context is assembled,
+so it has the same bounds and error locations as the top-level field, is
+recorded on the run in the same way, and never reaches the merged run context
+or the checkpointed `configurable`. Sending the top-level field and the context
+key together returns 422. `GET /api/features` reports
+`conversation_references.enabled` (the tool is configured) and `max_references`,
+so a client can hide its entry point on deployments without the tool.
+
 The request requires `runs:read` as well as the normal run-creation permission.
 The tool rechecks source ownership on each read; foreign, deleted and unowned
 legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`
@@ -948,7 +967,10 @@ Content-Type: multipart/form-data
   ],
   "message": "Successfully uploaded 1 file(s)"
 }
+
 ```
+
+**Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
 **Supported Document Formats** (auto-converted to Markdown):
 - PDF (`.pdf`)
@@ -1013,6 +1035,149 @@ DELETE /api/threads/{thread_id}
 **Error behavior:**
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+
+### Projects
+
+#### Get Projects Config
+
+```http
+GET /api/projects/config
+```
+
+The `projects` config-block knobs the UI needs for client-side validation. Requires the `projects:read` scope (PATs included).
+
+**Response:**
+```json
+{
+  "instructions_max_bytes": 8192,
+  "trash_retention_days": 30
+}
+```
+
+Values come from `projects.instructions_max_bytes` and `projects.trash_retention_days` in `config.yaml`; the documented defaults apply when the block is absent.
+
+### Project Documents
+
+Per-project document shelf (Projects Phase 2). All routes fail closed: a missing or foreign project/document is `404` (never `403`); uploads and individual trash require an active project — archived projects answer `404` for those while keeping reads; a memory-backend deployment answers `503` `"Projects not available"`. Trashed rows are invisible to every route.
+
+#### List Documents
+
+```http
+GET /api/projects/{project_id}/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor.
+
+#### Upload Document
+
+```http
+POST /api/projects/{project_id}/documents
+Content-Type: multipart/form-data
+```
+
+Exactly one file per request (`file` part), plus an optional `name` form field (defaults to the multipart filename). The name is rejected with `400` when empty after normalization, separator-bearing, or over 255 UTF-8 bytes; empty files are `400`; files over `uploads.max_file_size` are `413`.
+
+**Response:** `201 Created` with `{"document": {...}, "deduplicated": false}`. Re-uploading identical content returns the existing row with `200 OK` and `"deduplicated": true` — the first writer's name wins. Re-upload after trash creates a fresh row.
+
+#### Save Thread File to Shelf (from-thread)
+
+```http
+POST /api/projects/{project_id}/documents/from-thread
+Content-Type: application/json
+```
+
+```json
+{"thread_id": "abc123", "kind": "upload", "name": "report.pdf", "shelf_name": "q3-report.pdf"}
+```
+
+Copies one file from the thread's own uploads (`"kind": "upload"`) or outputs (`"kind": "output"`) directory into the shelf as a project-owned snapshot; the source file is never moved. `name` locates the source file inside the thread; `shelf_name` is optional and defaults to the source name, following upload-name validation (`400`). A source that does not resolve inside that thread's directory — separator-bearing names, escapes, missing files, or a missing/foreign thread — is `404`, indistinguishable from absence. Files over `uploads.max_file_size` are `413`; empty files are `400`.
+
+**Response:** same as Upload Document — `201 Created` with `{"document": {...}, "deduplicated": false}`, or `200 OK` on a content dedup hit. The created row records `source_thread_id` / `source_kind` / `source_name` provenance.
+
+#### Attach Document to Thread
+
+```http
+POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread_id}
+```
+
+Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+
+#### Get Document Content
+
+```http
+GET /api/projects/{project_id}/documents/{document_id}/content?download=false
+```
+Serves the converted-markdown companion when present, else inline text when the original samples as text, else an attachment; `download=true` always attaches. Active content (`text/html`, `text/xml`, `application/xml`, `text/xsl`, any `+xml` type such as XHTML/SVG) is always forced to an attachment regardless of `download`, mirroring the artifacts router, so it never executes script on the application origin. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+#### Delete Document (move to trash)
+
+```http
+DELETE /api/projects/{project_id}/documents/{document_id}
+```
+
+**Response:** `204`. Recoverable trash: the row keeps its bytes and a `{project_id, project_name}` origin snapshot. Deleting a project moves its whole shelf to trash in the same transaction. Restore/purge endpoints land with the trash-completion slice.
+
+### Project Thread Files
+
+Read-only conversation-files view over a project's member threads (Projects Phase 2) — the discovery route for Save Thread File to Shelf. Archived projects keep read access; a missing or foreign project is `404`.
+
+#### List Thread Files
+
+```http
+GET /api/projects/{project_id}/thread-files?offset=0&thread_limit=20&file_limit=50
+```
+
+**Query Parameters:** `offset` (member-thread cursor, default 0), `thread_limit` (default 20, 1..50), `file_limit` (per-thread file cap, default 50, 1..200) — out-of-bounds values are `422`.
+
+**Response:** `{"groups": [{"thread_id", "display_name", "updated_at", "truncated", "files": [{"kind": "upload"|"output", "name", "size_bytes", "modified_at", "artifact_url"}]}], "next_offset", "truncated"}`. Member threads are paged in the same non-archived order as the project thread list; `next_offset` is `null` when no threads remain. Each thread contributes up to `file_limit` files across its uploads and outputs; a group's `truncated` is `true` when that thread's listing was cut, and the envelope `truncated` is the OR over the page's groups. Entries disappear when their thread is deleted — the view keeps no storage of its own.
+
+
+### Trash
+
+Recoverable deletion tier for project shelf documents (Projects Phase 2). Trashed rows keep their bytes and a `{project_id, project_name}` origin snapshot for `projects.trash_retention_days` (default 30) before the retention sweep may purge them; permanent purge is a separate action. All routes fail closed: a missing or foreign document/project is `404` (never `403`), restoring into an archived or foreign target is the same `404`, and a memory-backend deployment answers `503` `"Projects not available"`. Purge endpoints carry no confirmation parameter — the "this cannot be undone" step is a UI contract, not a server-enforced handshake.
+
+#### List Trashed Documents
+
+```http
+GET /api/trash/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "trashed_at", "trash_origin": {"project_id", "project_name"} | null}], "total", "limit", "offset"}`, most recently trashed first. The retention sweep runs lazily before the listing (a sweep failure is logged and never blocks it).
+
+#### Restore Document
+
+```http
+POST /api/trash/documents/{document_id}/restore
+Content-Type: application/json
+
+{"project_id": "…"}
+```
+
+**Body:** `project_id` optional. Target = the body value, else `trash_origin.project_id` when that project still exists, is owned, and is active; otherwise `404` (the UI offers the project picker). A foreign or archived target is the same `404` as a missing one.
+
+**Response:** `{"outcome": "restored" | "merged", "document": <ProjectDocumentResponse>}`. `merged` means the target already had an active row with identical bytes: the trash row is deleted and `document` is the surviving active row. Restore re-points the row without moving any file. Missing or size-mismatched content answers `409` `"content_missing"` and leaves the row trashed.
+
+#### Purge Document
+
+```http
+POST /api/trash/documents/{document_id}/purge
+```
+
+**Response:** `204`. Permanently unlinks the original and `derived/converted.md`, then deletes the row, in one row-locked transaction. Already-absent content counts as removed; any other file-cleanup failure rolls back, keeps the trashed row, and answers `500` with a retryable message.
+
+#### Empty Trash
+
+```http
+POST /api/trash/purge
+```
+
+**Response:** `{"purged": <int>}` — permanently deletes every trashed document of the caller, regardless of age: the confirmation covers the whole listing, so the retention cutoff never gates this route. Each row goes through the same guarded row-locked transaction as the single-document purge — bytes first, then the row. A file-cleanup failure other than already-absent content answers `500` with a retryable message, leaving that row and every row not yet visited trashed. Retention expiry is enforced only by the sweep (lazily before `GET /api/trash/documents` and once at gateway startup).
 
 ### Artifacts
 

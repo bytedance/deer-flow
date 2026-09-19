@@ -29,6 +29,10 @@ Tests: the `tests/test_trace_*` and `tests/test_worker_trace_binding.py` suites,
 
 ### Managed Lark CLI credentials (`integrations/lark_cli.py`)
 
+Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
+(`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
+version marker; reinstalling the managed skill pack refreshes the stored text.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed
@@ -48,21 +52,21 @@ drift.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
-`DeerFlowClient` provides in-process access without HTTP or a FastAPI dependency. It shares Gateway's `deerflow` modules, config files, data directories, and response schemas for compatible consumers.
+`DeerFlowClient` provides in-process access without HTTP/FastAPI, sharing Gateway's `deerflow` modules, config, data directories, and response schemas.
 
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
-  - `"values"` — state snapshot (title, messages, artifacts, summary_text); `summary_text` is the current summary or `None` when absent and is forwarded on every snapshot, including unchanged summaries and resets. AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries; serialized `ToolMessage` entries preserve a non-`None` native `artifact`
-  - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each, and tool results preserve a non-`None` native `artifact`
+  - `"values"` — state snapshot (title, messages, artifacts, summary_text). Always forward `summary_text` (current summary or `None`), including unchanged values/resets. Never re-emit AI text delivered via `messages`; serialized `ToolMessage` entries retain non-`None` native `artifact`
+  - `"messages-tuple"` — AI text **deltas** (concatenate per `id`); emit tool calls/results once each, preserving non-`None` native result `artifact`
   - `"custom"` — forwarded from `StreamWriter`; DeerFlow-built-in custom events are dual-emitted through `deerflow.utils.custom_events`, so `astream_events(version="v2")` consumers also receive one `on_custom_event` with `name=payload["type"]` and the unchanged payload as `data`
   - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
-- **Custom-event invariant** — production DeerFlow emitters must use `emit_custom_event` / `aemit_custom_event`, not call `StreamWriter` alone. Every built-in payload must carry a non-empty string `type`; typeless payloads remain writer-only and are intentionally absent from `astream_events`. The writer runs first and remains authoritative for Gateway, Web UI, and embedded-client compatibility; callback dispatch is best-effort and must not break that path. Async graph hooks must await the async helper rather than invoking synchronous dispatch on a running event loop.
+- **Custom-event invariant** — use `emit_custom_event` / `aemit_custom_event`, never `StreamWriter` alone. Built-in payloads require a non-empty string `type`; typeless payloads stay writer-only, absent from `astream_events`. The writer runs first and is authoritative for Gateway/Web UI/embedded clients; best-effort callbacks must not break it. Async graph hooks must await the async helper, never dispatch synchronously on a running event loop.
 - Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
 - Cache graphs by effective storage `user_id` in every auth mode because prompts and middleware bind user SOUL, skills, and storage. `stream()` must materialize it before worker or isolated-loop boundaries.
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
-- See [docs/STREAMING.md](../../../docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
+- [Streaming design](../../../docs/STREAMING.md): Gateway/client parallel paths, LangGraph `stream_mode`, per-id deduplication, and regression tests
 
 **Gateway Equivalent Methods** (replaces Gateway API):
 

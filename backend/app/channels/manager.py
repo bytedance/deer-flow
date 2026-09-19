@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import HTTPException
@@ -46,6 +46,7 @@ from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -149,6 +150,37 @@ CHANNEL_CAPABILITIES = {
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
 
+# Cap for URL-based inbound attachments fetched by the generic reader (WeCom
+# media today; the WeChat reader is path-only by design — see
+# _read_wechat_inbound_file). The bytes are buffered in memory before being
+# persisted, so an oversized attachment must be refused before it is fully
+# read, not after — mirrors DingTalkChannel._download_by_code. 50 MB is a
+# deliberate default, not the platform ceiling: published WeCom callback
+# examples document files up to 100 MB, but the whole file is buffered (and
+# decrypt_file allocates a second copy), so the bound matches the sibling
+# channels' inbound caps (DingTalk's identically-sized 50 MB, WeChat's
+# max_inbound_file_bytes) and halves worst-case per-message buffering; a
+# legit-but-oversized file drops with a host-labeled warning naming the limit.
+MAX_INBOUND_URL_FILE_BYTES = 50 * 1024 * 1024
+
+# WeCom inbound media URLs come from the platform's WS frames (wecom.py passes
+# ``payload.get("url")`` straight through), the same untrusted-input shape as
+# WeChat's ``full_url``; the fetch is therefore gated to platform-owned hosts
+# before streaming, mirroring WechatChannel._is_allowed_media_url. Two
+# families: qq.com hosts, and the temporary signed COS links WeCom actually
+# serves media from — ``ww-aibot-img-<APPID>.cos.<region>.myqcloud.com``
+# (published callback examples; valid ~5 minutes). The COS numeric suffix is
+# the owner's Tencent Cloud APPID and the bucket name is user-chosen, so any
+# Tencent Cloud account could register a matching ``ww-aibot-img-*`` bucket:
+# the shape alone proves nothing about ownership. Only the APPID observed in
+# Tencent's published aibot callback examples (1258476243) is trusted by
+# default; media from any other account — including a future WeCom rotation
+# to a new APPID — goes through the operator suffix list
+# ``channels.wecom.allowed_media_hosts``.
+WECOM_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
+_WECOM_MEDIA_COS_APPIDS = frozenset({"1258476243"})
+_WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-(?P<appid>\d+)\.cos\.[a-z0-9-]+\.myqcloud\.com$")
+
 _METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
 
 
@@ -169,12 +201,149 @@ async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.Async
     if not isinstance(url, str) or not url:
         return None
 
-    resp = await client.get(url)
-    resp.raise_for_status()
-    return resp.content
+    chunks: list[bytes] = []
+    total = 0
+    # The transfer must stay undecoded: aiter_bytes() transparently decodes
+    # Content-Encoding, and the decoder allocates the whole decompressed body
+    # before yielding a single chunk — a compressed response from an admitted
+    # host would blow past the cap exactly like the unbounded read this
+    # reader exists to prevent. Identity is requested up front, any residual
+    # encoding is refused before reading, and aiter_raw() never decodes.
+    async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+        response.raise_for_status()
+        encoding = (response.headers.get("content-encoding") or "").strip().lower()
+        if encoding and encoding != "identity":
+            logger.warning(
+                "[Manager] inbound file response uses Content-Encoding %r, dropping before decode: %s",
+                encoding,
+                _inbound_file_label(file_info, url),
+            )
+            return None
+        async for chunk in response.aiter_raw():
+            total += len(chunk)
+            if total > MAX_INBOUND_URL_FILE_BYTES:
+                logger.warning(
+                    "[Manager] inbound file exceeds %d bytes download limit, dropping: %s",
+                    MAX_INBOUND_URL_FILE_BYTES,
+                    _inbound_file_label(file_info, url),
+                )
+                return None
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _url_host(url: str) -> str:
+    """Best-effort host extraction for logging; never raises, never logs the URL.
+
+    Media URLs can carry access tokens in their query strings, so only the
+    host is surfaced in drop warnings.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _inbound_file_label(file_info: dict[str, Any], url: str | None = None, idx: int | None = None) -> str:
+    """Sanitized logging label for one inbound attachment: filename, else URL host.
+
+    Signed media URLs carry credentials in both the path and the query string
+    (WeCom COS links: ``/path?sign=...&q-signature=...``), so no part of the
+    URL itself may reach the logs — only the hostname. Filenames are webhook
+    supplied, so whitespace is collapsed and length capped to keep a crafted
+    name from forging log lines (mirrors dingtalk._display_filename).
+    """
+    filename = file_info.get("filename")
+    if isinstance(filename, str) and filename.strip():
+        return re.sub(r"\s+", " ", filename).strip()[:80]
+    source = url if isinstance(url, str) else None
+    if source is None:
+        for key in ("url", "full_url"):
+            value = file_info.get(key)
+            if isinstance(value, str) and value.strip():
+                source = value
+                break
+    if source:
+        host = _url_host(source)
+        if host:
+            return f"host={host}"
+    return f"#{idx}" if idx is not None else "<unnamed>"
+
+
+def _reader_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media reader failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the signed download
+    credentials — and rendering the traceback (``logger.exception``) would
+    reproduce them verbatim, so only the class name and explicitly safe
+    fields ever reach the logs.
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
+def _is_allowed_wecom_media_url(url: str, extra_suffixes: frozenset[str] | tuple[str, ...] | list[str] = ()) -> bool:
+    """Platform-owned-host gate for WeCom inbound media fetches.
+
+    Matching semantics mirror ``WechatChannel._is_allowed_media_url``: http/https
+    only, and ``notqq.com`` / ``qq.com.evil.io`` never match a ``qq.com`` suffix.
+    The COS shape is matched exactly (see ``_WECOM_MEDIA_COS_HOST_RE``) AND its
+    numeric suffix must be one of the verified WeCom-owned APPIDs
+    (``_WECOM_MEDIA_COS_APPIDS``) — the suffix is a Tencent Cloud account
+    APPID and bucket names are user-chosen, so the shape alone would admit
+    any account that registers a lookalike bucket. Operator-supplied
+    ``channels.wecom.allowed_media_hosts`` suffixes are merged in on top of the
+    hard-coded families (see ``_wecom_extra_media_host_suffixes``).
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in (*WECOM_ALLOWED_MEDIA_HOST_SUFFIXES, *extra_suffixes)):
+        return True
+    cos_match = _WECOM_MEDIA_COS_HOST_RE.fullmatch(host)
+    return cos_match is not None and cos_match.group("appid") in _WECOM_MEDIA_COS_APPIDS
+
+
+def _wecom_extra_media_host_suffixes() -> frozenset[str]:
+    """Operator host suffixes from the live WeCom channel, if one is running.
+
+    The registry reader is module-level while ``channels.wecom.allowed_media_hosts``
+    is per-channel config, so the extras are resolved per call from the running
+    channel instance — the same service-reach-in ``_channel_supports_streaming``
+    already uses. Empty when no WeCom channel is up (direct calls, most tests),
+    leaving only the strict built-in families; a strict default plus an operator
+    escape hatch means a platform URL-shape change never requires widening the
+    hard-coded pattern for every deployment.
+    """
+    try:
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        channel = service.get_channel("wecom") if service is not None else None
+    except Exception:
+        return frozenset()
+    return frozenset(getattr(channel, "allowed_media_host_suffixes", ()) or ())
 
 
 async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    url = file_info.get("url")
+    if isinstance(url, str) and url and not _is_allowed_wecom_media_url(url, _wecom_extra_media_host_suffixes()):
+        logger.warning(
+            "[Manager] WeCom inbound media URL host is not allowed, dropping file=%s host=%s",
+            _inbound_file_label(file_info, url),
+            _url_host(url),
+        )
+        return None
+
     data = await _read_http_inbound_file(file_info, client)
     if data is None:
         return None
@@ -201,10 +370,14 @@ async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.Asy
             logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
             return None
 
-    full_url = file_info.get("full_url")
-    if isinstance(full_url, str) and full_url.strip():
-        return await _read_http_inbound_file({"url": full_url}, client)
-
+    # No re-fetch fallback: the only producer (WechatChannel) always stages a
+    # local ``path`` and drops the attachment when staging fails, so a file
+    # dict without one has no legitimate fetch source. Fetching ``full_url``
+    # here would be the one ungated Gateway-host fetch left in the WeChat
+    # path — the channel-side ``channels.wechat.allowed_media_hosts`` gate
+    # cannot reach this module-level reader, and re-implementing it with
+    # divergent rules would drop media the operator explicitly allowed.
+    logger.debug("[Manager] WeChat inbound file has no staged local path, skipping")
     return None
 
 
@@ -948,11 +1121,15 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             else:
                 try:
                     data = await file_reader(f, client)
-                except Exception:
-                    logger.exception(
-                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                except Exception as exc:
+                    # Sanitized on purpose: the URL-bearing exception message
+                    # and traceback must not reach the logs (see
+                    # _reader_error_summary).
+                    logger.warning(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
                         msg.channel_name,
-                        f.get("url") or filename or idx,
+                        _inbound_file_label(f, idx=idx),
+                        _reader_error_summary(exc),
                     )
                     continue
 
@@ -960,7 +1137,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 logger.warning(
                     "[Manager] inbound file reader returned no data: channel=%s, file=%s",
                     msg.channel_name,
-                    f.get("url") or filename or idx,
+                    _inbound_file_label(f, idx=idx),
                 )
                 continue
 
@@ -1057,9 +1234,11 @@ class ChannelManager:
         # same thread before every turn; None distinguishes a checked default
         # thread from a thread that has not been inspected yet.
         self._thread_agent_names: dict[str, str | None] = {}
-        # Per-conversation locks so concurrent inbound messages for the same
-        # chat don't race to create duplicate threads (see _get_or_create_thread).
-        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        # Waiter-aware per-conversation locks prevent concurrent inbound messages
+        # from creating duplicate threads. Participants are checked out before
+        # they wait, so failure or cancellation of the current creator cannot let
+        # a late caller bypass an already-queued creator through a new lock generation.
+        self._thread_create_locks = AsyncKeyedLockTable[tuple[str, str, str | None]]()
         # Per-thread run locks for channels that want in-manager serialization
         # instead of surfacing the runtime's generic busy reply.
         self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
@@ -2150,20 +2329,13 @@ class ChannelManager:
             return thread_id, False
 
         key = (msg.channel_name, msg.chat_id, msg.topic_id)
-        lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
-        try:
-            async with lock:
-                # A concurrent message for the same chat may have created the
-                # thread while we were waiting on the lock.
-                thread_id = await self._lookup_thread_id(msg)
-                if thread_id:
-                    return thread_id, False
-                return await self._create_thread(client, msg), True
-        finally:
-            # Once the thread is stored, later messages short-circuit on the
-            # lookup above and never reach this lock, so it's safe to drop the
-            # entry and keep the registry bounded to in-flight conversations.
-            self._thread_create_locks.pop(key, None)
+        async with self._thread_create_locks.hold(key):
+            # A concurrent message for the same chat may have created the
+            # thread while we were waiting on the lock.
+            thread_id = await self._lookup_thread_id(msg)
+            if thread_id:
+                return thread_id, False
+            return await self._create_thread(client, msg), True
 
     async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
         """Best-effort source metadata backfill for existing IM-created threads."""

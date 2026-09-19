@@ -121,17 +121,21 @@ secrets:
 
 The default ingress annotations permit a 100 MiB local `.skill` archive plus
 multipart framing, stream request bodies without ingress buffering, and allow
-up to 600 seconds for validation. If you replace `ingress.annotations`,
-preserve equivalent size, streaming, and response-timeout settings for your
-ingress controller or local skill uploads may fail before DeerFlow completes
-the installation.
+up to 600 seconds for a response, which the API requests that wait on a model
+call or a whole run all need — skill install and custom-skill edits (each file
+is scanned by an LLM), `/api/threads/{id}/compact`, `/api/input-polish`, and
+`/api/runs/wait`. If you replace `ingress.annotations`, preserve equivalent
+size, streaming, and response-timeout settings for your ingress controller, or
+local skill uploads may fail before DeerFlow completes the installation and
+those requests may time out while Gateway is still working — for
+`/api/runs/wait` the disconnect also cancels the run.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 44
+  config_version: 46
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -151,6 +155,10 @@ config: |
     connection_string: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+  knowledge_base:
+    enabled: true
+    scope_selection_enabled: false
+    # Provider connection/retrieval settings belong on the knowledge_search tool.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,
@@ -162,6 +170,7 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    - name: knowledge
   tools:
     - name: web_search
       group: web
@@ -175,6 +184,14 @@ config: |
       group: web
       use: deerflow.community.image_search.tools:image_search_tool
       max_results: 5
+    - name: knowledge_search
+      group: knowledge
+      use: deerflow.community.ragflow.tools:knowledge_search_tool
+      base_url: http://ragflow:9380
+      api_key: $RAGFLOW_API_KEY
+    - name: list_knowledge_bases
+      group: knowledge
+      use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool

@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { FENCE_MARKER_RE, INDENTED_CODE_RE } from "@/core/streamdown/fences";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
@@ -42,16 +44,9 @@ export function getMessageGroups(
   }
 
   const groups: MessageGroup[] = [];
-  let currentTurnStartIndex = -1;
-  if (isCurrentTurnLoading) {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
-        currentTurnStartIndex = index;
-        break;
-      }
-    }
-  }
+  const currentTurnStartIndex = isCurrentTurnLoading
+    ? findCurrentTurnStartIndex(messages)
+    : -1;
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
@@ -145,13 +140,24 @@ export function getMessageGroups(
       // same message later. Keep that unresolved message in the processing
       // group so its visible text does not jump from an assistant bubble into
       // the steps panel when the tool call arrives (#4304).
+      // A reasoning-bearing answer is treated as terminal until tool calls
+      // actually arrive. If they do arrive on that same message, it is
+      // deliberately reclassified as processing so its tool activity remains
+      // visible with the text that introduced it.
+      // Non-empty content arrays can contain only Anthropic thinking blocks.
+      // Require content the answer renderer can actually display.
+      const hasAnswerContent = extractContentFromMessage(message).length > 0;
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
-        hasContent(message) &&
-        !hasToolCalls(message);
+        hasAnswerContent &&
+        !hasToolCalls(message) &&
+        // A provider that has already supplied reasoning with answer text is
+        // completing an answer, not merely streaming a pre-tool narration.
+        // Keep it out of the processing disclosure while the turn is active.
+        !hasReasoning(message);
       const becomesAssistantBubble =
-        hasContent(message) &&
+        hasAnswerContent &&
         !hasToolCalls(message) &&
         !isUnresolvedAssistantText;
 
@@ -738,7 +744,7 @@ export function hasReasoning(message: Message) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
-    return true;
+    return message.additional_kwargs.reasoning_content.trim().length > 0;
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
@@ -764,6 +770,25 @@ export function hasPresentFiles(message: Message) {
     message.type === "ai" &&
     message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
   );
+}
+
+/** The latest visible user input or clarification result delimits a run. */
+export function findCurrentTurnStartIndex(
+  messages: readonly Message[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    // Clarification replies are hidden: the result, rather than the last
+    // visible human, separates completed answers from their continuation.
+    if (
+      message &&
+      !isHiddenFromUIMessage(message) &&
+      (message.type === "human" || isClarificationToolMessage(message))
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 export function isClarificationToolMessage(message: Message) {
@@ -879,10 +904,9 @@ export function stripUploadedFilesTag(content: string): string {
  *   legacy history does not leak raw blocks or server paths — see #4212)
  * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
- *   ``<memory>`` / ``<current_date>`` inside)
- * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
- *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
- *   the same tag vocabulary.
+ *   ``<memory>`` / ``<current_date>`` inside), plus the Phase-2 project
+ *   context blocks: ``<project name="…">`` (instructions identity) and the
+ *   request-scoped ``<documents count=… shown=…>`` shelf index.
  *
  * The primary export filter is {@link isHiddenFromUIMessage}. This list is
  * the defence-in-depth strip for any message that — by middleware bug,
@@ -896,12 +920,60 @@ export const INTERNAL_MARKER_TAGS = [
   "system-reminder",
   "memory",
   "current_date",
+  "project",
+  "documents",
 ] as const;
 
+// The project context blocks carry attributes (``<project name="…">``,
+// ``<documents count=… shown=…>``), so the opener match tolerates an
+// attribute span — same shape as the streamdown preprocess regex.
 const INTERNAL_MARKER_RE = new RegExp(
-  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
+  `<(${INTERNAL_MARKER_TAGS.join("|")})(?:\\s[^>]*)?>[\\s\\S]*?</\\1>`,
   "g",
 );
+
+/**
+ * Character ranges that must survive marker stripping: fenced code blocks
+ * (marker-aware, so a shorter or different fence inside a block does not
+ * close it) and 4-space indented code lines — the same protection the render
+ * path applies in ``stripLeakedSystemTags``. ``project`` and ``documents``
+ * are generic tag names, so a fenced Maven ``pom.xml`` or pasted XML must not
+ * lose its span on export; a marker whose span STARTS inside a protected
+ * range is left alone, while injected blocks (never fenced) keep being
+ * removed even when their content contains a fence.
+ */
+function protectedCodeRanges(content: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let fenceMarker: string | null = null;
+  let fenceStart = 0;
+  let offset = 0;
+  for (const line of content.split("\n")) {
+    const fenceMatch = FENCE_MARKER_RE.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      if (fenceMarker === null) {
+        fenceMarker = marker;
+        fenceStart = offset;
+      } else if (
+        marker.startsWith(fenceMarker.charAt(0)) &&
+        marker.length >= fenceMarker.length
+      ) {
+        ranges.push([fenceStart, offset + line.length]);
+        fenceMarker = null;
+      }
+    } else if (fenceMarker !== null) {
+      // Inside a fenced block: covered by the open range.
+    } else if (INDENTED_CODE_RE.test(line)) {
+      ranges.push([offset, offset + line.length]);
+    }
+    offset += line.length + 1;
+  }
+  if (fenceMarker !== null) {
+    // Unclosed fence: everything after the opener is code.
+    ranges.push([fenceStart, content.length]);
+  }
+  return ranges;
+}
 
 /**
  * Strip every known backend-injected marker from message content.
@@ -912,9 +984,25 @@ const INTERNAL_MARKER_RE = new RegExp(
  * via a separate filter and the narrower function avoids stripping content
  * a user might legitimately type into a meta-discussion (e.g. asking the
  * model about its own ``<memory>`` system).
+ *
+ * Code-aware like the renderer: markers inside fenced or indented code
+ * blocks are preserved, so a pasted ``<project>``/``<documents>`` snippet in
+ * a code block is not silently deleted from the exported markdown.
  */
 export function stripInternalMarkers(content: string): string {
-  return content.replace(INTERNAL_MARKER_RE, "").trim();
+  const protectedRanges = protectedCodeRanges(content);
+  if (protectedRanges.length === 0) {
+    return content.replace(INTERNAL_MARKER_RE, "").trim();
+  }
+  return content
+    .replace(INTERNAL_MARKER_RE, (match: string, ...args: unknown[]) => {
+      const offset = args[args.length - 2] as number;
+      const isProtected = protectedRanges.some(
+        ([start, end]) => offset >= start && offset < end,
+      );
+      return isProtected ? match : "";
+    })
+    .trim();
 }
 
 // The upload context block renders sizes as human-readable strings

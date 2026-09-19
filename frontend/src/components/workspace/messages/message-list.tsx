@@ -25,6 +25,7 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
@@ -1078,7 +1079,7 @@ export function MessageList({
     );
   };
   return (
-    <>
+    <KnowledgeSourcesProvider messages={thread.messages}>
       <Conversation
         className={cn("flex size-full flex-col justify-center", className)}
         data-testid={testId}
@@ -1504,6 +1505,6 @@ export function MessageList({
           </Button>
         </div>
       )}
-    </>
+    </KnowledgeSourcesProvider>
   );
 }

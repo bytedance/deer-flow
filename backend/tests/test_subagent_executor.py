@@ -20,6 +20,7 @@ import inspect
 import sys
 import threading
 import time
+from contextvars import Context
 from datetime import datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -389,6 +390,103 @@ class TestAgentConstruction:
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
+
+    def test_create_agent_scales_max_turns_into_a_super_step_budget(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: ``max_turns`` used to be passed to LangGraph verbatim.
+
+        ``recursion_limit`` counts graph nodes and ``create_agent`` compiles one
+        per middleware lifecycle hook, so a verbatim hand-off bought roughly
+        ``max_turns / chain_depth`` turns — about 18 of the built-in
+        ``general-purpose`` agent's 150.
+        """
+        from langchain.agents.middleware import AgentMiddleware
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _AfterModel(AgentMiddleware):
+            def after_model(self, state, runtime):
+                return None
+
+        middlewares = [_AfterModel(), _AfterModel()]
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        executor._create_agent()
+
+        # model + tools + two after_model nodes, once per turn.
+        assert executor._recursion_limit == base_config.max_turns * 4
+
+    def test_create_agent_warns_when_a_counted_hook_can_jump(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """A jump re-enters the loop without traversing ``tools``.
+
+        The flat per-turn cost does not model that, so the resolved limit becomes
+        a lower bound. Nothing in today's subagent chain declares a jump; if one
+        ever does, the run must not quietly cap short the way it did before this
+        translation existed.
+        """
+        import logging
+
+        from langchain.agents.middleware import AgentMiddleware, hook_config
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _Jumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                return None
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [_Jumper()],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        with caplog.at_level(logging.WARNING, logger=executor_module.logger.name):
+            executor._create_agent()
+
+        assert "_Jumper.after_model" in caplog.text
+        assert "lower bound" in caplog.text
 
     @pytest.mark.anyio
     async def test_load_skills_uses_explicit_app_config_for_skill_storage(
@@ -1255,7 +1353,26 @@ class TestAsyncExecutionPath:
                 final_message,
             ]
         }
-        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        class Stream:
+            def __init__(self):
+                self.closed = False
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return final_state
+
+            async def aclose(self):
+                self.closed = True
+
+        stream = Stream()
+        mock_agent.astream.return_value = stream
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1272,6 +1389,7 @@ class TestAsyncExecutionPath:
         assert result.error is None
         assert result.started_at is not None
         assert result.completed_at is not None
+        assert stream.closed is True
 
     @pytest.mark.anyio
     async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
@@ -1680,6 +1798,184 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert "Agent error" in result.error
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_stream_error_when_close_also_fails(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        close_attempted = False
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise ValueError("stream failed")
+
+            async def aclose(self):
+                nonlocal close_attempted
+                close_attempted = True
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "stream failed"
+        assert close_attempted is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_stream_error_wins_over_cooperative_cancellation(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        caplog,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                cancel_event.set()
+                raise ValueError("stream failed")
+
+            async def aclose(self):
+                return None
+
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-with-stream-error",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            caplog.at_level("ERROR", logger="deerflow.subagents.executor"),
+        ):
+            result = await executor._aexecute(
+                "Task",
+                result_holder=result_holder,
+            )
+
+        assert result.status is SubagentStatus.FAILED
+        assert result.error == "stream failed"
+        assert any(record.exc_info is not None and "async execution failed" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_aexecute_close_only_failure_marks_execution_failed(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        warning_handle = MagicMock()
+        loop = asyncio.get_running_loop()
+        real_call_later = loop.call_later
+
+        def record_warning_handle(delay, callback, *args, **kwargs):
+            if callback == executor_module.logger.warning:
+                assert delay == executor_module._STREAM_CLOSE_SLOW_WARNING_SECONDS
+                warning_context = kwargs.get("context")
+                assert isinstance(warning_context, Context)
+                assert list(warning_context.items()) == []
+                return warning_handle
+            return real_call_later(delay, callback, *args, **kwargs)
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        monkeypatch.setattr(loop, "call_later", record_warning_handle)
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "close failed"
+        warning_handle.cancel.assert_called_once_with()
+
+    @pytest.mark.anyio
+    async def test_aexecute_close_error_does_not_mask_inflight_cancelled_error(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        started = asyncio.Event()
+        close_attempted = False
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                nonlocal close_attempted
+                close_attempted = True
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(executor._aexecute("Task"))
+            await started.wait()
+            execution.cancel("host cancellation")
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await execution
+
+        assert raised.value.args == ("host cancellation",)
+        assert close_attempted is True
 
     @pytest.mark.anyio
     async def test_aexecute_finally_releases_only_the_failing_subagent_lease(
@@ -2121,6 +2417,56 @@ class TestAsyncExecutionPath:
             assert base_config.system_prompt in system_messages[0].content
             assert "regression-skill" in system_messages[0].content
             assert "Skill instruction text" not in system_messages[0].content
+
+    @pytest.mark.anyio
+    async def test_aexecute_sends_the_resolved_recursion_limit_to_the_graph(self, classes, base_config):
+        """The run config carries the scaled super-step budget ``_create_agent`` resolved."""
+        from langchain_core.messages import AIMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        def create_agent_resolving_budget(*args, **kwargs):
+            executor._recursion_limit = 77
+            return mock_agent
+
+        with patch.object(executor, "_create_agent", side_effect=create_agent_resolving_budget):
+            await executor._aexecute("Do something")
+
+        assert captured_configs[0]["recursion_limit"] == 77
+
+    @pytest.mark.anyio
+    async def test_aexecute_falls_back_to_the_turn_count_when_the_chain_is_unknown(self, classes, base_config, mock_agent, msg):
+        """A test double replacing ``_create_agent`` leaves no chain to measure.
+
+        The run must still get a usable limit rather than ``None``, which
+        LangGraph would reject.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [msg.ai("Done", msg_id="msg-1")]}
+
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            await executor._aexecute("Do something")
+
+        assert executor._recursion_limit is None
+        assert captured_configs[0]["recursion_limit"] == base_config.max_turns
 
 
 class TestSkillAllowedTools:
@@ -2957,22 +3303,80 @@ class TestCooperativeCancellation:
         assert call_count == 0  # astream was never entered
 
     @pytest.mark.anyio
-    async def test_aexecute_cancelled_mid_stream(self, classes, base_config, msg):
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_cancelled_mid_stream(
+        self,
+        classes,
+        base_config,
+        monkeypatch,
+        msg,
+        close_fails,
+    ):
         """Test that _aexecute returns CANCELLED when cancel_event is set during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentResult = classes["SubagentResult"]
         SubagentStatus = classes["SubagentStatus"]
 
         cancel_event = threading.Event()
+        events: list[str] = []
 
-        async def mock_astream(*args, **kwargs):
-            yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
-            # Simulate cancellation during streaming
-            cancel_event.set()
-            yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+        class Stream:
+            def __init__(self):
+                self.yielded = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.yielded += 1
+                if self.yielded == 1:
+                    return {
+                        "messages": [
+                            msg.human("Task"),
+                            msg.ai("Partial", "msg-1"),
+                        ],
+                    }
+                if self.yielded == 2:
+                    cancel_event.set()
+                    return {
+                        "messages": [
+                            msg.human("Task"),
+                            msg.ai("Should not appear", "msg-2"),
+                        ],
+                    }
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                events.append("aclose")
+                if close_fails:
+                    raise RuntimeError("close failed")
 
         mock_agent = MagicMock()
+        stream = Stream()
+
+        def mock_astream(*_args, **kwargs):
+            kwargs["context"]["sandbox_id"] = "sandbox-1"
+            return stream
+
         mock_agent.astream = mock_astream
+
+        class LeaseManager:
+            async def release_async(self, _owner_id):
+                events.append("lease_release")
+
+        sandbox_module = sys.modules["deerflow.sandbox"]
+        monkeypatch.setattr(
+            sandbox_module,
+            "get_sandbox_provider",
+            lambda: object(),
+            raising=False,
+        )
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: LeaseManager(),
+        )
 
         result_holder = SubagentResult(
             task_id="cancel-mid",
@@ -2987,13 +3391,246 @@ class TestCooperativeCancellation:
             tools=[],
             thread_id="test-thread",
         )
+        original_try_set_terminal = result_holder.try_set_terminal
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
+        def record_terminal(*args, **kwargs):
+            if args[0] is SubagentStatus.CANCELLED:
+                events.append("terminal_cancelled")
+            return original_try_set_terminal(*args, **kwargs)
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            patch.object(
+                result_holder,
+                "try_set_terminal",
+                side_effect=record_terminal,
+            ),
+        ):
             result = await executor._aexecute("Task", result_holder=result_holder)
 
         assert result.status == SubagentStatus.CANCELLED
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
+        assert events == [
+            "aclose",
+            "terminal_cancelled",
+            "lease_release",
+        ]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_honors_cancellation_at_stream_exhaustion(
+        self,
+        classes,
+        base_config,
+        msg,
+        close_fails,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    cancel_event.set()
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Done", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-at-exhaustion",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute(
+                "Task",
+                result_holder=result_holder,
+            )
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_honors_cancellation_while_closing_stream(
+        self,
+        classes,
+        base_config,
+        msg,
+        close_fails,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Done", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                close_started.set()
+                await allow_close.wait()
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-while-closing",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(
+                executor._aexecute(
+                    "Task",
+                    result_holder=result_holder,
+                )
+            )
+            await close_started.wait()
+            cancel_event.set()
+            allow_close.set()
+            result = await execution
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+
+    @pytest.mark.anyio
+    async def test_aexecute_warns_while_stream_cleanup_blocks_terminalization(
+        self,
+        classes,
+        base_config,
+        monkeypatch,
+        msg,
+        caplog,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                cancel_event.set()
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Partial", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                close_started.set()
+                await allow_close.wait()
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="slow-close",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_STREAM_CLOSE_SLOW_WARNING_SECONDS",
+            0.0,
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            caplog.at_level("WARNING", logger="deerflow.subagents.executor"),
+        ):
+            execution = asyncio.create_task(
+                executor._aexecute(
+                    "Task",
+                    result_holder=result_holder,
+                )
+            )
+            await close_started.wait()
+            await asyncio.sleep(0)
+
+            assert not execution.done()
+            assert result_holder.status is SubagentStatus.RUNNING
+            assert [record for record in caplog.records if "stream cleanup for execution slow-close is still running" in record.getMessage()]
+
+            allow_close.set()
+            result = await execution
+            await asyncio.sleep(0)
+
+        assert result.status is SubagentStatus.CANCELLED
+        assert len([record for record in caplog.records if "stream cleanup for execution slow-close is still running" in record.getMessage()]) == 1
 
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""

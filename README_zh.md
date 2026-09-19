@@ -76,6 +76,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [项目 (Projects)](#项目-projects)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
     - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
@@ -636,6 +637,17 @@ Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下�
 
 Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
 
+### 私有知识检索（RAGFlow）
+
+DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding 模型分组并行召回运维允许的知识库；dataset ID 与 API key 不会暴露给模型。
+
+使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为主智能体和自定义智能体聊天开放模式选择器右侧的纯图标“知识库”按钮。图标持续高亮表示知识检索已启用，普通状态表示本轮检索已关闭。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。同一个配置开关统一控制两类聊天；关闭时两类输入框都不显示、也不提交知识范围。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。回复待处理的澄清问题或编辑后重新生成时，若提交了当前选择器快照则以该新范围为准，未提交时继承来源轮次已接纳的范围；知识库仍处于“全部可检索文件”时，展开文件区域不会加载目录，切换为“指定文件”后才加载。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。`knowledge_base` 是与 provider 无关的能力开关，只控制知识能力和选择器是否启用；RAGFlow 的连接、dataset allowlist 和检索参数（`base_url`、`api_key`、`datasets`、`page_size`、阈值及输出上限）必须配置在 `tools[].name: knowledge_search` 条目中，`knowledge_base` 中的这些字段不会被读取。
+
+自定义智能体聊天请求会同时携带该智能体名称作为 `assistant_id` 和
+`context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
+
+本版不在工作区侧边栏增加独立的“知识库”入口，也不提供 DeerFlow 知识库管理页面；知识库和文件的创建、上传、解析与删除仍直接在 RAGFlow 中完成。
+
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
 Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。自动继承的分叉标题会使用下一个空闲的数字后缀（`标题 (2)`、`标题 (3)`……）；显式指定或手动重命名得到的同名后缀也会占号，即使它没有生成序号 metadata，后续自动分叉也不会与它重名。API 调用方显式提供的标题保持不变；重命名会清除旧的生成序号，因此从新标题继续自动分叉时会重新从 `(2)` 开始。最近对话列表还会把已加载的分叉直接排列在已加载的父对话下方，并显示低干扰的树形连接线。父对话尚未加载、谱系数据错误或成环、父子置顶状态不一致时，分叉会安全地保留在顶层，不会被隐藏或跨越置顶边界移动。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
@@ -808,19 +820,38 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
-## 项目成员归属 (Project Membership)
+## 项目 (Projects)
 
-会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
-永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
-某个 project 后，它会保持未指派状态，直到被再次显式移动。
+项目把相关会话组织在同一个名称、共享指令和文档架之下。
 
-移动会话时会同时刷新其头部归属信息和 project 列表，即使此前的元数据请求仍
-在途中也是如此。
+会话在创建时（选择了某个项目）或之后通过移动菜单加入项目。运行不会修改归属关系：发送消息不会把会话指派或改派到任何项目。把会话移出项目后，它会保持未归属状态，直到再次被显式移动。
 
-Projects 需要当前版本的数据库表和列。如果数据库已打上旧 0018 迁移序列的
-`0019_thread_incarnations` 版本标记而缺少 project schema，本次构建会在启动
-时拒绝该数据库。针对这类数据库启动此构建前，请先遵循
-[离线数据库恢复流程](docs/database-forward-revision-recovery.md)。
+移动会话会同时刷新会话顶部的归属信息和项目列表，即使还有较早的元数据请求尚未返回。
+
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018  rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018 rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+### 项目指令 (Project instructions)
+
+每个项目可以保存一段自由文本指令——适用于项目内所有会话的背景、约定和约束——在项目页的 Instructions 标签页编辑，并带有实时字节计数。成员线程每次发起运行时，Gateway 会一次性固定（pin）项目当前状态，把指令渲染成一个有界的、仅在本次请求内有效的 `<project>` 块：它不会进入系统提示词，也不会写入持久化历史；每次新运行都会读到最新保存的指令。指令长度上限为 `projects.instructions_max_bytes`（按 UTF-8 字节计，默认 8192，可配范围 256–262144），多字节字符按其 UTF-8 字节长度计数。超限的指令会在写入时被 `422` 拒绝，绝不会被静默截断。
+
+### 文档架 (Document shelf)
+
+每个项目都有一个文档架，用于存放整个项目共享的文件，在项目页的 Documents 区域管理：
+
+- **上传**文件（按钮或拖拽，每次请求一个文件）。大小限制复用 `uploads.max_file_size`（默认 50 MiB）；重复上传相同内容会返回已有条目，而不是产生重复。
+- **列出**条目，包含名称、大小、修改时间和来源徽标（直接上传 vs. 从会话保存），并可预览或下载任意条目。
+- **从会话文件保存到项目**：文档架下方只读的会话文件浏览器按 thread 分组列出成员会话的上传与输出文件，每个条目都带 Save to project 操作。
+- **附加到会话（Attach to thread）**：把文档架文件复制到某个会话的上传目录，走与常规上传相同的接入管线，让该会话可以直接使用。
+
+成员线程的运行还会收到一个按运行渲染的有界 `<documents>` 索引（由固定快照生成，受 `projects.shelf_index_max_entries` 和 `projects.shelf_index_max_bytes` 限制），agent 也可以通过 `list_project_documents` 和 `read_project_document` 工具分页浏览文档架并读取文档。
+
+### 归档读取语义 (Archive read semantics)
+
+归档项目会冻结写入，但保留读取。归档项目中的会话仍可运行，仍会收到项目指令和文档架索引；文档架也保持完全可读：列表、预览/下载、会话文件浏览器和附加到会话都继续可用。上传、保存到项目、把单个文档架文件移入回收站都要求项目处于活跃状态，回收站中的文档也不能恢复到已归档的项目。删除已归档项目仍然允许，并会把它的整个文档架移入回收站。
+
+### 回收站 (Trash)
+
+删除文档架文档会把它移入回收站而不是直接抹除：条目保留其字节内容和来源项目快照，保留期为 `projects.trash_retention_days`（默认 30 天），之后保留期清理才可能将其永久清除。`/workspace/trash` 页面——可从项目页 Documents 区域和侧边栏 Projects 标题进入——列出回收站中的文档及其来源项目和剩余保留天数，提供逐条 Restore（恢复）和 Delete permanently（永久删除）操作，以及清空回收站（Empty trash，立即永久删除回收站中的全部条目，无需等到保留期结束；保留期只决定单条记录在被保留期清理回收前最多能停留多久）。恢复会把文档放回其来源项目；来源项目已删除或已归档时，可以选择一个目标项目；如果目标项目中已有内容完全相同的活跃文件，两个条目会合并。删除项目会在同一步骤中把它的整个文档架移入回收站。
 
 ## 定时任务 (Scheduled Tasks)
 
@@ -829,6 +860,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 当前 MVP 能力：
 
 - 在 `/workspace/scheduled-tasks` 管理任务
+- 支持按任务标题或提示词搜索，可与状态、类型筛选及当前会话范围组合使用
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
 - 每个任务可以固定使用 `lead_agent`（默认）或当前用户已有的自定义 agent；未知名字会被拒绝
 - 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
