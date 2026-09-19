@@ -18,6 +18,53 @@ export const enUS: Translations = {
   },
 
   capabilities: {
+    icon: {
+      title: "Plugin icon",
+      upload: "Upload plugin icon",
+      change: "Choose image",
+      reset: "Restore default",
+      hint: "PNG, JPG or WebP · up to 2 MB. Changes take effect when you save.",
+      singleServer: "Upload an icon when adding one plugin at a time.",
+      errors: {
+        type: "Choose a PNG, JPG or WebP image.",
+        size: "The image must be 2 MB or smaller.",
+        invalid:
+          "Cannot read this image. Choose a valid image up to 16 megapixels.",
+      },
+    },
+    directory: {
+      categories: {
+        office: "Office & collaboration",
+        knowledge: "Documents & knowledge",
+        research: "Search & research",
+        business: "Business & data",
+        development: "Development & operations",
+        custom: "Custom plugins",
+      },
+      hints: {
+        office: "Keep your team in sync",
+        knowledge: "Make company knowledge accessible",
+        research: "Find sources and turn them into insights",
+        business: "Bring business context to every decision",
+        development: "Connect the tools your team builds with",
+        custom: "Your configured MCP servers",
+      },
+      connected: "Connected",
+      native: "Built-in support",
+      guide: "Setup guide",
+      candidate: "Suggested",
+      view: "View",
+      allCategories: "All categories",
+      source: "Open setup documentation",
+      setup: "How to connect",
+      notice:
+        "Discover integrations for your team. Connect accounts and configure access when you need them.",
+      configured: "Configured",
+      nativeHint: "Supported by DeerFlow · requires deployment configuration",
+      guideHint: "Setup reference · not connected",
+      unknownStatus: "Status unavailable",
+      notConnected: "Not connected",
+    },
     integrationSkills: "From plugins",
     sharedSkills: "Shared skills",
     title: "Capability Center",

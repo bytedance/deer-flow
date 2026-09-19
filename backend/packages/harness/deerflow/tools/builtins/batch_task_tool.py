@@ -206,6 +206,7 @@ async def batch_task(
         "subagent_config": asdict(config),
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
+        "mcp_plugins": metadata.get("mcp_plugins"),
         "user_role": context.get("user_role"),
         "oauth_provider": context.get("oauth_provider"),
         "oauth_id": context.get("oauth_id"),
