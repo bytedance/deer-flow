@@ -83,7 +83,7 @@
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
 
-Inline `<think>` extraction scans code delimiters and reasoning openers in source order. Literal tags inside fenced, indented, or inline code stay in answer/copy data, including unfinished code spans during streaming. Once a real reasoning block starts, its closing tag takes precedence over Markdown inside it; an unfinished fence in reasoning must not hide the subsequent answer. Keep the per-message content-keyed cache and the no-tag fast path.
+Inline `<think>` extraction scans code delimiters and reasoning openers in source order. Literal tags inside fenced, indented, or inline code stay in answer/copy data, including unfinished code spans during streaming. Blank lines end unfinished inline spans, but not fenced or indented blocks. Indented code cannot interrupt a paragraph. Once a real reasoning block starts, its closing tag takes precedence over Markdown inside it; an unfinished fence in reasoning must not hide the subsequent answer. Keep the per-message content-keyed cache and the no-tag fast path.
 
 Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
 variants after the write succeeds, merge only `deerflow_project_id`, then

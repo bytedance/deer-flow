@@ -554,6 +554,51 @@ describe("inline <think> tag splitting", () => {
     },
   );
 
+  test.each(["\n\n", "\n  \n", "\r\n\t\r\n"])(
+    "ends an unfinished inline span at a paragraph boundary: %j",
+    (separator) => {
+      const prefix = `Run \`this command${separator}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    },
+  );
+
+  test.each(["    ", "\t"])(
+    "extracts reasoning on an indented paragraph continuation: %j",
+    (indent) => {
+      const prefix = `Note this:\n${indent}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>\nAnswer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}\nAnswer.`);
+    },
+  );
+
+  test.each([
+    "    first line\n    <think>sample</think>",
+    "Intro.\n\n    first line\n\n    <think>sample</think>",
+    "```\nfirst line\n\n<think>sample</think>\n```",
+  ])("preserves code blocks across lines and blank lines: %s", (code) => {
+    const message = aiMessage(
+      `${code}\n\n<think>real reasoning</think>Answer.`,
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      `${code}\n\nAnswer.`.trim(),
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+    expect(getMessageCopyData(message)).toBe(`${code}\n\nAnswer.`.trim());
+  });
+
   test("finds real streaming reasoning after a literal inline opener", () => {
     const message = aiMessage("Use `<think>` literally. <think>real reasoning");
     expect(extractContentFromMessage(message)).toBe("Use `<think>` literally.");

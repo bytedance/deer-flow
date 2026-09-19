@@ -591,17 +591,34 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   // Scan code delimiters and reasoning openers in source order. Once inside
   // real reasoning, jump directly to its closing tag: Markdown in reasoning
   // must not change how the following answer is parsed.
-  const tokens = /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|`+|<think>/gm;
+  const tokens =
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|`+|<think>/gm;
   let fence: string | null = null;
   let inlineDelimiter: string | null = null;
+  let indentedCodeEnd: number | null = null;
   let contentStart = 0;
   let match: RegExpExecArray | null;
   while ((match = tokens.exec(content)) !== null) {
+    if (match[3]) {
+      // Inline spans cannot cross paragraph boundaries, unlike fenced code.
+      if (fence === null) inlineDelimiter = null;
+      continue;
+    }
     if (match[2]) {
       // An indented continuation can still close an open inline code span.
-      if (inlineDelimiter === null) {
+      // Indented code cannot interrupt an existing paragraph either.
+      const previousLineStart = content.lastIndexOf("\n", match.index - 2) + 1;
+      const startsBlock =
+        content.slice(previousLineStart, match.index).trim() === "";
+      const continuesBlock =
+        indentedCodeEnd !== null &&
+        content.slice(indentedCodeEnd, match.index).trim() === "";
+      if (inlineDelimiter === null && (startsBlock || continuesBlock)) {
         const newline = content.indexOf("\n", tokens.lastIndex);
         tokens.lastIndex = newline === -1 ? content.length : newline;
+        indentedCodeEnd = tokens.lastIndex;
+      } else {
+        indentedCodeEnd = null;
       }
       continue;
     }
