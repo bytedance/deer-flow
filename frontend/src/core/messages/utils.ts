@@ -575,7 +575,7 @@ export function extractTextFromMessage(message: Message) {
 }
 
 const THINK_OPEN_TAG = "<think>";
-const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
+const THINK_CLOSE_TAG = "</think>";
 
 interface InlineReasoningSplit {
   content: string;
@@ -583,47 +583,130 @@ interface InlineReasoningSplit {
 }
 
 function splitInlineReasoning(content: string): InlineReasoningSplit {
-  const reasoningParts: string[] = [];
-
-  // First pass: strip every fully closed `<think>...</think>` pair and
-  // collect its body as reasoning. A pair whose opener sits right after a
-  // backtick is the model talking about the tag literally inside markdown
-  // inline code (same guard as the streaming pass below) — leave it in the
-  // rendered content instead of hollowing out the code span.
-  let cleaned = content.replace(
-    THINK_TAG_RE,
-    (match: string, reasoning: string, offset: number) => {
-      if (content[offset - 1] === "`") {
-        return match;
-      }
-      const normalized = reasoning.trim();
-      if (normalized) {
-        reasoningParts.push(normalized);
-      }
-      return "";
-    },
-  );
-
-  // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
-  // yet means the rest of the chunk is reasoning in flight. Route it into the
-  // reasoning slot instead of letting it render as message content (the
-  // raw-HTML markdown pipeline would otherwise paint the inner text on
-  // screen until the closing tag lands).
-  //
-  // Skip when the opener sits right after a backtick — that is the model
-  // talking about `<think>` literally inside markdown inline code, not
-  // actually streaming reasoning.
-  const openTagIndex = cleaned.indexOf(THINK_OPEN_TAG);
-  if (openTagIndex !== -1 && cleaned[openTagIndex - 1] !== "`") {
-    const tail = cleaned.slice(openTagIndex + THINK_OPEN_TAG.length).trim();
-    if (tail) {
-      reasoningParts.push(tail);
-    }
-    cleaned = cleaned.slice(0, openTagIndex);
+  if (!content.includes(THINK_OPEN_TAG)) {
+    return { content: content.trim(), reasoning: null };
   }
+  const reasoningParts: string[] = [];
+  const contentParts: string[] = [];
+  // Scan code delimiters and reasoning openers in source order. Once inside
+  // real reasoning, jump directly to its closing tag: Markdown in reasoning
+  // must not change how the following answer is parsed.
+  const tokens =
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:=+|-+|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})[ \t]*\r?$)|^ {0,3}((?:[-+*]|1[.)])[ \t]+)(?=\S)|`+|<think>/gm;
+  let fence: string | null = null;
+  let inlineDelimiter: string | null = null;
+  let headingEnd: number | null = null;
+  let indentedCodeEnd: number | null = null;
+  let contentStart = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokens.exec(content)) !== null) {
+    if (headingEnd !== null && match.index >= headingEnd) {
+      inlineDelimiter = null;
+      headingEnd = null;
+    }
+    if (match[4] || match[5] || match[6]) {
+      // Headings, thematic breaks and nonempty lists delimit inline spans
+      // without a blank line. Ordered lists must start at 1 to interrupt.
+      if (fence === null) {
+        inlineDelimiter = null;
+        if (match[4]) {
+          const newline = content.indexOf("\n", tokens.lastIndex);
+          headingEnd = newline === -1 ? content.length : newline;
+        }
+      }
+      continue;
+    }
+    if (match[3]) {
+      // Inline spans cannot cross paragraph boundaries, unlike fenced code.
+      if (fence === null) inlineDelimiter = null;
+      continue;
+    }
+    if (match[2]) {
+      // An indented continuation can still close an open inline code span.
+      // Indented code cannot interrupt an existing paragraph either.
+      const previousLineStart = content.lastIndexOf("\n", match.index - 2) + 1;
+      const startsBlock =
+        content.slice(previousLineStart, match.index).trim() === "";
+      const continuesBlock =
+        indentedCodeEnd !== null &&
+        content.slice(indentedCodeEnd, match.index).trim() === "";
+      if (inlineDelimiter === null && (startsBlock || continuesBlock)) {
+        const newline = content.indexOf("\n", tokens.lastIndex);
+        tokens.lastIndex = newline === -1 ? content.length : newline;
+        indentedCodeEnd = tokens.lastIndex;
+      } else {
+        indentedCodeEnd = null;
+      }
+      continue;
+    }
+    const marker = match[1];
+    if (marker) {
+      const newline = content.indexOf("\n", tokens.lastIndex);
+      const lineEnd = newline === -1 ? content.length : newline;
+      const lineTail = content.slice(tokens.lastIndex, lineEnd);
+      if (fence !== null) {
+        if (
+          marker.startsWith(fence.charAt(0)) &&
+          marker.length >= fence.length &&
+          lineTail.trim() === ""
+        ) {
+          fence = null;
+        }
+        tokens.lastIndex = lineEnd;
+        continue;
+      }
+      // Backtick fence info strings cannot contain backticks. Such a run
+      // may instead open or close an inline code span on this line.
+      if (marker.startsWith("~") || !lineTail.includes("`")) {
+        // Fenced blocks also interrupt paragraphs, including unfinished spans.
+        inlineDelimiter = null;
+        fence = marker;
+        tokens.lastIndex = lineEnd;
+        continue;
+      }
+    }
+    if (fence !== null) {
+      continue;
+    }
+    let delimiter = marker ?? match[0];
+    if (delimiter.startsWith("`")) {
+      // Backslash escapes apply outside a code span, not within one.
+      let escapeStart = match.index;
+      while (escapeStart > 0 && content[escapeStart - 1] === "\\") {
+        escapeStart--;
+      }
+      if (inlineDelimiter === null && (match.index - escapeStart) % 2 === 1) {
+        // An escape consumes one character, not the whole delimiter run.
+        delimiter = delimiter.slice(1);
+        if (!delimiter) continue;
+      }
+      if (inlineDelimiter === null) {
+        inlineDelimiter = delimiter;
+      } else if (inlineDelimiter === delimiter) {
+        inlineDelimiter = null;
+      }
+      continue;
+    }
+    if (inlineDelimiter !== null || match[0] !== THINK_OPEN_TAG) {
+      continue;
+    }
+    contentParts.push(content.slice(contentStart, match.index));
+    const reasoningStart = tokens.lastIndex;
+    const close = content.indexOf(THINK_CLOSE_TAG, reasoningStart);
+    const reasoning = content
+      .slice(reasoningStart, close === -1 ? undefined : close)
+      .trim();
+    if (reasoning) {
+      reasoningParts.push(reasoning);
+    }
+    contentStart =
+      close === -1 ? content.length : close + THINK_CLOSE_TAG.length;
+    tokens.lastIndex = contentStart;
+  }
+  contentParts.push(content.slice(contentStart));
 
   return {
-    content: cleaned.trim(),
+    content: contentParts.join("").trim(),
     reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : null,
   };
 }

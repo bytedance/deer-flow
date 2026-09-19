@@ -516,6 +516,214 @@ test("keeps tool-call reasoning in the processing group while the final answer's
 });
 
 describe("inline <think> tag splitting", () => {
+  test.each([
+    [
+      "fenced pair",
+      "Example:\n```xml\n<think>sample</think>\n```\nExplanation.",
+    ],
+    ["fenced opener", "Example:\n```xml\n<think>\n```\nExplanation."],
+    ["tilde fence", "~~~xml\n<think>sample</think>\n~~~"],
+    ["unfinished fence", "```xml\n<think>sample"],
+    ["longer fence", "````xml\n```\n<think>sample</think>\n````"],
+    ["different fence marker", "~~~xml\n```\n<think>sample</think>\n~~~"],
+    ["indented code", "    <think>sample</think>"],
+    ["inline prefix", "Use `prefix <think>sample</think>` literally."],
+    ["multiple backticks", "Use ``prefix ` <think>sample</think>`` literally."],
+    ["unfinished inline code", "Use `prefix <think>sample"],
+  ])("preserves literal tags in %s", (_name, content) => {
+    const message = aiMessage(content);
+    expect(extractContentFromMessage(message)).toBe(content.trim());
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(getMessageCopyData(message)).toBe(content.trim());
+    expect(getAssistantTurnCopyData([message])).toBe(content.trim());
+  });
+
+  test.each(["    ", "\t"])(
+    "closes multiline inline code on an indented continuation: %j",
+    (indent) => {
+      const code = `Use \`first line\n${indent}second line\` literally.`;
+      const message = aiMessage(
+        `${code}\n<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${code}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${code}\nAnswer.`);
+      expect(getAssistantTurnCopyData([message])).toBe(`${code}\nAnswer.`);
+    },
+  );
+
+  test.each(["\n\n", "\n  \n", "\r\n\t\r\n"])(
+    "ends an unfinished inline span at a paragraph boundary: %j",
+    (separator) => {
+      const prefix = `Run \`this command${separator}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    },
+  );
+
+  test.each(["    ", "\t"])(
+    "extracts reasoning on an indented paragraph continuation: %j",
+    (indent) => {
+      const prefix = `Note this:\n${indent}`;
+      const message = aiMessage(
+        `${prefix}<think>real reasoning</think>\nAnswer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${prefix}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${prefix}\nAnswer.`);
+    },
+  );
+
+  test.each([
+    "# Result\n",
+    "   ###### Result\n",
+    "- Result\n",
+    "+ Result\n",
+    "* Result\n",
+    "1. Result\n",
+    "1) Result\n",
+    "---\n",
+    "===\n",
+    "- \n",
+    "* * *\n",
+    "___\n",
+    "```sh\necho hi\n```\n",
+    "~~~sh\necho hi\n~~~\n",
+  ])("ends an unfinished inline span at a block boundary: %j", (block) => {
+    const prefix = `Run \`this command\n${block}`;
+    const message = aiMessage(`${prefix}<think>real reasoning</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+    expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${prefix}Answer.`);
+  });
+
+  test.each([
+    "#not-a-heading",
+    "####### Not a heading",
+    "2. Cannot interrupt a paragraph",
+    "+ ",
+    "ordinary continuation",
+  ])("keeps an inline span across a non-boundary: %j", (line) => {
+    const code = `Use \`first line\n${line}\n<think>sample</think>\` literally.`;
+    const message = aiMessage(`${code} <think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code} Answer.`);
+  });
+
+  test.each(["# Heading `unfinished", "# Heading `closed`"])(
+    "does not carry a heading's inline state into the following paragraph: %s",
+    (heading) => {
+      const message = aiMessage(`${heading}\n<think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${heading}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
+  test.each([
+    "Run `unfinished\n```xml\n# Heading\n- List\n<think>sample</think>\n```",
+    "Run `unfinished\n# Use `<think>sample</think>` literally",
+    "Run `unfinished\n- Use `<think>sample</think>` literally",
+  ])("preserves literal tags in the new block: %s", (code) => {
+    const message = aiMessage(`${code}\n<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code}\nAnswer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code}\nAnswer.`);
+  });
+
+  test.each([
+    "Use \\``<think>sample</think>` literally.",
+    "Use \\```<think>sample</think>`` literally.",
+    "Use \\\\``<think>sample</think>`` literally.",
+    "Use `<think>sample</think>\\` literally.",
+  ])("escapes only one backtick outside an inline span: %s", (code) => {
+    const message = aiMessage(`${code} <think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${code} Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${code} Answer.`);
+  });
+
+  test.each([
+    "    first line\n    <think>sample</think>",
+    "Intro.\n\n    first line\n\n    <think>sample</think>",
+    "```\nfirst line\n\n<think>sample</think>\n```",
+  ])("preserves code blocks across lines and blank lines: %s", (code) => {
+    const message = aiMessage(
+      `${code}\n\n<think>real reasoning</think>Answer.`,
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      `${code}\n\nAnswer.`.trim(),
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+    expect(getMessageCopyData(message)).toBe(`${code}\n\nAnswer.`.trim());
+  });
+
+  test("finds real streaming reasoning after a literal inline opener", () => {
+    const message = aiMessage("Use `<think>` literally. <think>real reasoning");
+    expect(extractContentFromMessage(message)).toBe("Use `<think>` literally.");
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+  });
+
+  test("keeps code between real closed and streaming reasoning blocks", () => {
+    const code = "```xml\n<think>sample</think>\n```";
+    const message = aiMessage(`<think>first</think>\n${code}\n<think>second`);
+    expect(extractContentFromMessage(message)).toBe(code);
+    expect(extractReasoningContentFromMessage(message)).toBe("first\n\nsecond");
+  });
+
+  test("does not let an unfinished code fence inside reasoning hide the answer", () => {
+    const message = aiMessage(
+      "<think>Consider:\n```python\nprint(1)</think>Answer.",
+    );
+    expect(extractContentFromMessage(message)).toBe("Answer.");
+    expect(extractReasoningContentFromMessage(message)).toBe(
+      "Consider:\n```python\nprint(1)",
+    );
+  });
+
+  test("does not close a fence on a marker followed by non-whitespace", () => {
+    const message = aiMessage(
+      "```xml\n```not-a-close\n<think>sample</think>\n```\n<think>real</think>Answer.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "```xml\n```not-a-close\n<think>sample</think>\n```\nAnswer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test("escaped backticks do not turn real reasoning into literal code", () => {
+    const message = aiMessage("Escaped \\` marker. <think>real</think>Answer.");
+    expect(extractContentFromMessage(message)).toBe(
+      "Escaped \\` marker. Answer.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test.each([
+    "```prefix <think>sample</think>```",
+    // A bare triple-backtick run at line start would begin a fenced block.
+    "Use ```prefix\n<think>sample</think>\ntail ```",
+  ])(
+    "recognizes multi-backtick inline code before real reasoning: %s",
+    (code) => {
+      const message = aiMessage(`${code} <think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${code} Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
   test("strips a fully closed <think> block from AI content", () => {
     const message = aiMessage("<think>internal reasoning</think>final answer");
     expect(extractContentFromMessage(message)).toBe("final answer");
