@@ -185,6 +185,14 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Opt-in capability for Gateway management calls that name an agent scope.
+    # The HTTP layer rejects a scoped read/write unless the backend declares
+    # this flag, because accepting ``agent_name`` in a Python signature does
+    # not prove that an adapter actually binds storage and mutations to it.
+    # Backends that leave it False retain the unscoped management API and get
+    # an explicit 501 for scoped management instead of silently operating on
+    # the user's default/global bucket.
+    supports_agent_scoped_management: ClassVar[bool] = False
     # Backends that rely on conversation-level extraction instead of fact CRUD
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.

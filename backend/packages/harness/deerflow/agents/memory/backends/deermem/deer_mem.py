@@ -111,6 +111,7 @@ class DeerMem(MemoryManager):
     # for tool mode). Backends without real search inherit the False default and
     # cannot be used with mode="tool".
     supports_search: ClassVar[bool] = True
+    supports_agent_scoped_management: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
         """Construct DeerMem's dependencies from ``self.backend_config``.
