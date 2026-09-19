@@ -109,7 +109,7 @@ def _load_json_object(path: Path) -> dict | None:
         return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -118,6 +118,13 @@ def _has_non_empty_token(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+# Acceptance rules mirror backend/packages/harness/deerflow/models/credential_loader.py
+# (``load_codex_cli_credential``, ``_extract_claude_code_credential`` + ``is_expired``), which
+# stays the source of truth; keep the two in lockstep when the loader changes. The mirror is
+# deliberate: importing the loader could consume the one-shot
+# CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR handoff. Strictness differs on purpose in one
+# place -- doctor rejects a whitespace-only token that the runtime's truthiness check would
+# accept before failing at the provider.
 def _codex_auth_file_has_access_token(path: Path) -> bool:
     data = _load_json_object(path)
     if data is None:
