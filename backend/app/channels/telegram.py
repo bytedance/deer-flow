@@ -93,6 +93,14 @@ class TelegramChannel(Channel):
         self._thread: threading.Thread | None = None
         self._tg_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Dedicated Bot for inbound file downloads. The Application's Bot is
+        # built on the manager/main loop (see start()), so its httpx
+        # connection pool is bound to that loop; opening a fresh download
+        # connection from the Telegram loop then trips "Event bound to a
+        # different event loop". A Bot initialized on the Telegram loop keeps
+        # its pool on the loop that performs the download.
+        self._download_bot: Any = None
+        self._download_bot_lock = asyncio.Lock()
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
@@ -209,6 +217,12 @@ class TelegramChannel(Channel):
                     logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
                 self._thread = None
                 self._application = None
+            if self._download_bot is not None:
+                try:
+                    await self._download_bot.session.close()
+                except Exception:
+                    logger.debug("[Telegram] failed to close download bot session", exc_info=True)
+                self._download_bot = None
         logger.info("Telegram channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -462,7 +476,6 @@ class TelegramChannel(Channel):
         if not msg.files:
             return msg
 
-        bot = self._application.bot if self._application is not None else None
         materialized: list[dict[str, Any]] = []
         unavailable: list[str] = []
 
@@ -478,6 +491,10 @@ class TelegramChannel(Channel):
                 unavailable.append(f"{filename} (exceeds the 20 MB download limit)")
                 continue
 
+            # Resolve the loop-bound download Bot. It is created on the
+            # Telegram loop so its httpx pool is bound to the loop that
+            # performs the download (the Application's Bot is main-loop-bound).
+            bot = await self._get_download_bot()
             if bot is None or not file_id:
                 logger.error("[Telegram] cannot download inbound file: %s", filename)
                 unavailable.append(f"{filename} (download unavailable)")
@@ -487,8 +504,23 @@ class TelegramChannel(Channel):
                 resolved_size, content = await self._run_on_telegram_loop(self._download_inbound_file(bot, file_id))
             except Exception as exc:
                 # Exception strings from HTTP clients can contain request URLs.
-                # Log only the class name so a Bot API token can never leak.
-                logger.error("[Telegram] failed to download inbound file %s: %s", filename, type(exc).__name__)
+                # Log only class names so a Bot API token can never leak, but
+                # include the cause chain to distinguish timeout / reset / TLS.
+                cause = exc.__cause__ or exc.__context__
+                if cause is not None:
+                    # Mask the token-bearing Bot API file URL, keep the rest.
+                    import re
+
+                    cause_msg = re.sub(r"api\.telegram\.org/file/\S+", "api.telegram.org/file/[redacted]", str(cause))[:200]
+                    cause_desc = f" caused_by={type(cause).__name__}:{cause_msg}"
+                else:
+                    cause_desc = ""
+                logger.error(
+                    "[Telegram] failed to download inbound file %s: %s%s",
+                    filename,
+                    type(exc).__name__,
+                    cause_desc,
+                )
                 unavailable.append(f"{filename} (download failed)")
                 continue
 
@@ -519,6 +551,36 @@ class TelegramChannel(Channel):
         return msg
 
     # -- helpers -----------------------------------------------------------
+
+    async def _get_download_bot(self) -> Any:
+        """Return a PTB Bot whose httpx client is bound to the Telegram loop.
+
+        The Application's Bot is constructed on the manager/main loop, so its
+        shared connection pool is bound there; opening a fresh download
+        connection from the Telegram loop fails with "bound to a different
+        event loop". This dedicated Bot is created and initialized on the
+        Telegram loop, keeping its pool on the loop that performs downloads.
+        """
+        if self._download_bot is not None:
+            return self._download_bot
+        telegram_loop = self._tg_loop
+        if telegram_loop is None:
+            return None
+
+        async def _init() -> Any:
+            if self._download_bot is not None:
+                return self._download_bot
+            async with self._download_bot_lock:
+                if self._download_bot is not None:
+                    return self._download_bot
+                from telegram import Bot
+
+                bot = Bot(token=self.config.get("bot_token", ""))
+                await bot.initialize()
+                self._download_bot = bot
+                return bot
+
+        return await self._run_on_telegram_loop(_init())
 
     async def _download_inbound_file(self, bot: Any, file_id: str) -> tuple[int | None, bytearray | None]:
         """Fetch one file entirely on the event loop that owns PTB's HTTP client."""

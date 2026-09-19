@@ -6,7 +6,9 @@ import asyncio
 import logging
 import math
 import mimetypes
+import os
 import re
+import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -1082,6 +1084,29 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+def _make_inbound_file_sandbox_readable(file_path: Path) -> None:
+    """Make a channel-downloaded upload readable by the sandbox process.
+
+    Mirrors the HTTP upload path (uploads._make_file_sandbox_readable). The
+    gateway writes inbound files as root with 0o600; in AIO/Docker sandbox
+    mode the sandbox runs as a non-root user on the bind-mounted path and
+    cannot read the file without group/other read bits.
+    """
+    try:
+        file_stat = os.lstat(file_path)
+    except OSError:
+        return
+    if stat.S_ISLNK(file_stat.st_mode):
+        return
+    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    try:
+        os.chmod(file_path, readable_mode, **chmod_kwargs)
+    except OSError:
+        # Best-effort: platforms without POSIX perms (Windows) simply skip.
+        logger.debug("[Manager] could not chmod inbound upload readable: %s", file_path, exc_info=True)
+
+
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
@@ -1160,6 +1185,9 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             dest = uploads_dir / safe_name
             try:
                 dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                # Root-written 0o600 files are unreadable to the non-root
+                # sandbox; grant group/other read like the HTTP upload path.
+                await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue

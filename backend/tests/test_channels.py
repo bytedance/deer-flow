@@ -9354,7 +9354,7 @@ class TestTelegramInboundMessages:
             downloaded = bytearray(b"data")
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=downloaded))
             bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9423,7 +9423,7 @@ class TestTelegramInboundMessages:
                         return LoopBoundFile()
 
                 ch._tg_loop = telegram_loop
-                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                ch._download_bot = LoopBoundBot()
                 msg = InboundMessage(
                     channel_name="telegram",
                     chat_id="100",
@@ -9482,7 +9482,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                ch._download_bot = LoopBoundBot()
                 msg = InboundMessage(
                     channel_name="telegram",
                     chat_id="100",
@@ -9567,7 +9567,7 @@ class TestTelegramInboundMessages:
             stopped_loop = asyncio.new_event_loop()
             bot = SimpleNamespace(get_file=AsyncMock())
             ch._tg_loop = stopped_loop
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9595,7 +9595,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             bot = SimpleNamespace(get_file=AsyncMock())
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9629,7 +9629,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_file = SimpleNamespace(file_size=2, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9655,7 +9655,7 @@ class TestTelegramInboundMessages:
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             download = AsyncMock(return_value=bytearray(b"four"))
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=download)
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9680,7 +9680,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9702,7 +9702,7 @@ class TestTelegramInboundMessages:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed"))))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed")))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9893,6 +9893,157 @@ class TestTelegramInboundMessages:
             assert msg.text == "/status"
             assert msg.topic_id == "33"
             assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_get_download_bot_returns_none_without_telegram_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            assert ch._tg_loop is None
+
+            result = await ch._get_download_bot()
+
+            assert result is None
+            assert ch._download_bot is None
+
+        _run(go())
+
+    def test_get_download_bot_creates_loop_bound_bot_and_caches_it(self):
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+
+                created_tokens: list[str] = []
+                init_loops: list[asyncio.AbstractEventLoop] = []
+
+                class FakeBot:
+                    def __init__(self, token: str) -> None:
+                        created_tokens.append(token)
+
+                    async def initialize(self) -> None:
+                        init_loops.append(asyncio.get_running_loop())
+
+                with patch("telegram.Bot", FakeBot):
+                    first = await ch._get_download_bot()
+                    second = await ch._get_download_bot()
+
+                # One Bot, built with the configured token and initialized on the
+                # Telegram loop; the second call reuses the cached instance.
+                assert first is second
+                assert first is ch._download_bot
+                assert created_tokens == ["test-token"]
+                assert init_loops == [telegram_loop]
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_uses_download_bot_not_application_bot(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            # The Application's Bot is main-loop-bound; the download must never
+            # route through it.
+            app_bot = SimpleNamespace(get_file=AsyncMock())
+            download_bot = SimpleNamespace(
+                get_file=AsyncMock(
+                    return_value=SimpleNamespace(
+                        file_size=2,
+                        download_as_bytearray=AsyncMock(return_value=bytearray(b"data")),
+                    )
+                )
+            )
+            ch._application = SimpleNamespace(bot=app_bot)
+            ch._download_bot = download_bot
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            download_bot.get_file.assert_awaited_once_with("document-id")
+            app_bot.get_file.assert_not_awaited()
+            assert result.files[0]["_content"] == b"data"
+
+        _run(go())
+
+    def test_stop_closes_download_bot_session(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._running = True
+            session = SimpleNamespace(close=AsyncMock())
+            ch._download_bot = SimpleNamespace(session=session)
+
+            await ch.stop()
+
+            session.close.assert_awaited_once()
+            assert ch._download_bot is None
+
+        _run(go())
+
+    def test_receive_file_download_failure_logs_cause_chain_without_token(self, caplog):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            def boom(file_id: str) -> None:
+                raise RuntimeError("download aborted") from ConnectionResetError("GET https://api.telegram.org/file/bottest-token/ABC123/photo.jpg")
+
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(side_effect=boom))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 10}],
+            )
+
+            with caplog.at_level(logging.ERROR):
+                result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert "report.pdf" in result.text
+            # The cause chain is surfaced for diagnosis...
+            assert "caused_by=" in caplog.text
+            assert "ConnectionResetError" in caplog.text
+            # ...with the token-bearing Bot API file URL masked.
+            assert "api.telegram.org/file/[redacted]" in caplog.text
+            assert "ABC123" not in caplog.text
+            assert "test-token" not in caplog.text
 
         _run(go())
 
