@@ -1452,7 +1452,14 @@ same optional field is supported in the agent's `config.yaml`.
 
 Sub-agents are an optimization, not the default response to a complex request.
 
+After Stop interrupts a delegated task before it returns a reply, the next user
+turn marks that earlier task as cancelled in the agent's durable context so it
+can retry. Existing replies are preserved. Older replies without status metadata
+may still appear in progress; their outcome is not inferred from their text.
+
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
+
+Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
@@ -1534,6 +1541,8 @@ The built-in `grep` tool searches either one text file or all matching text file
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
+UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
+outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
@@ -1639,6 +1648,13 @@ in the composer and in the transcript. There is no automatic history search. See
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
+
+For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
+summary reads while keeping JSON writes and the existing UI. A hand-edited
+`memory.json` can contain its JSON object inside a fenced `memory-json` block;
+embedded backticks and later fenced notes are supported. Unparseable summary
+text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+`storage_path` must point to the data root directory, not an existing JSON file.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime

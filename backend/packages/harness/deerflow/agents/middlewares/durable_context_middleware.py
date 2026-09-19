@@ -19,7 +19,7 @@ from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
@@ -151,29 +151,59 @@ def _messages_after_pre_existing_boundary(messages: list[AnyMessage], pre_existi
     return []
 
 
-def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
-    """Return the message tail where this invocation may have emitted tasks.
+def _run_opening_human_index(messages: list[AnyMessage], run_id: str, pre_existing_message_ids: frozenset[str]) -> int | None:
+    """Index of the HumanMessage that opened this run, or None for a resumed run.
 
-    A resumed run may not append a new HumanMessage marker. In that case the
-    latest HumanMessage can belong to an older run. The worker supplies the
-    message ids that existed before this run so we can capture only newly
-    appended messages instead of re-tagging old task calls.
+    The latest HumanMessage opened this run when it carries this run's
+    ``run_id``, or carries none and was not in the thread before the run
+    started. A resumed run may not append one, so the latest HumanMessage can
+    belong to an older run. Both the capture window and the decision to close
+    earlier runs' delegations read this, so they cannot disagree.
     """
-    if run_id is None:
-        return messages
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
         if not isinstance(message, HumanMessage):
             continue
         message_run_id = message.additional_kwargs.get("run_id")
-        if message_run_id == run_id:
-            return messages[index + 1 :]
-        if message_run_id is None:
-            message_id = _message_id(message)
-            if not pre_existing_message_ids or (message_id is not None and message_id not in pre_existing_message_ids):
-                return messages[index + 1 :]
-        return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
+        if message_run_id is not None:
+            return index if message_run_id == run_id else None
+        message_id = _message_id(message)
+        opened = not pre_existing_message_ids or (message_id is not None and message_id not in pre_existing_message_ids)
+        return index if opened else None
+    return None
+
+
+def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
+    """Return the message tail where this invocation may have emitted tasks.
+
+    The worker supplies the message ids that existed before this run, so a
+    resumed run captures only newly appended messages instead of re-tagging
+    old task calls.
+    """
+    if run_id is None:
+        return messages
+    index = _run_opening_human_index(messages, run_id, pre_existing_message_ids)
+    if index is not None:
+        return messages[index + 1 :]
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
+
+
+def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str) -> list[dict]:
+    """Mark delegations that an earlier run left in_progress without a result as cancelled.
+
+    A ``task`` call waits for its subagent, so an entry that is still
+    in_progress with no ToolMessage once a later user turn starts belongs to a
+    run that was stopped while the subagent ran. Nothing else will ever update
+    it, and the ledger would keep telling the model not to delegate again.
+
+    Any recorded reply excludes this inference, including legacy ToolMessages
+    without subagent status metadata. Their outcome is unknown, not evidence
+    of cancellation. Conservatively leave those entries unchanged, even if
+    they remain in_progress: this repairs missing replies, not legacy results.
+    Current task producers stamp metadata for extract_delegations to capture.
+    """
+    answered = {str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage) and message.tool_call_id}
+    return [{**entry, "status": "cancelled"} for entry in existing if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and entry.get("id") not in answered]
 
 
 def _with_run_id(delegations: list[dict], run_id: str | None, existing: list[dict]) -> list[dict]:
@@ -243,6 +273,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             _with_run_id(extract_delegations(messages), run_id, existing),
             existing,
         )
+        if run_id is not None and _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) is not None:
+            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id)]
         if delegations:
             return {"delegations": delegations}
         return None
