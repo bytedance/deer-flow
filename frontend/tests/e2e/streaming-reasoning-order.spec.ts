@@ -59,6 +59,65 @@ const INITIAL_MESSAGES = [
   },
 ];
 
+for (const block of ["# Result", "- Result", "```sh\necho hi\n```"]) {
+  test(`extracts reasoning after a block interrupts inline code: ${block}`, async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "Reasoning at a block boundary",
+          messages: [
+            ...INITIAL_MESSAGES,
+            {
+              type: "ai",
+              id: "block-boundary-ai",
+              content: `Run \`this command\n${block}\n<think>Internal boundary reasoning.</think>Visible final answer.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(page.getByText("Reasoning", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Visible final answer.", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("<think>Internal boundary reasoning.</think>", {
+        exact: false,
+      }),
+    ).toHaveCount(0);
+  });
+}
+
+test("preserves inline code after the first backtick is escaped", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: SETTLED_THREAD_ID,
+        title: "Escaped backtick run",
+        messages: [
+          ...INITIAL_MESSAGES,
+          {
+            type: "ai",
+            id: "escaped-backtick-ai",
+            content: "Use \\``<think>sample</think>` literally.",
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+  await expect(
+    page.locator("code").filter({ hasText: "<think>sample</think>" }),
+  ).toBeVisible();
+  await expect(page.getByText("Reasoning", { exact: true })).toHaveCount(0);
+});
+
 const SETTLED_AI_MESSAGE = {
   type: "ai",
   id: "msg-ai-4576-settled",

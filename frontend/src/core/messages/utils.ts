@@ -592,13 +592,30 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   // real reasoning, jump directly to its closing tag: Markdown in reasoning
   // must not change how the following answer is parsed.
   const tokens =
-    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|`+|<think>/gm;
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:=+|-+|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})[ \t]*\r?$)|^ {0,3}((?:[-+*]|1[.)])[ \t]+)(?=\S)|`+|<think>/gm;
   let fence: string | null = null;
   let inlineDelimiter: string | null = null;
+  let headingEnd: number | null = null;
   let indentedCodeEnd: number | null = null;
   let contentStart = 0;
   let match: RegExpExecArray | null;
   while ((match = tokens.exec(content)) !== null) {
+    if (headingEnd !== null && match.index >= headingEnd) {
+      inlineDelimiter = null;
+      headingEnd = null;
+    }
+    if (match[4] || match[5] || match[6]) {
+      // Headings, thematic breaks and nonempty lists delimit inline spans
+      // without a blank line. Ordered lists must start at 1 to interrupt.
+      if (fence === null) {
+        inlineDelimiter = null;
+        if (match[4]) {
+          const newline = content.indexOf("\n", tokens.lastIndex);
+          headingEnd = newline === -1 ? content.length : newline;
+        }
+      }
+      continue;
+    }
     if (match[3]) {
       // Inline spans cannot cross paragraph boundaries, unlike fenced code.
       if (fence === null) inlineDelimiter = null;
@@ -640,10 +657,9 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
       }
       // Backtick fence info strings cannot contain backticks. Such a run
       // may instead open or close an inline code span on this line.
-      if (
-        inlineDelimiter === null &&
-        (marker.startsWith("~") || !lineTail.includes("`"))
-      ) {
+      if (marker.startsWith("~") || !lineTail.includes("`")) {
+        // Fenced blocks also interrupt paragraphs, including unfinished spans.
+        inlineDelimiter = null;
         fence = marker;
         tokens.lastIndex = lineEnd;
         continue;
@@ -652,7 +668,7 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
     if (fence !== null) {
       continue;
     }
-    const delimiter = marker ?? match[0];
+    let delimiter = marker ?? match[0];
     if (delimiter.startsWith("`")) {
       // Backslash escapes apply outside a code span, not within one.
       let escapeStart = match.index;
@@ -660,7 +676,9 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
         escapeStart--;
       }
       if (inlineDelimiter === null && (match.index - escapeStart) % 2 === 1) {
-        continue;
+        // An escape consumes one character, not the whole delimiter run.
+        delimiter = delimiter.slice(1);
+        if (!delimiter) continue;
       }
       if (inlineDelimiter === null) {
         inlineDelimiter = delimiter;
