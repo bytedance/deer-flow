@@ -279,6 +279,16 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Terminal-lifecycle owners whose foreground worker already logged out
+        # (cancelled past its drain deadline). Shutdown observes them inside the
+        # same budget but never cancels them: cancellation mid-write is exactly
+        # what this ownership mechanism exists to survive.
+        self._background_finalization_tasks: set[asyncio.Task[Any]] = set()
+        # Every in-flight terminal-lifecycle owner, keyed by run. The foreground
+        # may still be waiting on it; that only changes the waiter, not whether
+        # the run's resources are still in use, so lease renewal and shutdown
+        # must both see it from the moment the task exists.
+        self._lifecycle_owners: dict[str, set[asyncio.Task[Any]]] = {}
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -2149,14 +2159,26 @@ class RunManager:
             # saturation, slow checkpoint hydrate on a fresh worker), peer
             # reconciliation will reclaim the run as an orphan and mark it
             # ``error`` even though this worker still intends to execute it.
-            active_runs = [(rid, record) for rid, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())]
+            #
+            # A terminal-lifecycle owner keeps the same claim even though its
+            # local status is already staged terminal: the durable row is still
+            # ``running`` and deliberately handed to that owner, so dropping its
+            # lease here would let a peer reclaim a row this worker is still
+            # finalizing. Losing the renewal instead fences the owner below.
+            active_runs = [
+                (rid, record)
+                for rid, record in self._runs.items()
+                if record.owner_worker_id == self._worker_id and ((record.status in (RunStatus.pending, RunStatus.running) and (record.task is None or not record.task.done())) or self._has_live_lifecycle_owner(rid))
+            ]
 
         for run_id, record in active_runs:
+            lifecycle_owned = self._has_live_lifecycle_owner(run_id)
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
                 await self._mark_ownership_lost(
                     record,
                     reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+                    require_active=not lifecycle_owned,
                 )
                 continue
 
@@ -2178,6 +2200,7 @@ class RunManager:
                         await self._mark_ownership_lost(
                             record,
                             reason="Lease renewal completed after the last confirmed lease had already expired.",
+                            require_active=not lifecycle_owned,
                         )
                         continue
                     # Unsynced write is benign: ``lease_expires_at`` is the
@@ -2204,7 +2227,11 @@ class RunManager:
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
                     async with self._lock:
-                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        still_active = (
+                            self._runs.get(run_id) is record
+                            and record.owner_worker_id == self._worker_id
+                            and ((record.status in (RunStatus.pending, RunStatus.running) and (record.task is None or not record.task.done())) or self._has_live_lifecycle_owner(run_id))
+                        )
                     if still_active:
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2215,12 +2242,14 @@ class RunManager:
                         await self._mark_ownership_lost(
                             record,
                             reason="The durable store rejected lease renewal for this worker.",
+                            require_active=not lifecycle_owned,
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
                     await self._mark_ownership_lost(
                         record,
                         reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+                        require_active=not lifecycle_owned,
                     )
                 else:
                     logger.warning(
@@ -2303,6 +2332,99 @@ class RunManager:
                 timeout,
             )
 
+    def track_lifecycle_owner(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        run_id: str,
+    ) -> None:
+        """Register an in-flight terminal-lifecycle owner for *run_id*.
+
+        Ownership of the *task* is the manager's from the moment it exists; the
+        foreground merely owns the wait. Lease renewal keys off this so a run
+        whose local status is already staged terminal keeps its durable lease
+        while the owner still writes the durable row, and shutdown drains it
+        even when no ``pending``/``running`` record remains.
+        """
+        owners = self._lifecycle_owners.setdefault(run_id, set())
+        if task in owners:
+            return
+        owners.add(task)
+
+        def forget(completed: asyncio.Task[Any]) -> None:
+            bucket = self._lifecycle_owners.get(run_id)
+            if bucket is None:
+                return
+            bucket.discard(completed)
+            if not bucket:
+                self._lifecycle_owners.pop(run_id, None)
+
+        task.add_done_callback(forget)
+
+    def _has_live_lifecycle_owner(self, run_id: str) -> bool:
+        """Return ``True`` while *run_id* still has a terminal-lifecycle owner."""
+        return any(not task.done() for task in self._lifecycle_owners.get(run_id, ()))
+
+    def track_background_finalization(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        action: str,
+        run_id: str,
+    ) -> None:
+        """Retain the exact terminal-lifecycle task that outlived its worker.
+
+        The run's foreground worker logged out (host cancellation) before its
+        lifecycle owner settled. The owner keeps running under this manager's
+        supervision so a slow durable write is never cancelled mid-flight; the
+        retained set holds that same task, and shutdown observes it inside the
+        existing drain budget.
+        """
+        self.track_lifecycle_owner(task, run_id=run_id)
+        if task in self._background_finalization_tasks:
+            return
+
+        self._background_finalization_tasks.add(task)
+
+        def finalize(completed: asyncio.Task[Any]) -> None:
+            self._background_finalization_tasks.discard(completed)
+
+            try:
+                error = completed.exception()
+            except asyncio.CancelledError as exc:
+                error = exc
+
+            if error is None:
+                return
+
+            logger.error(
+                "Run background finalization failed (%s, run_id=%s): %s",
+                action,
+                run_id,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+        task.add_done_callback(finalize)
+
+    async def _drain_lifecycle_owners(self, *, deadline: float, timeout: float) -> None:
+        """Observe in-flight lifecycle owners within the remaining shutdown budget."""
+        loop = asyncio.get_running_loop()
+        background_finalization = {task for owners in self._lifecycle_owners.values() for task in owners if not task.done()}
+        remaining = deadline - loop.time()
+        if background_finalization and remaining > 0:
+            _, pending_finalization = await asyncio.wait(background_finalization, timeout=remaining)
+        else:
+            pending_finalization = background_finalization
+
+        if pending_finalization:
+            logger.warning(
+                "Run shutdown deadline expired with %d background finalization task(s) still supervised",
+                len(pending_finalization),
+            )
+        elif background_finalization:
+            logger.info("Drained %d background finalization task(s) on shutdown", len(background_finalization))
+
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
@@ -2349,6 +2471,7 @@ class RunManager:
         await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
 
         if not inflight:
+            await self._drain_lifecycle_owners(deadline=deadline, timeout=timeout)
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
             return
 
@@ -2401,6 +2524,7 @@ class RunManager:
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+        await self._drain_lifecycle_owners(deadline=deadline, timeout=timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
 
 

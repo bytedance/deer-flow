@@ -1680,3 +1680,35 @@ async def test_failed_create_or_reject_unindexes_run():
         await manager.create_or_reject("thread-a", multitask_strategy="reject")
     assert manager._runs == {}
     assert "thread-a" not in manager._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_retained_background_finalization():
+    # A run whose terminal lifecycle outlived the worker has no active
+    # ``record.task``; shutdown must still observe it inside the same budget.
+    manager = RunManager()
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def finalization():
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(finalization())
+    await started.wait()
+
+    manager.track_background_finalization(
+        task,
+        action="test finalization",
+        run_id="run-1",
+    )
+
+    shutdown = asyncio.create_task(manager.shutdown(timeout=1.0))
+    await asyncio.sleep(0)
+
+    assert not shutdown.done()
+
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=1.0)
+    await task
