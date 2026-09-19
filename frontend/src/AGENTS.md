@@ -203,7 +203,6 @@ Markdown. Source records retain retrieval-time evidence, not live documents.
 Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
 
-
 Custom-agent settings persist `knowledge_scope` as an optional retrieval default.
 Use `knowledgeScopeToSelection` to restore all execution IDs, falling back to IDs
 where the bounded display snapshot lacks names. Only dirty knowledge settings
