@@ -1539,11 +1539,44 @@ class E2BSandboxProvider(SandboxProvider):
             self._acquire_inflight.add(sandbox_id)
             return True
 
+    def _sweep_expired_warm_entries(self) -> None:
+        """Drop warm-pool entries whose VMs have expired at the control plane.
+
+        ``release()`` sets the remote TTL to ``idle_timeout`` when parking, so
+        a warm entry older than that is expected to be dead already. Dropping
+        it frees the capacity slot without reconnecting; if the VM turns out
+        to be alive after all, a later pass rediscovers and adopts it as an
+        unknown remote sandbox.
+        """
+        idle_timeout = float(self._config["idle_timeout"])
+        if idle_timeout <= 0:
+            return
+        now_wall = time.time()
+        with self._lock:
+            expired = [sandbox_id for sandbox_id, (_seed, parked_at) in self._warm_pool.items() if now_wall - parked_at >= idle_timeout]
+            for sandbox_id in expired:
+                self._warm_pool.pop(sandbox_id, None)
+                self._owned_sandbox_ids.discard(sandbox_id)
+        for sandbox_id in expired:
+            logger.info("Dropping expired warm-pool e2b sandbox %s (parked longer than idle_timeout=%ss)", sandbox_id, idle_timeout)
+            self._forget_mount_result(sandbox_id)
+            self._release_deployment_sandbox(sandbox_id)
+            self._release_ownership(sandbox_id)
+
     def _reconcile_remote_sandboxes(self, *, now: float | None = None) -> ReconciliationStats:
         """Adopt canonical E2B sandboxes and safely reap duplicates/orphans."""
         observed_at = time.monotonic() if now is None else now
         deadline = time.monotonic() + float(self._config["reconciliation_max_seconds"])
         stats = ReconciliationStats()
+        self._sweep_expired_warm_entries()
+        # Keep actively-used VMs alive: their remote TTL is set at acquire /
+        # reuse / release, but a single turn may outlive ``idle_timeout``.
+        # Refresh through the cached client — never ``connect()`` — so
+        # warm-pool entries are untouched and still expire on schedule.
+        with self._lock:
+            active_clients = [sandbox.client for sandbox in self._sandboxes.values()]
+        for client in active_clients:
+            self._refresh_remote_timeout(client)
         capacity_revision = None
         capacity_store = self._deployment_capacity
         if capacity_store is not None:
@@ -1615,12 +1648,16 @@ class E2BSandboxProvider(SandboxProvider):
         for (user_id, thread_id), candidates in groups.items():
             candidates.sort(key=lambda item: (item[1].get(META_KEY_CREATED_AT, ""), item[0]))
             with self._lock:
-                local_id = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
-            if local_id:
-                candidates.sort(key=lambda item: item[0] != local_id)
+                # Sandboxes tracked locally — active or parked in the warm pool —
+                # are never probed: ``Sandbox.connect`` refreshes the remote
+                # expiry, which would defeat the warm pool's idle timeout and
+                # keep idle VMs alive indefinitely.
+                local_ids = {sandbox_id for sandbox_id, _metadata in candidates if sandbox_id in self._sandboxes or sandbox_id in self._warm_pool}
 
             live: list[tuple[str, dict[str, Any], E2BClientSandbox]] = []
             for sandbox_id, metadata in candidates:
+                if sandbox_id in local_ids:
+                    continue
                 if time.monotonic() >= deadline:
                     stats.budget_exhausted = True
                     break
@@ -1634,57 +1671,64 @@ class E2BSandboxProvider(SandboxProvider):
                     continue
                 live.append((sandbox_id, metadata, client))
 
-            if not live:
+            if local_ids:
+                # The locally tracked sandbox is canonical; every live remote
+                # candidate is a duplicate. No probe, no adoption.
+                stats.duplicates += len(live)
+                duplicates = live
+            elif not live:
                 continue
-            stats.duplicates += max(0, len(live) - 1)
-            canonical_id, canonical_metadata, canonical_client = live[0]
-            with self._lock:
-                already_local = canonical_id in self._sandboxes
-            if already_local:
-                self._safe_close_client(canonical_client)
-            elif not self._reserve_reconciliation_capacity(
-                canonical_id,
-                reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
-            ):
-                self._safe_close_client(canonical_client)
-                stats.deferred += 1
-            elif not self._claim_ownership(canonical_id):
-                self._complete_reserved_remote_op(canonical_id, remote_destroyed=False)
-                with self._lock:
-                    self._acquire_inflight.discard(canonical_id)
-                self._safe_close_client(canonical_client)
-                stats.deferred += 1
             else:
-                bootstrap_error, remote_destroyed = self._bootstrap_or_discard(canonical_client, canonical_id)
-                if bootstrap_error is not None:
-                    self._complete_reserved_remote_op(canonical_id, remote_destroyed=remote_destroyed)
+                stats.duplicates += max(0, len(live) - 1)
+                duplicates = live[1:]
+                canonical_id, canonical_metadata, canonical_client = live[0]
+                with self._lock:
+                    already_local = canonical_id in self._sandboxes or canonical_id in self._warm_pool
+                if already_local:
+                    self._safe_close_client(canonical_client)
+                elif not self._reserve_reconciliation_capacity(
+                    canonical_id,
+                    reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
+                ):
+                    self._safe_close_client(canonical_client)
+                    stats.deferred += 1
+                elif not self._claim_ownership(canonical_id):
+                    self._complete_reserved_remote_op(canonical_id, remote_destroyed=False)
                     with self._lock:
                         self._acquire_inflight.discard(canonical_id)
+                    self._safe_close_client(canonical_client)
                     stats.deferred += 1
                 else:
-                    discard_after_shutdown = False
-                    with self._lock:
-                        if self._shutdown_called:
-                            discard_after_shutdown = True
-                        else:
-                            self._owned_sandbox_ids.add(canonical_id)
-                            self._unowned_remote_ops_in_progress.discard(canonical_id)
-                            self._register_connected_sandbox(
-                                canonical_id,
-                                canonical_client,
-                                thread_id=thread_id,
-                                user_id=user_id,
-                            )
-                            self._commit_capacity()
-                    if discard_after_shutdown:
-                        if self._claim_ownership(canonical_id, for_destroy=True):
-                            self._kill_client(canonical_client)
-                            self._release_ownership(canonical_id)
-                        self._safe_close_client(canonical_client)
+                    bootstrap_error, remote_destroyed = self._bootstrap_or_discard(canonical_client, canonical_id)
+                    if bootstrap_error is not None:
+                        self._complete_reserved_remote_op(canonical_id, remote_destroyed=remote_destroyed)
+                        with self._lock:
+                            self._acquire_inflight.discard(canonical_id)
+                        stats.deferred += 1
                     else:
-                        stats.adopted += 1
+                        discard_after_shutdown = False
+                        with self._lock:
+                            if self._shutdown_called:
+                                discard_after_shutdown = True
+                            else:
+                                self._owned_sandbox_ids.add(canonical_id)
+                                self._unowned_remote_ops_in_progress.discard(canonical_id)
+                                self._register_connected_sandbox(
+                                    canonical_id,
+                                    canonical_client,
+                                    thread_id=thread_id,
+                                    user_id=user_id,
+                                )
+                                self._commit_capacity()
+                        if discard_after_shutdown:
+                            if self._claim_ownership(canonical_id, for_destroy=True):
+                                self._kill_client(canonical_client)
+                                self._release_ownership(canonical_id)
+                            self._safe_close_client(canonical_client)
+                        else:
+                            stats.adopted += 1
 
-            for sandbox_id, _metadata, client in live[1:]:
+            for sandbox_id, _metadata, client in duplicates:
                 first_seen = self._orphan_first_seen.setdefault(sandbox_id, observed_at)
                 if observed_at - first_seen < float(self._config["reconciliation_grace_seconds"]):
                     self._safe_close_client(client)
