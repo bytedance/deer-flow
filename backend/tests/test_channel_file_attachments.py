@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -402,6 +403,87 @@ class TestInboundFileIngestion:
         assert outside_file.read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim_1.txt").read_bytes() == b"new attachment data"
+
+
+# ---------------------------------------------------------------------------
+# Inbound file sandbox-readability tests
+# ---------------------------------------------------------------------------
+
+
+class TestInboundFileSandboxPerms:
+    def test_make_inbound_file_sandbox_readable_sets_group_other_read(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        f = tmp_path / "photo.jpg"
+        f.write_bytes(b"\x89PNG data")
+        os.chmod(f, 0o600)
+
+        _make_inbound_file_sandbox_readable(f)
+
+        mode = stat.S_IMODE(os.stat(f).st_mode)
+        assert mode == 0o644
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
+
+    def test_make_inbound_file_sandbox_readable_preserves_owner_bits(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"pdf")
+        os.chmod(f, 0o640)
+
+        _make_inbound_file_sandbox_readable(f)
+
+        mode = stat.S_IMODE(os.stat(f).st_mode)
+        # Owner rw and the existing group read are preserved; only the missing
+        # other-read bit is added and no write is granted to group/other.
+        assert mode == 0o644
+        assert not (mode & stat.S_IWOTH)
+
+    def test_make_inbound_file_sandbox_readable_skips_symlink(self, tmp_path):
+        from support.symlinks import symlink_or_skip
+
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        target = tmp_path / "target.txt"
+        target.write_text("secret")
+        os.chmod(target, 0o600)
+        link = tmp_path / "link.txt"
+        symlink_or_skip(link, target)
+
+        # Must not raise and must leave the symlink target's mode untouched.
+        _make_inbound_file_sandbox_readable(link)
+
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+
+    def test_make_inbound_file_sandbox_readable_missing_noop(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        # Best-effort helper: a missing file is a silent no-op.
+        _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
+
+    def test_ingest_inbound_files_makes_file_sandbox_readable(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"type": "image", "filename": "photo.jpg", "_content": b"\x89PNG data"}],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            _run(manager._ingest_inbound_files("thread-1", msg))
+
+        dest = uploads_dir / "photo.jpg"
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        # The 0o600 root-written upload is made group/other readable so the
+        # non-root sandbox process can read it.
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
 
 
 # ---------------------------------------------------------------------------
