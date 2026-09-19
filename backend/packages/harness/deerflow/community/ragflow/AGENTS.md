@@ -18,12 +18,12 @@ together, including delegated results and model-request history. Never shorten
 an excerpt under an existing ID. Drop entries that cannot fit, with an omission
 notice, while preserving unrelated artifact fields. This honors per-tool and
 fallback limits without exempting citation-bearing results from the budget.
+## Document validation
 
-
-## 文档校验
-
-`tools.py` 将每个知识库的文档校验拆成最多 100 个 ID 的批次，所有批次共用
-`_bounded_gather` 的并发上限 4。按输入顺序合并已验证的 ID，检索保持完整范围；
-任一批次异常、文档缺失或不可检索都沿用整体拒绝路径。应用级 1000 份选择上限
-与提供商单请求上限分别维护。回归见 `backend/tests/test_ragflow_tools.py`
-的 `test_large_document_scope_*`。
+`tools.py` validates each dataset's selected documents in batches of at most
+100 IDs. All batches share the `_bounded_gather` concurrency limit of four.
+Merge validated IDs in input order to retain the complete retrieval scope;
+any batch error, missing document, or non-searchable document rejects the
+whole scope. Keep the application-level 1000-document selection limit separate
+from the provider's per-request limit. Regression coverage lives in
+`backend/tests/test_ragflow_tools.py` under `test_large_document_scope_*`.
