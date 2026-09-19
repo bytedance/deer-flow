@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..config import DeerMemConfig
+from .storage import is_stale_clear_generation
 
 if TYPE_CHECKING:
     from .updater import MemoryUpdater
@@ -68,6 +69,39 @@ class ConversationContext:
     # so a flush cannot drop a pending normal update's un-extracted tail. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
+    # Scope clear-generation captured when this conversation became pending
+    # work. Commit must use this token, not a later snapshot: a clear that
+    # lands during debounce would otherwise look current and restore facts.
+    # Same-key merges keep the earlier value unless a newer clear is already
+    # visible; then the queue consumes the pre-clear snapshot and starts a
+    # fresh fence. An incoming peek older than the queued context is refused
+    # so that snapshot cannot inherit the newer fence, but its signals still
+    # union onto the queued item. A failed consume of that refused snapshot
+    # must not rewrite the queued fence. A missing token and emergency
+    # (bypass) snapshots are never refreshed.
+    clear_generation: tuple[int, int] | None = None
+    # Monotonic call-arrival order: the value ``_next_sequence()`` returned to
+    # ``add``/``add_nowait`` *before that call acquired the queue lock* (like
+    # ``captured_clear_generation``'s pre-lock peek). Stamping it here instead,
+    # inside ``_enqueue_locked``, would order by lock-acquisition time instead
+    # -- a caller already waiting on the lock when a clear and a newer
+    # same-key add race ahead of it must keep the sequence it had when it
+    # started, not gain a fresh, larger one for having waited.
+    #
+    # ``MemoryUpdater`` receives this value as the ``sequence=`` argument on
+    # every watermark-advancing call this context feeds (a persisted write, a
+    # generation-fenced drop, or a cancelled/refused snapshot's consume) and
+    # refuses to move its internal watermark backward: a call whose sequence
+    # is lower than the watermark's already-stored sequence is a delayed
+    # completion of older work and must not undo a more-advanced watermark
+    # another, later call already set. Same-key queue merges use the same
+    # ordering: an incoming snapshot whose sequence is lower than the queued
+    # item is refused so a delayed, possibly shorter feed cannot replace a
+    # newer one. ``0`` is only the field default for
+    # contexts a test builds directly (bypassing ``add``/``add_nowait``); such
+    # contexts still order relative to each other and to real queue-assigned
+    # sequences (which start at ``1``), never regressing the latter.
+    sequence: int = 0
 
 
 class MemoryUpdateQueue:
@@ -92,6 +126,28 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
+        # Monotonic counter for ``ConversationContext.sequence``, stamped by
+        # ``_next_sequence()`` at the *start* of ``add``/``add_nowait`` -- before
+        # the pre-lock clear-generation peek, like ``captured_clear_generation``.
+        # A dedicated lock (not ``self._lock``) because this must be callable
+        # before that lock is taken: stamping inside ``_enqueue_locked`` instead
+        # would order by lock-acquisition time, not call-arrival time, and a
+        # caller delayed behind the lock (e.g. blocked while a clear and a
+        # newer same-key add race ahead of it) would then get a *larger*
+        # sequence than the newer work it lost the race to -- letting its
+        # stale, shorter snapshot look "newest" and overwrite a watermark that
+        # already advanced past it.
+        self._sequence_lock = threading.Lock()
+        self._sequence_counter = 0
+
+    def _next_sequence(self) -> int:
+        """Return a fresh, strictly increasing call-arrival sequence number.
+
+        Must be read before ``self._lock`` is acquired (see ``__init__``).
+        """
+        with self._sequence_lock:
+            self._sequence_counter += 1
+            return self._sequence_counter
 
     def add(
         self,
@@ -117,6 +173,16 @@ class MemoryUpdateQueue:
                 reinforcement / preference / ...), used as extraction hints. Any
                 signal is admitted under backpressure.
         """
+        # Sequence + peek before the queue lock: every conversation turn
+        # enqueues here, and the file-backed peek is uncached manifest I/O.
+        # Holding ``_lock`` across that read would serialize all memory admits
+        # behind disk. A token that misses a clear landing afterwards is still
+        # dropped by the pre-LLM and commit-time checks. The sequence must be
+        # stamped here too (not inside ``_enqueue_locked``) so a caller that
+        # blocks on the lock is not mistaken for arriving later than callers
+        # that acquire it first -- see ``_next_sequence``.
+        call_sequence = self._next_sequence()
+        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -126,6 +192,8 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=False,
+                captured_clear_generation=captured_clear_generation,
+                call_sequence=call_sequence,
             )
             self._reset_timer()
 
@@ -141,6 +209,8 @@ class MemoryUpdateQueue:
         signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
+        call_sequence = self._next_sequence()
+        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -150,6 +220,8 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=True,
+                captured_clear_generation=captured_clear_generation,
+                call_sequence=call_sequence,
             )
             self._schedule_timer(0)
 
@@ -165,7 +237,21 @@ class MemoryUpdateQueue:
         trace_id: str | None,
         signals: frozenset[str],
         bypass_watermark: bool = False,
+        captured_clear_generation: tuple[int, int],
+        call_sequence: int,
     ) -> ConversationContext:
+        """Merge/enqueue one call's snapshot. Must run under ``self._lock``.
+
+        ``call_sequence`` must come from ``_next_sequence()``, read by the
+        caller *before* this lock was acquired (see ``add``/``add_nowait``).
+        Assigning it here instead would order by lock-acquisition time, not
+        call-arrival time: a caller already blocked on this lock when a clear
+        and a newer same-key add race ahead of it must keep the (lower)
+        sequence it had when it started, not gain a fresh (higher) one for
+        having waited -- otherwise its stale, possibly shorter snapshot could
+        look "newest" and overwrite a watermark two other calls already
+        advanced past it.
+        """
         key = queue_key(thread_id, user_id, agent_name)
         # Emergency (bypass) and normal updates coexist: the match key includes
         # ``bypass_watermark`` so a summarization flush (bypass=True) never
@@ -189,6 +275,47 @@ class MemoryUpdateQueue:
 
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
+        # First enqueue binds the pre-lock peek. A later same-key merge keeps
+        # that token when the generation is unchanged, missing, or this is an
+        # emergency snapshot. Re-reading after a clear and blindly refreshing
+        # would restore pre-clear facts; a visible newer clear instead consumes
+        # the pre-clear snapshot and starts a fresh fence so post-clear turns
+        # are extracted on this flush. A late add whose peek is older than the
+        # queued context must not replace messages: that would inherit the
+        # newer fence and restore the pre-clear snapshot. Consume of that
+        # refused snapshot is best-effort; failure must leave the queued
+        # fence untouched so the post-clear job still commits.
+        if existing is None:
+            enqueued_clear_generation = captured_clear_generation
+        elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
+            incoming = ConversationContext(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                signals=signals,
+                bypass_watermark=bypass_watermark,
+                clear_generation=captured_clear_generation,
+                sequence=call_sequence,
+            )
+            self._consume_pre_clear_feed(incoming)
+            # Keep the queued snapshot and fence, but do not drop signals from
+            # the refused add: a signal seen on any update for this key stays.
+            existing.signals = merged_signals
+            return existing
+        elif call_sequence < existing.sequence:
+            # Same-or-newer generation, but this call started earlier than the
+            # snapshot already queued. Keep the later arrival: replacing it
+            # would drop turns the older, possibly shorter feed never carried.
+            existing.signals = merged_signals
+            return existing
+        elif existing.bypass_watermark or existing.clear_generation is None:
+            enqueued_clear_generation = existing.clear_generation
+        elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation) and self._consume_pre_clear_feed(existing):
+            enqueued_clear_generation = captured_clear_generation
+        else:
+            enqueued_clear_generation = existing.clear_generation
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -197,11 +324,66 @@ class MemoryUpdateQueue:
             trace_id=trace_id,
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
+            clear_generation=enqueued_clear_generation,
+            sequence=call_sequence,
         )
         if existing is not None:
             self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
         return context
+
+    def _capture_clear_generation(self, agent_name: str | None, user_id: str | None) -> tuple[int, int]:
+        """Read the current scope fence without loading fact files.
+
+        Callers must invoke this before acquiring ``self._lock``. Missing or
+        invalid updater peeks default to ``(0, 0)`` so a later clear still
+        looks newer and the write is dropped.
+        """
+        peek = getattr(self._updater, "peek_clear_generation", None)
+        if not callable(peek):
+            return (0, 0)
+        try:
+            value = peek(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to capture clear generation at enqueue; defaulting to (0, 0)", exc_info=True)
+            return (0, 0)
+        if not isinstance(value, tuple) or len(value) != 2:
+            return (0, 0)
+        user_gen, agent_gen = value
+        if isinstance(user_gen, bool) or isinstance(agent_gen, bool) or not isinstance(user_gen, int) or not isinstance(agent_gen, int) or user_gen < 0 or agent_gen < 0:
+            return (0, 0)
+        return user_gen, agent_gen
+
+    def _consume_pre_clear_feed(self, existing: ConversationContext) -> bool:
+        """Mark the stale job's snapshot consumed so it cannot restore after a clear.
+
+        Returns False when the updater cannot advance the watermark. A merge
+        that would refresh the queued token must keep the earlier fence on
+        failure; a refused older add must leave the queued fence unchanged.
+
+        Forwards ``existing.sequence`` so the updater can refuse to move the
+        watermark backward: an in-flight extraction pulled off the queue
+        earlier (lower sequence) may still be running when a later-queued
+        snapshot (higher sequence) is dropped/consumed here. That in-flight
+        extraction's own eventual fenced-drop must not un-advance the
+        watermark this call just set.
+        """
+        mark = getattr(self._updater, "mark_feed_consumed", None)
+        if not callable(mark):
+            return False
+        try:
+            mark(
+                existing.messages,
+                thread_id=existing.thread_id,
+                user_id=existing.user_id,
+                agent_name=existing.agent_name,
+                bypass_watermark=existing.bypass_watermark,
+                sequence=existing.sequence,
+            )
+        except Exception:
+            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; leaving the queued fence unchanged", exc_info=True)
+            return False
+        return True
 
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""
@@ -267,6 +449,8 @@ class MemoryUpdateQueue:
                         user_id=context.user_id,
                         trace_id=context.trace_id,
                         bypass_watermark=context.bypass_watermark,
+                        expected_clear_generation=context.clear_generation,
+                        sequence=context.sequence,
                     )
                     if success:
                         succeeded += 1
@@ -410,10 +594,12 @@ class MemoryUpdateQueue:
         """Drop pending contexts for a scope without processing them.
 
         Matches ``(agent_name, user_id)`` against items still sitting in
-        ``_items``. Contexts already pulled out by an in-flight
+        ``_items``. Dropped snapshots still advance the conversation watermark
+        so a later turn cannot restore those pre-clear messages against a
+        newer generation. Contexts already pulled out by an in-flight
         :meth:`_process_queue` worker are deliberately left alone -- interrupting
-        mid-LLM-call belongs to a durable outbox, not this in-memory debounce
-        queue.
+        mid-LLM-call belongs to the durable clear-generation fence, not this
+        in-memory debounce queue.
 
         Args:
             agent_name: Canonical agent bucket to cancel. Ignored when
@@ -438,11 +624,16 @@ class MemoryUpdateQueue:
                     return True
                 return context.user_id != user_id
 
+            dropped = [context for context in self._items if not _keep(context)]
             self._items = [context for context in self._items if _keep(context)]
             removed = before - len(self._items)
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+            # Consume under the lock so a concurrent add cannot re-feed the
+            # dropped snapshot before the watermark advances.
+            for context in dropped:
+                self._consume_pre_clear_feed(context)
             return removed
 
     def clear(self) -> None:

@@ -8,6 +8,7 @@ import pytest
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
+    MemoryClearGenerationConflict,
     MemoryManifestRevisionConflict,
     MemoryStorage,
 )
@@ -811,6 +812,78 @@ def test_create_memory_fact_legacy_path_retries_save_conflict_and_stores() -> No
     assert fact_id is not None
     assert len(storage.save_calls) == 2
     assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent", fact_id]
+
+
+class _ClearDuringCreateStorage(_MemoryStorage):
+    """apply_changes stand-in that wipes memory and raises a clear-generation
+    conflict on the first commit, then accepts a retry with the new fence."""
+
+    def __init__(self, memory: dict[str, object] | None = None):
+        super().__init__(memory)
+        self.apply_calls = 0
+        self.expected_clear_generations: list[tuple[int, int] | None] = []
+        self.user_gen = int(self.memory.get("clearGeneration") or 0)
+        raw_agents = self.memory.get("agentClearGenerations")
+        self.agent_gens = dict(raw_agents) if isinstance(raw_agents, dict) else {}
+
+    def apply_changes(  # noqa: ANN001, ANN201, ANN202 - test fake
+        self,
+        change_set,
+        *,
+        user_id=None,
+        agent_name=None,
+        expected_manifest_revision=None,
+        allow_manifest_rebase=False,
+        expected_clear_generation=None,
+        bump_clear_generation=None,
+    ):
+        self.apply_calls += 1
+        self.expected_clear_generations.append(expected_clear_generation)
+        current = (self.user_gen, int(self.agent_gens.get(agent_name, 0) or 0) if agent_name else 0)
+        if self.apply_calls == 1:
+            self.memory["facts"] = []
+            self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+            self.user_gen += 1
+            self.memory["clearGeneration"] = self.user_gen
+            raise MemoryClearGenerationConflict("simulated concurrent clear")
+        if expected_clear_generation is not None and expected_clear_generation != current:
+            raise MemoryClearGenerationConflict(f"Expected clear generation {expected_clear_generation}, found {current}")
+        if expected_manifest_revision is not None and expected_manifest_revision != int(self.memory.get("revision") or 0):
+            raise MemoryManifestRevisionConflict("stale revision after clear")
+        self.memory["facts"] = [*self.memory.get("facts", []), *change_set.get("upserts", [])]
+        self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+        return {"complete": False}
+
+
+def test_create_memory_fact_retries_after_concurrent_clear() -> None:
+    """A clear during create must not surface MemoryClearGenerationConflict.
+
+    The change set only upserts a brand-new fact_id, so retrying against the
+    emptied document stores the new fact instead of restoring a wiped one.
+    """
+    existing = _make_memory(
+        facts=[
+            {
+                "id": "fact_old",
+                "content": "User likes Python",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    storage = _ClearDuringCreateStorage(existing)
+    updater = _make_updater(storage=storage)
+
+    result, fact_id = updater.create_memory_fact(content="I live in Beijing", agent_name="researcher")
+
+    assert fact_id is not None
+    assert storage.apply_calls == 2
+    assert storage.expected_clear_generations == [(0, 0), (1, 0)]
+    contents = {fact["content"] for fact in result["facts"]}
+    assert "I live in Beijing" in contents
+    assert "User likes Python" not in contents
 
 
 def test_delete_memory_fact_raises_for_unknown_id() -> None:

@@ -194,6 +194,8 @@ def test_async_defaults_delegate_to_sync():
     manager = _MinimalBackend(backend_config={})
     asyncio.run(manager.aadd("t", [], user_id="u"))
     assert manager._adds == [("t", "u")]
+    asyncio.run(manager.aadd_nowait("t2", [], user_id="u2"))
+    assert manager._adds == [("t", "u"), ("t2", "u2")]
     assert asyncio.run(manager.aget_context("u")) == "ctx:u"
     # asearch delegates to search -> raises (default) just like search.
     with pytest.raises(NotImplementedError):
