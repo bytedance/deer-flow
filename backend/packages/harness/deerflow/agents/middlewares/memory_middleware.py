@@ -10,7 +10,9 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.middlewares.pii_redaction_middleware import _redact_content, _Redactor, active_pii_detectors
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 
@@ -38,17 +40,29 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        memory_config: "MemoryConfig | None" = None,
+        pii_redaction_config: PiiRedactionConfig | None = None,
+    ):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
             memory_config: Explicit memory config. When omitted, legacy global
                 config fallback is used.
+            pii_redaction_config: When enabled, the queued conversation payload
+                is redacted at the enqueue boundary (#3190 vector 5) — request-scoped
+                redaction leaves originals in thread state, and the buffered payload
+                is durable, so the extraction model's input and the persisted facts
+                would otherwise carry raw PII.
         """
         super().__init__()
         self._agent_name = agent_name
         self._memory_config = memory_config
+        self._pii_redaction_config = pii_redaction_config
 
     def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str] | None:
         """Resolve one write request without invoking the manager."""
@@ -83,7 +97,16 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
         trace_id = resolve_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
-        return thread_id, messages, user_id, trace_id
+        return thread_id, self._redact_queued_messages(messages), user_id, trace_id
+
+    def _redact_queued_messages(self, messages: list) -> list:
+        """Redact the conversation payload queued for extraction (#3190 vector 5)."""
+        redactor = _Redactor(active_pii_detectors(self._pii_redaction_config))
+        redacted = []
+        for message in messages:
+            content, changed = _redact_content(message.content, redactor)
+            redacted.append(message.model_copy(update={"content": content}) if changed else message)
+        return redacted
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
