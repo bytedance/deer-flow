@@ -392,6 +392,86 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
     return MemoryResponse(**memory_data)
 
 
+class BatchFactUpdateRequest(BaseModel):
+    """Request model for batch fact update."""
+
+    fact_id: str = Field(..., min_length=1, description="Fact ID to update")
+    content: str | None = Field(default=None, min_length=1, description="Fact content")
+    category: str | None = Field(default=None, description="Fact category")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
+
+
+class BatchDeleteRequest(BaseModel):
+    """Request model for batch fact deletion."""
+
+    fact_ids: list[str] = Field(..., min_length=1, max_length=100, description="List of fact IDs to delete (max 100)")
+
+
+class BatchUpdateRequest(BaseModel):
+    """Request model for batch fact update."""
+
+    updates: list[BatchFactUpdateRequest] = Field(..., min_length=1, max_length=100, description="List of fact updates (max 100)")
+
+
+@router.post(
+    "/memory/facts/batch",
+    response_model=MemoryResponse,
+    response_model_exclude_none=True,
+    summary="Batch Operations on Memory Facts",
+    description="Perform batch delete or update operations on multiple memory facts.",
+)
+async def batch_facts_endpoint(request: BatchUpdateRequest, http_request: Request) -> MemoryResponse:
+    """Perform batch update operations on multiple facts."""
+    manager = await asyncio.to_thread(get_memory_manager)
+    try:
+        updates = [u.model_dump(exclude_none=True) for u in request.updates]
+        memory_data = await asyncio.to_thread(
+            manager.batch_update_facts,
+            updates=updates,
+            user_id=_resolve_memory_user_id(http_request),
+        )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "batch update facts") from None
+    except ValueError as exc:
+        raise _map_memory_fact_value_error(exc) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Memory fact not found: {exc}") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to batch update memory facts.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
+@router.post(
+    "/memory/facts/batch-delete",
+    response_model=MemoryResponse,
+    response_model_exclude_none=True,
+    summary="Batch Delete Memory Facts",
+    description="Delete multiple memory facts by their IDs.",
+)
+async def batch_delete_facts_endpoint(request: BatchDeleteRequest, http_request: Request) -> MemoryResponse:
+    """Delete multiple facts from memory."""
+    manager = await asyncio.to_thread(get_memory_manager)
+    try:
+        memory_data = await asyncio.to_thread(
+            manager.batch_delete_facts,
+            fact_ids=request.fact_ids,
+            user_id=_resolve_memory_user_id(http_request),
+        )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "batch delete facts") from None
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Memory fact not found: {exc}") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to batch delete memory facts.") from exc
+
+    return MemoryResponse(**memory_data)
+
+
 @router.get(
     "/memory/export",
     response_model=MemoryResponse,

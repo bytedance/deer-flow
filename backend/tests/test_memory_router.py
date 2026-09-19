@@ -338,6 +338,102 @@ def test_settings_fact_crud_without_agent_name_uses_default_agent(tmp_path) -> N
     assert "facts" not in json.loads(memory_path.read_text(encoding="utf-8"))
 
 
+def test_batch_delete_facts_route_returns_updated_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    updated_memory = _sample_memory(facts=[])
+
+    mock_mgr = MagicMock()
+    mock_mgr.batch_delete_facts.return_value = updated_memory
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch-delete", json={"fact_ids": ["fact_1", "fact_2"]})
+    assert response.status_code == 200
+    assert response.json()["facts"] == []
+    mock_mgr.batch_delete_facts.assert_called_once_with(
+        fact_ids=["fact_1", "fact_2"],
+        user_id=mock_mgr.batch_delete_facts.call_args[1]["user_id"],
+    )
+
+
+def test_batch_delete_facts_route_returns_404_for_missing_fact() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.batch_delete_facts.side_effect = KeyError("fact_missing")
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch-delete", json={"fact_ids": ["fact_1", "fact_missing"]})
+    assert response.status_code == 404
+    assert "fact_missing" in response.json()["detail"]
+
+
+def test_batch_delete_facts_route_maps_501() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.batch_delete_facts.side_effect = NotImplementedError()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch-delete", json={"fact_ids": ["fact_1"]})
+    assert response.status_code == 501
+
+
+def test_batch_update_facts_route_returns_updated_memory() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    updated_memory = _sample_memory(facts=[{"id": "fact_1", "content": "Updated", "category": "work", "confidence": 0.9, "createdAt": "2026-03-20T00:00:00Z", "source": "manual"}])
+
+    mock_mgr = MagicMock()
+    mock_mgr.batch_update_facts.return_value = updated_memory
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch", json={"updates": [{"fact_id": "fact_1", "category": "work"}]})
+    assert response.status_code == 200
+    assert response.json()["facts"][0]["category"] == "work"
+
+
+def test_batch_update_facts_route_rejects_empty_fact_id() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch", json={"updates": [{"fact_id": "", "category": "work"}]})
+    assert response.status_code == 422
+
+
+def test_batch_update_facts_route_maps_501() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.batch_update_facts.side_effect = NotImplementedError()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch", json={"updates": [{"fact_id": "fact_1", "category": "work"}]})
+    assert response.status_code == 501
+
+
+def test_batch_delete_facts_route_rejects_empty_ids() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch-delete", json={"fact_ids": []})
+    assert response.status_code == 422
+
+
+def test_batch_update_facts_route_rejects_empty_updates() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts/batch", json={"updates": []})
+    assert response.status_code == 422
+
+
 def test_update_memory_fact_route_preserves_omitted_fields() -> None:
     app = FastAPI()
     app.include_router(memory.router)
