@@ -456,8 +456,8 @@ class E2BSandbox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        regex_source = re.escape(pattern) if literal else pattern
-        re.compile(regex_source, 0 if case_sensitive else re.IGNORECASE)
+        if not literal:
+            re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
@@ -466,10 +466,7 @@ class E2BSandbox(Sandbox):
         flags = ["-r", "-n", "-H", "-I"]
         if not case_sensitive:
             flags.append("-i")
-        if literal:
-            flags.append("-F")
-        else:
-            flags.append("-E")
+        flags.append("-F" if literal else "-E")
         if glob is not None:
             # ``grep --include`` only matches by basename, at any depth -- it
             # cannot express a directory-scoping prefix like ``src/`` in
@@ -485,7 +482,7 @@ class E2BSandbox(Sandbox):
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
-        search = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null"
+        search = "grep " + " ".join(flags) + f" -- {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
 
         with self._lock:
             client = self._client
