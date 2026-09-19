@@ -395,3 +395,6 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+
+Optional research audit contracts and the unresolved upstream security blocker:
+[setup guide](docs/MCP_SERVER.md#research-report-audit-optional).
