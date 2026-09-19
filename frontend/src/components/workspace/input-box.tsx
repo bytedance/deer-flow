@@ -87,6 +87,7 @@ import {
   buildReferenceMessageMetadata,
   type SidecarContext,
 } from "@/core/sidecar";
+import { COMPOSER_BUILTIN_COMMAND_NAMES } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
@@ -132,6 +133,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ComposerSkillPicker } from "./composer-skill-picker";
 import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
 import { ReferenceConversationsButton } from "./conversation-references/reference-conversations-button";
 import {
@@ -146,6 +148,7 @@ import {
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  shouldReseedPickDraft,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
@@ -533,21 +536,20 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
-  const builtinSlashCommands = useMemo<SlashSuggestion[]>(
-    () => [
-      {
-        name: "goal",
-        description: t.inputBox.goalCommandDescription,
-        kind: "builtin",
-      },
-      {
-        name: "compact",
-        description: t.inputBox.compactCommandDescription,
-        kind: "builtin",
-      },
-    ],
-    [t.inputBox.compactCommandDescription, t.inputBox.goalCommandDescription],
-  );
+  const builtinSlashCommands = useMemo<SlashSuggestion[]>(() => {
+    // Exhaustive record keyed off the shared tuple: a third builtin
+    // without a description entry is a compile error, not a silent
+    // drift onto compact's text (and a stale extra key fails too).
+    const descriptions = {
+      goal: t.inputBox.goalCommandDescription,
+      compact: t.inputBox.compactCommandDescription,
+    } satisfies Record<(typeof COMPOSER_BUILTIN_COMMAND_NAMES)[number], string>;
+    return COMPOSER_BUILTIN_COMMAND_NAMES.map((name) => ({
+      name,
+      description: descriptions[name],
+      kind: "builtin" as const,
+    }));
+  }, [t.inputBox.compactCommandDescription, t.inputBox.goalCommandDescription]);
 
   const reportUploadLimitViolations = useCallback(
     (violations: UploadLimitViolation[]) => {
@@ -2495,6 +2497,28 @@ export function InputBox({
               disabled={composerLocked}
               uploadLimits={uploadLimits}
             />
+            <ComposerSkillPicker
+              skills={agentScopedSkills}
+              disabled={composerLocked}
+              onPick={(skill) => {
+                // Selecting from the picker must not discard a draft the user
+                // already typed. applySkillSuggestion clears the input as part
+                // of the slash-path flow, so capture the draft and re-seed it:
+                // the inline chip-text effect carries the value into the
+                // editable span, matching how reload-restore rehydrates the
+                // {text, skillName} draft pair.
+                const draft = textInput.value;
+                applySkillSuggestion({
+                  name: skill.name,
+                  description: skill.description,
+                  kind: "skill",
+                });
+                if (shouldReseedPickDraft(draft)) {
+                  textInput.setInput(draft);
+                }
+              }}
+            />
+
             <ReferenceConversationsButton
               className="px-2!"
               currentThreadId={threadId}
