@@ -7,6 +7,10 @@ not abort runtime teardown. Cancellation waits for the owned workers before
 propagating; backend `close()` overrides must be quick or internally bounded
 because close has no host timeout. Budget resolution and close in the pod grace
 period in addition to the configured flush timeout and other shutdown hooks.
+Extension-service teardown follows the same ownership rule: `stop_services()`
+is drained across host cancellation before later runtime resources unwind; each
+service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include
+that bound in pod grace-period budgeting.
 
 `conversation_access.py` binds an opt-in read-only tool to a run request's
 explicit `conversation_references` and effective `runs:read` permission. Never
