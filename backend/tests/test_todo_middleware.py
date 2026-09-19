@@ -10,6 +10,9 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
+    ModelLengthFinishReasonMiddleware,
+)
 from deerflow.agents.middlewares.todo_middleware import (
     TodoMiddleware,
     _format_todos,
@@ -453,6 +456,41 @@ class TestAfterModel:
         }
         assert mw.after_model(state, _make_runtime()) is None
 
+    def test_does_not_reengage_when_model_length_capped_marker_present(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="nit",
+                    tool_calls=[],
+                    additional_kwargs={
+                        "model_length_termination": {
+                            "detector": "openai_compatible_length",
+                            "suppressed_tool_call_count": 1,
+                            "suppressed_tool_call_names": ["write_file"],
+                        }
+                    },
+                )
+            ],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_pure_text_length_cap_without_marker_still_reengages(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="partial answer",
+                    response_metadata={"finish_reason": "length"},
+                )
+            ],
+            "todos": _incomplete_todos(),
+        }
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        assert result["jump_to"] == "model"
+
 
 class TestAafterModel:
     def test_delegates_to_sync(self):
@@ -616,6 +654,44 @@ class TestTodoMiddlewareAgentGraphIntegration:
         ]
         assert mw._pending_completion_reminders == {}
         assert mw._completion_reminder_counts == {}
+
+    def test_length_capped_write_file_does_not_reengage_todos(self):
+        """Reproduces the incident (thread b1723286): model emits a write_file
+        call with finish_reason=length, ModelLength suppresses it, and
+        TodoMiddleware must NOT re-engage via jump_to=model."""
+        todo_mw = TodoMiddleware()
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="nit",
+                    tool_calls=[{"name": "write_file", "id": "call_1", "args": {"path": "/mnt/user-data/outputs/report.md", "content": "# truncated report\n| ext4 | jbd2"}}],
+                    response_metadata={"finish_reason": "length", "model_name": "deepseek-v4-pro"},
+                ),
+            ],
+        )
+
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[todo_mw, ModelLengthFinishReasonMiddleware()],
+            state_schema=ThreadState,
+        )
+
+        result = graph.invoke(
+            {"messages": [("user", "write the report")], "todos": [{"content": "Phase 9: Synthesis and final report writing", "status": "in_progress"}]},
+            context={"thread_id": "cap-thread", "run_id": "cap-run"},
+        )
+
+        assert len(model.seen_messages) == 1
+        reminders_by_call = [_todo_completion_reminders(messages) for messages in model.seen_messages]
+        assert all(len(r) == 0 for r in reminders_by_call)
+
+        final_ai = result["messages"][-1]
+        assert final_ai.additional_kwargs.get("model_length_termination")
+        assert "output limit" in str(final_ai.content)
+        assert "nit" in str(final_ai.content)
+        assert result["todos"] == [{"content": "Phase 9: Synthesis and final report writing", "status": "in_progress"}]
+        assert todo_mw._pending_completion_reminders == {}
 
 
 class TestRunScopedReminderCleanup:
