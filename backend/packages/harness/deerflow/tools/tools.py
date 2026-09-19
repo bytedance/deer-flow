@@ -1,7 +1,9 @@
+import copy
 import logging
 import threading
 
 from langchain.tools import BaseTool
+from pydantic import BaseModel
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
@@ -68,6 +70,34 @@ def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
         if getattr(tool, "func", None) is None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
+
+
+def _extract_max_tokens(model_config: object | None) -> int | None:
+    """Safely extract a positive integer max_tokens from a model config object.
+
+    Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
+    dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
+    values, negative numbers, zero, and None.
+    """
+    if model_config is None:
+        return None
+    raw = model_config.get("max_tokens") if isinstance(model_config, dict) else getattr(model_config, "max_tokens", None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _clone_tool_with_description(tool: BaseTool, description: str) -> BaseTool:
+    """Return a copy of tool with an updated description, leaving the original intact."""
+    if isinstance(tool, BaseModel):
+        return tool.model_copy(update={"description": description})
+    cloned = copy.copy(tool)
+    cloned.description = description
+    return cloned
 
 
 def get_available_tools(
@@ -163,6 +193,30 @@ def get_available_tools(
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+
+    # Annotate write_file with the model's configured output budget so the
+    # model does not assume the 80 KB streaming ceiling is the practical limit
+    # for a single completion. The tool is cloned to avoid mutating the
+    # module-level singleton in-place across assemblies or leaking guidance to
+    # models configured without max_tokens.
+    max_tokens = _extract_max_tokens(model_config)
+    if max_tokens is not None:
+        safe_chars = int(max_tokens * 3 * 0.7)
+        budget_note = (
+            f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+            f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+            "For larger documents, write the first section now, "
+            "then use append=True for subsequent sections."
+        )
+        loaded_tools = [
+            _clone_tool_with_description(
+                tool,
+                f"{getattr(tool, 'description', '') or ''}{budget_note}",
+            )
+            if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
+            else tool
+            for tool in loaded_tools
+        ]
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
