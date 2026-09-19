@@ -2,6 +2,7 @@
 
 import errno
 import os
+import stat
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    copy_upload_file_no_symlink,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
@@ -189,6 +191,72 @@ class TestWriteUploadFileNoSymlink:
                 write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
 
         assert not (tmp_path / "pipe.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# copy_upload_file_no_symlink
+# ---------------------------------------------------------------------------
+
+
+class TestCopyUploadFileNoSymlink:
+    def test_copies_content_mode_and_timestamps(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"hello")
+        os.chmod(src, 0o640)
+        os.utime(src, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+        dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest == uploads / "notes.txt"
+        assert dest.read_bytes() == b"hello"
+        if os.chmod in os.supports_fd:
+            assert stat.S_IMODE(os.stat(dest).st_mode) == 0o640
+        if os.utime in os.supports_fd:
+            assert os.stat(dest).st_mtime_ns == 1_700_000_000_000_000_000
+
+    def test_overwrites_existing_regular_file(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "notes.txt").write_bytes(b"old contents")
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"new contents"
+
+    def test_rejects_symlink_destination(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"original")
+        link = uploads / "notes.txt"
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"attacker-chosen target")
+
+        with pytest.raises(UnsafeUploadPathError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert outside.read_bytes() == b"original"
+        assert link.is_symlink()
+
+    def test_missing_source_leaves_existing_destination_untouched(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "notes.txt").write_bytes(b"keep me")
+
+        with pytest.raises(FileNotFoundError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", tmp_path / "missing.txt")
+
+        assert (uploads / "notes.txt").read_bytes() == b"keep me"
 
 
 # ---------------------------------------------------------------------------

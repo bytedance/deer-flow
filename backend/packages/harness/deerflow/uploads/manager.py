@@ -7,6 +7,7 @@ Both Gateway and Client delegate to these functions.
 import errno
 import logging
 import os
+import shutil
 import stat
 from pathlib import Path
 from urllib.parse import quote
@@ -281,6 +282,29 @@ def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> 
     dest, fh = open_upload_file_no_symlink(base_dir, filename)
     with fh:
         fh.write(data)
+    return dest
+
+
+def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Path:
+    """Copy *src* into an upload destination without following a destination symlink.
+
+    Matches ``shutil.copy2`` for content, permission bits and timestamps, but
+    opens the destination through :func:`open_upload_file_no_symlink` and
+    applies the metadata to that descriptor, never to the name. The source is
+    opened first, so a missing source leaves an existing destination intact.
+    Where descriptor-based ``chmod``/``utime`` are unavailable (Windows), the
+    destination keeps its default mode and the copy time.
+    """
+    with open(src, "rb") as src_fh:
+        src_stat = os.fstat(src_fh.fileno())
+        dest, fh = open_upload_file_no_symlink(base_dir, filename)
+        with fh:
+            shutil.copyfileobj(src_fh, fh)
+            fh.flush()
+            if os.chmod in os.supports_fd:
+                os.chmod(fh.fileno(), stat.S_IMODE(src_stat.st_mode))
+            if os.utime in os.supports_fd:
+                os.utime(fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
     return dest
 
 
