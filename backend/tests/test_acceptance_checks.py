@@ -678,14 +678,17 @@ class TestProbeInnerScriptRealLayouts:
         outputs = tmp_path / "outputs"
         outputs.mkdir()
         (outputs / "empty.md").touch()
+        mapping = {
+            "/mnt/user-data/outputs/empty.md": str(outputs / "empty.md"),
+            "/mnt/user-data/outputs": str(outputs),
+        }
 
         class _RealShellSandbox:
             def execute_command(self, command, **kwargs):
-                args = shlex.split(command)
-                # Map the provider's virtual file/root arguments to the test mount.
-                args[-2] = str(outputs / "empty.md")
-                args[-1] = str(outputs)
-                return subprocess.run(args, capture_output=True, text=True, check=True, timeout=5).stdout
+                assert kwargs.get("env") == {"_DEERFLOW_SIZE_PROBE": "1"}
+                for virtual, host in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+                    command = command.replace(virtual, shlex.quote(host))
+                return subprocess.run(command, shell=True, capture_output=True, text=True, check=True, timeout=5).stdout
 
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _RealShellSandbox())
         verdict = check_acceptance_criteria(

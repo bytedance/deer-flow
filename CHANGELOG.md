@@ -941,6 +941,10 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
+  acceptance checks. Readable empty files now satisfy `exists` and
+  `file_written` and deterministically fail `non-empty`, instead of remaining
+  UNVERIFIED. ([#5559])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -4281,3 +4285,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
