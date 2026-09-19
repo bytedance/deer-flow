@@ -18,6 +18,7 @@ together, including delegated results and model-request history. Never shorten
 an excerpt under an existing ID. Drop entries that cannot fit, with an omission
 notice, while preserving unrelated artifact fields. This honors per-tool and
 fallback limits without exempting citation-bearing results from the budget.
+
 ## Document validation
 
 `tools.py` validates each dataset's selected documents in batches of at most
