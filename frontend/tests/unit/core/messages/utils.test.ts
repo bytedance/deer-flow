@@ -538,6 +538,22 @@ describe("inline <think> tag splitting", () => {
     expect(getAssistantTurnCopyData([message])).toBe(content.trim());
   });
 
+  test.each(["    ", "\t"])(
+    "closes multiline inline code on an indented continuation: %j",
+    (indent) => {
+      const code = `Use \`first line\n${indent}second line\` literally.`;
+      const message = aiMessage(
+        `${code}\n<think>real reasoning</think>Answer.`,
+      );
+      expect(extractContentFromMessage(message)).toBe(`${code}\nAnswer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe(
+        "real reasoning",
+      );
+      expect(getMessageCopyData(message)).toBe(`${code}\nAnswer.`);
+      expect(getAssistantTurnCopyData([message])).toBe(`${code}\nAnswer.`);
+    },
+  );
+
   test("finds real streaming reasoning after a literal inline opener", () => {
     const message = aiMessage("Use `<think>` literally. <think>real reasoning");
     expect(extractContentFromMessage(message)).toBe("Use `<think>` literally.");

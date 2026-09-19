@@ -591,12 +591,20 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   // Scan code delimiters and reasoning openers in source order. Once inside
   // real reasoning, jump directly to its closing tag: Markdown in reasoning
   // must not change how the following answer is parsed.
-  const tokens = /^ {0,3}(`{3,}|~{3,})|^(?: {4}|\t)[^\n]*|`+|<think>/gm;
+  const tokens = /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|`+|<think>/gm;
   let fence: string | null = null;
   let inlineDelimiter: string | null = null;
   let contentStart = 0;
   let match: RegExpExecArray | null;
   while ((match = tokens.exec(content)) !== null) {
+    if (match[2]) {
+      // An indented continuation can still close an open inline code span.
+      if (inlineDelimiter === null) {
+        const newline = content.indexOf("\n", tokens.lastIndex);
+        tokens.lastIndex = newline === -1 ? content.length : newline;
+      }
+      continue;
+    }
     const marker = match[1];
     if (marker) {
       const newline = content.indexOf("\n", tokens.lastIndex);
