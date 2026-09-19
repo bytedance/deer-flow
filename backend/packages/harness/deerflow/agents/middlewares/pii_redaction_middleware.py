@@ -17,8 +17,10 @@ Scope model (mirrors the structural guardrails):
 
 * the user-message rewrite is request-scoped — thread state keeps the raw text,
   so the UI still shows the original message and the whole conversation is
-  re-redacted on every model call, keeping placeholder numbering stable across
-  turns (the Nth distinct email in a thread always renders ``[EMAIL_N]``);
+  re-redacted on every model call. Existing summary/message placeholders reserve
+  their indices before new values are assigned, avoiding collisions after
+  compaction. Without a persisted mapping, a repeated raw value cannot be
+  linked to a placeholder whose source was compacted away;
 * tool-result redaction runs at the tool boundary (``wrap_tool_call``) with the
   same allowlist as ``ToolResultSanitizationMiddleware`` (first-party web tools
   by name, MCP tools via their ``deerflow_mcp`` tag), so redacted text is what
@@ -26,12 +28,12 @@ Scope model (mirrors the structural guardrails):
 * subagents are covered because ``build_subagent_runtime_middlewares`` reuses
   this base;
 * NOT covered in v1: the memory-extraction path (follow-up slice per the issue
-  discussion) and tool outputs externalized to disk by
-  ``ToolOutputBudgetMiddleware`` (they are not model-bound).
+  discussion). Allowlisted tool results are redacted before budget externalization.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
-  (reinjected ``summary_text``).
+  (reinjected ``summary_text``); TitleMiddleware redacts its complete user and
+  assistant fields before truncation and direct model invocation.
 
 Detector order is fixed and pinned by a regression test; email → api_key →
 national_id → credit_card → phone. Checksum-gated national IDs run *before*
@@ -203,12 +205,24 @@ def redact_text(text: str | None, config: PiiRedactionConfig | None) -> str | No
     return _Redactor(active_pii_detectors(config)).redact(text)
 
 
+def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> list[str]:
+    """Redact related text fields with one allocation scope, before truncation."""
+    redactor = _Redactor(active_pii_detectors(config))
+    for text in texts:
+        redactor.reserve(text)
+    return [redactor.redact(text) for text in texts]
+
+
+# Bound the numeric field before int() conversion; generated indices are tiny.
+_PLACEHOLDER_PATTERN = re.compile(r"\[(EMAIL|API_KEY|NATIONAL_ID|CREDIT_CARD|PHONE)_([1-9][0-9]{0,19})\]")
+
+
 class _Redactor:
     """Per-scan redaction state: one stable placeholder per distinct value.
 
     A single instance covers one scan (one model request, or one tool result),
-    so identical values render the same placeholder and cross-turn references
-    stay coherent. Placeholders are irreversible — the mapping lives only as
+    so identical raw values in that scan render the same placeholder. Existing
+    tokens reserve indices but cannot recover compacted raw-value identities. Placeholders are irreversible — the mapping lives only as
     long as this instance.
     """
 
@@ -217,7 +231,26 @@ class _Redactor:
         self._tokens: dict[tuple[str, str], str] = {}
         self._counts: dict[str, int] = {}
 
+    def reserve(self, content: object) -> None:
+        """Reserve visible placeholders before assigning any new values.
+
+        Only placeholder counters survive compaction, never raw-value mappings.
+        Pre-scan all fields so a token in a later block cannot collide with a
+        new value in an earlier one.
+        """
+        if isinstance(content, str):
+            for match in _PLACEHOLDER_PATTERN.finditer(content):
+                name, index = match.groups()
+                self._counts[name.lower()] = max(self._counts.get(name.lower(), 0), int(index))
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    self.reserve(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    self.reserve(block.get("text"))
+
     def redact(self, text: str) -> str:
+        self.reserve(text)
         for detector in self._detectors:
             text = detector.pattern.sub(self._replacer(detector), text)
         return text
@@ -245,6 +278,7 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
     content blocks. Non-text blocks (images, etc.) pass through untouched.
     The input is never mutated.
     """
+    redactor.reserve(content)
     if isinstance(content, str):
         redacted = redactor.redact(content)
         return redacted, redacted != content
@@ -293,6 +327,12 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
     def _process_request(self, request: ModelRequest) -> ModelRequest:
         redactor = _Redactor(self._detectors)
         messages = list(request.messages)
+        state = getattr(request, "state", None) or {}
+        summary = state.get("summary_text")
+        redactor.reserve(summary)
+        for message in messages:
+            redactor.reserve(message.content)
+        redacted_summary = redactor.redact(summary) if isinstance(summary, str) else summary
         changed = False
         for index, msg in enumerate(messages):
             if not isinstance(msg, HumanMessage) or not requires_input_sanitization(msg):
@@ -317,9 +357,14 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
                 additional_kwargs=dict(msg.additional_kwargs or {}),
             )
             changed = True
-        if not changed:
-            return request
-        return request.override(messages=messages)
+        updates = {}
+        if changed:
+            updates["messages"] = messages
+        if redacted_summary != summary:
+            # Request-local copy only: the inner durable-context wrapper must
+            # use the same allocation as the retained user messages.
+            updates["state"] = {**state, "summary_text": redacted_summary}
+        return request.override(**updates) if updates else request
 
     def _try_process(self, request: ModelRequest) -> ModelRequest:
         try:
@@ -369,6 +414,9 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
         if isinstance(update, dict):
             messages = update.get("messages")
             if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
+                for message in messages:
+                    if isinstance(message, ToolMessage):
+                        redactor.reserve(message.content)
                 new_messages = [self._redact_tool_message(m, redactor) if isinstance(m, ToolMessage) else m for m in messages]
                 if new_messages != messages:
                     return dc_replace(result, update={**update, "messages": new_messages})

@@ -1338,6 +1338,15 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 ### Manual Context Compaction
 
+Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
+remote tool results, compaction input, reinjected summaries, and configured
+LLM title input. It is off by default. Existing summary placeholders reserve
+indices so new values do not reuse them after compaction. No PII mapping is
+persisted, so repeated values cannot be linked to a compacted source; numbering
+may change when history or summary placeholders disappear. Raw thread text and
+local fallback titles remain available for display; memory extraction is outside
+this feature's scope.
+
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
 Compaction keeps the current user request and summarizes older assistant/tool activity. When rescuing that request leaves an assistant/tool-only summary window, input trimming favors its most recent content. For mixed histories whose user-message anchor falls outside the trimming budget, compaction retains the existing final-message fallback. `summarization.trim_tokens_to_summarize` (4000 by default) controls trimming of the raw summary input; escaping and prompt formatting add overhead beyond that budget. Setting this option to `null` disables input trimming for the summary model; choose that only when the model can accept the full history being compacted.

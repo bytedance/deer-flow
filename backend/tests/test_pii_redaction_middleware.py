@@ -6,12 +6,17 @@ without mutating the original request or messages, the tool-boundary allowlist,
 and the pinned detector registry.
 """
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from _agent_e2e_helpers import FakeToolCallingModel
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, get_buffer_string
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.types import Command
+from pydantic import Field
 
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
@@ -480,7 +485,7 @@ class _StateRequest:
 
     def override(self, **kwargs):
         copy = object.__new__(type(self))
-        copy.state = self.state
+        copy.state = kwargs.get("state", self.state)
         copy.messages = kwargs.get("messages", self.messages)
         return copy
 
@@ -539,3 +544,123 @@ class TestSummarizationCompactionInput:
         mw = self._middleware(PiiRedactionConfig(enabled=False))
         prompt = mw._build_summary_prompt([HumanMessage("reach alice@example.com")], previous_summary=None)
         assert "alice@example.com" in prompt
+
+
+class _RecordingPiiModel(FakeToolCallingModel):
+    seen: list[str] = Field(default_factory=list)
+    echo_summary: bool = False
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        text = get_buffer_string(messages)
+        self.seen.append(text)
+        if self.echo_summary:
+            # Preserve the exact placeholder received, rather than inventing one.
+            token = re.search(r"\[EMAIL_[0-9]+\]", text).group(0)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"Alice's email is {token}"))])
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_async_graph_redacts_configured_title_model_input(monkeypatch, enabled):
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config.title_config import TitleConfig
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    pii = PiiRedactionConfig(enabled=enabled)
+    config = _wiring_app_config(pii_redaction=pii, title=TitleConfig(enabled=True, model_name="title-model"))
+    primary = _RecordingPiiModel(responses=[AIMessage(content="Reply to charlie@example.net")])
+    title = Mock(ainvoke=AsyncMock(return_value=AIMessage(content="Contact records")))
+    monkeypatch.setattr("deerflow.agents.middlewares.title_middleware.create_chat_model", lambda **kwargs: title)
+    graph = create_agent(primary, tools=[], state_schema=ThreadState, middleware=[PiiRedactionMiddleware(pii), TitleMiddleware(app_config=config)])
+    user = HumanMessage(content="Contact alice@example.com", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "Contact alice@example.com"})
+
+    result = await graph.ainvoke({"messages": [user]})
+
+    prompt = title.ainvoke.await_args.args[0]
+    assert result["title"] == "Contact records"
+    assert result["messages"][0].content == user.content
+    if enabled:
+        assert "alice@example.com" not in primary.seen[0]
+        assert "alice@example.com" not in prompt
+        assert "charlie@example.net" not in prompt
+        assert "[EMAIL_1]" in prompt and "[EMAIL_2]" in prompt
+    else:
+        assert "alice@example.com" in primary.seen[0]
+        assert "alice@example.com" in prompt and "charlie@example.net" in prompt
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_compiled_graph_keeps_summary_and_retained_pii_distinct(async_mode):
+    import asyncio
+
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+    from deerflow.agents.thread_state import ThreadState
+
+    pii = PiiRedactionConfig(enabled=True)
+    config = _wiring_app_config(pii_redaction=pii)
+    summary = _RecordingPiiModel(responses=[AIMessage(content="unused")], echo_summary=True)
+    primary = _RecordingPiiModel(responses=[AIMessage(content="done")])
+    graph = create_agent(
+        primary,
+        tools=[],
+        state_schema=ThreadState,
+        middleware=[
+            PiiRedactionMiddleware(pii),
+            DurableContextMiddleware(pii_redaction_config=pii),
+            DeerFlowSummarizationMiddleware(model=summary, trigger=("messages", 4), keep=("messages", 2), token_counter=len, app_config=config),
+        ],
+    )
+    messages = [HumanMessage(content="Alice's email is alice@example.com"), AIMessage(content="Noted"), HumanMessage(content="Bob's email is bob@example.com; keep their records separate"), AIMessage(content="Noted")]
+    state = {"messages": messages}
+    result = asyncio.run(graph.ainvoke(state)) if async_mode else graph.invoke(state)
+
+    assert summary.seen and "alice@example.com" not in summary.seen[0]
+    assert result["summary_text"] == "Alice's email is [EMAIL_1]"
+    assert "Alice's email is [EMAIL_1]" in primary.seen[0]
+    assert "Bob's email is [EMAIL_2]" in primary.seen[0]
+    assert "bob@example.com" not in primary.seen[0]
+    assert any(message.content == messages[2].content for message in result["messages"])
+
+
+def test_summary_redaction_reserves_existing_placeholders():
+    config = PiiRedactionConfig(enabled=True)
+    assert redact_text("Alice [EMAIL_1], Bob bob@example.com", config) == "Alice [EMAIL_1], Bob [EMAIL_2]"
+
+
+def test_existing_placeholder_in_later_content_block_is_reserved_first():
+    messages, _ = _run_model_call(_make_middleware(), [HumanMessage(content=["bob@example.com", {"type": "text", "text": "Alice [EMAIL_1]"}])])
+    assert messages[0].content == ["[EMAIL_2]", {"type": "text", "text": "Alice [EMAIL_1]"}]
+
+
+def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    pii = PiiRedactionConfig(enabled=True)
+    state = {"summary_text": "Alice alice@example.com"}
+    request = _StateRequest(state, [HumanMessage(content="Alice alice@example.com; Bob bob@example.com")])
+    redacted = PiiRedactionMiddleware(pii)._process_request(request)
+    final = DurableContextMiddleware(pii_redaction_config=pii)._inject(redacted)
+    text = get_buffer_string(final.messages)
+    assert "Alice [EMAIL_1]" in text and "Bob [EMAIL_2]" in text
+    assert "alice@example.com" not in text and "bob@example.com" not in text
+    assert state == {"summary_text": "Alice alice@example.com"}
+    assert request.messages[0].content == "Alice alice@example.com; Bob bob@example.com"
+
+
+def test_repeated_compaction_reserves_prior_summary_tokens():
+    middleware = TestSummarizationCompactionInput()._middleware(PiiRedactionConfig(enabled=True))
+    prompt = middleware._build_summary_prompt([HumanMessage("Carol carol@example.com")], previous_summary="Alice [EMAIL_1], Bob [EMAIL_2]")
+    assert "Alice [EMAIL_1], Bob [EMAIL_2]" in prompt
+    assert "Carol [EMAIL_3]" in prompt
+
+
+def test_title_redacts_identifiers_before_field_truncation():
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    config = _wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True))
+    prompt, fallback = TitleMiddleware(app_config=config)._build_title_prompt({"messages": [HumanMessage(content="x " * 246 + "alice@example.com"), AIMessage(content="done")]})
+    assert "alice" not in prompt
+    assert fallback.endswith("alice@example.com")  # Local display fallback preserves the original user text.

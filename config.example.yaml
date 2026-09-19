@@ -1315,6 +1315,8 @@ loop_detection:
 # rewritten to irreversible placeholders like [EMAIL_1] before they reach the
 # model. No mapping is stored, so redaction cannot be reversed. Raw text stays
 # in thread state for the UI; the memory-extraction path is not covered.
+# Compaction and configured LLM title inputs are redacted too. Existing
+# placeholders reserve indices; compacted raw identities cannot be relinked.
 pii_redaction:
   enabled: false
   # redact_email: true
