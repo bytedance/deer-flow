@@ -5,8 +5,8 @@ text so downstream empty-result, error-detail, and archive-skip fallbacks work.
 Keep its other conversions unchanged, including newline-separated list blocks
 and literal strings such as `"None"`. Do not replace it with `message_to_text`,
 which takes a whole message and uses different list/mapping semantics.
-Regression coverage lives in `tests/test_utils_messages.py` and
-`tests/test_subagent_executor.py`.
+Regression coverage lives in `tests/test_utils_messages.py`,
+`tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
 ### Agent / Tool Assembly Off-Load
 
