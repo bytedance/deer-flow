@@ -2772,6 +2772,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **client:** `DeerFlowClient.upload_files` no longer writes through a
+  symlink. A symlink planted in the sandbox-writable uploads directory, at an
+  upload's name or its Markdown companion's name, made the embedded client
+  overwrite the host file it pointed to while reporting success. The file is
+  now skipped and listed in `skipped_files` with `success: false`, matching
+  the Gateway; an unsafe companion is left out and the upload kept. Copies
+  keep the source's permission bits and timestamps. ([#5578])
 - **uploads:** Deleting an upload no longer follows a symlink to delete a
   different file. A symlink planted in the sandbox-writable uploads directory
   made `DELETE /api/threads/{id}/uploads/{filename}` (and
@@ -4300,3 +4307,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578

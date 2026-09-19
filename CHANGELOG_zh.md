@@ -2085,6 +2085,10 @@
 
 ### 安全
 
+- **客户端：** `DeerFlowClient.upload_files` 不再写穿符号链接。沙箱可写的 uploads 目录中，
+  若在上传文件名或其 Markdown 配套文件名处放置符号链接，嵌入式客户端此前会覆盖链接指向的宿主
+  文件并报告成功。现在该文件会被跳过并列入 `skipped_files`，`success` 为 `false`，与 Gateway
+  一致；不安全的配套文件会被省略，原上传保留。复制时保留源文件的权限位与时间戳。([#5578])
 - **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
   放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
   `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
@@ -3505,3 +3509,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
