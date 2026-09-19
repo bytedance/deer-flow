@@ -45,7 +45,7 @@ import {
 } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  ALL_KNOWLEDGE_SCOPE,
+  knowledgeScopeToSelection,
   buildKnowledgeScopeSnapshot,
   KNOWLEDGE_SCOPE_KEY,
   type KnowledgeScopeSelection,
@@ -114,7 +114,7 @@ export default function AgentChatPage() {
   const agentKnowledgeEnabled =
     agent !== null &&
     (agent.tool_groups == null || agent.tool_groups.includes("knowledge"));
-  const [knowledgeScope, setKnowledgeScope] =
+  const [knowledgeScopeOverride, setKnowledgeScope] =
     useState<KnowledgeScopeSelection | null>(null);
   const previousConversationRef = useRef({
     agentName: agent_name,
@@ -122,12 +122,12 @@ export default function AgentChatPage() {
     isNewThread,
   });
 
-  useEffect(() => {
-    setKnowledgeScope((current) => {
-      if (!selectorVisible) return null;
-      return current ?? ALL_KNOWLEDGE_SCOPE;
-    });
-  }, [selectorVisible]);
+  const knowledgeScope = useMemo(
+    () =>
+      knowledgeScopeOverride ??
+      knowledgeScopeToSelection(agent?.knowledge_scope),
+    [knowledgeScopeOverride, agent?.knowledge_scope],
+  );
 
   useEffect(() => {
     const previous = previousConversationRef.current;
@@ -137,7 +137,7 @@ export default function AgentChatPage() {
         previous.isNewThread &&
         !isNewThread;
       if (!isNewThreadRouteReplacement) {
-        setKnowledgeScope(selectorVisible ? ALL_KNOWLEDGE_SCOPE : null);
+        setKnowledgeScope(null);
       }
     }
     previousConversationRef.current = {

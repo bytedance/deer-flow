@@ -202,3 +202,12 @@ outside code/images. Dialog excerpts render as plain text, never HTML or nested
 Markdown. Source records retain retrieval-time evidence, not live documents.
 Resolve knowledge destinations before testing the label in message and artifact
 link renderers: Sources lists use ordinary titles without a `citation:` prefix.
+
+
+Custom-agent settings persist `knowledge_scope` as an optional retrieval default.
+Use `knowledgeScopeToSelection` to restore all execution IDs, falling back to IDs
+where the bounded display snapshot lacks names. Only dirty knowledge settings
+are sent on save. Custom-agent chat derives its initial selection from the saved
+binding; explicit page-local overrides survive new-thread route replacement and
+reset on conversation changes. Gateway supplies defaults for clients without a
+selector; frontend visibility must not become a runtime enforcement boundary.

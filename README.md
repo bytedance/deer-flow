@@ -1141,8 +1141,8 @@ is off. Set `knowledge_base.scope_selection_enabled: true` in `config.yaml`
 while using the built-in RAGFlow `knowledge_search` provider to allow all
 permitted datasets, selected datasets/files, or no retrieval for a turn. The
 same config flag controls both chat types; when disabled, neither composer
-shows the selector or submits a scope. The choice resets to all when the page
-is refreshed or another conversation is opened; each sent human message keeps
+shows the selector or submits a scope. The choice resets to the custom agent’s saved default (or all when unbound)
+when the page is refreshed or another conversation is opened; each sent human message keeps
 an immutable scope snapshot for replay and history. The Gateway validates
 every snapshot, intersects it with the operator's dataset allowlist, propagates
 the execution-only scope to native and durable subagents, and removes it from
@@ -1150,6 +1150,20 @@ model inputs and external traces. Client-supplied internal runtime controls
 and credentials are also stripped from run context before execution or
 checkpoint persistence. Idempotent retries accept both canonical snapshots and
 legacy raw run inputs, preserving retry compatibility across upgrades.
+Custom agents can save a **Default knowledge** selection from **Agents → Agent
+settings**, including optional file filters or retrieval off. Selecting all
+knowledge bases clears the binding. The same `knowledge_scope` field is available
+on agent create/update APIs and in the agent's stored configuration; omitted
+updates preserve it and `null` clears it. It is a default, not an authorization
+boundary: an explicit per-message selection overrides it, and the operator's
+allowlist still applies at retrieval time. Gateway runs without a message scope
+(including scheduled and channel turns) use and snapshot the saved default even
+when the composer selector is hidden. Regenerate/resume retain the original
+turn's scope, including legacy unscoped turns, rather than picking up later
+configuration changes. Unknown or unavailable selections never broaden retrieval.
+This default applies to Gateway-hosted custom-agent turns; direct harness/client
+integrations continue to supply their own execution scope.
+
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
