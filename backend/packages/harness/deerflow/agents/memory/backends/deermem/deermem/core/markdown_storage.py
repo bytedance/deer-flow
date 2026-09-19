@@ -77,10 +77,7 @@ class MarkdownMemoryStorage(FileMemoryStorage):
             return parsed
 
         logger.warning(
-            "Memory summary %s is unreadable (neither valid JSON nor a Markdown "
-            "summary with a usable ```memory-json block); quarantining the file "
-            "so its content stays recoverable instead of being silently "
-            "overwritten by the next save.",
+            "Memory summary %s is unreadable (neither valid JSON nor a Markdown summary with a usable ```memory-json block); quarantining the file so its content stays recoverable instead of being silently overwritten by the next save.",
             path,
         )
         self._quarantine_unreadable(path)

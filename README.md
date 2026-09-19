@@ -1503,6 +1503,13 @@ and the [request contract](backend/docs/API.md#referencing-a-previous-conversati
 
 ### Long-Term Memory
 
+For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
+summary reads while keeping JSON writes and the existing UI. A hand-edited
+`memory.json` can contain its JSON object inside a fenced `memory-json` block;
+embedded backticks and later fenced notes are supported. Unparseable summary
+text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+`storage_path` must point to the data root directory, not an existing JSON file.
+
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
 DeerMem can optionally suppress near-duplicate extracted facts with

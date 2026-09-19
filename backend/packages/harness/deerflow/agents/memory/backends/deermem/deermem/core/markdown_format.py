@@ -13,10 +13,9 @@ non-object JSON) yields ``None`` so the caller can decide policy (the
 default is to quarantine the unreadable file rather than silently rebuild
 over persistent state).
 
-The fence is matched greedily up to the *last* ```` ``` ```` in the input,
-because remembered strings may themselves contain triple backticks (code
-snippets); a non-greedy match would truncate the JSON mid-string and break
-the lossless round-trip.
+The JSON decoder locates the end of the value before the closing fence is
+checked. Backticks inside remembered strings cannot truncate the value, and
+later fenced notes cannot be accidentally consumed as part of the JSON.
 
 A lossy structured parse of the human-readable sections is deliberately NOT
 provided: it cannot reproduce the manifest schema (``user``/``history`` must
@@ -32,14 +31,8 @@ import json
 import re
 from typing import Any
 
-# Greedy: capture up to the LAST closing fence so JSON string values that
-# contain ``` (remembered code snippets) survive the round-trip intact.
-_FENCE_RE = re.compile(r"```memory-json\s*\n(.*)```", re.DOTALL)
-
-
-def _extract_fenced_json(raw: str) -> str | None:
-    match = _FENCE_RE.search(raw)
-    return match.group(1).strip() if match else None
+_OPEN_FENCE_RE = re.compile(r"```memory-json[ \t]*\r?\n")
+_CLOSE_FENCE_RE = re.compile(r"[ \t\r\n]*\r?\n[ \t]*```[ \t]*(?:\r?\n|$)")
 
 
 def _parse_markdown_memory(raw: str) -> dict[str, Any] | None:
@@ -50,11 +43,14 @@ def _parse_markdown_memory(raw: str) -> dict[str, Any] | None:
     mapped onto the manifest schema losslessly, so returning ``None`` (the
     caller quarantines and starts fresh) is the honest outcome.
     """
-    fenced = _extract_fenced_json(raw)
-    if fenced is None:
+    opening = _OPEN_FENCE_RE.search(raw)
+    if opening is None:
         return None
+    payload = raw[opening.end() :].lstrip()
     try:
-        value = json.loads(fenced)
+        value, end = json.JSONDecoder().raw_decode(payload)
     except json.JSONDecodeError:
+        return None
+    if _CLOSE_FENCE_RE.match(payload, end) is None:
         return None
     return value if isinstance(value, dict) else None
