@@ -24,9 +24,11 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
@@ -234,9 +236,11 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         skills_container_path: str | None = None,
         skill_file_read_tool_names: Collection[str] | None = None,
         task_continuity_enabled: bool = False,
+        pii_redaction_config: PiiRedactionConfig | None = None,
     ) -> None:
         super().__init__()
         self._task_continuity_enabled = task_continuity_enabled
+        self._pii_redaction_config = pii_redaction_config
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
 
@@ -246,6 +250,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             "skills_container_path": self._skills_root,
             "skill_file_read_tool_names": sorted(self._skill_read_tool_names),
             "task_continuity_enabled": self._task_continuity_enabled,
+            "pii_redaction_enabled": bool(self._pii_redaction_config and self._pii_redaction_config.enabled),
         }
 
     @override
@@ -293,7 +298,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
         data_block = _render_durable_context_data(
-            state.get("summary_text"),
+            redact_text(state.get("summary_text"), self._pii_redaction_config),
             state.get("delegations") or [],
             state.get("skill_context") or [],
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
