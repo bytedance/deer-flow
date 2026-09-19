@@ -2399,6 +2399,44 @@ def test_reconcile_never_probes_a_locally_active_sandbox(monkeypatch):
     assert fake_cls.connect_calls == []
     assert stats.adopted == 0
     assert p._sandboxes["sb-active"].client is client
+    # The active VM's remote TTL is still refreshed through the cached client
+    # so a turn longer than idle_timeout is not killed mid-execution.
+    assert client.timeouts_set == [1800]
+
+
+def test_reconcile_sweeps_expired_warm_pool_entry(monkeypatch):
+    # A warm entry older than idle_timeout is expected to be dead at the
+    # control plane; drop it so it stops pinning a capacity slot.
+    p = _make_provider(idle_timeout=600)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    store = _install_shared_deployment_capacity(p)
+    fake_cls.list_return = []
+    p._warm_pool["sb-old"] = (p._stable_seed("t1", "u1"), time.time() - 601)
+    p._owned_sandbox_ids.add("sb-old")
+    p._mount_results["sb-old"] = MagicMock()
+    p._ownership.take("sb-old")
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert "sb-old" not in p._warm_pool
+    assert "sb-old" not in p._owned_sandbox_ids
+    assert p._ownership.owner("sb-old") is None
+    assert "sb-old" not in p._mount_results
+    store.release.assert_called_once_with("sb-old")
+    assert fake_cls.connect_calls == []
+    assert stats.adopted == 0
+
+
+def test_reconcile_keeps_unexpired_warm_pool_entry(monkeypatch):
+    p = _make_provider(idle_timeout=600)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = []
+    p._warm_pool["sb-fresh"] = (p._stable_seed("t1", "u1"), time.time())
+
+    p._reconcile_remote_sandboxes(now=100.0)
+
+    assert "sb-fresh" in p._warm_pool
+    assert fake_cls.connect_calls == []
 
 
 def test_reconcile_kills_remote_duplicate_of_a_warm_pool_sandbox(monkeypatch):
