@@ -857,6 +857,10 @@ export const zhCN: Translations = {
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
+    settingsKnowledge: "默认知识库",
+    settingsKnowledgeHint:
+      "新对话默认使用此知识库范围，单条消息可以临时覆盖。选择全部知识库可解除绑定。",
+    settingsKnowledgeReset: "使用全部知识库",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
     settingsTemperature: "温度",

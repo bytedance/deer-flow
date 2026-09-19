@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   buildKnowledgeScopeSnapshot,
+  knowledgeScopeToSelection,
   cloneKnowledgeScopeSelection,
   readKnowledgeScopeSnapshot,
   type KnowledgeScopeSelection,
@@ -155,5 +156,44 @@ describe("knowledge scope snapshots", () => {
         document_filters: [{ dataset_id: "dataset-1", document_ids: null }],
       }),
     ).toBeNull();
+  });
+});
+
+describe("agent knowledge defaults", () => {
+  test("restores every execution ID even when display labels were capped", () => {
+    const selection = knowledgeScopeToSelection({
+      version: 1,
+      mode: "selected",
+      dataset_ids: ["a", "b"],
+      document_filters: [{ dataset_id: "b", document_ids: ["one", "two"] }],
+      display: { datasets: [{ id: "a", name: "Policies" }] },
+    });
+    expect(selection).toEqual({
+      mode: "selected",
+      datasets: [
+        { id: "a", name: "Policies", documents: { mode: "all" } },
+        {
+          id: "b",
+          name: "b",
+          documents: {
+            mode: "selected",
+            items: [
+              { id: "one", name: "one" },
+              { id: "two", name: "two" },
+            ],
+          },
+        },
+      ],
+    });
+    expect(buildKnowledgeScopeSnapshot(selection)).toMatchObject({
+      dataset_ids: ["a", "b"],
+      document_filters: [{ dataset_id: "b", document_ids: ["one", "two"] }],
+    });
+  });
+  test("missing defaults inherit all while disabled stays disabled", () => {
+    expect(knowledgeScopeToSelection(null)).toEqual({ mode: "all" });
+    expect(knowledgeScopeToSelection({ version: 1, mode: "disabled" })).toEqual(
+      { mode: "disabled" },
+    );
   });
 });

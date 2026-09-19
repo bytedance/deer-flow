@@ -754,6 +754,9 @@ export interface Translations {
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
     settingsDescription: string;
+    settingsKnowledge: string;
+    settingsKnowledgeHint: string;
+    settingsKnowledgeReset: string;
     settingsModel: string;
     settingsModelDefault: string;
     settingsTemperature: string;
