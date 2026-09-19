@@ -2,6 +2,29 @@
 
 Memory and Redis bridges take their default idle heartbeat cadence from the startup-only `stream_bridge.heartbeat_interval_seconds` setting. Keep the default on the bridge instance so SSE, `/wait`, and internal subscribers stay aligned; an explicit `subscribe(..., heartbeat_interval=...)` remains a per-subscription override.
 
+### RunJournal Write Ownership
+
+`runtime/journal.py` owns event-store writes independently of the run lifecycle:
+
+- **In-flight owner.** The exact `put_batch` task that started owns an ambiguous
+  write until its outcome is applied; no successor may overtake it, and no
+  completion callback releases it early. A best-effort progress snapshot stays
+  owned by the journal and the module-level cancellation registry until settle.
+- **Deadline.** Ordinary `flush()` is bounded: it keeps an unresolved write owned
+  with successors buffered, cancels a hung best-effort progress snapshot, and
+  returns `False` while a predecessor is in flight. `flush_until_settled()` and
+  `close(flush=True)` wait without a deadline and raise instead of returning
+  `False`.
+- **Terminal outcomes.** Success advances `feed_generation`; only an explicitly
+  failed or cancelled write prepends its batch once for retry; an unresolved
+  write is never requeued. Caller cancellation is re-raised after the outcome is
+  handled and never cancels the store write.
+- **Teardown.** `close(flush=False)` stops new durable writes but preserves
+  supervision of one already in flight. `close(flush=True)` detaches runtime
+  dependencies on success and on caller cancellation (cancelling and retaining
+  any in-flight progress snapshot first) before re-raising; only an ordinary
+  write failure leaves the store and buffer attached for a later retry.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
