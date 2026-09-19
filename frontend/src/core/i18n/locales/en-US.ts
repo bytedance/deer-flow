@@ -920,7 +920,7 @@ export const enUS: Translations = {
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
     settingsKnowledgeHint:
-      "New conversations use this knowledge scope. Individual messages can override it. All knowledge bases removes the binding.",
+      "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
