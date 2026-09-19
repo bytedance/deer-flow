@@ -17,6 +17,11 @@ omission restores LangChain's 4000-token default.
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 Completed is not accepted; retain useful work and address acceptance gaps.
 
+On new user turns, DurableContext cancels earlier-run unanswered delegations.
+It preserves resumes, same-run continuations, and entries without `run_id`.
+Any reply prevents cancellation; legacy replies without status metadata may
+stay `in_progress`. Never infer status from reply text.
+
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
 **Message provenance.** At injection/rewrite, always stamp `additional_kwargs`

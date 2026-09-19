@@ -195,6 +195,12 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
     in_progress with no ToolMessage once a later user turn starts belongs to a
     run that was stopped while the subagent ran. Nothing else will ever update
     it, and the ledger would keep telling the model not to delegate again.
+
+    Any recorded reply excludes this inference, including legacy ToolMessages
+    without subagent status metadata. Their outcome is unknown, not evidence
+    of cancellation. Conservatively leave those entries unchanged, even if
+    they remain in_progress: this repairs missing replies, not legacy results.
+    Current task producers stamp metadata for extract_delegations to capture.
     """
     answered = {str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage) and message.tool_call_id}
     return [{**entry, "status": "cancelled"} for entry in existing if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and entry.get("id") not in answered]

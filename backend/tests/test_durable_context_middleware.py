@@ -486,7 +486,16 @@ class TestBeforeModelCapture:
 
         assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
 
-    def test_new_user_turn_keeps_earlier_delegation_that_has_a_result(self):
+    @pytest.mark.parametrize(
+        "result_metadata",
+        [
+            pytest.param(make_subagent_additional_kwargs("completed", result="partial notes"), id="structured-completed"),
+            pytest.param(make_subagent_additional_kwargs("failed", error="task failed"), id="structured-failed"),
+            pytest.param({}, id="legacy-without-status-metadata"),
+        ],
+    )
+    def test_new_user_turn_keeps_earlier_delegation_that_has_a_result(self, result_metadata):
+        """A recorded reply rules out inferring cancellation, even when its legacy status is unknown."""
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-new"})
         messages = [
@@ -502,7 +511,7 @@ class TestBeforeModelCapture:
                     }
                 ],
             ),
-            ToolMessage(content="partial notes", tool_call_id="old-call", name="task"),
+            ToolMessage(content="partial notes", tool_call_id="old-call", name="task", additional_kwargs=result_metadata),
             HumanMessage(content="please continue", additional_kwargs={"run_id": "run-new"}),
         ]
         existing = [
