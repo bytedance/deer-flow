@@ -109,6 +109,7 @@ class McpTaskService:
             thread_id=request.thread_id,
             server_name=request.server_name,
             remote_task_id=submission.remote_task_id,
+            thread_incarnation=request.thread_incarnation,
             driver_data=driver_data,
         )
         try:
@@ -120,6 +121,7 @@ class McpTaskService:
                 task_id=local_task_id,
                 user_id=request.user_id,
                 thread_id=request.thread_id,
+                expected_thread_incarnation=request.thread_incarnation,
                 run_id=request.run_id,
                 tool_call_id=request.tool_call_id,
                 server_name=request.server_name,
@@ -243,12 +245,14 @@ class McpTaskService:
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         return await self._repository.list_by_thread(
             thread_id,
             user_id=user_id,
+            thread_incarnation=thread_incarnation,
             limit=limit,
             active_only=active_only,
         )
@@ -259,12 +263,14 @@ class McpTaskService:
         task_id: str,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         return await self._repository.request_cancel(
             task_id,
             user_id=user_id,
             thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
             requested_at=now or datetime.now(UTC),
         )
 
@@ -273,9 +279,15 @@ class McpTaskService:
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]:
-        active = await self.list_tasks(thread_id=thread_id, user_id=user_id, active_only=True)
+        active = await self.list_tasks(
+            thread_id=thread_id,
+            user_id=user_id,
+            thread_incarnation=thread_incarnation,
+            active_only=True,
+        )
         if task:
             normalized = task.casefold().strip()
             matches = [item for item in active if item["id"] == task or str(item.get("task_name") or "").casefold() == normalized]
@@ -290,6 +302,7 @@ class McpTaskService:
             task_id=matches[0]["id"],
             thread_id=thread_id,
             user_id=user_id,
+            thread_incarnation=thread_incarnation,
         )
         if result is None:
             raise LookupError("The selected background task no longer exists")
