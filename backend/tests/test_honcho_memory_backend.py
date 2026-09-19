@@ -100,6 +100,45 @@ class TestHonchoConfig:
     @pytest.mark.parametrize(
         ("key", "value"),
         [
+            pytest.param("timeout_seconds", ["slow"], id="timeout-list"),
+            pytest.param("timeout_seconds", "slow", id="timeout-text"),
+            pytest.param("connect_timeout_seconds", {"seconds": 5}, id="connect-timeout-mapping"),
+            pytest.param("message_char_limit", "wide", id="message-limit-text"),
+            pytest.param("max_injection_chars", ["1000"], id="injection-limit-list"),
+        ],
+    )
+    def test_unusable_numeric_values_rejected_as_config_error(self, key, value):
+        """``float([...])`` and ``int("wide")`` raise a TypeError that names neither
+        the knob nor the config file, so a mistyped scalar reaches the operator as
+        an internal traceback — the same symptom as the nested values above, one
+        block below them."""
+        with pytest.raises(ValueError, match=f"{key} must be a number"):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize(
+        ("key", "default"),
+        [
+            ("timeout_seconds", 10.0),
+            ("connect_timeout_seconds", 3.0),
+            ("message_char_limit", 8000),
+            ("max_injection_chars", 6000),
+        ],
+    )
+    @pytest.mark.parametrize("value", [None, "", "  "])
+    def test_empty_numeric_values_still_mean_unset(self, key, default, value):
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert getattr(cfg, key) == default
+
+    @pytest.mark.parametrize(("key", "value", "expected"), [("timeout_seconds", "2.5", 2.5), ("message_char_limit", "120", 120)])
+    def test_numeric_strings_still_accepted(self, key, value, expected):
+        """float()/int() already accept numeric strings, so a quoted YAML scalar
+        must keep working; the guard is only for values that cannot be cast."""
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert getattr(cfg, key) == expected
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
             pytest.param("timeout_seconds", 0, id="timeout-zero"),
             pytest.param("timeout_seconds", -1, id="timeout-negative"),
             pytest.param("timeout_seconds", float("nan"), id="timeout-nan"),
