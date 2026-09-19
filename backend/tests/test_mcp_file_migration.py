@@ -426,6 +426,48 @@ class TestRewriteLocalPathsInText:
         assert result == text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a literal backslash in a filename is POSIX-only")
+class TestRewriteUniqueBareFilenames:
+    """The correlated virtual path must be inserted verbatim, never as a template.
+
+    The replacement is built from the real file's relative path, where a
+    backslash is an ordinary character, so handing it to ``re.sub`` as a
+    template reads it as a regex escape instead.
+    """
+
+    def test_backslash_in_replacement_is_inserted_literally(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, r"screenshots\raw.png")
+        text = r"Saved as screenshots\raw.png"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_unique_bare_filenames(
+                text,
+                changed_files=[src],
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/screenshots\\raw.png"
+
+    def test_unknown_regex_escape_in_replacement_does_not_raise(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, r"screenshots\q3.png")
+        text = r"Saved as screenshots\q3.png"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_unique_bare_filenames(
+                text,
+                changed_files=[src],
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/screenshots\\q3.png"
+
+
 class TestWorkspaceSnapshots:
     def test_changed_workspace_files_detects_created_and_modified_files(self, paths: Paths):
         import time

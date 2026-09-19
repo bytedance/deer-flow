@@ -259,6 +259,47 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_canonical_run_record_input_uses_admitted_message_snapshot():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import _canonical_run_record_input
+
+    raw = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Search",
+                "additional_kwargs": {
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": [" dataset-1 ", "dataset-1"],
+                    }
+                },
+            }
+        ]
+    }
+    admitted = {
+        "messages": [
+            HumanMessage(
+                content="Search",
+                additional_kwargs={
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": ["dataset-1"],
+                    }
+                },
+            )
+        ]
+    }
+
+    stored = _canonical_run_record_input(raw, admitted)
+
+    assert stored is not None
+    assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
@@ -295,6 +336,7 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     """
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 
     result = normalize_input(
         {
@@ -307,6 +349,8 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
                         "hide_from_ui": True,
                         _DYNAMIC_CONTEXT_REMINDER_KEY: True,
                         _REMINDER_DATE_KEY: "2099-01-01, Thursday",
+                        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+                        KNOWLEDGE_SCOPE_RUNTIME_KEY: {"version": 1, "mode": "disabled"},
                         "custom": "keep-me",
                     },
                 }
@@ -317,7 +361,12 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     from deerflow.utils.messages import UNTRUSTED_INPUT_KEY
 
     assert result["messages"][0].id == "known-checkpoint-id__memory"
-    assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me", UNTRUSTED_INPUT_KEY: True}
+    assert result["messages"][0].additional_kwargs == {
+        "hide_from_ui": True,
+        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+        "custom": "keep-me",
+        UNTRUSTED_INPUT_KEY: True,
+    }
 
 
 def test_normalize_input_strips_external_view_image_context_marker():
@@ -2076,6 +2125,264 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
     return captured["graph_input"]
 
 
+@pytest.mark.parametrize(
+    "target_message_id",
+    ["assistant-answer", "missing-assistant", None],
+    ids=["regenerate", "interrupted-regenerate-fallback", "resume-fallback"],
+)
+@pytest.mark.asyncio
+async def test_recover_knowledge_scope_skips_hidden_conversation_reference_message(target_message_id):
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import _recover_run_knowledge_scope
+
+    source_scope = {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-source"],
+    }
+    messages = [
+        HumanMessage(
+            id="user-source",
+            content="Search only the selected dataset",
+            additional_kwargs={"knowledge_scope": source_scope},
+        ),
+        HumanMessage(
+            id="conversation-references",
+            content='Read-only conversation references for this run: ["thread-source"]',
+            additional_kwargs={"hide_from_ui": True},
+        ),
+        AIMessage(id="assistant-answer", content="Scoped answer"),
+    ]
+    accessor = SimpleNamespace(
+        aget=AsyncMock(return_value=SimpleNamespace(values={"messages": messages})),
+    )
+
+    with patch(
+        "app.gateway.services.build_thread_checkpoint_state_accessor",
+        new=AsyncMock(return_value=(accessor, {})),
+    ):
+        recovered = await _recover_run_knowledge_scope(
+            SimpleNamespace(),
+            thread_id="thread-scope-recovery",
+            target_message_id=target_message_id,
+        )
+
+    assert recovered == source_scope
+
+
+@pytest.mark.parametrize(
+    ("include_current_scope", "expected_scope", "recovery_calls"),
+    [
+        (
+            True,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-current"],
+            },
+            0,
+        ),
+        (False, {"version": 1, "mode": "disabled"}, 1),
+    ],
+    ids=["current-selection-wins", "omitted-selection-recovers"],
+)
+@pytest.mark.asyncio
+async def test_clarification_reply_scope_uses_current_selection_or_recovers_when_omitted(
+    _stub_app_config,
+    include_current_scope,
+    expected_scope,
+    recovery_calls,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                    }
+                ],
+            }
+        )
+    )
+    response_metadata = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-scope",
+        "response_kind": "text",
+        "value": "Use the current dataset",
+    }
+    additional_kwargs = {
+        "hide_from_ui": True,
+        "human_input_response": response_metadata,
+    }
+    if include_current_scope:
+        additional_kwargs["knowledge_scope"] = {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-current"],
+        }
+
+    body = RunCreateRequest(
+        assistant_id="researcher",
+        input={
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Use the current dataset",
+                    "additional_kwargs": additional_kwargs,
+                }
+            ]
+        },
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+    recover_scope = AsyncMock(return_value={"version": 1, "mode": "disabled"})
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch(
+            "app.gateway.services._load_scope_agent_config",
+            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
+        ),
+    ):
+        record = await start_run(body, "thread-clarification-scope", request)
+        await record.task
+
+    graph_input = captured["graph_input"]
+    assert isinstance(graph_input, dict)
+    message = graph_input["messages"][0]
+    assert message.additional_kwargs["knowledge_scope"] == expected_scope
+    assert recover_scope.await_count == recovery_calls
+
+
+@pytest.mark.parametrize(
+    ("include_current_scope", "expected_scope", "recovery_calls"),
+    [
+        (
+            True,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-current"],
+            },
+            0,
+        ),
+        (
+            False,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-source"],
+            },
+            1,
+        ),
+    ],
+    ids=["current-selection-wins", "omitted-selection-recovers"],
+)
+@pytest.mark.asyncio
+async def test_edit_replay_scope_uses_current_selection_or_recovers_when_omitted(
+    _stub_app_config,
+    include_current_scope,
+    expected_scope,
+    recovery_calls,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                    }
+                ],
+            }
+        )
+    )
+    additional_kwargs = {}
+    if include_current_scope:
+        additional_kwargs["knowledge_scope"] = {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-current"],
+        }
+    body = RunCreateRequest(
+        assistant_id="researcher",
+        input={
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Edited question",
+                    "additional_kwargs": additional_kwargs,
+                }
+            ]
+        },
+        metadata={
+            "replay_kind": "edit",
+            "regenerate_from_message_id": "assistant-source",
+        },
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+    recover_scope = AsyncMock(
+        return_value={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-source"],
+        }
+    )
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch(
+            "app.gateway.services._load_scope_agent_config",
+            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
+        ),
+    ):
+        record = await start_run(body, "thread-edit-scope", request)
+        await record.task
+
+    graph_input = captured["graph_input"]
+    assert isinstance(graph_input, dict)
+    message = graph_input["messages"][0]
+    assert message.additional_kwargs["knowledge_scope"] == expected_scope
+    assert recover_scope.await_count == recovery_calls
+
+
 def _make_start_run_persistence_context():
     from types import SimpleNamespace
 
@@ -2639,6 +2946,208 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     # Agent Server's reserved auth fields are never valid on the Gateway path.
     assert context.get("langgraph_auth_user") is None
     assert context.get("langgraph_auth_user_id") is None
+
+
+def test_start_run_strips_client_supplied_project_context_key(_stub_app_config):
+    """A client-supplied ``PROJECT_CONTEXT_KEY`` must never survive admission —
+    in either ``config['context']`` or ``config['configurable']`` (spec §12).
+    Here resolution also degrades (no project repository), so nothing is pinned.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, thread_store = _make_start_run_persistence_context()
+        await thread_store.create("thread-forged-project-ctx", user_id="u1", metadata={})
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        forged = {"project_id": "forged", "name": "Forged", "instructions": "forged"}
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {PROJECT_CONTEXT_KEY: forged},
+                "configurable": {PROJECT_CONTEXT_KEY: forged},
+            },
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-forged-project-ctx", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+    assert PROJECT_CONTEXT_KEY not in config.get("configurable", {})
+
+
+def test_start_run_pins_the_resolved_project_context(_stub_app_config):
+    """Admission resolves membership once and pins the snapshot under the
+    server-owned key for the run (spec §7.1)."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+
+        class _MemberThreadStore:
+            async def get(self, thread_id, **kwargs):
+                return {"thread_id": thread_id, "user_id": "u1", "metadata": {"deerflow_project_id": "p-1"}}
+
+            async def check_access(self, thread_id, user_id, **kwargs):
+                return True
+
+        class _ProjectRepo:
+            async def get(self, project_id, **kwargs):
+                return {"id": project_id, "name": "Roadmap", "instructions": "Prefer boring solutions.", "status": "active"}
+
+        request.app.state.thread_store = _MemberThreadStore()
+        request.app.state.project_repo = _ProjectRepo()
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-pinned-project-ctx", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert config["context"][PROJECT_CONTEXT_KEY] == {
+        "project_id": "p-1",
+        "name": "Roadmap",
+        "instructions": "Prefer boring solutions.",
+    }
+
+
+def test_start_run_project_resolution_failure_degrades_to_unassigned(_stub_app_config, caplog):
+    """A resolution error logs a warning and the run proceeds unassigned (§11)."""
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+
+        class _BoomThreadStore:
+            async def get(self, thread_id, **kwargs):
+                raise RuntimeError("database is down")
+
+            async def check_access(self, thread_id, user_id, **kwargs):
+                return True
+
+        request.app.state.thread_store = _BoomThreadStore()
+        request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+            caplog.at_level(logging.WARNING),
+        ):
+            record = await start_run(body, "thread-resolution-failure", request)
+            await record.task
+
+        return captured["config"]
+
+    config = asyncio.run(_scenario())
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+    assert "unassigned" in caplog.text
+
+
+def test_start_run_strips_project_context_message_marker_from_input(_stub_app_config):
+    """The transient project message marker is server-owned: a client copy in
+    message metadata is stripped at admission (spec §12), while ordinary keys
+    pass through."""
+    import asyncio
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "hi",
+                            "additional_kwargs": {PROJECT_CONTEXT_MESSAGE_MARKER: True, "custom": 1},
+                        }
+                    ]
+                },
+                command=None,
+            )
+        )
+    )
+
+    assert PROJECT_CONTEXT_MESSAGE_MARKER not in graph_input["messages"][0].additional_kwargs
+    assert graph_input["messages"][0].additional_kwargs["custom"] == 1
 
 
 @pytest.mark.asyncio
@@ -3274,6 +3783,28 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
     strip_internal_context_keys(via_configurable)
     assert "github_token" not in via_configurable["configurable"]
     assert "disable_clarification" not in via_configurable["configurable"]
+
+
+def test_strip_internal_context_keys_scrubs_audit_attribution_and_recorders():
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    server_owned = {
+        "is_subagent": True,
+        "agent_id": "forged-agent",
+        "__run_loop_detection_recorder": "forged",
+        "__run_tool_promotion_recorder": "forged",
+        "__run_tool_progress_recorder": "forged",
+    }
+    config = build_run_config(
+        "thread-1",
+        {"context": dict(server_owned), "configurable": dict(server_owned)},
+        None,
+    )
+
+    strip_internal_context_keys(config)
+
+    for section in ("context", "configurable"):
+        assert not server_owned.keys() & config[section].keys()
 
 
 def test_start_run_sequence_drops_context_only_keys_for_session_caller():

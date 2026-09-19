@@ -1327,19 +1327,21 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     assert truncated is False
 
 
-def test_list_dir_raises_when_find_returns_no_entries() -> None:
+@pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+def test_list_dir_classifies_empty_failure(marker, error) -> None:
     class _EmptyBox:
         async def exec(self, *argv, env=None, timeout=None):
-            return types.SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+            return types.SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
 
     box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(error) as exc:
         box.list_dir("/mnt/user-data/workspace")
+    assert type(exc.value) is error
 
 
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
-    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    # 127 (no binary) must not look like a missing path.
     class _MissingBinaryBox:
         async def exec(self, *argv, env=None, timeout=None):
             return types.SimpleNamespace(stdout="", stderr="", exit_code=127)

@@ -44,6 +44,7 @@ from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
+from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -480,14 +481,24 @@ def _patch_tool_message(
         config=config,
         sandbox=sandbox,
     )
-    if budgeted is None:
+    update: dict[str, Any] = {}
+    trigger = _effective_trigger(tool_name, config)
+    citation_result = None
+    if tool_name in {"knowledge_search", "task"} and trigger > 0 and len(text) > trigger:
+        citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted[0] if budgeted else text) if tool_name == "task" else "")
+    if citation_result is not None:
+        replacement, update["artifact"] = citation_result
+        transform_kind = "truncated"
+    elif budgeted is not None:
+        replacement, transform_kind = budgeted
+    else:
         return msg
-    replacement, transform_kind = budgeted
-
-    update: dict[str, Any] = {"content": replacement}
+    update["content"] = replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
+    if citation_result is not None and budgeted is not None and budgeted[1] == "externalized":
+        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware")
     append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")
     update["additional_kwargs"] = new_kwargs
     return msg.model_copy(update=update)

@@ -1039,6 +1039,41 @@ class TestDropParallelSiblingTools:
         ]
         assert [tc["name"] for tc in patched.tool_calls] == ["ask_clarification"]
 
+    def test_keeps_openai_responses_clarification_block_matched_by_call_id(self, middleware):
+        # Responses blocks carry the fc_ item id in ``id`` and the tool-call id
+        # in ``call_id``; matching on ``id`` would drop the kept call's block.
+        clarify = {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "ask_clarification", "arguments": "{}"}
+        sibling = {"type": "function_call", "id": "fc_2", "call_id": "b1", "name": "bash", "arguments": "{}"}
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "ls"}},
+            ],
+            content=[clarify, sibling],
+        )
+        patched = middleware.after_model({"messages": [msg]}, self._runtime())["messages"][0]
+        assert patched.content == [clarify]
+
+    def test_keeps_content_block_for_invalid_sibling_left_on_message(self, middleware):
+        # The invalid sibling stays on invalid_tool_calls and is answered by
+        # DanglingToolCallMiddleware, so its block must stay to pair with it.
+        content = [
+            {"type": "tool_use", "id": "c1", "name": "ask_clarification", "input": {"question": "q?"}},
+            {"type": "tool_use", "id": "b1", "name": "bash", "input": {"command": "ls"}},
+            {"type": "tool_use", "id": "w1", "name": "write_file", "input": {}},
+        ]
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "ls"}},
+            ],
+            content=content,
+            invalid_tool_calls=[{"id": "w1", "name": "write_file", "args": "{", "error": "parse", "type": "invalid_tool_call"}],
+        )
+        patched = middleware.after_model({"messages": [msg]}, self._runtime())["messages"][0]
+        assert [block["id"] for block in patched.content] == ["c1", "w1"]
+        assert [tc["id"] for tc in patched.invalid_tool_calls] == ["w1"]
+
     def test_aafter_model_matches_sync(self, middleware):
         import asyncio
 

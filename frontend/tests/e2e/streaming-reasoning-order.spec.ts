@@ -145,10 +145,10 @@ test("renders reasoning above the answer text while the turn is streaming", asyn
     await textarea.fill("Summarize that briefly");
     await textarea.press("Enter");
 
-    // The streaming turn renders inside the chain-of-thought panel, whose
-    // reasoning disclosure is labelled "Thinking".
+    // The streaming turn renders inside the assistant bubble, whose
+    // reasoning disclosure is labelled "Reasoning".
     await expectRenderedAbove(
-      page.getByText("Thinking", { exact: true }),
+      page.getByText("Reasoning", { exact: true }),
       page.getByText(ANSWER_TEXT),
     );
   } finally {

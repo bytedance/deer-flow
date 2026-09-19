@@ -1,5 +1,13 @@
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+Request-admission waits follow the next scheduled admission and configured
+interval, capped at 50 ms; the cap must not become a minimum poll interval that
+limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
+in LLM error handling regardless of its message text. Immediate admission and
+joining the blocking FIFO are one lock-protected decision: do not split the
+fast-path permit check from queue insertion, or an older caller can be overtaken
+while handing off to the wait queue.
+
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
@@ -7,6 +15,7 @@
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
+- Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
 
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 

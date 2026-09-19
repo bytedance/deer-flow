@@ -95,6 +95,13 @@ do not use HTML `maxLength`, which counts UTF-16 code units instead.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Scheduled-task list search filters the current authorized query result by title or
+prompt, composing with status/type filters and thread scope. Selection must derive
+from the filtered list so hidden tasks cannot remain actionable. Keep literal
+matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
+
+Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
+
 ## Environment
 
 Scheduled-task interval forms preserve the initial `every_seconds` on mount,
@@ -124,6 +131,13 @@ the standalone server from `frontend/` with `node --env-file=.env
 .next/standalone/server.js` to load the current credentials.
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
+
+One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
+do not round-trip in the selected timezone. Invalid input emits an empty spec and
+localized inline feedback; both create and edit must block submission. Keep this
+UI validation separate from the API payload. Preserve the original instant when
+wall time and timezone match the mounted snapshot; validate changed inputs, and
+restore the exact original timestamp when those edits are reverted.
 
 ## Resources
 
@@ -181,3 +195,12 @@ block dismissal while deletion is pending. Show the error message when available
 with a localized fallback, and log the rejection for debugging. The shared
 delete helper accepts remote 404 (not 403) before retrying local cleanup, and
 `onDeleted` runs only after both deletion steps succeed.
+
+## Capability Center
+
+`/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
+MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
+mutation permissions, and cache ownership remain in the existing hooks. Skill display names/summaries are presentation
+metadata; runtime names and full descriptions remain unchanged. Public, custom,
+integration, and legacy sources must stay distinct. Community currently offers
+archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.

@@ -32,7 +32,7 @@
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a
    later server preference. The
-   Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
+   Capability Center > Plugins MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
@@ -71,7 +71,7 @@
    fixed page size and an explicit load-more control; full results remain available
    only through JSONL export. The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
-   Settings > Integrations uses a local generation only to suppress stale React
+   Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.
@@ -80,6 +80,8 @@
    Custom Agent settings consume the same query and preserve stale selected names
    as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
+
+AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
 
 Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
 variants after the write succeeds, merge only `deerflow_project_id`, then
@@ -101,6 +103,8 @@ Run duration is run-scoped UI metadata even though the compatibility field `addi
 The workspace-change card follows the same rule: it is resolved from `(threadId, runId)` alone, so every AI message of a run would render an identical copy. A run ends in more than one terminal assistant bubble whenever the model emits answer text that never gains a tool call, so `core/messages/workspace-change-anchor.ts` picks the run's last assistant bubble and `MessageListItem` renders the badge only for that anchor (#4555). Any future run-scoped display belongs in the same place — do not hang one off every message. The two anchor helpers deliberately differ in which group types they accept as a run's last position, because an anchor is only useful where the display is actually rendered: run duration is emitted by `MessageList` around every group, so it accepts any type, while the workspace-change card comes from `MessageListItem` and so restricts to `assistant`. Keep a new helper's candidate set matched to its own render site rather than unifying them.
 
 Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores only text plus the selected slash-skill name in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. `InputBox` waits for enabled skills before restoring a skill chip, degrades a missing/disabled skill back to editable slash text, and clears the stored draft through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
+
+Conversation references (`read_conversation`, opt-in on the backend) are attached from the composer. `ReferenceConversationsButton` (`components/workspace/conversation-references/`) renders only while `/api/features` reports `conversation_references.enabled`, opens a picker over the same `useThreads()` list the sidebar uses (the current thread excluded, capped at `max_references`), and shows removable chips in the composer header. On submit the thread IDs ride `InputBoxSubmitOptions.conversationReferences` → `SendMessageOptions.conversationReferences` → run `context.conversation_references`, which the Gateway consumes at admission; the LangGraph SDK drops unknown top-level body fields, so the top-level request field is not reachable from the web UI. `core/conversation-references` also writes display-only `additional_kwargs.conversation_references` (`{thread_id, title, agent_name?}`) on the visible human message so `message-list-item.tsx` can render read-only chips linking to the source — through `pathOfThread`, so custom-agent sources route to `/workspace/agents/{agent}/chats/{id}`; that metadata grants nothing. References are per message: they are not persisted with the draft, clear on send or thread switch, and regenerate/edit of a turn runs without them unless attached again.
 
 Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
 
@@ -140,11 +144,24 @@ Array previews coalesce consecutive generated markers only at the end into one o
 - **SSE replay gaps** are handled in `core/api/api-client.ts`, which wraps both initial and joined run streams because the upstream SDK ignores unknown event names. An id-less backend `gap` control frame clears stale reconnect metadata, emits an internal `stream_replay_gap` custom event, reloads durable thread values, and resumes after the server-provided retained tail when one exists (or rejoins without a cursor if the buffer is empty), with up to five recovery rejoins after the original stream (six total stream calls on an all-gap exhaustion path). The wrapper remains a lazy async iterable because the SDK consumes it with `for await`. `core/threads/hooks.ts` clears optimistic/transient/subtask state, invalidates durable history caches, and shows the localized recovery warning; never let a gap fall through as a normal stream finish or cancel the still-running backend run.
 - **Streaming Markdown rendering** is owned by `core/streamdown`: Streamdown's `animated` / `isAnimating` API handles incremental word animation, while the shared `streamdownRenderingPlugins` config registers the named code-highlighting and Mermaid plugins required by Streamdown 2.5. Keep wrappers and derived configs wired to that shared object; do not reintroduce a rehype plugin that wraps every word, because reparsing a growing block remounts old words and replays their animation.
 - Citation links in message and artifact Markdown must derive their `citation:` label from the full `ReactNode` children tree, since Streamdown may provide element or array children during streaming rather than a plain string.
+- Tool-step links in `message-group.tsx` (`web_fetch` args, `web_search` / `image_search` result URLs) are model- or provider-controlled, so they pass the markdown `isSafeHref` allowlist; every surface renders a rejected href through the shared `UnsafeLink` marker.
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 - **Subtask step history and runtime metadata** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. The task tool's model-visible `description` is an optional progress label; `MessageList` uses the required `prompt` (then the localized generic subtask label) when a provider omits it, so a valid task call never renders a blank card title. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `task_started` carries the effective `model_name`; `task_running` carries a cumulative usage snapshot after each completed LLM call. `core/tasks/lifecycle.ts` normalizes these additive events, and `computeNextSubtask` keeps the largest cumulative total so replayed or late SSE frames cannot double-count or roll the folded card backward. Terminal ToolMessage metadata (`subagent_model_name` / `subagent_token_usage`) restores the same values from normal history after reload; no per-card event fetch is needed. `core/tasks/steps.ts` is the pure step model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/context.tsx`'s `useUpdateSubtask` applies updates against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
 
 ### Interaction Ownership
 
+- `src/components/workspace/model-picker-content.tsx` owns the compact model
+  list, favorite grouping, and the anchored non-modal picker shared by the main
+  composer and Side Chat. Each row keeps model selection and its inline
+  favorite star as sibling buttons. The picker deliberately follows the
+  pre-favorites two-line row density and does not add a search field. Favorites
+  are stored by
+  `core/models/favorites-store.ts` under a user-scoped browser key and only
+  reorder derived display arrays: never sort `useModels().models`, promote a
+  favorite to the default model, prune a temporarily unavailable favorite, or
+  merge the main and Side Chat selection callbacks. Keep favorite buttons out
+  of model-selection buttons; the two call sites continue to own their triggers
+  and their distinct mode/reasoning-effort transitions.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
 - `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.
@@ -161,3 +178,27 @@ Array previews coalesce consecutive generated markers only at the end into one o
   frame path for older clients.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
+
+Clarification ToolMessages delimit completed runs for streaming message grouping,
+including continuations submitted with hidden human replies. Do not classify all
+messages after the last visible human as unresolved once a clarification result
+has arrived. The processing renderer keeps tool-calling messages intact for
+association and usage accounting, but renders text accompanying
+`ask_clarification` outside the execution panel (including mixed tool calls).
+
+`findCurrentTurnStartIndex` owns the boundary rule for both full and incremental
+message grouping. Incremental prefix/tail splitting applies only at human
+boundaries; clarification results also belong to the preceding processing group,
+so derive the full grouping and stabilize references at clarification boundaries.
+
+### Knowledge source citations
+
+`KnowledgeSourcesProvider` scopes source records to the current message list.
+Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
+AI/human text and metadata cannot create a source. `CitationLink` resolves
+`#knowledge-…` citations through that context and renders unavailable text when
+there is no matching record. `KnowledgeSourcesPanel` lists only sources cited
+outside code/images. Dialog excerpts render as plain text, never HTML or nested
+Markdown. Source records retain retrieval-time evidence, not live documents.
+Resolve knowledge destinations before testing the label in message and artifact
+link renderers: Sources lists use ordinary titles without a `citation:` prefix.

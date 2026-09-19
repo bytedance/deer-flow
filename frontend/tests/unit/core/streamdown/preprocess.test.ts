@@ -273,6 +273,14 @@ test("stripLeakedSystemTags strips tags with attributes", () => {
   expect(stripLeakedSystemTags('<memory class="x">text</memory>')).toBe("text");
 });
 
+test("stripLeakedSystemTags strips project context tags with attributes", () => {
+  expect(
+    stripLeakedSystemTags(
+      '<project name="Roadmap">instructions</project><documents count="1" shown="1">- id=abc | a.pdf</documents>',
+    ),
+  ).toBe("instructions- id=abc | a.pdf");
+});
+
 test("stripLeakedSystemTags handles multiple occurrences", () => {
   expect(
     stripLeakedSystemTags(

@@ -180,17 +180,40 @@ def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
     return default
 
 
+def _append_named_tools_without_conflicts(tools: list, new_tools: list, *, kind: str) -> None:
+    """Append tools without dropping unrelated duplicate-named tools."""
+    existing_names = {getattr(tool, "name", None) for tool in tools}
+    for new_tool in new_tools:
+        if new_tool.name in existing_names:
+            logger.warning("%s tool name %r already exists and was skipped.", kind, new_tool.name)
+            continue
+        tools.append(new_tool)
+        existing_names.add(new_tool.name)
+
+
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
     """Append memory tools without dropping unrelated duplicate-named tools."""
     from deerflow.agents.memory.tools import get_memory_tools
 
-    existing_names = {getattr(tool, "name", None) for tool in tools}
-    for memory_tool in get_memory_tools():
-        if memory_tool.name in existing_names:
-            logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
-            continue
-        tools.append(memory_tool)
-        existing_names.add(memory_tool.name)
+    _append_named_tools_without_conflicts(tools, get_memory_tools(), kind="Memory")
+
+
+def _append_project_document_tools_if_pinned(tools: list, cfg: dict) -> None:
+    """Append the project shelf tools only for runs with a pinned project context.
+
+    Registration follows the admission-pinned ``PROJECT_CONTEXT_KEY`` and
+    nothing else (§10.11): a non-project run never pays the tools' schema
+    tokens and never sees them, while a project run keeps them even when
+    instructions and shelf are both empty. The tools themselves read the same
+    pinned key at call time and fail closed without it.
+    """
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    if PROJECT_CONTEXT_KEY not in cfg:
+        return
+    from deerflow.projects.tools import get_project_document_tools
+
+    _append_named_tools_without_conflicts(tools, get_project_document_tools(), kind="Project document")
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -693,15 +716,15 @@ def build_middlewares(
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
 
-    # A provider may return an empty AIMessage after tool execution. Retry the
-    # final response once, then persist a visible error fallback rather than
-    # allowing LangChain's no-tool-call router to end a silent successful run.
+    # LLMErrorHandlingMiddleware gives a run one model-boundary retry for a true
+    # empty stop. Keep a terminal fallback for post-tool responses that still have
+    # no user-visible text, without adding a graph-level recovery turn.
     middlewares.append(TerminalResponseMiddleware())
 
     # A provider may also cap the final assistant response at the model output
-    # limit. Preserve the assistant content unchanged, but stamp a run-level
-    # stop_reason so Gateway consumers can tell a length-capped completion from
-    # a clean one.
+    # limit. Detector-matched caps stamp stop_reason=model_length_capped,
+    # suppress that response's tool calls, and append a length notice when no
+    # visible text was produced.
     middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
@@ -1040,6 +1063,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_candidates.append(skill_setup.describe_skill_tool)
         if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
             _append_memory_tools_without_name_conflicts(authorization_candidates)
+        _append_project_document_tools_if_pinned(authorization_candidates, cfg)
         append_task_continuity_tools(authorization_candidates, resolved_app_config)
         configured_tool_ids = {id(tool) for tool in configured_tools}
         authorized_tools, _authz_provider = apply_tool_authorization(
@@ -1166,6 +1190,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_candidates.append(skill_setup.describe_skill_tool)
     if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(authorization_candidates)
+    _append_project_document_tools_if_pinned(authorization_candidates, cfg)
     append_task_continuity_tools(authorization_candidates, resolved_app_config)
     configured_tool_ids = {id(tool) for tool in configured_tools}
     authorized_tools, _authz_provider = apply_tool_authorization(

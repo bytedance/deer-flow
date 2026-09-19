@@ -235,6 +235,7 @@ backend/.deer-flow/threads/
 
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
+- 删除只作用于普通文件：上传目录中的符号链接不会被跟随，删除请求按文件不存在（404）处理
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
 - 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
