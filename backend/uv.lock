@@ -852,10 +852,14 @@ postgres = [
 redis = [
     { name = "deerflow-harness", extra = ["redis"] },
 ]
+sandbox0 = [
+    { name = "deerflow-harness", extra = ["sandbox0"] },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "blockbuster" },
+    { name = "filelock" },
     { name = "hypothesis" },
     { name = "jsonschema" },
     { name = "monocle-apptrace" },
@@ -880,6 +884,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["sandbox0"], marker = "extra == 'sandbox0'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.7.0" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.1" },
@@ -898,11 +903,12 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
+provides-extras = ["sandbox0", "postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
+    { name = "filelock", specifier = ">=3.20,<5" },
     { name = "hypothesis", specifier = ">=6.100,<7" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "monocle-apptrace", specifier = ">=0.8.8" },
@@ -1000,6 +1006,10 @@ pymupdf = [
 redis = [
     { name = "redis" },
 ]
+sandbox0 = [
+    { name = "filelock" },
+    { name = "sandbox0" },
+]
 tenki = [
     { name = "tenki" },
 ]
@@ -1024,6 +1034,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.0" },
     { name = "exa-py", specifier = ">=1.0.0" },
+    { name = "filelock", marker = "extra == 'sandbox0'", specifier = ">=3.20,<5" },
     { name = "firecrawl-py", specifier = ">=1.15.0" },
     { name = "html5lib", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.28.0" },
@@ -1058,6 +1069,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "readabilipy", specifier = ">=0.3.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
+    { name = "sandbox0", marker = "extra == 'sandbox0'", specifier = ">=0.10.2,<0.11" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
     { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
@@ -1065,7 +1077,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "sandbox0", "monocle", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"
@@ -1277,6 +1289,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5d/45/c130091c2dfa061bbfe3150f2a5091ef1adf149f2a8d2ae769ecaf6e99a2/fastapi-0.136.1.tar.gz", hash = "sha256:7af665ad7acfa0a3baf8983d393b6b471b9da10ede59c60045f49fbc89a0fa7f", size = 397448, upload-time = "2026-04-23T16:49:44.046Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5a/ff/2e4eca3ade2c22fe1dea7043b8ee9dabe47753349eb1b56a202de8af6349/fastapi-0.136.1-py3-none-any.whl", hash = "sha256:a6e9d7eeada96c93a4d69cb03836b44fa34e2854accb7244a1ece36cd4781c3f", size = 117683, upload-time = "2026-04-23T16:49:42.437Z" },
+]
+
+[[package]]
+name = "filelock"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6f/38/88cd6eda96c40594a1e3da7d8b40f04bc40ace5a6aef9ac5cb407540f173/filelock-4.0.1.tar.gz", hash = "sha256:fdefc3f3e87716d855ae2b732c1cfd521dd99799ef2b4d00e8c0d4dcdc7cc94b", size = 238888, upload-time = "2026-09-19T01:08:15.958Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/33/af0635ab07fe83b1788a1dbe370ff3e226062495a998335cb18a1cac81aa/filelock-4.0.1-py3-none-any.whl", hash = "sha256:481a321a27bef441e23c53371c6abc8d7d16e26b97090074ba44f7538a3fd55a", size = 106219, upload-time = "2026-09-19T01:08:14.49Z" },
 ]
 
 [[package]]
@@ -4404,6 +4425,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ea/f9/0ae446942c846b8266059ad8a30702a35afae55f5cdc54c5adf8d7afdc27/ruff-0.15.12-py3-none-win32.whl", hash = "sha256:d0185894e038d7043ba8fd6aee7499ece6462dc0ea9f1e260c7451807c714c20", size = 10657277, upload-time = "2026-04-24T18:17:18.591Z" },
     { url = "https://files.pythonhosted.org/packages/33/f1/9614e03e1cdcbf9437570b5400ced8a720b5db22b28d8e0f1bda429f660d/ruff-0.15.12-py3-none-win_amd64.whl", hash = "sha256:c87a162d61ab3adca47c03f7f717c68672edec7d1b5499e652331780fe74950d", size = 11837758, upload-time = "2026-04-24T18:17:00.113Z" },
     { url = "https://files.pythonhosted.org/packages/c0/98/6beb4b351e472e5f4c4613f7c35a5290b8be2497e183825310c4c3a3984b/ruff-0.15.12-py3-none-win_arm64.whl", hash = "sha256:a538f7a82d061cee7be55542aca1d86d1393d55d81d4fcc314370f4340930d4f", size = 11120821, upload-time = "2026-04-24T18:16:57.979Z" },
+]
+
+[[package]]
+name = "sandbox0"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpx", extra = ["socks"] },
+    { name = "python-dateutil" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/84/316b6df682ad65b7d05d74b58b861cc443223423dcb816eda378c1a69794/sandbox0-0.10.2.tar.gz", hash = "sha256:086e9028a47db26d371090f60e0659e9b0e179eba0138e9059b86f87b730f18b", size = 189304, upload-time = "2026-09-01T03:30:29.973Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/3c/9ff4a6a8940cf9c40d49f83a65773dbb5e1fa7e256536994851df88bcc51/sandbox0-0.10.2-py3-none-any.whl", hash = "sha256:b13276ee3965b663fdd058cecb6b93618fd653e9e3b2d7b740b940374d73c876", size = 526067, upload-time = "2026-09-01T03:30:28.377Z" },
 ]
 
 [[package]]

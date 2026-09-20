@@ -1729,6 +1729,19 @@ sandbox:
 #   # environment:                    # create-time and per-command defaults
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 7: Sandbox0 — persistent per-thread RootFS with checkpoint/pause between turns.
+# Install: uv sync --extra sandbox0 (from backend/).
+# Set SANDBOX0_API_KEY, and SANDBOX0_BASE_URL for self-hosted deployments.
+# One Gateway process per persistent state_dir; no host bind mounts.
+# sandbox:
+#   use: deerflow.community.sandbox0:Sandbox0Provider
+#   template: default
+#   ttl: 3600
+#   hard_ttl: 604800
+#   request_timeout: 660
+#   lifecycle_timeout: 120
+#   replicas: 10
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================

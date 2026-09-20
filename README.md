@@ -521,6 +521,12 @@ deploy.sh down
 ### Advanced
 #### Sandbox Mode
 
+[Sandbox0](backend/packages/harness/deerflow/community/sandbox0/README.md) is also
+available as an optional persistent workspace provider. It checkpoints and pauses
+the workspace between turns, then resumes the same sandbox identity. See the
+[real Agent demo](backend/examples/sandbox0/README.md) for upload, tools, skills,
+subagents, artifact download and cross-turn persistence validation.
+
 DeerFlow supports multiple sandbox execution modes:
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
