@@ -38,6 +38,62 @@ def _row(seq: int, content: dict) -> dict:
 @pytest.mark.parametrize(
     "content",
     [
+        "- a`b\n    `<think>private-indented-reasoning</think>` public answer",
+        '- paragraph\n    [x]: /url "`"\n    ` <think>private-indented-reasoning</think> ` public answer',
+        "- a`b\n\t`<think>private-indented-reasoning</think>` public answer",
+        "- a`b\n \t`<think>private-indented-reasoning</think>` public answer",
+        "- a`b\n     `<think>private-indented-reasoning</think>` public answer",
+        "- a`b\n      `<think>private-indented-reasoning</think>` public answer",
+        "10. a`b\n    `<think>private-indented-reasoning</think>` public answer",
+        "- a`b\r\n    `<think>private-indented-reasoning</think>` public answer",
+        "- a``b\n    ``<think>private-indented-reasoning</think>`` public answer",
+    ],
+)
+async def test_indented_container_cannot_publish_reasoning(monkeypatch, content):
+    async def scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": content})], False
+
+    monkeypatch.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", scan)
+    created, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    for snapshot in (created, resanitize_share_snapshot(stored)):
+        public = snapshot["messages"][0]["content"]
+        assert "private-indented-reasoning" not in public
+        assert "public answer" in public
+
+
+async def test_ambiguous_indent_preserves_prior_code_and_user_text(monkeypatch):
+    literal = "Use `<think>inline example</think>`.\n\n```xml\n<think>fenced example</think>\n```"
+    attack = "- a`b\n    `<think>private-indented-reasoning</think>` public answer"
+    content = literal + "\n\n" + attack
+
+    async def scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": content}), _row(2, {"type": "human", "content": attack})], False
+
+    monkeypatch.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", scan)
+    created, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}, {"id": "m2", "role": "user", "content": attack}]}
+    for snapshot in (created, resanitize_share_snapshot(stored)):
+        assert snapshot["messages"][0]["content"].startswith(literal)
+        assert "private-indented-reasoning" not in snapshot["messages"][0]["content"]
+        assert snapshot["messages"][1]["content"] == attack
+
+
+def test_ambiguous_indent_discards_pending_and_later_code_as_safety_policy():
+    # Do not emit even the earlier part of this still-pending paragraph or
+    # resume protection after a blank: its real container boundary is unknown.
+    content = "- `<think>pending example</think>`\n    continuation\n\n`<think>later example</think>` public answer"
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    public = resanitize_share_snapshot(stored)["messages"][0]["content"]
+    assert "pending example" not in public
+    assert "later example" not in public
+    assert "continuation" in public
+    assert "public answer" in public
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         '[x]: /url "`"\n<think>private-reference-reasoning</think> ` public answer',
         "[x]: /url '`'\n<think>private-reference-reasoning</think> ` public answer",
         '[x]: /url "`"\r\n<think>private-reference-reasoning</think> ` public answer',

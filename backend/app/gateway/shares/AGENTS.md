@@ -26,6 +26,10 @@ logging decisions from this guide; do not weaken them to simplify a fix.
   stays off to EOF. This deliberately over-strips adjacent code examples.
   Existing code blocks retain their contents. Preserve the documented
   fail-closed policies for quote/list, table, math and HTML boundaries.
+  After a quote/list, a four-column indented continuation discards the pending
+  segment's protection and all later protection in that message. Do not flush
+  and re-pair backticks at an uncertain boundary; previously emitted code stays
+  intact, while pending/later literal examples may be over-stripped.
 - Private-path detection uses bounded normalized shadows; edits use original
   offsets, preserving public text. Retain sparse maps and linear/bounded scans.
   Never build per-character maps for an unchanged multi-megabyte message.

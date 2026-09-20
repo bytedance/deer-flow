@@ -846,9 +846,9 @@ def _container_leaf_content(content: str) -> tuple[str, int, bool, int | None] |
 
     This parser is deliberately conservative after any quote/list has been
     observed: arbitrary leading indentation may be item content indentation.
-    Misclassifying an indented code line as a boundary can only remove extra
-    text, while missing a real item heading lets an inline-code span bridge
-    distinct paragraphs and publish reasoning.
+    Ambiguous four-column continuations are rejected before this classifier.
+    Splitting a segment does not by itself prove code protection only shrinks:
+    changing the starting position can change which backticks pair.
     """
     offset = 0
     thematic_start = _container_thematic_suffix_start(content)
@@ -1206,6 +1206,16 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                 indented_eligible = _is_commonmark_blank(content)
                 continue
             close_indented()
+        if saw_quotelike and _indent_columns(content) >= 4:
+            # The item's content column is unknown: this may be a new block
+            # or a continuation of the pending paragraph. Splitting and
+            # re-pairing backticks can CREATE a code span the renderer never
+            # had ("- a`b\n    `<think>secret</think>`"), not just shrink one.
+            # Discard the still-pending segment and stop granting protection
+            # for the remaining message. Do not flush or resume at a guessed
+            # blank/block boundary: skipped fences/HTML/math can outlive it.
+            # Previously emitted, established code blocks remain protected.
+            return
         # A definition can only begin at a paragraph boundary. Container
         # openers may supply that boundary even while a document paragraph
         # is open. Already-open fences/HTML/indented code were handled above.
@@ -1376,18 +1386,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             indented_start = start
             indented_end = line_end
             continue
-        if saw_quotelike and _indent_columns(content) >= 4:
-            # Fail-closed flush: the renderer resolves leading whitespace —
-            # a tab, or four-plus spaces — against the item's content
-            # column, so the line can open a nested blockquote or list this
-            # space-only quote/list grammar never sees; absorbing it as lazy
-            # continuation let a code span pair across the renderer's block
-            # boundary and publish the reasoning it serves as prose.
-            # Document-level indented-code protection is already suppressed
-            # under ``saw_quotelike``, so the only cost is over-stripping
-            # shapes the renderer may keep as one paragraph — the accepted
-            # asymmetry.
-            flush_segment()
         if segment_start is None:
             segment_start = start
             segment_kind = None

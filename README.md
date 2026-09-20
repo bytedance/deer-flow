@@ -1993,6 +1993,10 @@ sanitizer conservatively strips reasoning markers throughout a definition's
 nonblank continuation region, including ambiguous or malformed definitions. If
 a fence, HTML or math block begins within that region, stripping continues to
 the message end because the block boundary is ambiguous.
+Likewise, after a list or quote, a continuation indented four or more columns
+leaves the current paragraph and the remaining message unprotected as code;
+literal reasoning-tag examples there may be removed. Earlier code examples
+remain intact.
 
 Operators enable it with `conversation_sharing.enabled` in `config.yaml`.
 Multi-replica deployments must give every replica the same

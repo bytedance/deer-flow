@@ -57,6 +57,13 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   or quote appears, document-level fence/indent protection is suppressed:
   item indentation is not modeled, so possible code is over-stripped rather
   than reasoning leaked.
+  A continuation indented four or more columns (spaces or tabs) after a
+  quote/list stops code protection for the pending segment and the rest of
+  the message. Splitting at that uncertain boundary and re-pairing backticks
+  can create false code spans; neither the pending segment nor the remaining
+  text is reparsed. Earlier emitted code remains intact. Literal examples in
+  the pending segment or later in the message may be over-stripped, including
+  after a blank line; resuming would require knowing the skipped block state.
   Owner-only references are replaced in messages and titles, both at create
   and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`,
   `/api/runs/{id}`, and `/api/projects/{id}` route and subpath (plus nginx's
