@@ -133,7 +133,16 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     blocks: list[str] = []
     for s in skills:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
-        tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
+        # ``allowed_tools`` is tri-state: ``None`` is unrestricted (legacy allow-all)
+        # while an empty tuple is an explicit "no business tools" declaration. A
+        # truthiness test conflates them and tells the model every tool is available
+        # for a skill the policy middleware has just stripped down to none.
+        if s.allowed_tools is None:
+            tools_line = "(all)"
+        elif s.allowed_tools:
+            tools_line = ", ".join(s.allowed_tools)
+        else:
+            tools_line = "(none)"
         location = s.get_container_file_path(container_base_path)
         # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
         # escape so a value cannot forge a framework tag in the describe_skill output.
