@@ -29,41 +29,27 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   only bare strings and explicit `text` / `output_text` blocks; reasoning,
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
   sections are stripped outside Markdown code examples — code recognition
-  is block-aware per CommonMark (fences, all seven raw-HTML block types,
-  indented code, ATX headings including empty forms inside quote/list
-  containers, display-math openers there too — their block content is
-  consumed unprotected until a closing dollar run at the opener's own
-  quote shape (item-rooted math runs to the message end; over-consumption
-  is the safe direction) — and lazy paragraphs). Possible link-reference
-  definitions (escaped/multiline labels included) and their following
-  nonblank lines remain unprotected until a blank line: destination/title
+  is block-aware at document scope (fences, all seven raw-HTML block types,
+  indented code, headings, display math and GFM table cells). Container parsing
+  is deliberately not approximated: the first possible quote/list line,
+  including an empty marker, discards the still-pending paragraph and stops
+  granting code protection for the rest of that message. This also applies
+  inside a reference-definition region. Already-open document-level code
+  blocks consume their literal markers normally, and earlier emitted code
+  remains intact. Genuine `<think>` examples in the pending paragraph, inside
+  containers or anywhere afterward may therefore be over-stripped, even
+  after a blank line. Neither a guessed boundary nor re-pairing backticks
+  proves that protected regions only shrink; setext, nested lists, lazy
+  tables, HTML exits and math boundaries all had counterexamples.
+  Possible link-reference definitions (escaped/multiline labels included)
+  and their following nonblank lines remain unprotected: destination/title
   parsing is not duplicated. Invalid definitions and adjacent genuine code
-  examples may therefore be over-stripped; separate examples with a blank
-  line. If a skipped fence, raw-HTML or math opener makes later block state
-  ambiguous, protection stays off through the message end. Already-open code
-  blocks retain literal contents;
-  nested reasoning tags match to their
-  outer close by depth; and GFM table rows and cells are separate inline
-  contexts (remarkGfm splits them at the block level before inline parsing,
-  so backticks never pair across a row or an unescaped pipe; each row's
-  prefix peels the full container stack — quote markers, list markers, and
-  item continuation indentation — the way the renderer's containers do).
-  Messages with no case-insensitive `<think` opener skip Markdown pairing
-  entirely: masking can only hide openers, never add one, so nothing can
-  be removed and the edge trim comes from streamed region extents — two
-  compiled scans clear code-free messages without walking, and the walk
-  classifies only lines whose first character can open a construct.
-  Once a list
-  or quote appears, document-level fence/indent protection is suppressed:
-  item indentation is not modeled, so possible code is over-stripped rather
-  than reasoning leaked.
-  A continuation indented four or more columns (spaces or tabs) after a
-  quote/list stops code protection for the pending segment and the rest of
-  the message. Splitting at that uncertain boundary and re-pairing backticks
-  can create false code spans; neither the pending segment nor the remaining
-  text is reparsed. Earlier emitted code remains intact. Literal examples in
-  the pending segment or later in the message may be over-stripped, including
-  after a blank line; resuming would require knowing the skipped block state.
+  examples may be over-stripped; use a blank line before independent root
+  examples. If a skipped fence, raw-HTML or math opener makes later block
+  state ambiguous, protection stays off through the message end. Nested
+  reasoning tags match their outer close by depth.
+  Messages with no case-insensitive `<think` opener skip inline pairing;
+  edge trimming follows the same conservative line-level region walk.
   Owner-only references are replaced in messages and titles, both at create
   and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`,
   `/api/runs/{id}`, and `/api/projects/{id}` route and subpath (plus nginx's

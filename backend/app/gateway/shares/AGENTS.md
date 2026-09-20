@@ -20,16 +20,14 @@ logging decisions from this guide; do not weaken them to simplify a fix.
   Assistant reasoning/tool metadata never passes through. User text is not
   assistant reasoning. Strip assistant `<think>` outside genuine Markdown code,
   then neutralize owner-only paths in both text and titles.
-- Code protection follows renderer block boundaries. A possible reference
-  definition and its nonblank continuation region remain unprotected; if a
-  skipped fence/HTML/math opener makes later boundaries uncertain, protection
-  stays off to EOF. This deliberately over-strips adjacent code examples.
-  Existing code blocks retain their contents. Preserve the documented
-  fail-closed policies for quote/list, table, math and HTML boundaries.
-  After a quote/list, a four-column indented continuation discards the pending
-  segment's protection and all later protection in that message. Do not flush
-  and re-pair backticks at an uncertain boundary; previously emitted code stays
-  intact, while pending/later literal examples may be over-stripped.
+- Code protection is document-scoped. At the first possible quote/list line
+  (empty markers included), discard the pending paragraph and stop granting
+  protection through EOF, also in reference-definition regions. Do not guess
+  container boundaries or re-pair ticks: this can create false code spans.
+  Earlier emitted code and already-open root code blocks stay protected;
+  literal examples in the pending paragraph or later may be over-stripped.
+  Possible reference definitions and their nonblank continuations also stay
+  unprotected; a skipped fence/HTML/math opener extends that policy to EOF.
 - Private-path detection uses bounded normalized shadows; edits use original
   offsets, preserving public text. Retain sparse maps and linear/bounded scans.
   Never build per-character maps for an unchanged multi-megabyte message.

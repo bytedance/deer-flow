@@ -38,6 +38,29 @@ def _row(seq: int, content: dict) -> dict:
 @pytest.mark.parametrize(
     "content",
     [
+        "- a`b\n=\n`<think>private-container-reasoning</think>` public answer",
+        "> a`b\n> - <think>private-container-reasoning</think>\na`b public answer",
+        "> - x\n| a` | b |\n| - | - |\n`<think>private-container-reasoning</think>` public answer",
+        "- <div>\n$$\n\n`<think>private-container-reasoning</think>` public answer",
+        '-\n[x]: /url "`"\n<think>private-container-reasoning</think> public answer\n[x]: /url "`"',
+    ],
+)
+async def test_container_boundaries_cannot_publish_reasoning(monkeypatch, content):
+    async def scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": content})], False
+
+    monkeypatch.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", scan)
+    created, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    for snapshot in (created, resanitize_share_snapshot(stored)):
+        public = snapshot["messages"][0]["content"]
+        assert "private-container-reasoning" not in public
+        assert "public answer" in public
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         "- a`b\n    `<think>private-indented-reasoning</think>` public answer",
         '- paragraph\n    [x]: /url "`"\n    ` <think>private-indented-reasoning</think> ` public answer',
         "- a`b\n\t`<think>private-indented-reasoning</think>` public answer",
@@ -135,7 +158,6 @@ async def test_reference_definition_cannot_publish_reasoning_on_create_or_read(m
         '[x]: /url "title"\n\n```md\n<think>literal example</think>\n```',
         "Prose `\n[x]: /url\n<think>literal example</think>`.",
         "[ordinary link](/url) and `<think>literal example</think>`.",
-        '> [x]: /url "title"\n>\n> Use `<think>literal example</think>`.',
     ],
 )
 def test_reference_definition_guard_preserves_independent_code_examples(content):
@@ -152,6 +174,49 @@ def test_reference_like_region_overstrips_adjacent_code_as_safety_policy():
     result = resanitize_share_snapshot(snapshot)["messages"][0]["content"]
     assert "literal example" not in result
     assert "public answer" in result
+
+
+@pytest.mark.parametrize("marker", ["-", "+", "*", "1.", "10)", ">", "> >"])
+def test_container_start_discards_pending_and_later_code_as_safety_policy(marker):
+    prefix = "Earlier `<think>prior example</think>`.\n\n"
+    pending = "Pending `<think>pending example</think>`.\n"
+    tail = f"{marker}\n\nUse `<think>later example</think>` public answer"
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": prefix + pending + tail}]}
+    public = resanitize_share_snapshot(stored)["messages"][0]["content"]
+    assert public.startswith(prefix)
+    assert "pending example" not in public
+    assert "later example" not in public
+    assert "public answer" in public
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "```md\n- `<think>literal example</think>`\n> quote\n```",
+        "    - `<think>literal example</think>`\n    > quote",
+        "Use `<think>literal example</think>`.\n\n> <think>private reasoning</think> public answer",
+    ],
+)
+def test_container_markers_preserve_preexisting_root_code(content):
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    public = resanitize_share_snapshot(stored)["messages"][0]["content"]
+    assert "<think>literal example</think>" in public
+    assert "private reasoning" not in public
+
+
+@pytest.mark.parametrize("marker", ["-", "1.", ">"])
+def test_reference_region_cannot_resume_code_after_container_as_safety_policy(marker):
+    content = f'[x]: /url "title"\n{marker}\n\n`<think>later example</think>` public answer'
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    public = resanitize_share_snapshot(stored)["messages"][0]["content"]
+    assert "later example" not in public
+    assert "public answer" in public
+
+
+def test_quoted_reference_example_is_stripped_as_container_policy():
+    content = '> [x]: /url "title"\n>\n> Use `<think>literal example</think>`.'
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    assert resanitize_share_snapshot(stored)["messages"][0]["content"] == '> [x]: /url "title"\n>\n> Use ``.'
 
 
 async def test_snapshot_keeps_only_visible_human_and_ai_text():
@@ -2054,7 +2119,9 @@ def test_empty_atx_heading_interrupts_inline_code_before_reasoning():
     nested = strip("> > visible `\n> > ###\n> > <think>secret-after-nested-heading</think> ` tail")
     assert "secret-after-nested-heading" not in nested
     assert "visible" in nested and "tail" in nested
-    assert "quoted-code" in strip("> # `x<think>quoted-code</think>x`")
+    # Container policy now deliberately strips even real quoted code.
+    assert "quoted-code" not in strip("> # `x<think>quoted-code</think>x`")
+    assert "root-code" in strip("# `x<think>root-code</think>x`")
 
     ordered = strip("10. visible `\n    ###\n    <think>secret-after-ordered-heading</think> ` tail")
     assert "secret-after-ordered-heading" not in ordered
@@ -2062,7 +2129,7 @@ def test_empty_atx_heading_interrupts_inline_code_before_reasoning():
 
     mixed = strip("- visible `\n  > ###\n  > <think>secret-after-mixed-heading</think> ` tail")
     assert "secret-after-mixed-heading" not in mixed
-    assert "list-code" in strip("- # `x<think>list-code</think>x`")
+    assert "list-code" not in strip("- # `x<think>list-code</think>x`")
 
 
 def test_container_leaf_blocks_interrupt_inline_code_before_reasoning():
@@ -2288,10 +2355,9 @@ def test_strip_indented_eligible_after_selfclosed_html_block():
     assert "s-oc" in out
 
 
-def test_strip_quote_marker_depth_interrupts_and_dedent_continues():
-    """Round-5: a deeper-nested quote line interrupts the outer quote's
-    paragraph (its ``<think>`` is prose and must strip), while the dedent
-    mirror is lazy continuation whose real span is preserved."""
+def test_quote_depth_and_lazy_dedent_both_strip_under_container_policy():
+    """Both real prose and a genuine lazy code span take the safe loss;
+    quote nesting is no longer guessed to grant code protection."""
     from app.gateway.shares.snapshot import (
         _strip_think_blocks_outside_markdown_code as strip,
     )
@@ -2299,7 +2365,7 @@ def test_strip_quote_marker_depth_interrupts_and_dedent_continues():
     deeper = strip("> `a\nplain <think>s-dq</think>x\n> > `b`")
     assert "s-dq" not in deeper
     dedent = strip("> > `a\nplain <think>s-keep</think>x\n> `b`")
-    assert "s-keep" in dedent
+    assert "s-keep" not in dedent
 
 
 def test_strip_cross_tag_raw_text_close_strips_reasoning():
@@ -3141,9 +3207,10 @@ def test_strip_gfm_table_inside_quote_and_list_containers_splits_cells():
     assert "list-secret" not in out
     assert "tail" in out
 
-    # Balanced spans inside one cell remain code (no over-strip).
+    # Container policy strips even balanced spans inside a real quoted cell.
     out = strip("> - | `<think>keep-in-code</think>` |\n>   | --- |\n>   | plain |")
-    assert "keep-in-code" in out
+    assert "keep-in-code" not in out
+    assert "root-code" in strip("| `<think>root-code</think>` |\n| --- |\n| plain |")
 
 
 def test_strip_skips_markdown_scan_when_no_think_opener_exists(
@@ -3274,10 +3341,10 @@ def test_container_math_state_machine_variants():
     out = strip("> <div>\n> $$\n> x\n> <think>html-math</think> ` t")
     assert "html-math" not in out
 
-    # Mid-line dollars keep the line a paragraph: the two backticks pair
-    # inside it and the reasoning is legitimate inline code (no overstrip).
+    # This really is inline code, but quoted examples take the deliberate
+    # safe loss instead of reintroducing a container-dependent exception.
     out = strip("> a ` x\n> $$ inline $$\n> <think>para-math</think> ` t")
-    assert "para-math" in out
+    assert "para-math" not in out
 
 
 def test_container_math_closer_is_scoped_to_the_openers_own_quote_shape():

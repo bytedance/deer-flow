@@ -67,17 +67,10 @@ def _math_closes(content: str, opener_len: int) -> bool:
 
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
-_QUOTE_DEPTH_MARKER_RE = re.compile(r" {0,3}>[ \t]?")
-_LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
+_LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)")
 _CONTAINER_PADDING_RE = re.compile(r"[ \t]*")
 _CONTAINER_QUOTE_MARKER_RE = re.compile(r">[ \t]?")
 _CONTAINER_LIST_MARKER_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])[ \t]+")
-# A container flow-math closer must repeat the opener's own quote-marker
-# prefix verbatim: only a pure quote run can bound the block (a list
-# marker in the prefix means the math is item-rooted, and the item's
-# content column this walk does not model — such math conservatively runs
-# to the message end instead of closing on a guessed shape).
-_CONTAINER_MATH_QUOTE_PREFIX_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]?)*")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # CommonMark type-1 start: the tag name must be followed by a space, a
@@ -698,9 +691,9 @@ def _segment_gfm_inline_contexts(segment):
     Every row's prefix peels the renderer's full container stack — quote
     markers, list markers, and the opened item's continuation indentation —
     before classification, mirroring what reaches remarkGfm's tokenizer.
-    When the renderer would NOT split (e.g. a lazy delimiter line inside a
-    quote), the split still happens — over-stripping, the module's
-    leak-vs-loss safe direction. Body rows run to the segment end: the walk
+    The caller stops protection at container openers, so container lazy
+    lines cannot be reinterpreted as document-level tables here. Body rows
+    run to the segment end: the walk
     never leaves a blank line inside a segment, and micromark accepts any
     non-blank line as a body row.
     """
@@ -785,39 +778,6 @@ def _segment_gfm_inline_contexts(segment):
         yield pre_start, last_line_end
 
 
-def _quote_depth(content: str) -> int:
-    """Number of leading blockquote markers (a line starting "> > " nests two)."""
-    depth = 0
-    offset = 0
-    while True:
-        marker = _QUOTE_DEPTH_MARKER_RE.match(content, offset)
-        if marker is None:
-            return depth
-        depth += 1
-        offset = marker.end()
-
-
-def _container_thematic_suffix_start(content: str) -> int | None:
-    """Start of a homogeneous three-marker suffix, computed in one pass."""
-    cursor = len(content)
-    while cursor > 0 and content[cursor - 1] in " \t":
-        cursor -= 1
-    if cursor == 0 or content[cursor - 1] not in "-*_":
-        return None
-    marker = content[cursor - 1]
-    count = 0
-    start = cursor
-    while cursor > 0:
-        while cursor > 0 and content[cursor - 1] in " \t":
-            cursor -= 1
-        if cursor == 0 or content[cursor - 1] != marker:
-            break
-        cursor -= 1
-        start = cursor
-        count += 1
-    return start if count >= 3 else None
-
-
 def _container_body(content: str) -> tuple[str, bool]:
     """Peel quote/list markers and report whether a quote was present."""
     offset = 0
@@ -834,60 +794,6 @@ def _container_body(content: str) -> tuple[str, bool]:
         if marker is None:
             return content[offset:], saw_quote
         offset = marker.end()
-
-
-def _container_leaf_content(content: str) -> tuple[str, int, bool, int | None] | None:
-    """Return a leaf-block line nested in quote/list containers.
-
-    The fourth element is the flow-math opener's dollar-run length when the
-    leaf is display math (the caller consumes the block's content until a
-    standalone run at least that long, mirroring the root-level math walk),
-    and ``None`` for every other leaf kind.
-
-    This parser is deliberately conservative after any quote/list has been
-    observed: arbitrary leading indentation may be item content indentation.
-    Ambiguous four-column continuations are rejected before this classifier.
-    Splitting a segment does not by itself prove code protection only shrinks:
-    changing the starting position can change which backticks pair.
-    """
-    offset = 0
-    thematic_start = _container_thematic_suffix_start(content)
-    while True:
-        # Regex ``pos`` keeps one immutable source string.  Re-slicing the
-        # remaining suffix at every nested marker makes a valid 2 MiB share
-        # quadratic under an adversarial ``> > > ...`` line.
-        padding = _CONTAINER_PADDING_RE.match(content, offset)
-        assert padding is not None
-        offset = padding.end()
-        # Thematic syntax overlaps a bullet marker (``* * *``), so test it
-        # at every container depth before consuming another list marker.
-        if offset == thematic_start:
-            return content[offset:], offset, False, None
-        marker = _CONTAINER_QUOTE_MARKER_RE.match(content, offset)
-        if marker is None:
-            marker = _CONTAINER_LIST_MARKER_RE.match(content, offset)
-        if marker is None:
-            break
-        offset = marker.end()
-
-    body = content[offset:]
-    if _HEADING_RE.match(body) is not None:
-        return body, offset, True, None
-    math_match = _DISPLAY_MATH_OPEN_RE.match(body)
-    if math_match is not None and "$" not in body[math_match.end() :]:
-        # Same construct and meta guard as the root-level walk: a valid
-        # flow-math opener is its own block, so it interrupts the item
-        # paragraph, and nothing inside the math is protected.
-        return body, offset, False, len(math_match.group(1))
-    if _THEMATIC_RE.match(body) is not None or _SETEXT_UNDERLINE_RE.match(body) is not None:
-        return body, offset, False, None
-    fence = _FENCE_OPEN_RE.match(body)
-    if fence is not None and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
-        return body, offset, False, None
-    html_kind, _tag, _blank_end, _closes_on_open = _html_open(body)
-    if html_kind is not None:
-        return body, offset, False, None
-    return None
 
 
 def _indent_columns(content: str) -> int:
@@ -1030,7 +936,9 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     length) and inline code spans, passing each ``(start, end)`` region to
     *emit*. HTML blocks are deliberately NOT protected — their lines merely
     terminate paragraphs, so any ``<think>`` inside them is stripped rather
-    than served.
+    than served. Quote/list openers discard the pending paragraph and stop
+    the walk: container boundaries cannot be approximated safely by splitting
+    and re-pairing inline spans.
 
     The walk is line-structured (linear in the text; the old DOTALL fence
     regex was quadratic per line start) and yields disjoint regions, which
@@ -1058,13 +966,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     html_kind: str | None = None
     html_tag: str | None = None
     html_blank_end = False
-    container_html_kind: str | None = None
-    container_html_tag: str | None = None
-    container_html_blank_end = False
-    container_html_requires_quote = False
-    container_math_open = False
-    container_math_len = 0
-    container_math_prefix = ""
     indented_start: int | None = None
     indented_end = 0
     math_open = False
@@ -1077,16 +978,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     indented_eligible = True
     segment_start: int | None = None
     segment_end = 0
-    # Quote/list lines root a segment whose later plain lines are lazy
-    # continuations of the same paragraph (an inline span may bridge them);
-    # an ordinary line roots a segment a quote/list line would interrupt.
-    # `saw_quotelike` latches for the whole message: item-scoped fences and
-    # indents cannot be told from document-level ones by a flat walk, so
-    # once a list or quote appears, both document-level protections are
-    # suppressed (strip instead — the module's leak-vs-loss asymmetry).
-    segment_kind: str | None = None
-    segment_quote_depth = 0
-    saw_quotelike = False
     reference_region = False
     reference_ambiguous_block = False
 
@@ -1120,7 +1011,8 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             # This deliberately over-strips adjacent code examples unless
             # separated by a blank line, but cannot publish hidden reasoning.
             content = text[start:content_end]
-            saw_quotelike = saw_quotelike or _BLOCKQUOTE_RE.match(content) is not None or _LIST_ITEM_RE.match(content) is not None
+            if _BLOCKQUOTE_RE.match(content) is not None or _LIST_ITEM_RE.match(content) is not None:
+                return
             body, _ = _container_body(content)
             # A skipped fence/raw-HTML/math opener may outlive a blank line.
             # Re-entering the walker would reinterpret its closer as an
@@ -1140,20 +1032,9 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
         # fallthrough below: extend the open segment. Prose-dominated
         # messages (the common no-think share) must not pay the construct
         # battery per line on every anonymous read.
-        if (
-            fence_char is None
-            and html_kind is None
-            and container_html_kind is None
-            and not math_open
-            and not container_math_open
-            and indented_start is None
-            and start < content_end
-            and text[start] not in " \t#>*+-~_<=$`["
-            and not text[start].isdigit()
-        ):
+        if fence_char is None and html_kind is None and not math_open and indented_start is None and start < content_end and text[start] not in " \t#>*+-~_<=$`[" and not text[start].isdigit():
             if segment_start is None:
                 segment_start = start
-                segment_kind = None
             segment_end = line_end
             indented_eligible = False
             continue
@@ -1174,22 +1055,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                 html_kind = None
                 indented_eligible = True
             continue
-        if container_html_kind is not None:
-            container_body, has_quote = _container_body(content)
-            if container_html_requires_quote and not has_quote:
-                # A raw HTML block cannot lazily continue after its quote
-                # container ends; reconsider this line at document scope.
-                container_html_kind = None
-                indented_eligible = True
-            else:
-                if container_html_blank_end:
-                    if _is_commonmark_blank(container_body):
-                        container_html_kind = None
-                        indented_eligible = True
-                elif _html_block_close(container_body, container_html_kind, container_html_tag):
-                    container_html_kind = None
-                    indented_eligible = True
-                continue
         if math_open:
             # The closer is a standalone dollar run at least the opener's
             # length: a mid-line ``$$`` is math content, so the block stays
@@ -1206,30 +1071,21 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                 indented_eligible = _is_commonmark_blank(content)
                 continue
             close_indented()
-        if saw_quotelike and _indent_columns(content) >= 4:
-            # The item's content column is unknown: this may be a new block
-            # or a continuation of the pending paragraph. Splitting and
-            # re-pairing backticks can CREATE a code span the renderer never
-            # had ("- a`b\n    `<think>secret</think>`"), not just shrink one.
-            # Discard the still-pending segment and stop granting protection
-            # for the remaining message. Do not flush or resume at a guessed
-            # blank/block boundary: skipped fences/HTML/math can outlive it.
-            # Previously emitted, established code blocks remain protected.
+        if _BLOCKQUOTE_RE.match(content) is not None or _LIST_ITEM_RE.match(content) is not None:
+            # This flat walk cannot establish the renderer's container stack.
+            # Guessing boundaries then re-pairing backticks can CREATE false
+            # code spans (setext, nested items, lazy tables, HTML and math).
+            # Do not flush the pending paragraph: only regions emitted before
+            # it keep protection. The container and the rest of the message
+            # remain unprotected, including after blank lines. Already-open
+            # root code/HTML/math blocks were handled above.
             return
-        # A definition can only begin at a paragraph boundary. Container
-        # openers may supply that boundary even while a document paragraph
-        # is open. Already-open fences/HTML/indented code were handled above.
-        quote = _BLOCKQUOTE_RE.match(content) is not None
-        item = _LIST_ITEM_RE.match(content) is not None
-        if "[" in content and not (indented_eligible and not saw_quotelike and _indent_columns(content) >= 4):
-            body, _ = _container_body(content)
-            prefix_len = len(content) - len(body)
-            # A new list item can be nested inside an unchanged quote depth.
-            new_container = item or _CONTAINER_LIST_MARKER_RE.search(content[:prefix_len]) is not None or (quote and (segment_kind != "quote" or _quote_depth(content) > segment_quote_depth))
-            if (segment_start is None or new_container) and _starts_reference_definition(text, start + prefix_len):
-                flush_segment()
+        # At document scope a definition starts only at a paragraph boundary;
+        # four columns of indentation are code, not a reference definition.
+        if segment_start is None and _indent_columns(content) < 4:
+            body = content.lstrip(" ")
+            if _starts_reference_definition(text, start + len(content) - len(body)):
                 reference_region = True
-                saw_quotelike = saw_quotelike or quote or item
                 indented_eligible = False
                 continue
         math_match = _DISPLAY_MATH_OPEN_RE.match(content)
@@ -1253,19 +1109,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             continue
         fence_match = _FENCE_OPEN_RE.match(content)
         if fence_match is not None and not (fence_match.group(1)[0] == "`" and "`" in fence_match.group(2)):
-            if saw_quotelike:
-                # List/quote context: an item-scoped fence's extent depends
-                # on the item's content indent, which this document-level
-                # walk does not model — and both misreads leak (an item
-                # fence kept open past its item, or a dedented fence line
-                # eaten as document fence content). Conservative inversion:
-                # no document-level fence protection once a list or quote
-                # has been seen. The fence line only BREAKS the segment so
-                # fake inline spans cannot pair across it; item-scoped
-                # fences are stripped instead of protected.
-                flush_segment()
-                indented_eligible = False
-                continue
             # A fence interrupts any open paragraph.
             close_indented()
             flush_segment()
@@ -1294,73 +1137,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                 # A self-closed HTML block is a leaf-block boundary.
                 indented_eligible = True
             continue
-        quote_match = _BLOCKQUOTE_RE.match(content) is not None
-        list_match = (not quote_match) and _LIST_ITEM_RE.match(content) is not None
-        if quote_match or list_match or saw_quotelike:
-            if container_math_open:
-                # Inside a container flow-math block the content is literal
-                # math source to the renderer — headings or fences it
-                # resembles are NOT leaves there, and nothing inside is
-                # protected. The block closes only on a standalone dollar
-                # run at the opener's own quote shape: a deeper quote, a
-                # fresh list item, or a dedented/indented variant is
-                # content (closing on those dropped the renderer's real
-                # math back into segments where backticks paired across
-                # it), and item-rooted math conservatively runs to the
-                # message end — over-consumption is the module's safe
-                # direction, the round-22 leak was the other one.
-                if _CONTAINER_MATH_QUOTE_PREFIX_RE.fullmatch(container_math_prefix) is not None and content.startswith(container_math_prefix) and _math_closes(content[len(container_math_prefix) :], container_math_len):
-                    container_math_open = False
-                continue
-            container_leaf = _container_leaf_content(content)
-            if container_leaf is not None:
-                leaf_body, leaf_offset, preserve_inline, math_len = container_leaf
-                # A leaf block inside any quote/list container interrupts the
-                # item paragraph. Item indentation is intentionally parsed
-                # fail-closed because this sanitizer's leak-vs-loss contract
-                # already suppresses code-block protection in such messages.
-                saw_quotelike = True
-                flush_segment()
-                if math_len is not None:
-                    container_math_open = True
-                    container_math_len = math_len
-                    container_math_prefix = content[:leaf_offset]
-                elif preserve_inline and inline_spans:
-                    for begin, end in _commonmark_inline_code_spans(leaf_body):
-                        emit(start + leaf_offset + begin, start + leaf_offset + end)
-                kind, tag, ends_at_blank, closes_on_open = _html_open(leaf_body)
-                if kind is not None and not closes_on_open:
-                    container_html_kind = kind
-                    container_html_tag = tag
-                    container_html_blank_end = ends_at_blank
-                    _body, container_html_requires_quote = _container_body(content)
-                indented_eligible = True
-                continue
-        if quote_match or list_match:
-            # An empty quote line at any nesting depth is a blank line
-            # inside the quote: it splits the quoted paragraph.
-            blank_quote = quote_match and re.fullmatch(r" {0,3}>[ \t]*(?:>[ \t]*)*", content) is not None
-            if blank_quote:
-                flush_segment()
-                indented_eligible = True
-                continue
-            saw_quotelike = True
-            kind_root = "quote" if quote_match else "list"
-            # A list line always starts a fresh item (two items are two
-            # paragraphs — a span can never bridge them). A quote line
-            # continues a quote-rooted segment only when its marker depth
-            # is not deeper — the `>` markers are lazy paragraph
-            # continuation at the same nesting; a deeper-nested quote line
-            # interrupts the outer quote's paragraph.
-            depth = _quote_depth(content) if quote_match else 0
-            if list_match or segment_kind != "quote" or depth > segment_quote_depth:
-                flush_segment()
-                segment_start = start
-                segment_kind = kind_root
-                segment_quote_depth = depth
-            segment_end = line_end
-            indented_eligible = False
-            continue
         # A setext underline exists only under an open paragraph (spec
         # §4.3): with no paragraph to underline, ``===``/``-``-only lines
         # are ordinary paragraph/list text and a following 4-column line is
@@ -1378,7 +1154,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                     emit(start + begin, start + end)
             indented_eligible = True
             continue
-        if indented_eligible and not saw_quotelike and _indent_columns(content) >= 4:
+        if indented_eligible and _indent_columns(content) >= 4:
             # An indented code block (it cannot interrupt a paragraph, so
             # entry requires a blank line, the document start, or a leaf
             # block boundary); its content is protected verbatim.
@@ -1388,7 +1164,6 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             continue
         if segment_start is None:
             segment_start = start
-            segment_kind = None
         segment_end = line_end
         indented_eligible = False
     flush_segment()
