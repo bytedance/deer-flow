@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
@@ -29,16 +30,64 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     ``memory_flush_hook``: thread state is mixed by design (raw user turns next
     to already-redacted tool results / summaries), so existing placeholder
     indices are reserved across the whole batch before any new value allocates,
-    and message objects are rebuilt rather than mutated.
+    and message objects are rebuilt rather than mutated. Structured tool-call
+    arguments are covered too — backends like OpenViking retain the full
+    message object, including ``tool_calls`` and provider-format arguments in
+    ``additional_kwargs``.
     """
     redactor = _Redactor(active_pii_detectors(pii_redaction_config))
     for message in messages:
         redactor.reserve(message.content)
+        for call in _iter_tool_calls(message):
+            redactor.reserve(call.get("args"))
+
     redacted = []
     for message in messages:
+        updates: dict = {}
         content, changed = _redact_content(message.content, redactor)
-        redacted.append(message.model_copy(update={"content": content}) if changed else message)
+        if changed:
+            updates["content"] = content
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            rewritten = [_redact_tool_call(call, redactor) for call in tool_calls]
+            if rewritten != tool_calls:
+                updates["tool_calls"] = rewritten
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("tool_calls"):
+            rewritten = _redact_strings(additional_kwargs["tool_calls"], redactor)
+            if rewritten != additional_kwargs["tool_calls"]:
+                updates["additional_kwargs"] = {**additional_kwargs, "tool_calls": rewritten}
+        redacted.append(message.model_copy(update=updates) if updates else message)
     return redacted
+
+
+def _iter_tool_calls(message: object) -> Iterator[dict]:
+    """Yield the parsed tool-call dicts carried by *message*, if any."""
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict):
+                yield call
+
+
+def _redact_tool_call(call: dict, redactor: _Redactor) -> dict:
+    """Redact PII inside one parsed tool-call dict (args values recursively)."""
+    rewritten = dict(call)
+    args = rewritten.get("args")
+    if args is not None:
+        rewritten["args"] = _redact_strings(args, redactor)
+    return rewritten
+
+
+def _redact_strings(value: object, redactor: _Redactor) -> object:
+    """Redact every string leaf in a JSON-like *value* tree."""
+    if isinstance(value, str):
+        return redactor.redact(value)
+    if isinstance(value, list):
+        return [_redact_strings(item, redactor) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_strings(item, redactor) for key, item in value.items()}
+    return value
 
 
 class MemoryMiddlewareState(AgentState):

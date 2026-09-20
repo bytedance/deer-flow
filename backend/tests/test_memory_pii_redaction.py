@@ -138,3 +138,33 @@ def test_compaction_flush_hook_untouched_without_config(monkeypatch):
 def test_compaction_flush_hook_untouched_when_disabled(monkeypatch):
     queued = _flush_hook_call(monkeypatch, PiiRedactionConfig(enabled=False), [HumanMessage("reach alice@example.com")])
     assert "alice@example.com" in queued[0].content
+
+
+def test_tool_call_args_redacted(monkeypatch):
+    # OpenViking-style retention keeps the full message object, including
+    # parsed tool_calls and provider-format arguments in additional_kwargs.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    ai = AIMessage(
+        content="",
+        tool_calls=[{"name": "memory_search", "args": {"query": "alice@example.com"}, "id": "call_1"}],
+        additional_kwargs={
+            "tool_calls": [
+                {"function": {"name": "memory_search", "arguments": '{"query": "alice@example.com"}'}},
+            ],
+        },
+    )
+    call = _run(mw, manager, monkeypatch, [HumanMessage("hi"), ai])
+    queued = call.args[1][1]
+    assert "alice@example.com" not in str(queued.tool_calls)
+    assert EMAIL_TOKEN in str(queued.tool_calls)
+    assert "alice@example.com" not in str(queued.additional_kwargs.get("tool_calls"))
+    assert EMAIL_TOKEN in str(queued.additional_kwargs.get("tool_calls"))
+
+
+def test_non_text_block_text_field_redacted(monkeypatch):
+    # DeerMem's format_conversation_for_update reads the "text" value of any
+    # dict block, not only type=="text" — the helper must follow.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    call = _run(mw, manager, monkeypatch, [HumanMessage([{"type": "custom_card", "text": "alice@example.com"}])])
+    block = call.args[1][0].content[0]
+    assert block["text"] == EMAIL_TOKEN

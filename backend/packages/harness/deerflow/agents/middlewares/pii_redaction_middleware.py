@@ -275,8 +275,11 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Non-text blocks (images, etc.) pass through untouched.
-    The input is never mutated.
+    content blocks. Blocks pass through untouched except for any string-valued
+    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
+    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
+    the block type, so a non-text block must not smuggle raw PII past the
+    helper. The input is never mutated.
     """
     redactor.reserve(content)
     if isinstance(content, str):
@@ -291,7 +294,7 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-        elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
             redacted = redactor.redact(block["text"])
             if redacted != block["text"]:
                 new_content.append({**block, "text": redacted})
