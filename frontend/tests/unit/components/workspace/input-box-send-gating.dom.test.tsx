@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
@@ -8,6 +8,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { toast } from "sonner";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
@@ -54,9 +55,15 @@ function typeText(container: HTMLElement, value: string): void {
 function renderComposer({
   canCreateRuns,
   onSubmit,
+  onPrepareThread,
+  onGoalChange,
+  isWelcomeMode = false,
 }: {
   canCreateRuns?: boolean;
   onSubmit: () => void;
+  onPrepareThread?: () => void | Promise<void>;
+  onGoalChange?: () => void;
+  isWelcomeMode?: boolean;
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -83,6 +90,9 @@ function renderComposer({
                 context={{ mode: "flash" } as never}
                 onSubmit={onSubmitProp}
                 canCreateRuns={canCreateRuns}
+                onPrepareThread={onPrepareThread}
+                onGoalChange={onGoalChange}
+                isWelcomeMode={isWelcomeMode}
               />
             </PromptInputProvider>
           </ThreadContext.Provider>
@@ -93,12 +103,135 @@ function renderComposer({
   return render(tree(onSubmit));
 }
 
+beforeEach(() => {
+  window.sessionStorage.clear();
+});
+
 afterEach(() => {
   rs.restoreAllMocks();
+  rs.unstubAllGlobals();
   cleanup();
 });
 
+function submitForm(container: HTMLElement, text: string) {
+  typeText(container, text);
+  const form = container.querySelector("form");
+  if (!(form instanceof HTMLFormElement)) {
+    throw new Error("composer form not rendered");
+  }
+  fireEvent.submit(form);
+}
+
+function mockCommandRequests(events: string[] = []) {
+  const fetchMock = rs.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      const isCommand = url.endsWith("/goal") || url.endsWith("/compact");
+      if (isCommand) {
+        events.push(init?.method ?? "GET");
+      }
+      return new Response(
+        JSON.stringify(isCommand ? { goal: null, compacted: true } : {}),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    },
+  );
+  rs.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 describe("InputBox send gating (runs:create)", () => {
+  it.each([false, true])(
+    "rejects goal-set before thread preparation or goal writes (welcome=%s)",
+    async (isWelcomeMode) => {
+      const events: string[] = [];
+      mockCommandRequests(events);
+      const info = rs.spyOn(toast, "info");
+      const success = rs.spyOn(toast, "success");
+      const onSubmit = rs.fn();
+      const onPrepareThread = rs.fn();
+      const onGoalChange = rs.fn();
+      const { container } = renderComposer({
+        canCreateRuns: false,
+        onSubmit,
+        onPrepareThread,
+        onGoalChange,
+        isWelcomeMode,
+      });
+
+      submitForm(container, "/goal finish all tests");
+      await waitFor(() =>
+        expect(info).toHaveBeenCalledWith(
+          expect.stringContaining("not permitted"),
+        ),
+      );
+
+      expect(onPrepareThread).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onGoalChange).not.toHaveBeenCalled();
+      expect(success).not.toHaveBeenCalled();
+      expect(container.querySelector("textarea")?.value).toBe(
+        "/goal finish all tests",
+      );
+    },
+  );
+
+  it("preserves prepare, goal-save, and run-start ordering for an allowed role", async () => {
+    const events: string[] = [];
+    mockCommandRequests(events);
+    const onSubmit = rs.fn(() => {
+      events.push("submit");
+    });
+    const { container } = renderComposer({
+      canCreateRuns: true,
+      onSubmit,
+      onPrepareThread: () => {
+        events.push("prepare");
+      },
+    });
+
+    submitForm(container, "/goal finish all tests");
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(events).toEqual(["prepare", "PUT", "submit"]);
+  });
+
+  it.each([
+    ["/goal", "GET"],
+    ["/goal clear", "DELETE"],
+    ["/compact", "POST"],
+  ])("allows %s without runs:create", async (command, method) => {
+    const events: string[] = [];
+    mockCommandRequests(events);
+    const info = rs.spyOn(toast, "info");
+    const onSubmit = rs.fn();
+    const onPrepareThread = rs.fn();
+    const { container } = renderComposer({
+      canCreateRuns: false,
+      onSubmit,
+      onPrepareThread,
+    });
+
+    submitForm(container, command);
+    await waitFor(() =>
+      expect(container.querySelector("textarea")?.value).toBe(""),
+    );
+    expect(events).toEqual([method]);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onPrepareThread).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalledWith(
+      expect.stringContaining("not permitted"),
+    );
+  });
+
   it("disables the send affordance for a denied role and never fires onSubmit", () => {
     const onSubmit = rs.fn();
     const { container } = renderComposer({

@@ -1129,14 +1129,6 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
-      // Roles denied runs:create must not start a new turn — the Gateway
-      // would 403 the run create anyway. This is the single choke point
-      // every composer entry (submit button, Enter, goal-set-triggered
-      // run) funnels through; reject so PromptInput keeps the text.
-      if (!canCreateRuns) {
-        toast.info(t.inputBox.startTurnUnavailable);
-        return Promise.reject(new Error("runs-create-denied"));
-      }
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
@@ -1246,7 +1238,6 @@ export function InputBox({
       return submit();
     },
     [
-      canCreateRuns,
       context,
       conversationReferences,
       draftKey,
@@ -1260,7 +1251,6 @@ export function InputBox({
       selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
-      t.inputBox.startTurnUnavailable,
       uploadLimits,
     ],
   );
@@ -1307,6 +1297,17 @@ export function InputBox({
           messageWithSlashSkill.files.length + projectAttachments.length,
         status,
       });
+      // Check run-starting actions before goal preparation or persistence:
+      // saving a goal also clears the draft and announces success. Status,
+      // clear, and compact commands do not start runs and keep their own gates.
+      if (
+        !canCreateRuns &&
+        (submitAction.kind === "message" ||
+          (submitAction.kind === "goal" && submitAction.command.kind === "set"))
+      ) {
+        toast.info(t.inputBox.startTurnUnavailable);
+        return Promise.reject(new Error("runs-create-denied"));
+      }
       if (submitAction.kind === "goal") {
         if (
           submitAction.command.kind === "set" &&
@@ -1379,6 +1380,7 @@ export function InputBox({
     },
     [
       abortVoiceInput,
+      canCreateRuns,
       handleCompactCommand,
       handleGoalCommand,
       onPrepareThread,
@@ -1388,6 +1390,7 @@ export function InputBox({
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
+      t.inputBox.startTurnUnavailable,
     ],
   );
 
