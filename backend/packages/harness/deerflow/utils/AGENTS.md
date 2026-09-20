@@ -18,3 +18,10 @@ Tool and agent assembly re-enters `get_available_tools()` and may block on MCP d
 optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
 occupy a preview line. Preserve physical line numbers, embedded U+FEFF
 characters, and the original file bytes.
+
+### Active Content MIME Types
+
+`text_detection.py::_is_active_content_mime_type` is the shared download-safety
+boundary for artifacts and project documents. Keep platform aliases such as
+Windows' `image/svg` aligned with their standard active type (`image/svg+xml`),
+and preserve the generic `+xml` rule.

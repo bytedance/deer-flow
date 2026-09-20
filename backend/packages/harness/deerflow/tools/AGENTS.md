@@ -11,7 +11,13 @@ The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
 results stay inline. Cut messages carry a `message_seq`/`offset` continuation that
 the same host reader serves; keep reading guidance separate from permission enforcement.
 
+Lead and bootstrap assembly pass the constructed `chat_model` to tool assembly.
+The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
+including custom-agent and thinking-mode overrides; an absent cap omits the hint.
+Only standalone tool discovery without a model falls back to the base profile.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
+
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)
 3. **Built-in tools**:
@@ -29,7 +35,7 @@ the same host reader serves; keep reading guidance separate from permission enfo
 The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
-- Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
+- Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
 

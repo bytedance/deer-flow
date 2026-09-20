@@ -1267,26 +1267,56 @@ def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape()
     assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
-def test_non_interactive_context_override_is_internal_only():
-    """Client-supplied ``non_interactive`` must be dropped: it strips the
-    ``ask_clarification`` tool, so only the internal scheduler path may set it."""
+def test_interaction_policy_context_override_is_internal_only():
+    """Client-supplied interaction policy must be dropped because it controls
+    whether the lead agent exposes ``ask_clarification``."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"non_interactive": True})
+    merge_run_context_overrides(
+        config,
+        {
+            "non_interactive": True,
+            "interaction_mode": "scheduled",
+            "disable_clarification": True,
+            "channel_name": "github",
+        },
+    )
 
     assert "non_interactive" not in config["configurable"]
     assert "non_interactive" not in config["context"]
+    assert "interaction_mode" not in config["configurable"]
+    assert "interaction_mode" not in config["context"]
+    assert "disable_clarification" not in config["configurable"]
+    assert "disable_clarification" not in config["context"]
+    assert "channel_name" not in config["configurable"]
+    assert "channel_name" not in config["context"]
 
 
-def test_non_interactive_context_override_honored_for_internal_caller():
+def test_interaction_policy_context_override_honored_for_internal_caller():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"non_interactive": True, "model_name": "gpt"}, internal=True)
+    merge_run_context_overrides(
+        config,
+        {
+            "non_interactive": True,
+            "interaction_mode": "scheduled",
+            "disable_clarification": True,
+            "channel_name": "github",
+            "model_name": "gpt",
+        },
+        internal=True,
+    )
 
     assert config["configurable"]["non_interactive"] is True
     assert config["context"]["non_interactive"] is True
+    assert config["configurable"]["interaction_mode"] == "scheduled"
+    assert config["context"]["interaction_mode"] == "scheduled"
+    assert config["context"]["disable_clarification"] is True
+    assert config["context"]["channel_name"] == "github"
+    assert "disable_clarification" not in config["configurable"]
+    assert "channel_name" not in config["configurable"]
     assert config["configurable"]["model_name"] == "gpt"
 
 
@@ -3738,20 +3768,49 @@ def test_build_run_config_no_request_config():
     assert "context" not in config
 
 
-def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
-    """A non-internal client must not force ``non_interactive`` via the free-form
+def test_strip_internal_context_keys_scrubs_config_smuggled_interaction_policy():
+    """A non-internal client must not force interaction policy via the free-form
     ``body.config`` either — ``build_run_config`` copies ``config.context`` and
     ``config.configurable`` verbatim, so the assembled config gets scrubbed."""
     from app.gateway.services import build_run_config, strip_internal_context_keys
 
-    via_context = build_run_config("thread-1", {"context": {"non_interactive": True, "model_name": "gpt"}}, None)
+    via_context = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "non_interactive": True,
+                "interaction_mode": "scheduled",
+                "disable_clarification": True,
+                "channel_name": "github",
+                "model_name": "gpt",
+            }
+        },
+        None,
+    )
     strip_internal_context_keys(via_context)
     assert "non_interactive" not in via_context["context"]
+    assert "interaction_mode" not in via_context["context"]
+    assert "disable_clarification" not in via_context["context"]
+    assert "channel_name" not in via_context["context"]
     assert via_context["context"]["model_name"] == "gpt"
 
-    via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
+    via_configurable = build_run_config(
+        "thread-1",
+        {
+            "configurable": {
+                "non_interactive": True,
+                "interaction_mode": "interactive",
+                "disable_clarification": True,
+                "channel_name": "github",
+            }
+        },
+        None,
+    )
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+    assert "interaction_mode" not in via_configurable["configurable"]
+    assert "disable_clarification" not in via_configurable["configurable"]
+    assert "channel_name" not in via_configurable["configurable"]
 
 
 def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
@@ -4671,3 +4730,161 @@ class TestForgedFrameworkInjectionMarkers:
             processed = InputSanitizationMiddleware()._try_process(_Request(graph_input["messages"]))
 
             assert "<system-reminder>" not in str(processed.messages[0].content), forged
+
+
+@pytest.mark.parametrize(
+    ("assistant_id", "run_options", "effective_agent"),
+    [
+        ("researcher", {}, "researcher"),
+        ("researcher", {"config": {"context": {"agent_name": "policy-expert"}}}, "policy-expert"),
+        ("lead_agent", {"context": {"agent_name": "policy-expert"}}, "policy-expert"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_agent_knowledge_default_reaches_run_and_idempotent_retry_keeps_original(_stub_app_config, assistant_id, run_options, effective_agent):
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.config.agents_config import AgentConfig
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
+    agent = AgentConfig(name=effective_agent, knowledge_scope=scope)
+    load = AsyncMock(return_value=agent)
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    body = RunCreateRequest(assistant_id=assistant_id, input={"messages": [{"type": "human", "content": "Policy?"}]}, **run_options)
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured.update(kwargs)
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", side_effect=fake_run_agent), patch("app.gateway.services._load_scope_agent_config", new=load):
+        record = await start_run(body, "thread-default-scope", request, idempotency_key="request-1")
+        await record.task
+        assert captured["knowledge_scope"] == scope
+        assert captured["graph_input"]["messages"][0].additional_kwargs["knowledge_scope"] == scope
+        assert record.kwargs["input"]["messages"][0]["additional_kwargs"]["knowledge_scope"] == scope
+        # Editing/clearing the binding must neither change nor reject the same
+        # already-accepted request; different prompts still conflict.
+        for edited_scope in (None, {"version": 1, "mode": "selected", "dataset_ids": ["other"]}, {"version": 1, "mode": "disabled"}):
+            load.return_value = AgentConfig(name=effective_agent, knowledge_scope=edited_scope)
+            reused = await start_run(body, "thread-default-scope", request, idempotency_key="request-1")
+            assert reused.run_id == record.run_id
+            assert reused.kwargs["input"]["messages"][0]["additional_kwargs"]["knowledge_scope"] == scope
+        with pytest.raises(HTTPException) as exc:
+            await start_run(body.model_copy(update={"input": {"messages": [{"type": "human", "content": "Different?"}]}}), "thread-default-scope", request, idempotency_key="request-1")
+        assert exc.value.status_code == 409
+    assert load.await_args.kwargs["assistant_id"] == effective_agent
+
+
+@pytest.mark.parametrize("run_store_backend", ["memory", "sql"])
+@pytest.mark.parametrize("record_format", ["current", "legacy-canonical", "legacy-raw"])
+@pytest.mark.asyncio
+async def test_initially_unbound_agent_retry_preserves_original_run(_stub_app_config, tmp_path, run_store_backend, record_format):
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.config.agents_config import AgentConfig
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    body = RunCreateRequest(assistant_id="researcher", input={"messages": [{"type": "human", "content": "Policy?"}]})
+    load = AsyncMock(return_value=AgentConfig(name="researcher"))
+    worker = AsyncMock()
+    try:
+        if run_store_backend == "sql":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}", sqlite_dir=str(tmp_path))
+            store = RunRepository(get_session_factory())
+        else:
+            store = MemoryRunStore()
+        owner = RunManager(store=store, worker_id="owner")
+        request = _make_start_run_request(owner)
+        with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", new=worker), patch("app.gateway.services._load_scope_agent_config", new=load):
+            if record_format == "current":
+                original = await start_run(body, "thread-unbound", request, idempotency_key="request-1")
+                await original.task
+            else:
+                # Seed the actual pre-feature wire formats, without a digest.
+                stored_input = body.input if record_format == "legacy-raw" else {"messages": [HumanMessage(content="Policy?").model_dump(mode="json")]}
+                original = await owner.create_or_reject("thread-unbound", "researcher", kwargs={"input": stored_input}, idempotency_key="request-1")
+            await owner.set_status(original.run_id, RunStatus.success)
+            snapshot = json.loads(json.dumps(original.kwargs["input"]))
+            # A new Gateway worker must recover identity from durable storage.
+            peer = _make_start_run_request(RunManager(store=store, worker_id="peer"), thread_store=request.app.state.thread_store)
+            for edited_scope in (None, {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}, {"version": 1, "mode": "disabled"}, None):
+                load.return_value = AgentConfig(name="researcher", knowledge_scope=edited_scope)
+                reused = await start_run(body, "thread-unbound", peer, idempotency_key="request-1")
+                assert reused.run_id == original.run_id
+                assert reused.kwargs["input"] == snapshot
+                assert reused.task is None
+                for changed_message in (
+                    {"type": "human", "content": "Different?"},
+                    {"type": "human", "content": "Policy?", "additional_kwargs": {"knowledge_scope": {"version": 1, "mode": "disabled"}}},
+                ):
+                    with pytest.raises(HTTPException) as exc:
+                        await start_run(body.model_copy(update={"input": {"messages": [changed_message]}}), "thread-unbound", peer, idempotency_key="request-1")
+                    assert exc.value.status_code == 409
+            assert worker.await_count == (1 if record_format == "current" else 0)
+            stored = await store.get(original.run_id)
+            assert stored["kwargs"]["input"] == snapshot
+            if record_format == "current":
+                assert stored["kwargs"]["knowledge_default_request_hash"]
+            else:
+                assert "knowledge_default_request_hash" not in stored["kwargs"]
+    finally:
+        if run_store_backend == "sql":
+            await close_engine()
+
+
+@pytest.mark.parametrize(
+    "bootstrap_kwargs",
+    [
+        {"context": {"is_bootstrap": True}},
+        {"config": {"configurable": {"is_bootstrap": True}}},
+        {"config": {"context": {"is_bootstrap": True}}},
+        {"config": {"configurable": {"is_bootstrap": False}, "context": {"is_bootstrap": True}}},
+    ],
+)
+@pytest.mark.asyncio
+async def test_knowledge_default_lookup_does_not_break_new_agent_bootstrap(_stub_app_config, bootstrap_kwargs):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    load = AsyncMock(side_effect=FileNotFoundError("not created yet"))
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", new=AsyncMock()), patch("app.gateway.services._load_scope_agent_config", new=load):
+        record = await start_run(RunCreateRequest(assistant_id="new-researcher", input={"messages": [{"type": "human", "content": "Create this agent"}]}, **bootstrap_kwargs), "thread-bootstrap-default", request)
+        await record.task
+    load.assert_not_awaited()

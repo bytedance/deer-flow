@@ -10,6 +10,9 @@ rs.mock("@/core/config", () => ({
 
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
+  cancelWechatQRLogin,
+  pollWechatQRLogin,
+  startWechatQRLogin,
   configureChannelProvider,
   connectChannelProvider,
   disconnectChannelConnection,
@@ -217,4 +220,47 @@ describe("channels api", () => {
       "Channel provider is not configured",
     );
   });
+});
+
+test("WeChat QR requests use authenticated mutations and support cancellation", async () => {
+  const session = {
+    id: "qr/id",
+    status: "pending",
+    qrcode_content: "scan",
+    expires_in: 180,
+    provider: null,
+  };
+  mockedFetch.mockResolvedValueOnce(jsonResponse(200, session));
+  await expect(startWechatQRLogin()).resolves.toEqual(session);
+  expect(mockedFetch).toHaveBeenLastCalledWith(
+    "/backend/api/channels/wechat/qr-login",
+    { method: "POST" },
+  );
+  const controller = new AbortController();
+  mockedFetch.mockResolvedValueOnce(jsonResponse(200, session));
+  await pollWechatQRLogin(session.id, controller.signal);
+  expect(mockedFetch).toHaveBeenLastCalledWith(
+    "/backend/api/channels/wechat/qr-login/qr%2Fid/poll",
+    { method: "POST", signal: controller.signal },
+  );
+  mockedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+  await cancelWechatQRLogin(session.id);
+  expect(mockedFetch).toHaveBeenLastCalledWith(
+    "/backend/api/channels/wechat/qr-login/qr%2Fid",
+    { method: "DELETE" },
+  );
+});
+
+test("submits a pairing code in the request body, never the URL", async () => {
+  mockedFetch.mockResolvedValueOnce(jsonResponse(200, { status: "scanned" }));
+  await pollWechatQRLogin("session", undefined, "123456");
+  expect(mockedFetch).toHaveBeenCalledWith(
+    "/backend/api/channels/wechat/qr-login/session/poll",
+    {
+      method: "POST",
+      signal: undefined,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verify_code: "123456" }),
+    },
+  );
 });

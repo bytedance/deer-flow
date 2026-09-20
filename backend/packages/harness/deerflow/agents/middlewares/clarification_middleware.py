@@ -15,6 +15,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -385,7 +386,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         context = getattr(runtime, "context", None)
         if not context:
             return False
-        return bool(context.get("disable_clarification"))
+        return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
     def _is_disabled(self, request: ToolCallRequest) -> bool:
         """Whether clarifications are suppressed for this tool-call request."""
@@ -446,22 +447,25 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         return {"messages": [patched]}
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
-        """Suppress a clarification and tell the agent to proceed.
+        """Suppress clarification without granting permission to act.
 
         Returns a plain ToolMessage (not a ``Command(goto=END)``) so the
         agent loop continues instead of ending — the agent receives this
-        as the tool result and generates again, ideally acting rather
-        than re-asking.
+        as the tool result and either continues low-risk, reversible work
+        or reports a blocked result rather than re-asking.
         """
         tool_call_id = request.tool_call.get("id", "")
-        logger.info("ask_clarification suppressed (disable_clarification set); instructing agent to proceed")
+        logger.info("ask_clarification suppressed by run interaction policy; applying unattended risk guidance")
         return ToolMessage(
             id=self._stable_message_id(tool_call_id, "proceed-without-clarification"),
             content=(
                 "Clarification is disabled in this context — the human is not present "
-                "to answer synchronously. Do not ask for confirmation. Proceed with your "
-                "best judgment, carry out the requested action, and state any assumptions "
-                "you made in your final response."
+                "to answer synchronously. Do not ask for confirmation or wait for a human response. "
+                "For low-risk and reversible work, proceed with the smallest reasonable assumption "
+                "supported by the available context, and state all material assumptions in your final response. "
+                "For high-risk or irreversible work without sufficient authorization, do not guess or act: "
+                "stop with a concise structured BLOCKED result naming the missing decision. "
+                "Prefer inspection and read-only checks before changing state."
             ),
             tool_call_id=tool_call_id,
             name=ASK_CLARIFICATION_TOOL_NAME,

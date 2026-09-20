@@ -626,6 +626,7 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
+        "image/svg",
         "text/xml",
         "application/xml",
         "text/xsl",
@@ -636,8 +637,8 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
     ],
 )
 def test_is_active_content_mime_type_covers_html_and_xml_documents(mime_type: str) -> None:
-    # Whether .rss or .atom guess to a +xml type depends on the host's
-    # mime.types file, so the classification is pinned on MIME types directly.
+    # MIME guesses depend on the host database (Windows uses image/svg), so
+    # classification is pinned on MIME types directly.
     assert artifacts_router._is_active_content_mime_type(mime_type)
 
 
