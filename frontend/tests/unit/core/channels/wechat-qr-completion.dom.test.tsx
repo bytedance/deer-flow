@@ -49,13 +49,12 @@ afterEach(() => {
 });
 function mount(connected = false, bindingToResume?: PendingWechatBinding) {
   const onDone = rs.fn();
-  render(
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const view = (connected: boolean) => (
     <StrictMode>
-      <QueryClientProvider
-        client={
-          new QueryClient({ defaultOptions: { queries: { retry: false } } })
-        }
-      >
+      <QueryClientProvider client={queryClient}>
         <I18nProvider initialLocale="en-US">
           <WechatQRCompletion
             provider={
@@ -70,13 +69,17 @@ function mount(connected = false, bindingToResume?: PendingWechatBinding) {
           />
         </I18nProvider>
       </QueryClientProvider>
-    </StrictMode>,
+    </StrictMode>
   );
-  return onDone;
+  const { rerender } = render(view(connected));
+  return {
+    onDone,
+    updateConnection: (connected: boolean) => rerender(view(connected)),
+  };
 }
 
 it("keeps saved credentials and the binding instruction visible until connected", async () => {
-  const onDone = mount();
+  const { onDone } = mount();
   expect(await screen.findByText("/connect demo")).toBeTruthy();
   expect(screen.getByText("Token saved securely")).toBeTruthy();
   expect(onDone).not.toHaveBeenCalled();
@@ -90,11 +93,61 @@ it("keeps saved credentials and the binding instruction visible until connected"
 });
 
 it("shows a stable success step when no user binding is required", async () => {
-  const onDone = mount(true);
+  const { onDone } = mount(true);
   expect(screen.getByText("WeChat is connected")).toBeTruthy();
   expect(connectChannelProvider).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
   expect(onDone).toHaveBeenCalledTimes(1);
+});
+
+it("shows success when the provider connects before the binding poll finishes", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let finishPoll!: (connections: ChannelConnection[]) => void;
+  rs.mocked(listChannelConnections).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishPoll = resolve;
+    }),
+  );
+  const { onDone, updateConnection } = mount();
+  await act(() => rs.advanceTimersByTimeAsync(1));
+  expect(screen.getByText("/connect demo")).toBeTruthy();
+  await act(() => rs.advanceTimersByTimeAsync(2000));
+  expect(listChannelConnections).toHaveBeenCalledTimes(1);
+
+  updateConnection(true);
+  expect(screen.getByText("WeChat is connected")).toBeTruthy();
+  expect(screen.queryByText("/connect demo")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Scan again" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Done" })).toBeTruthy();
+
+  await act(async () => finishPoll([]));
+  await act(() => rs.advanceTimersByTimeAsync(600_000));
+  expect(screen.getByText("WeChat is connected")).toBeTruthy();
+  expect(listChannelConnections).toHaveBeenCalledTimes(1);
+  expect(connectChannelProvider).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  expect(onDone).toHaveBeenCalledTimes(1);
+});
+
+it("keeps success when the provider connects while a binding request is pending", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let failBinding!: (reason: Error) => void;
+  rs.mocked(connectChannelProvider).mockReturnValueOnce(
+    new Promise((_resolve, reject) => {
+      failBinding = reject;
+    }),
+  );
+  const { updateConnection } = mount();
+  await act(() => rs.advanceTimersByTimeAsync(1));
+  expect(connectChannelProvider).toHaveBeenCalledTimes(1);
+
+  updateConnection(true);
+  expect(screen.getByText("WeChat is connected")).toBeTruthy();
+  await act(async () => failBinding(new Error("late binding failure")));
+  await act(() => rs.advanceTimersByTimeAsync(600_000));
+  expect(screen.getByText("WeChat is connected")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Done" })).toBeTruthy();
+  expect(listChannelConnections).not.toHaveBeenCalled();
 });
 
 it("retries account binding without asking the user to scan again", async () => {

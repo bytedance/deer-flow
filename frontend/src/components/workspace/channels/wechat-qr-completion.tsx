@@ -57,7 +57,10 @@ export function WechatQRCompletion({
   const [copyFailed, setCopyFailed] = useState(false);
 
   useEffect(() => {
-    if (alreadyConnected) return;
+    if (alreadyConnected) {
+      setStage("connected");
+      return;
+    }
     let stopped = false;
     let poller: ConnectPollHandle | undefined;
     let expiry: ReturnType<typeof setTimeout> | undefined;
