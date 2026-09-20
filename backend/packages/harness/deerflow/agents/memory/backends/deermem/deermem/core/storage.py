@@ -1843,6 +1843,10 @@ def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None
     storage_class_path = config.storage_class
     if not storage_class_path or storage_class_path == "file":
         return FileMemoryStorage(config, retrieval=retrieval)
+    if storage_class_path == "markdown":
+        from .markdown_storage import MarkdownMemoryStorage
+
+        return MarkdownMemoryStorage(config, retrieval=retrieval)
     try:
         module_path, class_name = storage_class_path.rsplit(".", 1)
         storage_class = getattr(importlib.import_module(module_path), class_name)

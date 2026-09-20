@@ -1,3 +1,7 @@
+import {
+  staticCapabilityCatalog,
+  staticCapabilityInstallations,
+} from "@/core/capabilities/static";
 import { getBackendBaseURL } from "@/core/config";
 import type { FeaturesResponse } from "@/core/features/api";
 import type { UserMemory } from "@/core/memory/types";
@@ -38,6 +42,21 @@ export async function staticApiResponse(
   }
 
   const path = url.pathname.slice(root.pathname.length).replace(/\/$/, "");
+  if (path === "capabilities/catalog") {
+    return method === "HEAD"
+      ? new Response(null)
+      : Response.json(staticCapabilityCatalog);
+  }
+  if (path.startsWith("capabilities/installations/")) {
+    const response = await staticCapabilityInstallations(
+      path.slice("capabilities/installations/".length),
+      origin,
+      init,
+    );
+    return method === "HEAD"
+      ? new Response(null, { status: response.status })
+      : response;
+  }
   // These routes already own the demo settings data; do not maintain a second copy.
   if (["skills", "mcp/config", "integrations/lark/status"].includes(path)) {
     return globalThis.fetch(new URL(`/mock/api/${path}`, origin).href, init);
@@ -56,6 +75,7 @@ export async function staticApiResponse(
           worker_running: false,
           max_running: 0,
         },
+        conversation_references: { enabled: false, max_references: 0 },
       } satisfies FeaturesResponse;
       break;
     case "channels/providers":

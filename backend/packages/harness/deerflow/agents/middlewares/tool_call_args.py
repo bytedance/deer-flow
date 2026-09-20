@@ -26,7 +26,11 @@ that touched ``tool_calls`` alone would still send the original payload.
 ``model_copy`` (or the same object when nothing matched), so callers never
 mutate state and the result is identical across model calls. Policy — which
 calls, and what replaces their arguments — stays with the caller; see
-``read_before_write_middleware.elide_blocked_write_payloads`` for one.
+``read_before_write_middleware.elide_blocked_write_payloads`` and
+``tool_output_budget_middleware.elide_superseded_write_payloads``. Both decide
+per call *occurrence*, pairing each AIMessage call with the ToolMessage that
+answered it through :func:`pair_tool_call_results`, because tool-call ids may
+repeat across assistant turns.
 
 A rewrite also invalidates server-side continuation. With
 ``use_previous_response_id`` the OpenAI adapter sends only the messages after
@@ -44,10 +48,12 @@ billed either way, so replay costs no more).
 from __future__ import annotations
 
 import json
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 #: Replacement args keyed by tool-call id.
 ArgsReplacements = Mapping[str, dict[str, Any]]
@@ -62,8 +68,13 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     was replaced. Untouched messages pass through by identity, except that once
     anything was rewritten every AIMessage loses its ``resp_`` response id (see
     the module docstring: the server-side history behind that id still holds
-    the original arguments). Only calls with a non-empty string id are offered
-    to the selector, since nothing else can be matched across surfaces.
+    the original arguments). Only calls with a non-empty string id that is
+    unique within its message are offered to the selector: every surface is
+    addressed by id, so nothing else can be matched across surfaces, and an id
+    a malformed provider payload repeats inside one AIMessage could only be
+    rewritten for *all* of its occurrences at once — a failed sibling would
+    take on the successful call's arguments (review on #5374). Such calls are
+    conservatively left alone.
     """
     updated: list[Any] = []
     changed = False
@@ -71,11 +82,12 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         patched = message
         if isinstance(message, AIMessage) and message.tool_calls:
             replacements: dict[str, dict[str, Any]] = {}
+            duplicated = _duplicated_call_ids(message.tool_calls)
             for tool_call in message.tool_calls:
                 if not isinstance(tool_call, dict):
                     continue
                 call_id = tool_call.get("id")
-                if not isinstance(call_id, str) or not call_id:
+                if not isinstance(call_id, str) or not call_id or call_id in duplicated:
                     continue
                 new_args = replacement_for(message, tool_call)
                 if new_args is not None:
@@ -88,6 +100,78 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     if not changed:
         return None
     return [_without_response_chain_id(message) for message in updated]
+
+
+def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
+    """Ids that occur more than once in one message's structured tool-call list (the list every surface mirrors).
+
+    Only non-empty string ids are counted: a list or dict id from a malformed
+    provider payload is unhashable and must be skipped, never hashed, or the
+    whole model call would fail (review on #5374).
+    """
+    counts = Counter(call_id for tool_call in tool_calls if isinstance(tool_call, dict) and isinstance(call_id := tool_call.get("id"), str) and call_id)
+    return {call_id for call_id, count in counts.items() if count > 1}
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallOccurrence:
+    """One tool call on one AIMessage, paired with the ToolMessage that answered it (``None`` if unanswered)."""
+
+    #: Position of ``message`` in the history it was paired from.
+    index: int
+    message: AIMessage
+    tool_call: dict[str, Any]
+    result: ToolMessage | None
+
+    @property
+    def call_id(self) -> str:
+        return self.tool_call["id"]
+
+    @property
+    def name(self) -> str:
+        name = self.tool_call.get("name")
+        return name if isinstance(name, str) else ""
+
+    @property
+    def args(self) -> dict[str, Any]:
+        args = self.tool_call.get("args")
+        return args if isinstance(args, dict) else {}
+
+
+def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
+    """Pair every AIMessage tool call carrying a non-empty string id with the ToolMessage that answered it.
+
+    Walks ``messages`` in document order. Each AIMessage opens its own calls,
+    and a ToolMessage answers the still-open call with its id from the *most
+    recent preceding* AIMessage only — the rule ``DanglingToolCallMiddleware``
+    applies: a result never answers a call from an earlier turn. So ids that
+    repeat across turns pair per occurrence, an interrupted call whose id a
+    later turn reused stays unanswered instead of inheriting that turn's result
+    (review on #5374), and stray or duplicate results are ignored. ``index`` is
+    the AIMessage's position in ``messages``, so callers can order events
+    across turns; the calls of one AIMessage share an index because they ran
+    concurrently, in no fixed order.
+    """
+    occurrences: list[ToolCallOccurrence] = []
+    # Unanswered calls of the most recent AIMessage: id -> positions in ``occurrences``.
+    open_calls: dict[str, deque[int]] = defaultdict(deque)
+    for index, message in enumerate(messages):
+        if isinstance(message, AIMessage):
+            open_calls = defaultdict(deque)
+            for tool_call in message.tool_calls or ():
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = tool_call.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                open_calls[call_id].append(len(occurrences))
+                occurrences.append(ToolCallOccurrence(index, message, tool_call, None))
+        elif isinstance(message, ToolMessage):
+            queue = open_calls.get(message.tool_call_id) if isinstance(message.tool_call_id, str) else None
+            if queue:
+                position = queue.popleft()
+                occurrences[position] = replace(occurrences[position], result=message)
+    return occurrences
 
 
 def _without_response_chain_id(message: Any) -> Any:

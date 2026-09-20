@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import gc
+import json
 import threading
 import weakref
 from types import SimpleNamespace
@@ -31,6 +32,87 @@ def test_discord_channel_init() -> None:
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
     assert channel.name == "discord"
+
+
+# ---------------------------------------------------------------------------
+# thread-mapping persistence across restart (#2897)
+# ---------------------------------------------------------------------------
+
+
+def test_discord_thread_mapping_persists_across_restart(tmp_path) -> None:
+    """A channel->thread mapping written before shutdown is restored on a
+    subsequent start, so conversations are not lost across restarts (#2897)."""
+    store_path = tmp_path / "discord_threads.json"
+
+    # First process lifetime: record and persist a mapping.
+    first = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    first._thread_store_path = store_path
+    first._record_thread_mapping("chan-1", "thread-1")
+    first._persist_thread_mappings()
+    assert store_path.exists()
+    assert json.loads(store_path.read_text()) == {"chan-1": "thread-1"}
+
+    # Restart: a brand-new channel instance reads the same file.
+    second = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    second._thread_store_path = store_path
+    second._active_threads.clear()
+    second._active_thread_ids.clear()
+    second._load_active_threads()
+
+    assert second._active_threads == {"chan-1": "thread-1"}
+    assert "thread-1" in second._active_thread_ids
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_flushes_thread_mappings(tmp_path) -> None:
+    """stop() best-effort flushes in-memory thread mappings to disk so the
+    most recent mapping survives a hard shutdown."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = tmp_path / "discord_threads.json"
+    # stop() only flushes once the load has marked the in-memory map
+    # authoritative (see DiscordChannel._thread_store_loaded); simulate the
+    # normal post-start() state so this exercises the flush, not the guard.
+    channel._thread_store_loaded = True
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    channel._record_thread_mapping("chan-2", "thread-2")
+    await channel.stop()
+
+    assert channel._thread_store_path.exists()
+    assert json.loads(channel._thread_store_path.read_text()) == {"chan-2": "thread-2"}
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_does_not_clobber_store_before_load(tmp_path) -> None:
+    """stop() before the initial load must not overwrite the persisted file.
+
+    ``ChannelService`` deliberately stops a channel whose ``start()`` bailed
+    before ``_load_active_threads()`` ran (missing bot_token / discord import
+    error), when the in-memory map is still empty. An ungated flush would write
+    ``{}`` over the persisted mappings — the #2897 data loss this PR exists to
+    prevent.
+    """
+    store_path = tmp_path / "discord_threads.json"
+    store_path.write_text(json.dumps({"chan-9": "thread-9"}))
+
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = store_path
+    # start() bailed before the load, so the flag is still False.
+    assert channel._thread_store_loaded is False
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    await channel.stop()
+
+    # The pre-existing mapping survives intact: nothing was flushed over it.
+    assert json.loads(store_path.read_text()) == {"chan-9": "thread-9"}
 
 
 def _make_discord_message(text: str):

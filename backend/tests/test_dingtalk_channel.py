@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dingtalk import (
@@ -2310,7 +2311,7 @@ class TestReceiveFile:
             uploads = tmp_path / "uploads"
             uploads.mkdir()
             outside = tmp_path / "outside.txt"
-            (uploads / "image.png").symlink_to(outside)
+            symlink_or_skip(uploads / "image.png", outside)
             _patch_uploads(monkeypatch, uploads)
             channel._download_by_code = AsyncMock(return_value=b"PWNED")
 

@@ -90,6 +90,36 @@ class TestShouldIgnoreArchiveEntry:
 
 
 # ---------------------------------------------------------------------------
+# code-file classification shared with SkillScan
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFileClassification:
+    @pytest.mark.parametrize(
+        ("rel_path", "content", "expected"),
+        [
+            ("scripts/data.dat", b"plain", True),
+            ("lib/RUN.PY", b"print()", True),
+            ("bin/tool", b"#!/bin/sh\n", True),
+            ("bin/tool", b"echo", False),
+            ("bin/notes.txt", b"#!/bin/sh\n", False),
+            ("bin/scripts", b"echo", False),
+            ("assets/logo.png", b"\x89PNG", False),
+        ],
+    )
+    def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):
+        import deerflow.skills.installer as installer_module
+        from deerflow.skills.package_files import is_code_file
+
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+        assert asyncio.run(installer_module._is_code_file(path, Path(rel_path))) is expected
+        assert is_code_file(rel_path, content) is expected
+
+
+# ---------------------------------------------------------------------------
 # resolve_skill_dir_from_archive
 # ---------------------------------------------------------------------------
 

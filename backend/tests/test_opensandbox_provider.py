@@ -157,7 +157,7 @@ class _FakeCommands:
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
         if "__DF_FIND_STATUS__:" in command:
             status = 0 if matches else 1
-            marker = f"__DF_FIND_STATUS__:{status}"
+            marker = "__DF_FIND_STATUS__:0" if matches else "__DF_FIND_STATUS__:missing"
             stdout = (*matches, "", marker) if matches else ("", marker)
             return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
@@ -880,3 +880,23 @@ def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeyp
     found, _ = box.glob(str(tmp_path), "**/*.py")
     assert [os.path.basename(path) for path in found] == ["app.py"]
     assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)

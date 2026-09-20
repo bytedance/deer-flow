@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -61,6 +61,21 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _resolve_record_user_id(user_id: str | None) -> str | None:
+    """Fill an omitted run owner from the ambient user, as the SQL store does.
+
+    The SQL store stamps ``user_id=None`` with the request user, so a local
+    record left at ``None`` disagrees with its own durable row: owner-scoped
+    reads skip it and idempotent reuse rejects it as another user's run.
+    Resolving here gives every store the same owner. Without a user in context
+    the owner stays ``None``.
+    """
+    if user_id is not None:
+        return user_id
+    user = get_current_user()
+    return str(user.id) if user is not None else None
 
 
 def _cursor_part(value: str | None) -> str | None:
@@ -452,6 +467,10 @@ class RunManager:
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
         """Build a read-only runtime record from a serialized store row.
 
+        The result is a detached ``store_only`` snapshot. Never register it in
+        ``_runs``: only the owning worker's task lifecycle updates and removes
+        local records, so a registered snapshot would never leave.
+
         NULL status/on_disconnect columns (e.g. from rows written before those
         columns were added) default to ``pending`` and ``cancel`` respectively.
         """
@@ -605,6 +624,7 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        user_id = _resolve_record_user_id(user_id)
         lease_expires_at = self._compute_lease_expires_at()
         record = RunRecord(
             run_id=run_id,
@@ -1577,6 +1597,8 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        # Resolve before the idempotency checks below compare it with stored rows.
+        user_id = _resolve_record_user_id(user_id)
 
         _supported_strategies = ("reject", "interrupt", "rollback")
         if multitask_strategy not in _supported_strategies:
@@ -1616,16 +1638,18 @@ class RunManager:
                     return existing
 
             def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                # A locally held record for this key already returned above, so
+                # the conflicting row belongs to a peer or to a run this worker
+                # has cleaned up. Return a store-only handle without registering
+                # it: nothing here finalizes or cleans up that record, so a
+                # registered copy would keep its admission-time status, reject
+                # later admissions for the thread, and shadow the durable row
+                # for get(), cancel(), and orphan reconciliation.
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
-                current = self._runs.get(existing.run_id)
-                if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
-                    current = existing
-                current.idempotency_reused = True
-                return current
+                existing.idempotency_reused = True
+                return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
@@ -1926,7 +1950,16 @@ class RunManager:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
+        """Remove a run record after an optional delay.
+
+        Eviction is only safe when a ``RunStore`` backs this manager: history
+        then stays readable through the store fallback in ``get()`` /
+        ``list_by_thread()``. Without one, dropping the record would erase the
+        run's history entirely, so a store-less manager keeps the previous
+        retain-forever behaviour and this returns immediately.
+        """
+        if self._store is None:
+            return
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:

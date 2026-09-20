@@ -1,6 +1,8 @@
+import asyncio
 from types import SimpleNamespace
 from typing import Annotated
 
+import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain.tools import InjectedToolCallId
@@ -413,6 +415,118 @@ class TestBeforeModelCapture:
         assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
         assert out["delegations"][0]["run_id"] == "run-new"
 
+    def test_new_user_turn_closes_delegation_an_earlier_run_left_in_progress(self):
+        """A run stopped while its subagent ran never records a result; the next user turn must not keep saying "already delegated"."""
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            HumanMessage(content="please continue", additional_kwargs={"run_id": "run-new"}),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "research auth",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert out is not None
+        assert [(entry["id"], entry["status"], entry["run_id"]) for entry in out["delegations"]] == [("old-call", "cancelled", "run-old")]
+        ledger = merge_delegations(existing, out["delegations"])
+        request = middleware._inject(SimpleNamespace(messages=messages, state={"delegations": ledger}, override=lambda **kwargs: SimpleNamespace(**kwargs)))
+        data = next(message.content for message in request.messages if isinstance(message, HumanMessage) and "<durable_context_data>" in message.content)
+        assert "do NOT delegate again" not in data
+        assert "[cancelled] research auth" in data
+
+    def test_new_user_turn_keeps_in_progress_delegation_without_run_id(self):
+        """Ledger entries written before delegations carried a run_id can't be tied to a run, so they stay as they are."""
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "legacy-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            HumanMessage(content="please continue", additional_kwargs={"run_id": "run-new"}),
+        ]
+        existing = [
+            {
+                "id": "legacy-call",
+                "description": "research auth",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
+    @pytest.mark.parametrize(
+        "result_metadata",
+        [
+            pytest.param(make_subagent_additional_kwargs("completed", result="partial notes"), id="structured-completed"),
+            pytest.param(make_subagent_additional_kwargs("failed", error="task failed"), id="structured-failed"),
+            pytest.param({}, id="legacy-without-status-metadata"),
+        ],
+    )
+    def test_new_user_turn_keeps_earlier_delegation_that_has_a_result(self, result_metadata):
+        """A recorded reply rules out inferring cancellation, even when its legacy status is unknown."""
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content="partial notes", tool_call_id="old-call", name="task", additional_kwargs=result_metadata),
+            HumanMessage(content="please continue", additional_kwargs={"run_id": "run-new"}),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "research auth",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()
 
@@ -568,6 +682,42 @@ def fake_read_file(path: str) -> str:
 
 
 class TestGraphIntegration:
+    @pytest.mark.asyncio
+    async def test_stopped_delegation_is_not_reported_in_progress_to_the_next_turn(self):
+        """Stop cancels the run while the task tool waits, so no ToolMessage is ever written for it."""
+
+        task_started = asyncio.Event()
+
+        @tool("task")
+        async def slow_task(description: str, prompt: str, subagent_type: str) -> str:
+            """Delegate to a subagent."""
+            task_started.set()
+            await asyncio.sleep(3600)
+            return "never"
+
+        model = RecordingFakeModel(
+            responses=[
+                AIMessage(content="", id="ai-1", tool_calls=[{"name": "task", "id": "call-1", "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"}}]),
+                AIMessage(content="ok", id="ai-2"),
+            ]
+        )
+        graph = create_agent(model=model, tools=[slow_task], middleware=[DurableContextMiddleware()], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "stopped-delegation"}}
+
+        run_1 = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage("research auth", additional_kwargs={"run_id": "run-1"})]}, config=config, context={"run_id": "run-1"}))
+        await asyncio.wait_for(task_started.wait(), timeout=10)
+        run_1.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_1
+
+        await graph.ainvoke({"messages": [HumanMessage("please continue", additional_kwargs={"run_id": "run-2"})]}, config=config, context={"run_id": "run-2"})
+
+        state = (await graph.aget_state(config)).values
+        assert [(entry["id"], entry["status"]) for entry in state["delegations"]] == [("call-1", "cancelled")]
+        ledger_text = "\n".join(str(message.content) for message in model.received[-1] if isinstance(message, HumanMessage))
+        assert "[cancelled] research auth" in ledger_text
+        assert "do NOT delegate again" not in ledger_text
+
     def test_subagent_limit_counts_only_prior_delegations_in_real_middleware_chain(self):
         model = RecordingFakeModel(
             responses=[

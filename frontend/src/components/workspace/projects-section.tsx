@@ -7,6 +7,7 @@ import {
   FolderTree,
   List,
   Plus,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
@@ -306,6 +307,19 @@ export function ProjectsSection() {
             data-testid="projects-new-project-button"
           >
             <Plus />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-5 [&>svg]:size-3.5"
+            title={t.trash.title}
+            aria-label={t.trash.title}
+            asChild
+            data-testid="projects-trash-link"
+          >
+            <Link href="/workspace/trash">
+              <Trash2 />
+            </Link>
           </Button>
         </span>
       </SidebarGroupLabel>

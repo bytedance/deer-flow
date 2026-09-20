@@ -5,6 +5,7 @@ from langchain.tools import BaseTool
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
@@ -75,7 +76,9 @@ def get_available_tools(
     model_name: str | None = None,
     subagent_enabled: bool = False,
     *,
+    mcp_plugins: list[str] | None = None,
     include_upload_tool: bool = True,
+    include_conversation_reader: bool = False,
     app_config: AppConfig | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -92,12 +95,24 @@ def get_available_tools(
             Ordinary task subagents enable it only after snapshotting the
             parent's current-run upload state. Durable batch and non-standard
             subagent callers without that state keep it disabled.
+        include_conversation_reader: Allow the configured conversation reader
+            only when the host provides its authorized runtime capability.
+            Defaults to false for embedded callers and subagents.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    if not include_conversation_reader:
+        tool_configs = [tool for tool in tool_configs if tool.use != CONVERSATION_TOOL_USE]
+
+    # Knowledge tools are opt-in as a group. Provider connection and retrieval
+    # settings live on each tool entry; the generic capability flag controls
+    # whether the group is exposed at all.
+    knowledge_base_config = getattr(config, "knowledge_base", None)
+    if not getattr(knowledge_base_config, "enabled", False):
+        tool_configs = [tool for tool in tool_configs if tool.group != "knowledge"]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
@@ -173,6 +188,10 @@ def get_available_tools(
                     # policy-filtered list because their skills load at startup.
                     for t in mcp_tools:
                         tag_mcp_tool(t)
+            if mcp_plugins is not None:
+                from deerflow.capabilities.runtime import filter_mcp_plugins
+
+                mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:

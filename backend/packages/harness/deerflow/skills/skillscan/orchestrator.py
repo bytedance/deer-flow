@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
@@ -40,6 +41,7 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 _BLOCK_SEVERITY = "CRITICAL"
 _NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
 _MAX_ARCHIVE_MEMBERS = 4096
+_TEXT_PROBE_BYTES = 4096
 
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
@@ -58,6 +60,7 @@ _SPECS = [
     RuleSpec("package-executable-binary", "CRITICAL", "Package contains an executable binary.", "Remove binary executables from the skill package."),
     RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
     RuleSpec("package-hidden-sensitive-file", "HIGH", "Package contains a hidden sensitive file.", "Remove hidden credential or package-manager config files."),
+    RuleSpec("package-undecodable-script", "HIGH", "Code file is not NUL-free UTF-8 text, so it was analyzed from a lossy decode.", "Store code as UTF-8 text without NUL bytes, and keep compiled or binary artifacts out of scripts/."),
     RuleSpec("package-git-directory", "MEDIUM", "Package contains a .git directory.", "Package only source files needed by the skill, excluding repository metadata."),
     RuleSpec("secret-private-key", "CRITICAL", "Private key material is embedded in skill content.", "Move private keys to a managed secret store and remove them from the skill."),
     RuleSpec("secret-cloud-token", "CRITICAL", "High-confidence cloud or API token is embedded in skill content.", "Move tokens to environment variables or a secret store."),
@@ -206,7 +209,7 @@ def scan_archive_preflight(archive_path: Path) -> ScanResult:
                 except Exception as e:
                     scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
                     continue
-                if _is_executable_binary(prefix):
+                if is_executable_binary_prefix(prefix):
                     findings.append(_finding("package-executable-binary", file=normalized, evidence=_binary_magic_evidence(prefix)))
                 if _is_nested_archive_name(normalized) or _looks_like_archive(prefix):
                     findings.append(_nested_archive_finding(normalized, prefix, lambda: _read_archive_member(zf, info), scanner_errors))
@@ -236,7 +239,15 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
         findings.extend(_scan_file_package_properties(rel_path, file_bytes, path.stat().st_size))
         text = _decode_text_for_analysis(file_bytes)
         if text is None:
-            continue
+            text = _decode_script_lossily(rel_path, file_bytes)
+            if text is None:
+                continue
+            evidence = "NUL byte" if b"\x00" in file_bytes[:_TEXT_PROBE_BYTES] else "invalid UTF-8"
+            findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
+            # A decoded executable is string-table noise that reads as secrets
+            # and URLs; its CRITICAL executable finding already blocks it.
+            if is_executable_binary_prefix(file_bytes[:8]):
+                continue
 
         try:
             findings.extend(_scan_text_file(rel_path, text))
@@ -276,7 +287,7 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
         findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
     if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
         findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
-    if _is_executable_binary(file_bytes[:8]):
+    if is_executable_binary_prefix(file_bytes[:8]):
         findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
     return findings
 
@@ -507,7 +518,7 @@ def _nested_zip_contains_executable(data: bytes) -> bool:
                     continue
                 try:
                     with nested.open(info) as member:
-                        if _is_executable_binary(member.read(8)):
+                        if is_executable_binary_prefix(member.read(8)):
                             return True
                 except Exception:
                     continue
@@ -602,10 +613,6 @@ def _looks_like_archive(file_bytes: bytes) -> bool:
     return file_bytes.startswith(b"PK\x03\x04") or file_bytes.startswith(b"\x1f\x8b") or file_bytes.startswith(b"7z\xbc\xaf\x27\x1c")
 
 
-def _is_executable_binary(prefix: bytes) -> bool:
-    return prefix.startswith(b"\x7fELF") or prefix.startswith(b"MZ") or prefix.startswith((b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"))
-
-
 def _binary_magic_evidence(prefix: bytes) -> str:
     if prefix.startswith(b"\x7fELF"):
         return "ELF"
@@ -617,12 +624,21 @@ def _binary_magic_evidence(prefix: bytes) -> str:
 def _decode_text_for_analysis(file_bytes: bytes) -> str | None:
     # Binaries are rejected by the NUL probe and the decode failure below, so
     # every NUL-free, UTF-8-decodable file is analyzed regardless of extension.
-    if b"\x00" in file_bytes[:4096]:
+    if b"\x00" in file_bytes[:_TEXT_PROBE_BYTES]:
         return None
     try:
         return file_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _decode_script_lossily(rel_path: str, file_bytes: bytes) -> str | None:
+    # Interpreters run code despite a stray NUL or non-UTF-8 byte (a PEP 263
+    # cookie even makes Latin-1 valid Python), so skipping code files as binaries
+    # would let one byte hide the whole file. Replacement characters keep line numbers.
+    if not is_code_file(rel_path, file_bytes):
+        return None
+    return file_bytes.decode("utf-8", errors="replace")
 
 
 def _is_python_path(rel_path: str, text: str) -> bool:

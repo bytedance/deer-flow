@@ -201,6 +201,7 @@ class SubagentBatchService:
             tools = await run_assembly(
                 get_available_tools,
                 groups=spec.get("tool_groups"),
+                mcp_plugins=spec.get("mcp_plugins"),
                 model_name=effective_model,
                 subagent_enabled=False,
                 include_upload_tool=False,
@@ -237,6 +238,7 @@ class SubagentBatchService:
                 channel_user_id=spec.get("channel_user_id"),
                 is_internal=spec.get("is_internal") is True,
                 authz_attributes=spec.get("authz_attributes"),
+                knowledge_scope=spec.get("knowledge_scope"),
                 execution_capacity=self._execution_capacity,
                 acceptance_criteria=item.get("acceptance_criteria"),
             )

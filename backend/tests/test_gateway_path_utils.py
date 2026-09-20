@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from support.symlinks import symlink_or_skip
 
 from app.gateway.path_utils import OUTPUTS_VIRTUAL_ROOT, normalize_outputs_virtual_path, resolve_outputs_confined_path
 from deerflow.config.paths import Paths
@@ -30,13 +31,6 @@ def thread_dirs(tmp_path, monkeypatch) -> tuple[Path, Path]:
     outputs.mkdir(parents=True)
     uploads.mkdir(parents=True)
     return outputs, uploads
-
-
-def _symlink_or_skip(link: Path, target: Path) -> None:
-    try:
-        link.symlink_to(target)
-    except OSError:
-        pytest.skip("symlinks are unavailable on this platform")
 
 
 class TestNormalizeOutputsVirtualPath:
@@ -100,7 +94,7 @@ class TestResolveOutputsConfinedPath:
         outputs, uploads = thread_dirs
         victim = uploads / "victim.txt"
         victim.write_text("before", encoding="utf-8")
-        _symlink_or_skip(outputs / "linked.txt", victim)
+        symlink_or_skip(outputs / "linked.txt", victim)
 
         with pytest.raises(HTTPException) as exc_info:
             resolve_outputs_confined_path(THREAD_ID, "/mnt/user-data/outputs/linked.txt", user_id=USER_ID)
@@ -113,7 +107,7 @@ class TestResolveOutputsConfinedPath:
         outputs, _ = thread_dirs
         outside = tmp_path / "outside.txt"
         outside.write_text("outside", encoding="utf-8")
-        _symlink_or_skip(outputs / "linked.txt", outside)
+        symlink_or_skip(outputs / "linked.txt", outside)
 
         with pytest.raises(HTTPException) as exc_info:
             resolve_outputs_confined_path(THREAD_ID, "/mnt/user-data/outputs/linked.txt", user_id=USER_ID)
@@ -129,7 +123,7 @@ class TestResolveOutputsConfinedPath:
         real_outputs.mkdir()
         (real_outputs / "report.md").write_text("hello", encoding="utf-8")
         outputs.rmdir()
-        _symlink_or_skip(outputs, real_outputs)
+        symlink_or_skip(outputs, real_outputs)
 
         with pytest.raises(HTTPException) as exc_info:
             resolve_outputs_confined_path(THREAD_ID, "/mnt/user-data/outputs/report.md", user_id=USER_ID)
