@@ -7,10 +7,13 @@ import pytest
 
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+_MISSING = object()
 
 
 class FakeStatus(Enum):
@@ -70,7 +73,19 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 
 @pytest.mark.asyncio
-async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("thread_incarnation", "expected_present"),
+    [
+        ("incarnation-1", True),
+        (None, True),
+        (_MISSING, False),
+    ],
+)
+async def test_execute_item_marks_real_running_then_persists_terminal_result(
+    monkeypatch,
+    thread_incarnation,
+    expected_present,
+) -> None:
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,
         result=None,
@@ -78,6 +93,10 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         stop_reason=None,
         token_usage_records=None,
     )
+
+    execution_spec = dict(_request().execution_spec)
+    if thread_incarnation is not _MISSING:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
     class Repository:
         def __init__(self) -> None:
@@ -95,7 +114,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
                         "thread_id": "thread-1",
                         "user_id": "user-1",
                         "run_id": "run-1",
-                        "execution_spec": _request().execution_spec,
+                        "execution_spec": execution_spec,
                     },
                 }
             ]
@@ -152,6 +171,9 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+    assert (THREAD_INCARNATION_CONTEXT_KEY in executor_kwargs) is expected_present
+    if expected_present:
+        assert executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
 
 
 @pytest.mark.asyncio
