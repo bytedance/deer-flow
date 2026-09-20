@@ -223,3 +223,45 @@ def test_list_dir_existing_root_with_no_output_is_incomplete_failure(tmp_path) -
     assert proc.returncode == 1
     with pytest.raises(OSError, match="results would be incomplete"):
         parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+
+
+def test_parse_drops_entries_under_ignored_directories() -> None:
+    """A remote listing must skip the same directories remote glob/grep already skip."""
+    stdout = "/root\n/root/.git\n/root/.git/config\n/root/node_modules/pkg/index.js\n/root/src\n/root/src/app.py\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/root", pipeline_exit_code=0) == [
+        "/root",
+        "/root/src",
+        "/root/src/app.py",
+    ]
+
+
+def test_parse_keeps_names_that_only_resemble_ignore_patterns() -> None:
+    stdout = "/root/node_modules_backup/keep.txt\n/root/builds/keep.txt\n/root/src/environment.py\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/root", pipeline_exit_code=0) == [
+        "/root/node_modules_backup/keep.txt",
+        "/root/builds/keep.txt",
+        "/root/src/environment.py",
+    ]
+
+
+def test_parse_all_entries_ignored_returns_empty_list_not_missing_path() -> None:
+    """An existing directory whose entries are all ignored is empty, not missing."""
+    stdout = "/data/node_modules\n/data/node_modules/pkg/index.js\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/data/node_modules", pipeline_exit_code=0) == []
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_drops_ignored_directories(tmp_path) -> None:
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("print('x')", encoding="utf-8")
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "index.js").write_text("module.exports = {}", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]", encoding="utf-8")
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert str(root / "src" / "app.py") in entries
+    assert not any("node_modules" in entry for entry in entries)
+    assert not any(entry.endswith("/.git") or "/.git/" in entry for entry in entries)

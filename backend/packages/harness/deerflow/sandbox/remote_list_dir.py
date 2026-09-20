@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import shlex
 
+from deerflow.sandbox.search import should_ignore_path
+
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _MISSING_ROOT = "missing"
 _LIST_LIMIT = 500
@@ -59,9 +61,15 @@ def parse_remote_list_dir_output(
 ) -> list[str]:
     """Parse listing stdout, preferring the find-status marker over pipeline status.
 
+    Entries under ignored directories (``IGNORE_PATTERNS``) are dropped, matching
+    the local ``list_dir`` and the remote ``glob``/``grep`` implementations, which
+    already skip those paths. Filtering happens after the empty-output check, so a
+    directory whose entries are all ignored returns an empty list rather than a
+    missing-path error.
+
     Raises:
         OSError: Command/client failure or an incomplete traversal.
-        FileNotFoundError: The root is missing or no listable entries exist.
+        FileNotFoundError: The root is missing or ``find`` produced no output.
     """
     # find delimits records with "\n" only. splitlines() would also split on
     # \v, \f, \x1c-\x1e and \x85, which are legal in Linux filenames. Do not
@@ -98,4 +106,4 @@ def parse_remote_list_dir_output(
 
     if not entries:
         raise FileNotFoundError(resolved)
-    return entries
+    return [entry for entry in entries if not should_ignore_path(entry)]
