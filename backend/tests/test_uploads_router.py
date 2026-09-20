@@ -1177,6 +1177,75 @@ def test_upload_files_closes_conversion_descriptor_when_cancelled_during_commit(
     assert duplicated[0] in closed, "the owned descriptor was not closed on cancellation"
 
 
+def test_upload_files_closes_conversion_descriptor_when_cancelled_while_copy_is_queued(tmp_path):
+    """A copy job cancelled before its worker starts must not strand the descriptor."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+    real_run_file_io = upload_ingestion.run_file_io
+    state: dict[str, object] = {}
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    async def queueing_run_file_io(func, *args, **kwargs):
+        if func is not upload_ingestion._copy_fd_to_path:
+            return await real_run_file_io(func, *args, **kwargs)
+        # The pool is busy: the job is queued, not running.
+        state["queued"].set()
+        await state["release"].wait()
+        # Only a job that was never cancelled reaches its worker.
+        return func(*args, **kwargs)
+
+    async def scenario() -> None:
+        state["queued"] = asyncio.Event()
+        state["release"] = asyncio.Event()
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel-copy", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.wait_for(state["queued"].wait(), 5)
+        task.cancel()
+        state["release"].set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion, "run_file_io", side_effect=queueing_run_file_io),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed, "the descriptor handed to the queued copy was never closed"
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

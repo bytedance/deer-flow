@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -329,8 +329,13 @@ class ThreadUploadIngestionService:
                 # Hand the descriptor over before the call: the copy closes it
                 # even when it fails, so this scope must not close it again and
                 # risk closing an unrelated descriptor that reused the number.
+                # await_drained, not a bare await: a cancelled await would
+                # cancel the queued executor job before its worker — and its
+                # closing finally — ever ran, and draining also keeps the
+                # worker from writing into a private directory this scope has
+                # already removed.
                 staged_fd, convert_source_fd = convert_source_fd, None
-                await run_file_io(_copy_fd_to_path, staged_fd, conversion_source)
+                await await_drained(run_file_io(_copy_fd_to_path, staged_fd, conversion_source))
                 md_staged = await uploads.convert_file_to_markdown(conversion_source, output_path=md_staging)
             except Exception:
                 self._seen_filenames.discard(unique_md_name)
