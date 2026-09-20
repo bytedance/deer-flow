@@ -83,6 +83,7 @@ class WechatQRLogin:
             raise QRLoginError("WeChat QR login session not found. Start again.", 404)
         if session.status in _ACTIVE and time.monotonic() >= session.expires_at:
             session.status = "expired"
+            session.verify_code = None
         return session
 
     @asynccontextmanager
@@ -146,11 +147,13 @@ class WechatQRLogin:
                 session.error = "network" if retryable else "invalid_response"
                 if not retryable:
                     session.status = "failed"
+                    session.verify_code = None
                 logger.warning("WeChat QR poll transport error: %s; retryable=%s", type(exc).__name__, retryable)
                 return session.response()
             except ValueError:
                 session = self._get(owner, session_id)
                 session.status, session.error = "failed", "invalid_response"
+                session.verify_code = None
                 return session.response()
             async with self._lock:
                 session = self._get(owner, session_id)
@@ -158,7 +161,10 @@ class WechatQRLogin:
                     return session.response()
                 status = str(data.get("status", "")).strip().lower()
                 session.error = None
-                session.verify_code = None
+                # Waits and IDC redirects do not acknowledge the submitted code.
+                # Keep sending it until WeChat accepts, rejects or ends the login.
+                if status not in {"wait", "pending", "scaned_but_redirect"}:
+                    session.verify_code = None
                 if status == "confirmed":
                     token = data.get("bot_token")
                     session.status = "failed"
@@ -192,6 +198,7 @@ class WechatQRLogin:
                         session.status = "scanned"
                     except ValueError:
                         session.status, session.error = "failed", "invalid_response"
+                        session.verify_code = None
                 elif status == "need_verifycode":
                     session.status = "verification_required"
                     if submitted_code:
@@ -203,7 +210,11 @@ class WechatQRLogin:
                     session.status = "expired" if status == "expired" else "failed"
                 elif status in {"scanned", "scaned"}:
                     session.status = "scanned"
-                elif status not in {"wait", "pending"}:
+                elif status in {"wait", "pending"}:
+                    if submitted_code:
+                        # Keep browser polling instead of asking for the code again.
+                        session.status = "scanned"
+                else:
                     session.status, session.error = "failed", "invalid_response"
                 # Log normalized states only: never URLs, codes, tokens or upstream bodies.
                 logger.debug("WeChat QR login: status=%s error=%s", session.status, session.error)

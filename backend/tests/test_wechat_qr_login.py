@@ -274,3 +274,121 @@ async def test_pairing_timeout_keeps_code_and_signals_automatic_retry(login):
     login.request.return_value = {"status": "scaned"}
     assert (await login.poll("alice", session["id"], AsyncMock()))["status"] == "scanned"
     assert login.request.call_args.kwargs["verify_code"] == "123456"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"status": "wait"},
+        {"status": "pending"},
+        {"status": "scaned_but_redirect", "redirect_host": "ilinkai2.weixin.qq.com"},
+    ],
+)
+async def test_pairing_wait_and_redirect_keep_polling_with_submitted_code(login, response):
+    session = await login.start("alice", {})
+    apply = AsyncMock(return_value={"provider": "wechat", "configured": True})
+    login.request.return_value = {"status": "need_verifycode"}
+    await login.poll("alice", session["id"], apply)
+
+    login.request.return_value = response
+    result = await login.poll("alice", session["id"], apply, verify_code="123456")
+    # The browser automatically polls scanned sessions, but waits for input
+    # when verification_required has no network error.
+    assert result["status"] == "scanned"
+    assert result["error"] is None
+    assert "123456" not in str(result)
+    apply.assert_not_awaited()
+
+    # No resubmission from the browser is needed, even after multiple waits.
+    login.request.return_value = {"status": "wait"}
+    result = await login.poll("alice", session["id"], apply)
+    assert result["status"] == "scanned"
+    assert login.request.call_args.kwargs.get("verify_code") == "123456"
+    if response["status"] == "scaned_but_redirect":
+        assert login.request.call_args.args[0]["base_url"] == "https://ilinkai2.weixin.qq.com"
+
+    login.request.return_value = {"status": "confirmed", "bot_token": "secret-token"}
+    result = await login.poll("alice", session["id"], apply)
+    assert login.request.call_args.kwargs.get("verify_code") == "123456"
+    assert result["status"] == "confirmed"
+    assert login.session.verify_code is None
+    assert "123456" not in str(result)
+    assert "secret-token" not in str(result)
+    apply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,status,error",
+    [
+        ({"status": "need_verifycode"}, "verification_required", "verification_rejected"),
+        ({"status": "scaned"}, "scanned", None),
+        ({"status": "expired"}, "expired", None),
+        ({"status": "verify_code_blocked"}, "failed", "verification_blocked"),
+        ({"status": "binded_redirect"}, "failed", "already_bound"),
+        ({"status": "scaned_but_redirect", "redirect_host": "evil.example"}, "failed", "invalid_response"),
+        ({"status": "confirmed"}, "failed", "invalid_response"),
+        ({"status": "unsupported"}, "failed", "invalid_response"),
+    ],
+)
+async def test_pairing_code_is_cleared_after_provider_decides(login, response, status, error):
+    session = await login.start("alice", {})
+    apply = AsyncMock()
+    login.request.return_value = {"status": "need_verifycode"}
+    await login.poll("alice", session["id"], apply)
+    login.request.return_value = {"status": "wait"}
+    await login.poll("alice", session["id"], apply, verify_code="123456")
+
+    login.request.return_value = response
+    result = await login.poll("alice", session["id"], apply)
+    assert login.request.call_args.kwargs.get("verify_code") == "123456"
+    assert result["status"] == status
+    assert result["error"] == error
+    assert login.session.verify_code is None
+    assert "123456" not in str(result)
+    apply.assert_not_awaited()
+
+    if status == "verification_required":
+        login.request.return_value = {"status": "scaned"}
+        await login.poll("alice", session["id"], apply, verify_code="654321")
+        assert login.request.call_args.kwargs["verify_code"] == "654321"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "transport", "invalid_response", "expired"])
+async def test_pairing_wait_handles_network_retry_and_session_end(login, failure):
+    session = await login.start("alice", {})
+    apply = AsyncMock(return_value={"provider": "wechat"})
+    login.request.return_value = {"status": "need_verifycode"}
+    await login.poll("alice", session["id"], apply)
+    login.request.return_value = {"status": "wait"}
+    await login.poll("alice", session["id"], apply, verify_code="123456")
+    login.request.reset_mock()
+
+    if failure == "expired":
+        login.session.expires_at = 0
+    else:
+        login.request.side_effect = {
+            "timeout": httpx.ReadTimeout("private URL and code"),
+            "transport": httpx.ConnectError("private URL and code"),
+            "invalid_response": ValueError("private URL and code"),
+        }[failure]
+    result = await login.poll("alice", session["id"], apply)
+    assert "123456" not in str(result)
+    apply.assert_not_awaited()
+
+    if failure in {"timeout", "transport"}:
+        assert result["status"] == "scanned"
+        assert result["error"] == "network"
+        login.request.side_effect = None
+        login.request.return_value = {"status": "confirmed", "bot_token": "secret-token"}
+        assert (await login.poll("alice", session["id"], apply))["status"] == "confirmed"
+        assert login.request.call_args.kwargs.get("verify_code") == "123456"
+        assert login.session.verify_code is None
+        apply.assert_awaited_once()
+    else:
+        assert result["status"] == ("expired" if failure == "expired" else "failed")
+        assert login.session.verify_code is None
+        if failure == "expired":
+            login.request.assert_not_awaited()

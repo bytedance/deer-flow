@@ -267,6 +267,80 @@ it("keeps the same QR while automatically retrying temporary network errors", as
   expect(startWechatQRLogin).toHaveBeenCalledTimes(1);
 });
 
+it.each([
+  { status: "confirmed", provider },
+  { status: "verification_required", error: "verification_rejected" },
+  { status: "expired" },
+  { status: "failed", error: "verification_blocked" },
+] satisfies Partial<WechatQRLoginSession>[])(
+  "keeps polling a submitted pairing code until $status",
+  async (outcome) => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    rs.mocked(pollWechatQRLogin)
+      .mockResolvedValueOnce({ ...session, status: "verification_required" })
+      // Backend wait/redirect responses after submission normalize to scanned.
+      .mockResolvedValueOnce({ ...session, status: "scanned" })
+      .mockResolvedValueOnce({
+        ...session,
+        status: "scanned",
+        error: "network",
+      })
+      .mockResolvedValueOnce({ ...session, status: "scanned" })
+      .mockResolvedValueOnce({ ...session, ...outcome });
+    const { onConfigured } = mount();
+    await act(() => rs.advanceTimersByTimeAsync(1501));
+    fireEvent.change(screen.getByLabelText("Pairing code"), {
+      target: { value: "123456" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Continue connecting" }),
+      );
+    });
+    expect(pollWechatQRLogin).toHaveBeenNthCalledWith(
+      2,
+      "session-1",
+      expect.any(AbortSignal),
+      "123456",
+    );
+    expect(screen.queryByLabelText("Pairing code")).toBeNull();
+    expect(onConfigured).not.toHaveBeenCalled();
+
+    for (let call = 3; call <= 5; call++) {
+      await act(() => rs.advanceTimersByTimeAsync(1500));
+      // The server retains the submitted code; the browser need not resend it.
+      expect(pollWechatQRLogin).toHaveBeenNthCalledWith(
+        call,
+        "session-1",
+        expect.any(AbortSignal),
+        undefined,
+      );
+    }
+    if (outcome.status === "confirmed") {
+      expect(onConfigured).toHaveBeenCalledExactlyOnceWith(provider);
+    } else {
+      expect(onConfigured).not.toHaveBeenCalled();
+      if (outcome.status === "verification_required") {
+        expect(
+          screen.getByLabelText<HTMLInputElement>("Pairing code").value,
+        ).toBe("");
+        expect(
+          screen.getByText(
+            "The code did not match. Check the digits on your phone and try again.",
+          ),
+        ).toBeTruthy();
+      } else {
+        expect(
+          screen.getByRole("button", { name: "Refresh QR code" }),
+        ).toBeTruthy();
+      }
+    }
+    await act(() => rs.advanceTimersByTimeAsync(5000));
+    expect(pollWechatQRLogin).toHaveBeenCalledTimes(5);
+    expect(startWechatQRLogin).toHaveBeenCalledTimes(1);
+  },
+);
+
 it("restarts scanning while keeping the unexpired phone command and ignoring an old poll", async () => {
   rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   rs.mocked(listChannelProviders).mockResolvedValue({
