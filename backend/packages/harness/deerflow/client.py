@@ -1687,14 +1687,18 @@ class DeerFlowClient:
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
-                        # Convert outside the sandbox-writable uploads dir, then
-                        # publish without following a symlink at the companion name.
+                        # Convert the caller's own file, not the copy that just
+                        # landed in the sandbox-writable uploads dir: a sandbox
+                        # that swaps that name for a symlink would otherwise have
+                        # a host file converted into this thread's uploads. Write
+                        # the result outside uploads too, then publish it without
+                        # following a symlink at the companion name.
                         with tempfile.TemporaryDirectory() as md_dir:
                             md_output = Path(md_dir) / unique_md_name
                             if conversion_pool is not None:
-                                converted = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
+                                converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
                             else:
-                                converted = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                                converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
                             md_path = None
                             if converted is not None:
                                 # copy, not write_bytes: the companion keeps the

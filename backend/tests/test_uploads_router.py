@@ -12,6 +12,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
+from app.gateway import upload_ingestion
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
@@ -933,6 +934,81 @@ def test_upload_files_oversized_replacement_preserves_existing_regular_file(tmp_
     assert exc_info.value.status_code == 413
     assert existing_file.read_bytes() == b"original bytes"
     assert [path.name for path in thread_uploads_dir.iterdir()] == ["a.txt"]
+
+
+def test_upload_files_converts_the_bytes_it_wrote_not_the_committed_name(tmp_path):
+    """A sandbox swapping the landed upload must not redirect conversion at a host file."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    host_file = tmp_path / "host-secret.pdf"
+    host_file.write_bytes(b"HOST SECRET")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    async def racing_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        # The sandbox wins the race: the committed name now points outside uploads.
+        landed = thread_uploads_dir / "report.pdf"
+        if landed.exists() and not landed.is_symlink():
+            landed.unlink()
+            _symlink_to_or_skip(landed, host_file)
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_bytes(b"CONVERTED:" + file_path.read_bytes())
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=racing_convert)),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-race", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    companion = thread_uploads_dir / result.files[0].markdown_file
+    assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+    assert b"HOST SECRET" not in companion.read_bytes()
+
+
+def test_upload_files_conversion_source_survives_a_swap_before_it_is_read(tmp_path):
+    """The swap lands after the upload commits and before conversion reads it."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    host_file = tmp_path / "host-secret.pdf"
+    host_file.write_bytes(b"HOST SECRET")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    real_mkdtemp = upload_ingestion.tempfile.mkdtemp
+
+    def swap_then_mkdtemp(*args, **kwargs):
+        # Runs between the link-commit and the read of the staged bytes.
+        landed = thread_uploads_dir / "report.pdf"
+        if landed.exists() and not landed.is_symlink():
+            landed.unlink()
+            _symlink_to_or_skip(landed, host_file)
+        return real_mkdtemp(*args, **kwargs)
+
+    async def fake_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_bytes(b"CONVERTED:" + file_path.read_bytes())
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(upload_ingestion.tempfile, "mkdtemp", side_effect=swap_then_mkdtemp),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-race2", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    companion = thread_uploads_dir / result.files[0].markdown_file
+    assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+    assert b"HOST SECRET" not in companion.read_bytes()
 
 
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
