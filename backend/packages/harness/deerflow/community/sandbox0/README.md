@@ -54,16 +54,20 @@ bindings; it does not delete conversation data.
 ## Persistence and boundaries
 
 - Preserve `state_dir` (default: `DEER_FLOW_HOME/sandbox0`). Its atomic JSON
-  bindings contain IDs and ownership only. Losing this directory loses the
+  bindings contain IDs, ownership, and pending lifecycle actions, not credentials.
+  Losing this directory loses the
   mapping; it does not delete the remote workspaces.
 - This first integration supports **one Gateway process per state directory**.
   An OS lock rejects a second process. It does not provide distributed ownership
   or automatic adoption across independent Gateway hosts.
-- A pause timeout hides the cached client from new leases while retaining its
-  binding and retry handle. The next acquire finishes reconciling that pause
-  before resuming the same workspace. Release retries do not re-read artifacts
-  from an already paused runtime. An uncertain deletion also hides the client
-  and requires retrying `destroy()` before that provider can reuse the identity.
+- Pause/delete intent is saved atomically before the remote request. A timeout
+  hides the cached client from new leases while retaining the binding and retry
+  handle. After a Gateway restart, acquire reloads unresolved intent and finishes
+  reconciling a pause before resuming, even if the server still reports running.
+  Release retries do not re-read artifacts from an already paused runtime.
+  Uncertain deletion remains blocked across restarts until an explicit
+  `destroy()` retry completes. Files and directory entries are synced on POSIX;
+  Windows uses atomic file replacement and file sync.
 - Pause preserves writable RootFS files, including installed dependencies.
   Processes, memory, shell variables and `/tmp` do not survive pause. Every bash
   call starts a fresh shell, even within one turn.

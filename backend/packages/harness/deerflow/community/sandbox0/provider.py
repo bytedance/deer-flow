@@ -35,7 +35,7 @@ def _new_client(**kwargs):
 class Sandbox0Provider(SandboxProvider):
     """Keep thread identity across turns/restarts; pause commits the writable RootFS.
 
-    The local registry contains IDs only, never credentials or guest data. One
+    The registry stores identity and lifecycle intent, never credentials or guest data. One
     Gateway owns a registry at a time; an OS lock rejects concurrent workers.
     Distributed lifecycle ownership is intentionally not inferred from local IDs.
     """
@@ -118,16 +118,48 @@ class Sandbox0Provider(SandboxProvider):
         return self._state_dir / f"{sandbox_id}.json"
 
     def _save_binding(self, sandbox_id: str, remote_id: str, user_id: str, thread_id: str):
+        self._write_binding(sandbox_id, {"version": 1, "remote_id": remote_id, "user_id": user_id, "thread_id": thread_id})
+
+    def _read_binding(self, sandbox_id: str) -> dict:
+        binding = json.loads(self._binding_path(sandbox_id).read_text(encoding="utf-8"))
+        if binding.get("version") != 1 or binding.get("pending_action") not in (None, "pause", "delete"):
+            raise RuntimeError("Invalid Sandbox0 registry lifecycle state")
+        return binding
+
+    def _sync_state_dir(self):
+        # File fsync alone does not persist the rename/unlink across a crash.
+        # Windows does not support opening a directory with os.open().
+        if os.name != "nt":
+            descriptor = os.open(self._state_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _write_binding(self, sandbox_id: str, binding: dict):
         path = self._binding_path(sandbox_id)
         temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("x", encoding="utf-8") as stream:
-                json.dump({"version": 1, "remote_id": remote_id, "user_id": user_id, "thread_id": thread_id}, stream)
+                json.dump(binding, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            self._sync_state_dir()
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _set_pending_action(self, sandbox_id: str, action: str | None):
+        """Write intent before remote mutation; clear it only after completion."""
+        if action is not None:
+            with self._lock:
+                self._pending_actions[sandbox_id] = action
+        binding = self._read_binding(sandbox_id)
+        if action is None:
+            binding.pop("pending_action", None)
+        else:
+            binding["pending_action"] = action
+        self._write_binding(sandbox_id, binding)
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         from sandbox0.apispec.models.sandbox_config import SandboxConfig
@@ -155,10 +187,18 @@ class Sandbox0Provider(SandboxProvider):
             try:
                 path = self._binding_path(sid)
                 if path.exists():
-                    binding = json.loads(path.read_text(encoding="utf-8"))
-                    if binding.get("version") != 1 or (binding.get("user_id"), binding.get("thread_id")) != (user, thread):
+                    binding = self._read_binding(sid)
+                    if (binding.get("user_id"), binding.get("thread_id")) != (user, thread):
                         raise RuntimeError("Sandbox0 registry identity mismatch")
                     remote_id = binding["remote_id"]
+                    pending = binding.get("pending_action")
+                    if pending is not None:
+                        with self._lock:
+                            self._pending_actions[sid] = pending
+                        if pending == "delete":
+                            raise RuntimeError("Sandbox0 workspace deletion is pending; retry destroy()")
+                        self._reconcile_pause(remote_id)
+                        self._set_pending_action(sid, None)
                     # Missing/expired identity must be surfaced, never silently replace
                     # a persistent workspace with a new empty sandbox.
                     state = client.sandboxes.get(remote_id)
@@ -176,6 +216,10 @@ class Sandbox0Provider(SandboxProvider):
                     try:
                         self._save_binding(sid, remote.id, user, thread)
                     except BaseException:
+                        # A failed directory sync may leave the new binding
+                        # visible. Fence cleanup before deleting that identity.
+                        if path.exists():
+                            self._set_pending_action(sid, "delete")
                         self._delete_remote(remote.id)
                         raise
                 sandbox = Sandbox0Sandbox(sid, remote, command_timeout=self._command_timeout, environment=self._environment, refresh=partial(client.sandboxes.refresh, remote.id), refresh_interval=min(60, self._ttl / 3))
@@ -185,6 +229,7 @@ class Sandbox0Provider(SandboxProvider):
                 with self._lock:
                     self._sandboxes[sid] = sandbox
                     self._owners[sid] = (user, thread)
+                    self._pending_actions.pop(sid, None)
                 return sid
             except BaseException:
                 with self._lock:
@@ -260,25 +305,36 @@ class Sandbox0Provider(SandboxProvider):
                 except Exception as exc:
                     sync_error = exc
 
-            # Retried releases must not read artifacts from a runtime which
-            # may already be paused. The mirror was attempted before pause.
-            def paused(state):
-                return str(state.status) == "paused" and state.paused
-
+            # The durable marker also fences a replacement Gateway if the
+            # process exits before the remote mutation has completed.
+            self._set_pending_action(sandbox_id, "pause")
             if pending == "pause":
-                state = self._client.sandboxes.get(sandbox.remote_id)
-                if str(state.status) == "pausing":
-                    self._client.sandboxes.wait_for_lifecycle(sandbox.remote_id, paused, timeout_sec=self._lifecycle_timeout)
-                elif not paused(state):
-                    self._await_lifecycle(sandbox.remote_id, "pause", paused)
+                self._reconcile_pause(sandbox.remote_id)
             else:
-                self._await_lifecycle(sandbox.remote_id, "pause", paused)
+                self._await_lifecycle(sandbox.remote_id, "pause", lambda s: str(s.status) == "paused" and s.paused)
+            self._set_pending_action(sandbox_id, None)
             with self._lock:
                 self._sandboxes.pop(sandbox_id, None)
                 self._owners.pop(sandbox_id, None)
                 self._pending_actions.pop(sandbox_id, None)
             if sync_error is not None:
                 raise sync_error
+
+    def _reconcile_pause(self, remote_id: str):
+        """Finish an uncertain pause, even if the remote still reports running."""
+
+        def paused(state):
+            return str(state.status) == "paused" and state.paused
+
+        state = self._client.sandboxes.get(remote_id)
+        if paused(state):
+            return
+        if str(state.status) == "pausing":
+            self._client.sandboxes.wait_for_lifecycle(remote_id, paused, timeout_sec=self._lifecycle_timeout)
+        elif str(state.status) == "running":
+            self._await_lifecycle(remote_id, "pause", paused)
+        else:
+            raise RuntimeError(f"Sandbox0 pending pause cannot be reconciled: {state.status}")
 
     def _await_lifecycle(self, remote_id, action, predicate):
         # SDK 0.10.2 parses synchronous responses only. Newer Nomad services
@@ -317,13 +373,12 @@ class Sandbox0Provider(SandboxProvider):
         with self._lifecycle:
             self._initialize()
             path = self._binding_path(sandbox_id)
-            if not path.exists():
-                return
-            remote_id = json.loads(path.read_text(encoding="utf-8"))["remote_id"]
-            with self._lock:
-                self._pending_actions[sandbox_id] = "delete"
-            self._delete_remote(remote_id)
-            path.unlink()
+            if path.exists():
+                remote_id = self._read_binding(sandbox_id)["remote_id"]
+                self._set_pending_action(sandbox_id, "delete")
+                self._delete_remote(remote_id)
+                path.unlink()
+            self._sync_state_dir()
             with self._lock:
                 self._sandboxes.pop(sandbox_id, None)
                 self._owners.pop(sandbox_id, None)

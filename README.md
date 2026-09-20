@@ -549,7 +549,8 @@ deploy.sh down
 [Sandbox0](backend/packages/harness/deerflow/community/sandbox0/README.md) is also
 available as an optional persistent workspace provider. It checkpoints and pauses
 the workspace between turns, then resumes the same sandbox identity. Timed-out
-pauses are reconciled before a later turn can reuse the workspace. See the
+pauses are reconciled before a later turn can reuse the workspace, including
+after a Gateway restart. See the
 [real Agent demo](backend/examples/sandbox0/README.md) for upload, tools, skills,
 subagents, artifact download and cross-turn persistence validation.
 

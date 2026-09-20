@@ -409,3 +409,201 @@ def test_release_retry_after_remote_checkpoint_does_not_read_or_pause_again(prov
     client.sandboxes.pause_and_wait.assert_called_once()
     assert p.get(sid) is None
     assert p._binding_path(sid).exists()
+
+
+def _crash_provider(provider):
+    """Drop process-local state without completing outstanding remote actions."""
+    provider._closed = True
+    provider._serializer.close()
+    provider._client.close()
+    provider._registry_lock.release()
+
+
+@pytest.mark.parametrize("async_lease", [False, True])
+@pytest.mark.parametrize("remote_status", ["running", "pausing", "paused"])
+def test_restart_reconciles_durable_pause_before_next_lease(provider, async_lease, remote_status):
+    import asyncio
+    import json
+
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    client.sandboxes.pause_and_wait.side_effect = TimeoutError("lost pause response")
+    with pytest.raises(TimeoutError):
+        p.release(sid)
+    _crash_provider(p)
+    state = SimpleNamespace(status=remote_status, paused=remote_status == "paused", runtime_generation=1)
+    client.sandboxes.get.return_value = state
+
+    def checkpoint(*args, **kwargs):
+        state.status, state.paused = "paused", True
+        return state
+
+    def resume(*args, **kwargs):
+        assert state.status == "paused"
+        assert json.loads(p._binding_path(sid).read_text()).get("pending_action") is None
+        state.status, state.paused, state.runtime_generation = "running", False, 2
+        return state
+
+    client.sandboxes.pause_and_wait.side_effect = checkpoint
+    client.sandboxes.wait_for_lifecycle.side_effect = checkpoint
+    client.sandboxes.resume_and_wait.side_effect = resume
+    replacement = Sandbox0Provider()
+    leases = SandboxLeaseManager(replacement)
+    try:
+        if async_lease:
+            recovered = asyncio.run(leases.reuse_or_acquire_async("next-turn", sid, thread_id="thread", user_id="alice"))
+        else:
+            recovered = leases.reuse_or_acquire("next-turn", sid, thread_id="thread", user_id="alice")
+        assert recovered == sid
+        assert state.runtime_generation == 2
+        assert replacement.get(sid).remote_id == "remote-1"
+        assert client.sandboxes.claim.call_count == 1
+        client.sandboxes.resume_and_wait.assert_called_once()
+        leases.release("next-turn")
+    finally:
+        leases.close()
+        replacement.shutdown()
+
+
+@pytest.mark.parametrize("action", ["pause", "delete"])
+@pytest.mark.parametrize("restart", ["crash", "failed_shutdown"])
+def test_restart_does_not_adopt_running_workspace_with_unresolved_action(provider, action, restart):
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    mutation = client.sandboxes.pause_and_wait if action == "pause" else client.sandboxes.delete
+    mutation.side_effect = TimeoutError("request outcome unknown")
+    operation = p.release if action == "pause" else p.destroy
+    with pytest.raises(TimeoutError):
+        operation(sid)
+    if restart == "crash":
+        _crash_provider(p)
+    else:
+        with pytest.raises(ExceptionGroup):
+            p.shutdown()
+    replacement = Sandbox0Provider()
+    try:
+        expected = TimeoutError if action == "pause" else RuntimeError
+        with pytest.raises(expected, match="unknown|deletion"):
+            replacement.acquire("thread", user_id="alice")
+        assert replacement.get(sid) is None
+        assert replacement._binding_path(sid).exists()
+        client.sandboxes.resume_and_wait.assert_not_called()
+        assert client.sandboxes.claim.call_count == 1
+    finally:
+        mutation.side_effect = None
+        replacement.destroy(sid)
+        replacement.shutdown()
+
+
+@pytest.mark.parametrize("action", ["pause", "delete"])
+def test_lifecycle_intent_is_persisted_before_remote_mutation(provider, action):
+    import json
+
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    mutation = client.sandboxes.pause_and_wait if action == "pause" else client.sandboxes.delete
+
+    def inspect_intent(*args, **kwargs):
+        assert json.loads(p._binding_path(sid).read_text())["pending_action"] == action
+        raise TimeoutError("response lost")
+
+    mutation.side_effect = inspect_intent
+    try:
+        with pytest.raises(TimeoutError):
+            (p.release if action == "pause" else p.destroy)(sid)
+        assert json.loads(p._binding_path(sid).read_text())["pending_action"] == action
+    finally:
+        _crash_provider(p)
+
+
+@pytest.mark.parametrize("action", ["pause", "delete"])
+def test_failed_intent_write_prevents_remote_mutation(provider, monkeypatch, action):
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    monkeypatch.setattr("deerflow.community.sandbox0.provider.os.replace", Mock(side_effect=OSError("disk full")))
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            (p.release if action == "pause" else p.destroy)(sid)
+        client.sandboxes.pause_and_wait.assert_not_called()
+        client.sandboxes.delete.assert_not_called()
+        assert p.get(sid) is None
+    finally:
+        _crash_provider(p)
+
+
+def test_restart_recovers_when_clearing_completed_pause_intent_fails(provider, monkeypatch):
+    import json
+
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    write_binding = p._write_binding
+
+    def fail_clear(sandbox_id, binding):
+        if "pending_action" not in binding:
+            raise OSError("cannot clear checkpoint intent")
+        write_binding(sandbox_id, binding)
+
+    monkeypatch.setattr(p, "_write_binding", fail_clear)
+    with pytest.raises(OSError, match="cannot clear"):
+        p.release(sid)
+    assert json.loads(p._binding_path(sid).read_text())["pending_action"] == "pause"
+    assert p.get(sid) is None
+    _crash_provider(p)
+    client.sandboxes.get.return_value = SimpleNamespace(status="paused", paused=True, runtime_generation=1)
+    replacement = Sandbox0Provider()
+    try:
+        assert replacement.acquire("thread", user_id="alice") == sid
+        client.sandboxes.pause_and_wait.assert_called_once()
+        client.sandboxes.resume_and_wait.assert_called_once()
+        assert json.loads(replacement._binding_path(sid).read_text()).get("pending_action") is None
+    finally:
+        replacement.shutdown()
+
+
+def test_clearing_durable_intent_does_not_publish_paused_handle(provider, monkeypatch):
+    p, _ = provider
+    sid = p.acquire("thread", user_id="alice")
+    write_binding = p._write_binding
+
+    def inspect_readiness(sandbox_id, binding):
+        write_binding(sandbox_id, binding)
+        assert p.get(sid) is None
+
+    monkeypatch.setattr(p, "_write_binding", inspect_readiness)
+    p.release(sid)
+    assert p.get(sid) is None
+
+
+def test_initial_binding_directory_sync_failure_fences_cleanup(provider, monkeypatch):
+    import json
+
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    p, client = provider
+    monkeypatch.setattr(p, "_sync_state_dir", Mock(side_effect=OSError("directory sync failed")))
+    try:
+        with pytest.raises(OSError, match="directory sync"):
+            p.acquire("thread", user_id="alice")
+        sid = derive_sandbox_scope_token(user_id="alice", thread_id="thread")
+        assert json.loads(p._binding_path(sid).read_text())["pending_action"] == "delete"
+        client.sandboxes.delete.assert_not_called()
+        assert p.get(sid) is None
+    finally:
+        _crash_provider(p)
+
+
+def test_unknown_persisted_action_is_not_treated_as_ready(provider):
+    import json
+
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    p.release(sid)
+    binding = json.loads(p._binding_path(sid).read_text())
+    binding["pending_action"] = "future-action"
+    p._binding_path(sid).write_text(json.dumps(binding))
+    with pytest.raises(RuntimeError, match="lifecycle state"):
+        p.acquire("thread", user_id="alice")
+    assert p.get(sid) is None
+    assert client.sandboxes.claim.call_count == 1
