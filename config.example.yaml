@@ -1321,6 +1321,26 @@ loop_detection:
   #     hard_limit: 300
 
 # ============================================================================
+# PII Redaction Middleware Configuration (issue #3190)
+# ============================================================================
+# Deterministic PII redaction in model-bound context. When enabled, emails,
+# phone numbers, API keys, credit-card numbers (Luhn-validated) and national
+# IDs found in genuine user messages and remote-content tool results
+# (web_fetch / web_search / image_search / web_capture and MCP tools) are
+# rewritten to irreversible placeholders like [EMAIL_1] before they reach the
+# model. No mapping is stored, so redaction cannot be reversed. Raw text stays
+# in thread state for the UI; the memory-extraction path is not covered.
+# Compaction and configured LLM title inputs are redacted too. Existing
+# placeholders reserve indices; compacted raw identities cannot be relinked.
+pii_redaction:
+  enabled: false
+  # redact_email: true
+  # redact_api_key: true
+  # redact_credit_card: true
+  # redact_phone: true
+  # redact_national_id: true
+
+# ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)
 # ============================================================================
 # Detects tool stagnation and repetition at the (thread, tool) level.

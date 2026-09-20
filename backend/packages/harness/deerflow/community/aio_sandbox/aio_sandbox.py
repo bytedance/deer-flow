@@ -757,9 +757,12 @@ class AioSandbox(Sandbox):
                     line=truncate_line(match.line_content),
                 )
             )
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Look one match past the cap before deciding, as ``glob`` above
+            # does. Returning on the ``max_results``-th match cannot tell a
+            # search that held exactly that many from one that held more, so an
+            # exhausted search was reported as truncated.
+            if len(matches) > max_results:
+                return matches[:max_results], True
 
         return matches, truncated
 
