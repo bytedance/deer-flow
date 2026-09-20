@@ -12,6 +12,7 @@ from deerflow.models.credential_loader import (
     load_claude_code_credential,
     load_codex_cli_credential,
 )
+from deerflow.models.openai_codex_provider import CodexChatModel
 
 
 @pytest.fixture(autouse=True)
@@ -331,3 +332,21 @@ def test_load_codex_cli_credential_supports_legacy_top_level_shape(tmp_path, mon
     assert cred is not None
     assert cred.access_token == "legacy-access-token"
     assert cred.account_id == ""
+
+
+@pytest.mark.parametrize("payload", [[], "codex-access-token", 5])
+def test_load_codex_cli_credential_ignores_non_object_auth_file(tmp_path, monkeypatch, payload):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(payload))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None
+
+
+def test_codex_chat_model_reports_missing_credential_for_non_object_auth_file(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps([]))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    with pytest.raises(ValueError, match="Codex CLI credential not found"):
+        CodexChatModel(model="gpt-5.4")
