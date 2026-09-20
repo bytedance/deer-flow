@@ -119,6 +119,10 @@ server-generated hidden context, and ignore client values. Scope admission
 treats `input.messages: null` as an empty message collection so
 conversation-reference runs without a prompt remain valid.
 
+Unscoped new runs persist pre-default request digests even for unbound agents.
+Digest-free legacy retries compare pre-default canonical input; explicit scopes
+and recovery are excluded. Retries preserve the original run across binding edits.
+
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs
 are generated only for `None`, while explicit empty strings fail validation.

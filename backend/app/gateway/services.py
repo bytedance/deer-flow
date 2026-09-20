@@ -1794,11 +1794,12 @@ async def start_run(
             if not scope_runtime_config.get("is_bootstrap")
             else None
         )
-        # The accepted input includes a server-injected default. Keep a digest
-        # of the request for idempotent retries after that default is edited;
-        # the durable record continues to expose the original accepted scope.
-        knowledge_default_request_hash = hashlib.sha256(json.dumps(_canonical_run_record_input(body.input, graph_input), sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
-        applies_knowledge_default = not is_scope_recovery and not current_message_has_scope and getattr(agent_config, "knowledge_scope", None) is not None and knowledge_default_request_hash is not None
+        # Keep the pre-default identity even when the agent is initially
+        # unbound: adding a default must not reject an already-accepted retry.
+        # The durable input still exposes the original accepted scope.
+        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
+        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
         admitted_knowledge_scope = admit_message_knowledge_scope(
             scope_graph_input,
             assistant_id=scope_assistant_id,
@@ -1974,7 +1975,7 @@ async def start_run(
                     # config built above keeps the secrets for the actual run.
                     kwargs={
                         "input": run_record_input,
-                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if applies_knowledge_default else {}),
+                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                         "config": redact_config_secrets(body.config),
                         **({"conversation_references": conversation_references} if conversation_references else {}),
                     },
@@ -1993,7 +1994,13 @@ async def start_run(
                     # by older Gateway versions, while comparing canonical
                     # retries to the same representation as the stored record.
                     matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
-                    if (not matches_default_request and stored_input != body.input and stored_input != run_record_input) or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                    # Pre-feature unscoped records may already contain normalized
+                    # messages, but have no digest. Compare them before injecting
+                    # today's default; explicit scopes and recovery do not use
+                    # this compatibility path.
+                    matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
+                    matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                    if not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",

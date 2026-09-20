@@ -1161,6 +1161,8 @@ allowlist still applies at retrieval time. Gateway runs without a message scope
 when the composer selector is hidden. Regenerate/resume retain the original
 turn's scope, including legacy unscoped turns, rather than picking up later
 configuration changes. Unknown or unavailable selections never broaden retrieval.
+Idempotent retries keep the original run and scope when a default is added,
+changed, or cleared, including unscoped runs accepted before this feature.
 This default applies to Gateway-hosted custom-agent turns; direct harness/client
 integrations continue to supply their own execution scope.
 
