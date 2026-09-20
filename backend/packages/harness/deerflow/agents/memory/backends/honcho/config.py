@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
+from urllib.parse import urlsplit
 
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -87,6 +88,14 @@ class HonchoConfig:
     storage_path: str = ""
 
     def __post_init__(self) -> None:
+        # A scheme-less or non-http value is not a relative address: httpx turns
+        # "localhost:8000" into the bogus scheme "localhost:", so every later
+        # request fails while Gateway startup stays green. The mem0 and OpenViking
+        # backends already reject this shape; README.md and
+        # HonchoMemoryManager.from_config both promise a bad URL fails fast.
+        parsed_base_url = urlsplit(self.base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("Honcho backend: base_url must be an absolute http:// or https:// URL")
         if not isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("Honcho backend: timeout_seconds must be a finite value > 0")
         if not isfinite(self.connect_timeout_seconds) or self.connect_timeout_seconds <= 0:
