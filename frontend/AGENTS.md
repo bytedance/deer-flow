@@ -247,3 +247,13 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+### Shared model settings
+
+Settings → Models (`?settings=models`) offers administrator-only catalog management
+through `/api/managed-models`. YAML entries are read-only. `core/models/management.ts`
+whitelists editable fields so source metadata and `has_api_key` never get posted.
+Draft credentials stay in editor state, never query cache or browser storage; blank
+keeps the saved key, explicit removal sends an empty key. Saving invalidates both the
+admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
+callbacks. Static demos and non-admin users must not query the management API.

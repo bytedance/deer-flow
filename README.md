@@ -155,6 +155,31 @@ It is disabled by default; see the linked guide to enable it.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
+   Administrators can also open **Settings → Models** to add, edit, test, and
+   enable/disable shared OpenAI-compatible Chat Completions models without editing
+   `config.yaml`. Enter a unique name, base URL, model ID, and optional API key;
+   saving refreshes the chat model list. Connection testing sends a short streaming
+   tool-call request and may incur provider charges. It does not save the draft or
+   verify image support; set image support and token limits from provider documentation.
+   Native provider adapters and advanced reasoning settings remain YAML-configured.
+
+   YAML models remain read-only in this page and take precedence on name conflicts.
+   Managed models are appended after YAML models; edits apply to new configuration
+   snapshots, while active runs retain their existing snapshot. Disabling a model
+   removes it from future selection/resolution, so update any custom-agent or scheduled
+   task definitions that explicitly reference it before disabling it.
+   Managed models are shared by the deployment, not personal API-key profiles, and
+   remain subject to the existing model authorization policy.
+
+   The encrypted catalog and a generated local encryption key are stored in
+   `$DEER_FLOW_HOME/managed-models/` (default `.deer-flow/managed-models/`). Persist
+   and back up the **whole directory**, restrict filesystem access, and share it
+   across Gateway workers/replicas that should use the same catalog. The local key
+   is protected by filesystem permissions; encryption does not protect against
+   someone who can read both files. Losing the key requires restoring the backup.
+   Reads and writes fail if the catalog cannot be decrypted, rather than replacing it.
+   This storage is independent of the SQL backend and works with read-only YAML mounts.
+
    When several models are configured, open either model picker and use the
    star beside a model to favorite it. Favorites appear first in both the main
    chat and Side Chat pickers without changing either chat's selected or
@@ -1183,6 +1208,8 @@ loaded only after a dataset is switched from all files to selected files.
 This release does not add an independent Knowledge item to the workspace
 sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
 delete datasets and documents directly in RAGFlow.
+
+Each message can still select up to 1000 documents. When more than 100 documents are selected from a single dataset, DeerFlow validates them in batches of at most 100 while preserving the complete selection. If any batch contains an inaccessible or non-searchable document, retrieval is rejected.
 
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 

@@ -28,3 +28,26 @@ while handing off to the wait queue.
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
+
+### Managed shared models (`config/managed_models.py`)
+
+`ManagedModelStore` persists a Fernet-encrypted catalog plus its generated local key
+under `runtime_home()/managed-models`. Files are atomically replaced with temporary
+file permissions; complete read/modify/write transactions hold the process lock and
+cross-process sidecar lock. Missing keys and invalid catalogs fail closed. Backups
+and shared deployments must include both files. SQL storage does not replicate this
+catalog. Admin-supplied endpoints can address local providers; only trusted admins
+may create or probe them.
+
+`get_app_config()` and `reload_app_config()` merge enabled managed models after YAML
+profiles, with YAML names winning conflicts. A cached effective snapshot uses the
+base config identity and content signatures of both files. Never mutate a previously
+returned AppConfig: runtime-scoped and explicitly injected configurations remain
+authoritative. `_managed_model_names` is private source metadata, not provider kwargs.
+Direct `AppConfig.from_file()` continues to read only operator configuration.
+
+The MVP uses only the registered `langchain_openai:ChatOpenAI` adapter. Full updates
+require the current revision; omission means create, an omitted API key retains the
+saved key and an empty string clears it. Never serialize SecretStr masking as a saved
+key. Read APIs return `has_api_key`, never a credential. Tests live in
+`tests/test_managed_models.py` and `tests/blocking_io/test_managed_models.py`.

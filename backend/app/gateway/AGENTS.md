@@ -91,6 +91,7 @@ owner-scoped assistant version selection remains enabled.
 
 | Router | Endpoints |
 |--------|-----------|
+| **Managed Models** (`/api/managed-models`) | Admin-only GET catalog, PUT create/update with revision checks, POST `/test` streaming tool-call probe. YAML names are reserved; credentials stay private. |
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, separate batch repository/worker states so history stays readable without a worker, `conversation_references` (whether `read_conversation` is configured, plus the per-run reference cap), and knowledge scope selection |
 | **Knowledge** (`/api/knowledge/retrieval-catalog`) | Authenticated, allowlist-safe, read-only dataset/document catalog used only by main and custom-agent chat scope selection; knowledge management remains in RAGFlow |
@@ -118,10 +119,6 @@ recover checkpoint scope from the originating genuine user turn, skipping
 server-generated hidden context, and ignore client values. Scope admission
 treats `input.messages: null` as an empty message collection so
 conversation-reference runs without a prompt remain valid.
-
-Unscoped new runs persist pre-default request digests even for unbound agents.
-Digest-free legacy retries compare pre-default canonical input; explicit scopes
-and recovery are excluded. Retries preserve the original run across binding edits.
 
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs

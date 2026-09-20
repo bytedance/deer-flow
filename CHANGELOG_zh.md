@@ -798,6 +798,12 @@
   与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
   **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
   有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
+- **沙箱：** AIO 的 `grep` 与各远端 provider 的 `glob`/`grep` 不再把"恰好填满"的结果报告为截断。
+  它们本就持有整份列表——原始输出在上限之上截取并自行报告截断——但在收集到 `max_results` 个
+  过滤后的匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录也会被标记为被截断，
+  工具据此告诉模型结果不完整。现在改为多看一个匹配再判断，与 AIO 的 `glob` 两个分支一致。
+  这里涉及的只是**过滤后匹配数**上限；`parse_remote_search_output` 管的**原始输出行数**上限未作改动。
+  ([#5534])
 - **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
   token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
   却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
@@ -3504,4 +3510,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
