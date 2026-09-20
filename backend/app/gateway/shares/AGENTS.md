@@ -34,7 +34,12 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   containers, display-math openers there too — their block content is
   consumed unprotected until a closing dollar run at the opener's own
   quote shape (item-rooted math runs to the message end; over-consumption
-  is the safe direction) — and lazy paragraphs);
+  is the safe direction) — and lazy paragraphs). Possible link-reference
+  definitions (escaped/multiline labels included) and their following
+  nonblank lines remain unprotected until a blank line: destination/title
+  parsing is not duplicated. Invalid definitions and adjacent genuine code
+  examples may therefore be over-stripped; separate examples with a blank
+  line. Already-open code blocks retain literal contents;
   nested reasoning tags match to their
   outer close by depth; and GFM table rows and cells are separate inline
   contexts (remarkGfm splits them at the block level before inline parsing,

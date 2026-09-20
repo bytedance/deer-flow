@@ -999,6 +999,30 @@ def _iter_line_spans(text: str):
         yield line_start, content_end, line_end
 
 
+def _starts_reference_definition(text: str, offset: int) -> bool:
+    """Recognize a possible definition label without parsing a second Markdown AST.
+
+    Escaped brackets and multiline labels are legal. An unescaped opening
+    bracket ends a failed probe, so probes cannot repeatedly scan the same
+    suffix. We intentionally admit overlong/empty labels and invalid targets:
+    this only removes code protection, never grants it.
+    """
+    if offset >= len(text) or text[offset] != "[":
+        return False
+    cursor = offset + 1
+    while cursor < len(text):
+        char = text[cursor]
+        if char == "\\":
+            cursor += 2
+        elif char == "[":
+            return False
+        elif char == "]":
+            return text.startswith(":", cursor + 1)
+        else:
+            cursor += 1
+    return False
+
+
 def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, int], None]) -> None:
     """Walk the byte extents the Markdown renderer treats as code: fenced
     code blocks (CommonMark opener/closer rules — backtick fences reject
@@ -1063,6 +1087,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     segment_kind: str | None = None
     segment_quote_depth = 0
     saw_quotelike = False
+    reference_region = False
 
     def flush_segment() -> None:
         # Resets the segment on flush: a caller that keeps extending the
@@ -1086,6 +1111,19 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             indented_start = None
 
     for start, content_end, line_end in _iter_line_spans(text):
+        if reference_region:
+            # Definitions (including multiline titles) are not inline code.
+            # Their exact end depends on destination/title parsing and the
+            # container stack. Keep the entire nonblank region unprotected
+            # instead of guessing where a following paragraph/fence begins.
+            # This deliberately over-strips adjacent code examples unless
+            # separated by a blank line, but cannot publish hidden reasoning.
+            content = text[start:content_end]
+            saw_quotelike = saw_quotelike or _BLOCKQUOTE_RE.match(content) is not None or _LIST_ITEM_RE.match(content) is not None
+            if _is_commonmark_blank(content) or re.fullmatch(r" {0,3}>[ \t]*(?:>[ \t]*)*", content) is not None:
+                reference_region = False
+                indented_eligible = True
+            continue
         # Plain-paragraph fast path: with every block state machine idle, a
         # first character that cannot open any construct this walk
         # recognizes — blank/indent (space, tab), fence (backtick, tilde),
@@ -1103,7 +1141,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             and not container_math_open
             and indented_start is None
             and start < content_end
-            and text[start] not in " \t#>*+-~_<=$`"
+            and text[start] not in " \t#>*+-~_<=$`["
             and not text[start].isdigit()
         ):
             if segment_start is None:
@@ -1161,6 +1199,20 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
                 indented_eligible = _is_commonmark_blank(content)
                 continue
             close_indented()
+        # A definition can only begin at a paragraph boundary. Container
+        # openers may supply that boundary even while a document paragraph
+        # is open. Already-open fences/HTML/indented code were handled above.
+        quote = _BLOCKQUOTE_RE.match(content) is not None
+        item = _LIST_ITEM_RE.match(content) is not None
+        new_container = item or (quote and (segment_kind != "quote" or _quote_depth(content) > segment_quote_depth))
+        if "[" in content and (segment_start is None or new_container) and not (indented_eligible and not saw_quotelike and _indent_columns(content) >= 4):
+            body, _ = _container_body(content)
+            if _starts_reference_definition(text, start + len(content) - len(body)):
+                flush_segment()
+                reference_region = True
+                saw_quotelike = saw_quotelike or quote or item
+                indented_eligible = False
+                continue
         math_match = _DISPLAY_MATH_OPEN_RE.match(content)
         if math_match is not None and "$" not in content[math_match.end() :]:
             # remarkMath renders a valid flow-math opener as its own block:

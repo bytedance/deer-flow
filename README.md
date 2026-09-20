@@ -1643,6 +1643,11 @@ public `/share/{token}` frontend page. The returned `share_url` reserves that
 future page path; API clients can resolve the token today through
 `GET /api/shares/{share_token}`.
 
+The snapshot removes assistant reasoning outside code examples. Place a blank
+line between Markdown link-reference definitions and code examples: the sharing
+sanitizer conservatively strips reasoning markers throughout a definition's
+nonblank continuation region, including ambiguous or malformed definitions.
+
 Operators enable it with `conversation_sharing.enabled` in `config.yaml`.
 Multi-replica deployments must give every replica the same
 `SHARE_TOKEN_PEPPER`; see the

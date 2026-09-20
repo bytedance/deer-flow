@@ -35,6 +35,66 @@ def _row(seq: int, content: dict) -> dict:
     return {"seq": seq, "run_id": f"run-{seq}", "content": content}
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[x]: /url "`"\n<think>private-reference-reasoning</think> ` public answer',
+        "[x]: /url '`'\n<think>private-reference-reasoning</think> ` public answer",
+        '[x]: /url "`"\r\n<think>private-reference-reasoning</think> ` public answer',
+        '[x]: /url "`"\r<think>private-reference-reasoning</think> ` public answer',
+        '[x]:\n /url\n "`"\n<think>private-reference-reasoning</think> ` public answer',
+        '[multi\nline]: /url "`"\n<think>private-reference-reasoning</think> ` public answer',
+        '[escaped\\]]: /url "`"\n<think>private-reference-reasoning</think> ` public answer',
+        '[x]: /url "title\n```\n<think>private-reference-reasoning</think>\n```"\npublic answer',
+        '> [x]: /url "`"\n> <think>private-reference-reasoning</think> ` public answer',
+        '- [x]: /url "`"\n  <think>private-reference-reasoning</think> ` public answer',
+        '> - [x]: /url "`"\n>   <think>private-reference-reasoning</think> ` public answer',
+        '[one]: /url "`"\n[two]: /other\n<think>private-reference-reasoning</think> ` public answer',
+        'paragraph\n> [x]: /url "`"\n> <think>private-reference-reasoning</think> ` public answer',
+    ],
+)
+async def test_reference_definition_cannot_publish_reasoning_on_create_or_read(monkeypatch, content):
+
+    async def scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": content})], False
+
+    monkeypatch.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", scan)
+    created, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+    stored = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    for snapshot in (created, resanitize_share_snapshot(stored)):
+        public = snapshot["messages"][0]["content"]
+        assert "private-reference-reasoning" not in public
+        assert "public answer" in public
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '```md\n[x]: /url "`"\n<think>literal example</think> `\n```',
+        '    [x]: /url "`"\n    <think>literal example</think> `',
+        '[x]: /url "title"\n\nUse `<think>literal example</think>`.',
+        '[x]: /url "title"\n\n```md\n<think>literal example</think>\n```',
+        "Prose `\n[x]: /url\n<think>literal example</think>`.",
+        "[ordinary link](/url) and `<think>literal example</think>`.",
+        '> [x]: /url "title"\n>\n> Use `<think>literal example</think>`.',
+    ],
+)
+def test_reference_definition_guard_preserves_independent_code_examples(content):
+    snapshot = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    assert resanitize_share_snapshot(snapshot)["messages"][0]["content"] == content
+
+
+def test_reference_like_region_overstrips_adjacent_code_as_safety_policy():
+    # Destination/title parsing is deliberately not duplicated: a possible
+    # definition keeps all nonblank continuation lines unprotected. Even an
+    # invalid target or a genuine adjacent code example takes the safe loss.
+    content = '[x]: /url "title" trailing\n`<think>literal example</think>`\npublic answer'
+    snapshot = {"version": 1, "messages": [{"id": "m1", "role": "assistant", "content": content}]}
+    result = resanitize_share_snapshot(snapshot)["messages"][0]["content"]
+    assert "literal example" not in result
+    assert "public answer" in result
+
+
 async def test_snapshot_keeps_only_visible_human_and_ai_text():
     # Canonical helper contract: newest backward page first, each page
     # internally ascending by seq.
