@@ -287,8 +287,13 @@ class ThreadUploadIngestionService:
             md_staging = self._uploads_dir / f"{uploads.UPLOAD_STAGING_PREFIX}{uuid.uuid4().hex}{uploads.UPLOAD_STAGING_SUFFIX}"
             # The staged bytes are copied out of the sandbox-writable tree and
             # converted there; the uploads dir only ever receives the result.
-            private_dir = Path(await run_file_io(tempfile.mkdtemp, "-deerflow-convert"))
+            # Creating that directory belongs inside the cleanup scope: it can
+            # fail on its own (a full or unwritable temporary filesystem), and
+            # the descriptor is already owned here — leaking it would also hold
+            # the unlinked staged bytes until the process exits.
+            private_dir: Path | None = None
             try:
+                private_dir = Path(await run_file_io(tempfile.mkdtemp, "-deerflow-convert"))
                 conversion_source = private_dir / safe_filename
                 # Hand the descriptor over before the call: the copy closes it
                 # even when it fails, so this scope must not close it again and
@@ -302,7 +307,8 @@ class ThreadUploadIngestionService:
                 raise
             finally:
                 _close_fd(convert_source_fd)
-                await run_file_io(shutil.rmtree, private_dir, True)
+                if private_dir is not None:
+                    await run_file_io(shutil.rmtree, private_dir, True)
             if not md_staged:
                 # Conversion failed and wrote nothing (or a partial staged
                 # file, removed here): release the claim; holding it would

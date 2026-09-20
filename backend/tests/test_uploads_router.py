@@ -1011,6 +1011,46 @@ def test_upload_files_conversion_source_survives_a_swap_before_it_is_read(tmp_pa
     assert b"HOST SECRET" not in companion.read_bytes()
 
 
+def test_upload_files_closes_conversion_descriptor_when_private_dir_fails(tmp_path):
+    """A failed temp-dir creation must not strand the duplicated descriptor."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+        patch.object(upload_ingestion.tempfile, "mkdtemp", side_effect=OSError("No space left on device")),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-fd", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
