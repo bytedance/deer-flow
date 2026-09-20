@@ -5682,6 +5682,327 @@ def test_remote_search_raises_when_the_client_call_fails(op):
         _rs_search(sb, op, "/mnt/user-data/workspace")
 
 
+def _signal_lifecycle_wait(monkeypatch, provider, worker_name, reached):
+    """Observe the competing operation at its blocked lock or SDK callback.
+
+    The SDK callback signals on the unfixed implementation; the lock signals
+    after serialization is added. This forces both interleavings without sleeps.
+    """
+    checkout = provider._acquire_serializer._checkout
+
+    def observed(key):
+        entry = checkout(key)
+        if threading.current_thread().name == worker_name and len(key) == 2 and entry.lock.locked():
+            reached.set()
+        return entry
+
+    monkeypatch.setattr(provider._acquire_serializer, "_checkout", observed)
+
+
+@pytest.mark.parametrize("thread_bound", [True, False])
+def test_reconcile_renewal_cannot_overwrite_concurrent_release(monkeypatch, thread_bound):
+    provider = _make_provider(idle_timeout=30)
+    vm = _ReconciliationClock(30)
+    _bind_clock(monkeypatch, vm)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.connect_factory = vm.connect
+    client = FakeClient(sandbox_id="sb-race")
+    provider._sandboxes["sb-race"] = _make_sandbox(client)
+    if thread_bound:
+        provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-race"
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+    monkeypatch.setattr(provider, "_list_remote_entries", lambda _metadata: ([_info("sb-race", "u1", "t1")] if vm.now < vm.expiry else [], False, True))
+    renewal_started, finish_renewal, release_reached = threading.Event(), threading.Event(), threading.Event()
+    writes = []
+
+    def set_timeout(seconds):
+        if seconds > 30:
+            renewal_started.set()
+            assert finish_renewal.wait(5)
+        vm.set_timeout(seconds)
+        writes.append(seconds)
+        if seconds == 30:
+            release_reached.set()
+
+    monkeypatch.setattr(client, "set_timeout", set_timeout)
+    _signal_lifecycle_wait(monkeypatch, provider, "release-race", release_reached)
+
+    def release():
+        threading.current_thread().name = "release-race"
+        provider.release("sb-race")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        renewing = executor.submit(provider._reconcile_remote_sandboxes)
+        try:
+            assert renewal_started.wait(5)
+            # One blocked VM must not hold the provider-wide state lock or
+            # prevent a different VM's lifecycle operation from completing.
+            executor.submit(provider.release, "sb-unrelated").result(timeout=5)
+            releasing = executor.submit(release)
+            assert release_reached.wait(5)
+        finally:
+            finish_renewal.set()
+        renewing.result(timeout=5)
+        releasing.result(timeout=5)
+
+    assert writes[-1] == 30, writes
+    vm.now = 31
+    stats = provider._reconcile_remote_sandboxes()
+    assert stats.adopted == 0
+    assert "sb-race" not in provider._sandboxes
+    assert "sb-race" not in provider._warm_pool
+
+
+def test_reconcile_discards_active_snapshot_after_release(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [_info("sb-race", "u1", "t1")]
+    client = FakeClient(sandbox_id="sb-race")
+    provider._sandboxes["sb-race"] = _make_sandbox(client)
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-race"
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+    snapshot_taken, continue_renewal = threading.Event(), threading.Event()
+    checkout = provider._acquire_serializer._checkout
+
+    def pause_before_lock(key):
+        if threading.current_thread().name == "stale-active" and len(key) == 2:
+            snapshot_taken.set()
+            assert continue_renewal.wait(5)
+        return checkout(key)
+
+    monkeypatch.setattr(provider._acquire_serializer, "_checkout", pause_before_lock)
+
+    def reconcile():
+        threading.current_thread().name = "stale-active"
+        return provider._reconcile_remote_sandboxes()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        renewing = executor.submit(reconcile)
+        try:
+            assert snapshot_taken.wait(5)
+            provider.release("sb-race")
+        finally:
+            continue_renewal.set()
+        assert renewing.result(timeout=5).adopted == 0
+
+    assert client.timeouts_set == [30]
+    assert "sb-race" in provider._warm_pool
+    assert "sb-race" not in provider._sandboxes
+
+
+@pytest.mark.parametrize("reparked_at", [601, 0])
+def test_warm_sweep_rechecks_entry_after_reclaim_and_release(monkeypatch, reparked_at):
+    provider = _make_provider(idle_timeout=30)
+    vm = _ReconciliationClock(1190)
+    vm.now = 601
+    _bind_clock(monkeypatch, vm)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.connect_factory = vm.connect
+    seed = provider._stable_seed("t1", "u1")
+    provider._warm_pool["sb-race"] = (seed, 0)
+    provider._ownership.take("sb-race")
+    provider._owned_sandbox_ids.add("sb-race")
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+    snapshot_taken, continue_cleanup = threading.Event(), threading.Event()
+    checkout = provider._acquire_serializer._checkout
+
+    def pause_before_lock(key):
+        if threading.current_thread().name == "stale-warm" and len(key) == 2:
+            snapshot_taken.set()
+            assert continue_cleanup.wait(5)
+        return checkout(key)
+
+    monkeypatch.setattr(provider._acquire_serializer, "_checkout", pause_before_lock)
+
+    def sweep():
+        threading.current_thread().name = "stale-warm"
+        provider._sweep_expired_warm_entries()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        sweeping = executor.submit(sweep)
+        try:
+            assert snapshot_taken.wait(5)
+            assert provider.acquire("t1", user_id="u1") == "sb-race"
+            # A clock adjustment can give the new entry the old timestamp.
+            vm.now = reparked_at
+            provider.release("sb-race")
+        finally:
+            continue_cleanup.set()
+        sweeping.result(timeout=5)
+
+    assert provider._warm_pool["sb-race"] == (seed, reparked_at)
+    assert provider._ownership.owner("sb-race") == provider._owner_id
+    assert "sb-race" in provider._owned_sandbox_ids
+
+
+def test_warm_sweep_cannot_delete_concurrent_discovery_lease(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [_info("sb-race", "u1", "t1")]
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._ownership.take("sb-race")
+    provider._owned_sandbox_ids.add("sb-race")
+    cleanup_started, finish_cleanup, acquire_reached = threading.Event(), threading.Event(), threading.Event()
+    release_ownership = provider._release_ownership
+
+    def delayed_cleanup(sid):
+        cleanup_started.set()
+        assert finish_cleanup.wait(5)
+        release_ownership(sid)
+
+    monkeypatch.setattr(provider, "_release_ownership", delayed_cleanup)
+    take = provider._ownership.take
+
+    def observe_take(sid):
+        result = take(sid)
+        acquire_reached.set()
+        return result
+
+    monkeypatch.setattr(provider._ownership, "take", observe_take)
+    _signal_lifecycle_wait(monkeypatch, provider, "discovery-race", acquire_reached)
+
+    def discover():
+        threading.current_thread().name = "discovery-race"
+        return provider._discover_remote_sandbox("t1", user_id="u1")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        sweeping = executor.submit(provider._sweep_expired_warm_entries)
+        try:
+            assert cleanup_started.wait(5)
+            discovering = executor.submit(discover)
+            assert acquire_reached.wait(5)
+        finally:
+            finish_cleanup.set()
+        sweeping.result(timeout=5)
+        assert discovering.result(timeout=5) == "sb-race"
+
+    assert "sb-race" in provider._sandboxes
+    assert provider._ownership.owner("sb-race") == provider._owner_id
+    assert "sb-race" in provider._owned_sandbox_ids
+    provider._refresh_owned_leases()
+    assert provider._ownership.owner("sb-race") == provider._owner_id
+
+
+def test_warm_sweep_serializes_with_lapsed_lease_renewal(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._owned_sandbox_ids.add("sb-race")
+    renewal_started, finish_renewal, cleanup_reached = threading.Event(), threading.Event(), threading.Event()
+    renew = provider._ownership.renew
+
+    def delayed_renew(sid):
+        outcome = renew(sid)
+        renewal_started.set()
+        assert finish_renewal.wait(5)
+        return outcome
+
+    monkeypatch.setattr(provider._ownership, "renew", delayed_renew)
+    release_ownership = provider._release_ownership
+
+    def observed_release(sid):
+        release_ownership(sid)
+        cleanup_reached.set()
+
+    monkeypatch.setattr(provider, "_release_ownership", observed_release)
+    _signal_lifecycle_wait(monkeypatch, provider, "warm-cleanup-race", cleanup_reached)
+
+    def sweep():
+        threading.current_thread().name = "warm-cleanup-race"
+        provider._sweep_expired_warm_entries()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        renewing = executor.submit(provider._refresh_owned_leases)
+        try:
+            assert renewal_started.wait(5)
+            sweeping = executor.submit(sweep)
+            assert cleanup_reached.wait(5)
+        finally:
+            finish_renewal.set()
+        renewing.result(timeout=5)
+        sweeping.result(timeout=5)
+
+    assert provider._ownership.owner("sb-race") is None
+    assert "sb-race" not in provider._owned_sandbox_ids
+    assert "sb-race" not in provider._warm_pool
+
+
+def test_release_output_sync_does_not_block_ownership_heartbeat(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    client = FakeClient(sandbox_id="sb-race")
+    provider._sandboxes["sb-race"] = _make_sandbox(client)
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-race"
+    provider._ownership.take("sb-race")
+    provider._owned_sandbox_ids.add("sb-race")
+    syncing, finish_sync, renewal_reached = threading.Event(), threading.Event(), threading.Event()
+    renewed = threading.Event()
+
+    def sync(*args, **kwargs):
+        syncing.set()
+        assert finish_sync.wait(5)
+
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", sync)
+    renew = provider._ownership.renew
+
+    def observed_renew(sid):
+        result = renew(sid)
+        renewed.set()
+        renewal_reached.set()
+        return result
+
+    monkeypatch.setattr(provider._ownership, "renew", observed_renew)
+    _signal_lifecycle_wait(monkeypatch, provider, "release-heartbeat", renewal_reached)
+
+    def heartbeat():
+        threading.current_thread().name = "release-heartbeat"
+        provider._refresh_owned_leases()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        releasing = executor.submit(provider.release, "sb-race")
+        try:
+            assert syncing.wait(5)
+            renewing = executor.submit(heartbeat)
+            assert renewal_reached.wait(5)
+            renewed_during_sync = renewed.is_set()
+        finally:
+            finish_sync.set()
+        releasing.result(timeout=5)
+        renewing.result(timeout=5)
+
+    assert renewed_during_sync, "output sync must not starve the ownership heartbeat"
+
+
+def test_reconcile_does_not_readopt_a_release_in_progress(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [_info("sb-race", "u1", "t1")]
+    client = FakeClient(sandbox_id="sb-race")
+    provider._sandboxes["sb-race"] = _make_sandbox(client)
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-race"
+    provider._ownership.take("sb-race")
+    provider._owned_sandbox_ids.add("sb-race")
+    syncing, finish_sync = threading.Event(), threading.Event()
+
+    def sync(*args, **kwargs):
+        syncing.set()
+        assert finish_sync.wait(5)
+
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", sync)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        releasing = executor.submit(provider.release, "sb-race")
+        try:
+            assert syncing.wait(5)
+            stats = provider._reconcile_remote_sandboxes()
+        finally:
+            finish_sync.set()
+        releasing.result(timeout=5)
+
+    assert stats.adopted == 0
+    assert sdk.connect_calls == []
+    assert "sb-race" not in provider._sandboxes
+    assert "sb-race" in provider._warm_pool
+    assert "sb-race" not in provider._remote_ops_in_progress
+
+
 @pytest.mark.parametrize("inventory_complete", [False, True])
 def test_warm_sweep_leaves_shared_capacity_to_inventory(monkeypatch, inventory_complete):
     provider = _make_provider(idle_timeout=30)
