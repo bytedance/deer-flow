@@ -591,8 +591,10 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   // Scan code delimiters and reasoning openers in source order. Once inside
   // real reasoning, jump directly to its closing tag: Markdown in reasoning
   // must not change how the following answer is parsed.
+  // Thematic-break repetitions already consume trailing whitespace. Do not add
+  // another whitespace repetition after them: near-matches then backtrack quadratically.
   const tokens =
-    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:=+|-+|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})[ \t]*\r?$)|^ {0,3}((?:[-+*]|1[.)])[ \t]+)(?=\S)|`+|<think>/gm;
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:(?:=+|-+)[ \t]*|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\r?$)|^ {0,3}((?:[-+*]|1[.)])[ \t]+)(?=\S)|`+|<think>/gm;
   let fence: string | null = null;
   let inlineDelimiter: string | null = null;
   let headingEnd: number | null = null;

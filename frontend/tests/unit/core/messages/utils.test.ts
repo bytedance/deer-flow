@@ -608,6 +608,32 @@ describe("inline <think> tag splitting", () => {
     expect(getAssistantTurnCopyData([message])).toBe(`${prefix}Answer.`);
   });
 
+  test.each(["*", "_", "-"])(
+    "handles a long thematic-break near-match without backtracking: %s",
+    (marker) => {
+      const prefix = `${marker.repeat(3)}${" ".repeat(40_000)}x\n`;
+      const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+      // Time the first extraction, not a content-cache hit. The old overlapping
+      // whitespace repetitions take seconds; leave ample headroom for slow CI.
+      const start = performance.now();
+      const answer = extractContentFromMessage(message);
+      const elapsed = performance.now() - start;
+      expect(answer).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+      expect(elapsed).toBeLessThan(500);
+    },
+  );
+
+  test.each(["* * *", "_ _ _", "- - -", "---", "==="])(
+    "keeps trailing spaces and tabs valid on a block boundary: %s",
+    (line) => {
+      const prefix = `Run \`unfinished\n${line}${" \t".repeat(100)}\r\n`;
+      const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+      expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+      expect(extractReasoningContentFromMessage(message)).toBe("real");
+    },
+  );
+
   test.each([
     "#not-a-heading",
     "####### Not a heading",
