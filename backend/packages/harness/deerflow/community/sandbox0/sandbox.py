@@ -92,7 +92,14 @@ class Sandbox0Sandbox(Sandbox):
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
         path = self._path(path)
         self._touch()
-        content = self.remote.read_file(path).decode("utf-8", errors="replace")
+        try:
+            content = self.remote.read_file(path).decode("utf-8", errors="replace")
+        except Exception as exc:
+            # DeerFlow's read-before-write gate distinguishes a new file from
+            # a failed inspection. Keep the filesystem exception contract.
+            if getattr(exc, "status_code", None) == 404:
+                raise FileNotFoundError(path) from exc
+            raise
         if start_line is None and end_line is None:
             return content
         if (start_line is not None and start_line < 1) or (end_line is not None and end_line < 1):

@@ -284,3 +284,13 @@ def test_delete_timeout_retains_binding_for_retry(provider, monkeypatch):
     with pytest.raises(TimeoutError, match="binding retained"):
         p.destroy(sid)
     assert p._binding_path(sid).exists()
+
+
+def test_missing_file_uses_filesystem_error_contract():
+    remote = Mock(id="remote")
+    missing = RuntimeError("file not found")
+    missing.status_code = 404
+    remote.read_file.side_effect = missing
+    sandbox = Sandbox0Sandbox("scope", remote)
+    with pytest.raises(FileNotFoundError):
+        sandbox.read_file("/mnt/user-data/workspace/new.txt")

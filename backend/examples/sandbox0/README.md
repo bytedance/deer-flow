@@ -23,7 +23,8 @@ The demo creates isolated local data and a new conversation. It:
 4. Verifies that the sandbox is paused after the turn, resets the provider, and
    asks a second turn to reuse and modify the existing files.
 5. Checks the same remote identity, an increased runtime generation, the updated
-   result and coverage of all ten required tools.
+   result and coverage of all ten required tools. If the model skipped a tool,
+   one additional real Agent turn requests the missing calls and rechecks the result.
 6. Deletes the demo sandbox by default. `--keep` retains it until its hard TTL.
 
 Evidence is written to a unique directory under `.deer-flow/sandbox0-demo`, or

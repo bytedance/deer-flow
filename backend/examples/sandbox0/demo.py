@@ -58,13 +58,14 @@ def main():
     user = "sandbox0-demo"
     calls: set[str] = set()
     snapshots = []
+    completed_subagents: set[str] = set()
     sid = derive_sandbox_scope_token(user_id=user, thread_id=thread)
     provider = None
     evidence = {"passed": False, "thread_id": thread, "checks": {}}
 
     def run_turn(client, prompt):
         nonlocal provider, sid
-        for event in client.stream(prompt, thread_id=thread, user_id=user, recursion_limit=100):
+        for event in client.stream(prompt, thread_id=thread, user_id=user, recursion_limit=1000):
             if event.type == "messages-tuple":
                 metadata = event.data.get("additional_kwargs", {})
                 if metadata.get("deerflow_error_fallback"):
@@ -73,6 +74,9 @@ def main():
                 for call in event.data.get("tool_calls", []):
                     calls.add(call["name"])
                     print("tool:", call["name"], flush=True)
+            elif event.type == "custom" and event.data.get("type") == "task_completed":
+                completed_subagents.add(event.data["task_id"])
+                print("subagent completed", flush=True)
             elif event.type == "end":
                 print("turn complete", flush=True)
         provider = get_sandbox_provider()
@@ -110,6 +114,7 @@ Keep the script and input for the next turn. Do not ask questions.""",
         review, _ = client.get_artifact(thread, "mnt/user-data/outputs/review.json")
         assert json.loads(summary) == {"total": 90, "units": 6}
         assert json.loads(review)["verified"] is True and json.loads(review)["total"] == 90
+        assert completed_subagents, "no delegated subagent completed successfully"
         evidence["checks"]["uploaded_csv_and_subagent_review"] = True
         report, _ = client.get_artifact(thread, "mnt/user-data/outputs/report.md")
         assert "FINAL" in report.decode() and "DRAFT" not in report.decode()
@@ -129,6 +134,17 @@ This must use the previous turn's files after runtime pause/resume. Do not ask q
         evidence["checks"]["provider_restart_and_rootfs_resume"] = True
         required = {"bash", "ls", "read_file", "write_file", "str_replace", "glob", "grep", "task", "present_files", "write_todos"}
         missing = required - calls
+        if missing:
+            run_turn(
+                client,
+                "Complete the integration tool coverage by directly calling these registered tools: " + ", ".join(sorted(missing)) + ". A shell command with the same name does not count. Inspect /mnt/user-data/workspace and its files. "
+                "For write_file/str_replace, use only a disposable /mnt/user-data/workspace/coverage.txt. "
+                "For task, delegate a read-only verification of summary.json. For present_files, present the existing outputs. "
+                "Do not change sales.csv, analyze.py, summary.json, review.json or report.md.",
+            )
+            summary, _ = client.get_artifact(thread, "mnt/user-data/outputs/summary.json")
+            assert json.loads(summary) == {"total": 97, "units": 7}
+            missing = required - calls
         assert not missing, f"model did not exercise required tools: {sorted(missing)}"
         evidence["checks"]["core_tool_coverage"] = True
         evidence["tools"] = sorted(calls)
@@ -150,6 +166,7 @@ This must use the previous turn's files after runtime pause/resume. Do not ask q
             evidence["passed"] = False
             raise
         finally:
+            evidence["completed_subagents"] = sorted(completed_subagents)
             evidence["tools"] = sorted(calls)
             evidence["sandboxes"] = snapshots
             (output / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
