@@ -329,6 +329,34 @@ class TestErrorObservationRetry:
 class TestScopedShellSessions:
     """Concurrent subagents use independent persistent shell sessions (#5128)."""
 
+    def test_scoped_command_forwards_same_timeout_budget(self, sandbox):
+        sandbox._client.shell.create_session = MagicMock()
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert (
+            sandbox.execute_command_in_scope(
+                "echo ok",
+                timeout=3,
+                scope_id="subagent-a",
+            )
+            == "ok"
+        )
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["hard_timeout"] == 3
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 8,
+            "max_retries": 0,
+        }
+
     def test_different_scopes_execute_concurrently(self, sandbox):
         active = 0
         max_active = 0
@@ -839,6 +867,102 @@ class TestListDirSerialization:
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""
 
+    def test_execute_command_forwards_hard_timeout_and_bounded_request(self, sandbox):
+        calls = []
+
+        def exec_command(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+
+        assert sandbox.execute_command("echo ok", timeout=3) == "ok"
+
+        assert calls == [
+            {
+                "no_change_timeout": 600,
+                "hard_timeout": 3,
+                "request_options": {
+                    "timeout_in_seconds": 8,
+                    "max_retries": 0,
+                },
+            }
+        ]
+
+    def test_execute_command_uses_default_hard_timeout_when_timeout_is_none(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.execute_command("echo ok") == "ok"
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["hard_timeout"] == sandbox._DEFAULT_HARD_TIMEOUT
+        assert kwargs["request_options"]["max_retries"] == 0
+        assert kwargs["request_options"]["timeout_in_seconds"] > kwargs["hard_timeout"]
+
+    def test_hard_timeout_is_rendered_as_timeout_without_replay(self, sandbox):
+        executions = 0
+
+        def exec_command(command, **kwargs):
+            nonlocal executions
+            executions += 1
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="partial",
+                    exit_code=None,
+                    status="hard_timeout",
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+
+        out = sandbox.execute_command("side-effect; sleep 30", timeout=3)
+
+        assert executions == 1
+        assert "partial" in out
+        assert "Command timed out after 3 seconds and was terminated." in out
+        assert out.endswith("Exit Code: 124")
+
+    def test_no_change_timeout_is_reported_without_replay(self, sandbox):
+        executions = 0
+        calls = []
+
+        def exec_command(command, **kwargs):
+            nonlocal executions
+            executions += 1
+            calls.append(kwargs)
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="partial",
+                    exit_code=None,
+                    status="no_change_timeout",
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+
+        out = sandbox.execute_command("quiet-command", timeout=900)
+
+        assert executions == 1
+        assert calls[0]["no_change_timeout"] == 905
+        assert "no output change" in out
+        assert "905 seconds" in out
+        assert "may still be running" in out
+        assert "Exit Code: 124" not in out
+
     def test_execute_command_passes_no_change_timeout(self, sandbox):
         """execute_command should pass no_change_timeout to exec_command."""
         calls = []
@@ -852,7 +976,7 @@ class TestNoChangeTimeout:
         sandbox.execute_command("echo hello")
 
         assert len(calls) == 1
-        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0].get("no_change_timeout") == 605
 
     def test_retry_passes_no_change_timeout(self, sandbox):
         """The ErrorObservation retry path should also pass no_change_timeout."""
@@ -869,8 +993,8 @@ class TestNoChangeTimeout:
         sandbox.execute_command("echo hello")
 
         assert len(calls) == 2
-        assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
-        assert calls[1].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0].get("no_change_timeout") == 605
+        assert calls[1].get("no_change_timeout") == 605
 
     def test_list_dir_passes_no_change_timeout(self, sandbox):
         """list_dir should pass no_change_timeout to exec_command."""
