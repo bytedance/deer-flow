@@ -127,7 +127,7 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
     await _create_working_task(repo, task_id=task_id, now=now)
     claim = repo.claim_due_tasks
     if operation == "apply_cancel_snapshot":
-        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", requested_at=now)
+        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=now)
         claim = repo.claim_cancel_requests
     first = await claim(now=now, lease_owner="worker-1", lease_seconds=60, limit=1)
     kwargs = {"lease_owner": "worker-1", "lease_token": first[0]["lease_token"]}
@@ -154,13 +154,14 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
         second = await asyncio.wait_for(claim(now=now + timedelta(seconds=61), lease_owner="worker-1", lease_seconds=60, limit=1), timeout=5)
         assert len(second) == 1
         assert second[0]["lease_token"] != first[0]["lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
     # Check the entire row, including scheduling, errors, results and event
     # versions, not just the new lease: stale work must have no side effects.
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
 
 
@@ -211,11 +212,12 @@ async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_p
         second = await asyncio.wait_for(repo.claim_notification_work(now=now + timedelta(seconds=61), **claim_kwargs), timeout=5)
         assert len(second) == 1
         assert second[0]["notification_lease_token"] != first[0]["notification_lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
 
 
@@ -843,7 +845,7 @@ async def test_release_claim_after_same_worker_reclaim_cannot_clear_new_claim(tm
     )
     assert released is False
 
-    stored = await repo.get("task-fence", user_id="user-1")
+    stored = await repo.get("task-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -880,7 +882,7 @@ async def test_apply_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(t
     )
     assert applied is False
 
-    stored = await repo.get("task-apply-fence", user_id="user-1")
+    stored = await repo.get("task-apply-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -916,7 +918,7 @@ async def test_apply_cancel_snapshot_after_same_worker_reclaim_cannot_clear_new_
     )
     assert applied is False
 
-    stored = await repo.get("task-cancel-fence", user_id="user-1")
+    stored = await repo.get("task-cancel-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -981,7 +983,7 @@ async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_
     )
     assert finished is False
 
-    stored = await repo.get("task-notify-fence", user_id="user-1")
+    stored = await repo.get("task-notify-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier"
     assert stored["notification_lease_token"] == new_notify_token
@@ -1001,7 +1003,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
         next_poll_at=retry_at,
         error="temporary network failure",
     )
-    before = await repo.get("task-cancelled-poll", user_id="user-1")
+    before = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert before is not None
 
     reclaimed = await repo.claim_due_tasks(now=retry_at, lease_owner="worker-2", lease_seconds=60, limit=10)
@@ -1012,7 +1014,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
     )
 
     assert released is True
-    stored = await repo.get("task-cancelled-poll", user_id="user-1")
+    stored = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["next_poll_at"] == before["next_poll_at"]
     assert stored["last_poll_error"] == before["last_poll_error"]
@@ -1036,7 +1038,7 @@ async def test_release_poll_claim_after_cancellation_requires_current_owner(tmp_
     )
 
     assert released is False
-    stored = await repo.get("task-stale-cancel", user_id="user-1")
+    stored = await repo.get("task-stale-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-current"
     assert stored["lease_expires_at"] is not None
@@ -1666,7 +1668,7 @@ async def test_late_poll_release_after_same_worker_reclaim_is_fenced(tmp_path):
     )
     assert released is False
 
-    stored = await repo.get("task-late-poll", user_id="user-1")
+    stored = await repo.get("task-late-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1681,6 +1683,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
         "task-late-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now,
     )
 
@@ -1712,7 +1715,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert released is False
 
-    stored = await repo.get("task-late-cancel", user_id="user-1")
+    stored = await repo.get("task-late-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1769,7 +1772,7 @@ async def test_late_notification_release_after_same_worker_reclaim_is_fenced(tmp
     )
     assert released is False
 
-    stored = await repo.get("task-late-notify", user_id="user-1")
+    stored = await repo.get("task-late-notify", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier-same"
     assert stored["notification_lease_token"] == reclaimed[0]["notification_lease_token"]
@@ -1813,7 +1816,7 @@ async def test_late_snapshot_apply_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert applied is False
 
-    stored = await repo.get("task-late-apply", user_id="user-1")
+    stored = await repo.get("task-late-apply", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
