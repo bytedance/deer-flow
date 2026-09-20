@@ -7,6 +7,47 @@ export interface Translations {
   };
 
   capabilities: {
+    icon: {
+      title: string;
+      upload: string;
+      change: string;
+      reset: string;
+      hint: string;
+      singleServer: string;
+      errors: { type: string; size: string; invalid: string };
+    };
+    directory: {
+      categories: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      hints: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      connected: string;
+      native: string;
+      guide: string;
+      candidate: string;
+      view: string;
+      allCategories: string;
+      source: string;
+      setup: string;
+      notice: string;
+      configured: string;
+      nativeHint: string;
+      guideHint: string;
+      unknownStatus: string;
+      notConnected: string;
+    };
     integrationSkills: string;
     sharedSkills: string;
     title: string;

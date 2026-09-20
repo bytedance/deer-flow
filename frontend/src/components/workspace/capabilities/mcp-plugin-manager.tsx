@@ -21,6 +21,7 @@ import {
   useMCPConfig,
   useMCPServerMutation,
 } from "@/core/mcp/hooks";
+import { readPluginIcon, withPluginIcon } from "@/core/mcp/icon";
 import {
   formatMCPServerDefinition,
   MCPServerDefinitionError,
@@ -29,48 +30,56 @@ import {
 import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
 
-import { CapabilityCard, CapabilityIcon } from "./capability-card";
+import {
+  catalogForServer,
+  type CatalogPlugin,
+  type PluginCategory,
+} from "./plugin-catalog";
+import {
+  PluginDirectory,
+  PluginRow,
+  type PluginDirectoryEntry,
+} from "./plugin-directory";
+import { PluginIcon } from "./plugin-icon";
+import { PluginIconPicker } from "./plugin-icon-picker";
 
 type MCPPluginManagerProps = {
   query?: string;
-  children?: ReactNode;
+  catalog?: PluginDirectoryEntry[];
+  category?: PluginCategory | "all";
+  installedOnly?: boolean;
   toolbar?: ReactNode;
+  definitions?: CatalogPlugin[];
 };
 
 export function MCPPluginManager(props: MCPPluginManagerProps) {
-  const { t } = useI18n();
   const { config, isLoading, error } = useMCPConfig();
-  if (isLoading || error) {
-    return (
-      <div className="space-y-4">
-        {props.toolbar}
-        {isLoading ? (
-          <p role="status" className="text-muted-foreground text-sm">
-            {t.common.loading}
-          </p>
-        ) : (
-          <p role="alert" className="text-muted-foreground text-sm">
-            {error instanceof MCPConfigRequestError && error.isAdminRequired
-              ? t.settings.tools.adminRequired
-              : `${t.common.error} ${error?.message}`}
-          </p>
-        )}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {props.children}
-        </div>
-      </div>
-    );
-  }
-  return <MCPServerList {...props} servers={config?.mcp_servers} />;
+  // Keep the directory mounted while MCP discovery completes. Replacing the
+  // entire subtree can swallow a click on an independently available plugin.
+  return (
+    <MCPServerList
+      {...props}
+      servers={error ? undefined : config?.mcp_servers}
+      isLoading={isLoading}
+      error={error}
+    />
+  );
 }
 
 function MCPServerList({
   servers,
   query = "",
-  children,
+  catalog = [],
+  category = "all",
+  installedOnly = false,
   toolbar,
+  definitions = [],
+  isLoading = false,
+  error,
 }: MCPPluginManagerProps & {
   servers?: Record<string, MCPServerConfig>;
+  isLoading?: boolean;
+  error?: Error | null;
 }) {
   const { t } = useI18n();
   const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
@@ -79,16 +88,32 @@ function MCPServerList({
     { mode: "add" } | { mode: "edit"; name: string } | null
   >(null);
   const [definition, setDefinition] = useState("");
+  const [draftIcon, setDraftIcon] = useState<string | null | undefined>();
+  const [iconBusy, setIconBusy] = useState(false);
+  let previewEntries: [string, MCPServerConfig][] = [];
+  try {
+    previewEntries = Object.entries(parseMCPServerDefinition(definition));
+  } catch {
+    /* JSON can be incomplete while typing. */
+  }
+  const previewEntry = previewEntries[0];
+  const previewName =
+    editor?.mode === "edit" ? editor.name : (previewEntry?.[0] ?? "");
+  const previewMetadata = catalogForServer(
+    previewName,
+    previewEntry?.[1],
+    definitions,
+  );
+  const previewIcon =
+    draftIcon === undefined && previewEntry
+      ? readPluginIcon(previewEntry[1])
+      : draftIcon;
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
 
   const readOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const current = servers ?? {};
-  const entries = Object.entries(current).filter(([name, config]) =>
-    `${name} ${config.description ?? ""}`
-      .toLowerCase()
-      .includes(query.trim().toLowerCase()),
-  );
+  const entries = Object.entries(current);
   const isMutating = isPending || isWriting;
 
   function displayServerName(name: string | null) {
@@ -98,25 +123,33 @@ function MCPServerList({
   }
 
   function closeEditor() {
+    setDraftIcon(undefined);
+    setIconBusy(false);
     setEditor(null);
     setDefinition("");
     setDefinitionError(null);
   }
 
   function openAddEditor() {
+    setDraftIcon(undefined);
+    setIconBusy(false);
     setDefinition("");
     setDefinitionError(null);
     setEditor({ mode: "add" });
   }
 
   function openEditEditor(name: string, config: MCPServerConfig) {
-    setDefinition(formatMCPServerDefinition(name, config));
+    setDraftIcon(readPluginIcon(config) ?? null);
+    setIconBusy(false);
+    setDefinition(
+      formatMCPServerDefinition(name, withPluginIcon(config, null)),
+    );
     setDefinitionError(null);
     setEditor({ mode: "edit", name });
   }
 
   function handleSaveDefinition() {
-    if (editor === null) {
+    if (editor === null || iconBusy) {
       return;
     }
 
@@ -141,6 +174,20 @@ function MCPServerList({
         setDefinitionError(t.settings.tools.definitionInvalidJson);
       }
       return;
+    }
+
+    if (draftIcon !== undefined) {
+      const entries = Object.entries(parsed);
+      if (entries.length !== 1) {
+        setDefinitionError(
+          editor.mode === "edit"
+            ? t.settings.tools.editSingleServer
+            : t.capabilities.icon.singleServer,
+        );
+        return;
+      }
+      const [name, config] = entries[0]!;
+      parsed = { [name]: withPluginIcon(config, draftIcon) };
     }
 
     if (editor.mode === "add") {
@@ -195,93 +242,110 @@ function MCPServerList({
 
   return (
     <div className="flex w-full flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex min-h-9 flex-wrap items-center justify-between gap-3">
         {toolbar ?? <span />}
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={readOnly || isMutating}
-          onClick={openAddEditor}
-        >
-          {t.capabilities.addPlugin}
-        </Button>
+        {isLoading && (
+          <p role="status" className="text-muted-foreground text-sm">
+            {t.common.loading}
+          </p>
+        )}
+        {!isLoading && !error && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={readOnly || isMutating}
+            onClick={openAddEditor}
+          >
+            {t.capabilities.addPlugin}
+          </Button>
+        )}
       </div>
 
-      {entries.length === 0 && !children ? (
-        <div className="text-muted-foreground text-sm">
-          {query ? t.capabilities.noResults : t.settings.tools.empty}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {children}
-          {entries.map(([name, config]) => {
-            const displayName = displayServerName(name);
-            const actions = (
-              <>
-                <Switch
-                  checked={config.enabled}
-                  aria-label={`${t.capabilities.enabled} ${displayName}`}
-                  disabled={readOnly || isMutating}
-                  onCheckedChange={(checked) =>
-                    enableMCPServer({ serverName: name, enabled: checked })
-                  }
-                />
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  aria-label={`${t.common.edit} ${displayName}`}
-                  disabled={readOnly || isMutating}
-                  onClick={() => openEditEditor(name, config)}
-                >
-                  <PencilIcon className="size-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  aria-label={`${t.common.delete} ${displayName}`}
-                  disabled={readOnly || isMutating}
-                  onClick={() => setPendingRemoval(name)}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </>
-            );
-            return (
-              <CapabilityCard
-                key={name}
-                name={displayName}
-                description={
-                  config.description || t.capabilities.mcpDescription
-                }
-                label={t.capabilities.mcpLabel}
-                icon={<CapabilityIcon name={name} />}
-                status={
-                  <>
-                    <span
-                      className={
-                        config.enabled
-                          ? "size-1.5 rounded-full bg-emerald-500"
-                          : "bg-muted-foreground/40 size-1.5 rounded-full"
-                      }
-                    />
-                    {config.enabled
-                      ? t.capabilities.enabled
-                      : t.capabilities.disabled}
-                  </>
-                }
-                onDetails={
-                  readOnly || isMutating
-                    ? undefined
-                    : () => openEditEditor(name, config)
-                }
-                detailsLabel={`${t.capabilities.details} ${displayName}`}
-              >
-                {actions}
-              </CapabilityCard>
-            );
-          })}
-        </div>
+      {error && (
+        <p role="alert" className="text-muted-foreground text-sm">
+          {error instanceof MCPConfigRequestError && error.isAdminRequired
+            ? t.settings.tools.adminRequired
+            : `${t.common.error} ${error.message}`}
+        </p>
       )}
+      <PluginDirectory
+        query={query}
+        category={category}
+        installedOnly={installedOnly}
+        entries={[
+          ...catalog.filter(
+            (item) =>
+              !entries.some(
+                ([name, server]) =>
+                  catalogForServer(name, server, definitions)?.id === item.id,
+              ),
+          ),
+          ...entries.map(([name, config]): PluginDirectoryEntry => {
+            const displayName = displayServerName(name);
+            const metadata = catalogForServer(name, config, definitions);
+            return {
+              id: `mcp:${name}`,
+              category: metadata?.category ?? "custom",
+              search: `${name} ${config.description ?? ""} ${metadata?.aliases.join(" ") ?? ""} ${Object.values(metadata?.name ?? {}).join(" ")} ${Object.values(metadata?.description ?? {}).join(" ")}`,
+              installed: true,
+              node: (
+                <PluginRow
+                  name={displayName}
+                  description={
+                    config.description || t.capabilities.mcpDescription
+                  }
+                  label={
+                    config.enabled
+                      ? t.capabilities.enabled
+                      : t.capabilities.disabled
+                  }
+                  icon={
+                    <PluginIcon
+                      name={name}
+                      icon={readPluginIcon(config)}
+                      asset={metadata?.icon}
+                      capabilityId={metadata?.id}
+                    />
+                  }
+                  onDetails={
+                    readOnly || isMutating
+                      ? undefined
+                      : () => openEditEditor(name, config)
+                  }
+                  detailsLabel={`${t.capabilities.details} ${displayName}`}
+                >
+                  <Switch
+                    checked={config.enabled}
+                    aria-label={`${t.capabilities.enabled} ${displayName}`}
+                    disabled={readOnly || isMutating}
+                    onCheckedChange={(checked) =>
+                      enableMCPServer({ serverName: name, enabled: checked })
+                    }
+                  />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`${t.common.edit} ${displayName}`}
+                    disabled={readOnly || isMutating}
+                    onClick={() => openEditEditor(name, config)}
+                  >
+                    <PencilIcon className="size-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`${t.common.delete} ${displayName}`}
+                    disabled={readOnly || isMutating}
+                    onClick={() => setPendingRemoval(name)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </PluginRow>
+              ),
+            };
+          }),
+        ]}
+      />
 
       <Dialog
         open={editor !== null}
@@ -304,6 +368,20 @@ function MCPServerList({
                   )
                 : t.settings.tools.addServerDescription}
             </DialogDescription>
+            <PluginIconPicker
+              name={previewName}
+              asset={previewMetadata?.icon}
+              capabilityId={previewMetadata?.id}
+              value={previewIcon}
+              disabled={isWriting || previewEntries.length > 1}
+              onChange={setDraftIcon}
+              onBusyChange={setIconBusy}
+            />
+            {previewEntries.length > 1 && (
+              <p className="text-muted-foreground text-xs">
+                {t.capabilities.icon.singleServer}
+              </p>
+            )}
             <Textarea
               className="field-sizing-fixed h-96 min-h-24 resize-none overflow-auto font-mono text-xs"
               aria-label={t.settings.tools.serverDefinitionLabel}
@@ -329,7 +407,10 @@ function MCPServerList({
             >
               {t.common.cancel}
             </Button>
-            <Button disabled={isWriting} onClick={handleSaveDefinition}>
+            <Button
+              disabled={isWriting || iconBusy}
+              onClick={handleSaveDefinition}
+            >
               {isWriting ? t.common.loading : t.common.save}
             </Button>
           </DialogFooter>

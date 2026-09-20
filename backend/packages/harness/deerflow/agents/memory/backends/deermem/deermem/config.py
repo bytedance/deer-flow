@@ -53,7 +53,12 @@ class DeerMemConfig(BaseModel):
     )
     storage_class: str = Field(
         default="",
-        description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
+        description=(
+            "Dotted class path for an alternative storage provider, or a built-in alias: "
+            "``file`` = FileMemoryStorage (default) or ``markdown`` = MarkdownMemoryStorage "
+            "(tolerant load path, same JSON on disk); empty (default) = FileMemoryStorage "
+            "(no importlib, portable)."
+        ),
     )
     strict_user_scope: bool = Field(
         default=False,

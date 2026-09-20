@@ -608,6 +608,7 @@ def build_middlewares(
             skills_container_path=resolved_app_config.skills.container_path,
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
             task_continuity_enabled=getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True,
+            pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
         )
     )
 
@@ -1016,6 +1017,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
+            "mcp_plugins": getattr(agent_config, "mcp_plugins", None),
             "available_skills": sorted(available_skills) if available_skills is not None else None,
             "allowed_subagents": list(allowed_subagents) if allowed_subagents is not None else None,
             "memory_enabled": memory_enabled,
@@ -1178,6 +1180,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
+        mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         app_config=resolved_app_config,

@@ -29,6 +29,7 @@ export function useInstallLarkIntegration() {
         queryKey: larkIntegrationQueryKey,
       });
       await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      await queryClient.invalidateQueries({ queryKey: ["capabilities"] });
     },
   });
 }

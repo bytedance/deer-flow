@@ -1160,3 +1160,108 @@ def test_task_command_preserves_child_source_artifact() -> None:
     message = {"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": [source]}}}
     command = _task_result_command(tool_call_id="task-1", status="completed", result="Answer [citation:1](#knowledge-abc)", source_messages=[message])
     assert command.update["messages"][0].artifact["knowledge_sources"]["sources"] == [source]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count", [1, 100, 101, 200, 1000])
+async def test_large_document_scope_batches_provider_validation(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+    document_ids = [f"doc-{index:04d}" for index in range(count)]
+
+    class StrictClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            ids = [value for key, value in params if key == "ids"]
+            assert 1 <= len(ids) <= 100
+            assert dict(params)["page"] == "1"
+            assert int(dict(params)["page_size"]) == len(ids)
+            return await super().list_documents(dataset_id, params=params)
+
+    fake = StrictClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Documents")]},
+        documents_by_dataset_id={DATASET_ID_1: [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in document_ids]},
+    )
+    _install(monkeypatch, fake)
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": [DATASET_ID_1], "document_filters": [{"dataset_id": DATASET_ID_1, "document_ids": document_ids}]},
+    )
+    assert result == "No relevant content found."
+    assert len(fake.document_list_calls) == (count + 99) // 100
+    assert [value for _, params in fake.document_list_calls for key, value in params if key == "ids"] == document_ids
+    assert len(fake.retrieve_calls) == 1
+    assert fake.retrieve_calls[0][1]["document_ids"] == document_ids
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["missing", "running", "empty", "connection", "protocol"])
+async def test_large_document_scope_later_batch_fails_closed(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    document_ids = [f"doc-{index:04d}" for index in range(101)]
+
+    class LaterBatchFailureClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            ids = [value for key, value in params if key == "ids"]
+            assert len(ids) <= 100
+            if document_ids[-1] in ids:
+                if failure == "connection":
+                    raise RAGFlowConnectionError("unavailable")
+                if failure == "protocol":
+                    return {"data": {"docs": None}}
+            return await super().list_documents(dataset_id, params=params)
+
+    documents = [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in document_ids]
+    if failure == "missing":
+        documents.pop()
+    elif failure == "running":
+        documents[-1]["run"] = "RUNNING"
+    elif failure == "empty":
+        documents[-1]["chunk_count"] = 0
+    fake = LaterBatchFailureClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Documents")]},
+        documents_by_dataset_id={DATASET_ID_1: documents},
+    )
+    _install(monkeypatch, fake)
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": [DATASET_ID_1], "document_filters": [{"dataset_id": DATASET_ID_1, "document_ids": document_ids}]},
+    )
+    if failure in {"missing", "running", "empty"}:
+        assert "selected knowledge scope is no longer available" in result
+    elif failure == "connection":
+        assert "Unable to connect" in result
+    else:
+        assert "invalid document list" in result
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_large_document_scope_batches_share_global_concurrency_limit() -> None:
+    filters = [{"dataset_id": f"dataset-{index}", "document_ids": [f"doc-{index}-{number}" for number in range(201)]} for index in range(3)]
+    release = asyncio.Event()
+    saturated = asyncio.Event()
+    active = 0
+    peak = 0
+
+    class BarrierClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            nonlocal active, peak
+            ids = [value for key, value in params if key == "ids"]
+            assert len(ids) <= 100
+            active += 1
+            peak = max(peak, active)
+            if active >= 4:
+                saturated.set()
+            try:
+                await release.wait()
+                return {"data": {"docs": [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in reversed(ids)]}}
+            finally:
+                active -= 1
+
+    task = asyncio.create_task(ragflow_tools._validate_document_filters(BarrierClient(), filters))
+    try:
+        await asyncio.wait_for(saturated.wait(), timeout=2)
+        assert peak == 4
+    finally:
+        release.set()
+        result, error = await task
+    assert error is None
+    assert result == {item["dataset_id"]: item["document_ids"] for item in filters}
+    assert peak == 4

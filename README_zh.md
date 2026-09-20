@@ -643,6 +643,8 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 
 使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为主智能体和自定义智能体聊天开放模式选择器右侧的纯图标“知识库”按钮。图标持续高亮表示知识检索已启用，普通状态表示本轮检索已关闭。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。同一个配置开关统一控制两类聊天；关闭时两类输入框都不显示、也不提交知识范围。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。回复待处理的澄清问题或编辑后重新生成时，若提交了当前选择器快照则以该新范围为准，未提交时继承来源轮次已接纳的范围；知识库仍处于“全部可检索文件”时，展开文件区域不会加载目录，切换为“指定文件”后才加载。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。`knowledge_base` 是与 provider 无关的能力开关，只控制知识能力和选择器是否启用；RAGFlow 的连接、dataset allowlist 和检索参数（`base_url`、`api_key`、`datasets`、`page_size`、阈值及输出上限）必须配置在 `tools[].name: knowledge_search` 条目中，`knowledge_base` 中的这些字段不会被读取。
 
+每条消息仍可选择最多 1000 份文档；同一知识库超过 100 份时，DeerFlow 会按每批最多 100 份校验，保留完整选择范围。任何一批文档不可访问或不可检索，都会拒绝本次检索。
+
 自定义智能体聊天请求会同时携带该智能体名称作为 `assistant_id` 和
 `context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
 

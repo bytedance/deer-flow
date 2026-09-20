@@ -20,6 +20,7 @@ from app.gateway.routers import (
     assistants_compat,
     auth,
     browser,
+    capabilities,
     channel_connections,
     channels,
     console,
@@ -913,6 +914,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(console.router)
 
     # MCP API is mounted at /api/mcp
+    app.include_router(capabilities.router)
     app.include_router(mcp.router)
 
     # Durable MCP tasks are scoped to their owning thread.

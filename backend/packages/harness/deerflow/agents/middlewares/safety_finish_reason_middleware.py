@@ -374,12 +374,9 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         #      thread until a new chat is started. Backfill an explanation so
         #      the persisted message is non-empty.
         tool_calls = list(last.tool_calls or [])
-        # ``or ""`` normalizes every "no visible content" shape to blank:
-        # None, "", [] and whitespace all count. None is reachable via
-        # ``model_copy(update={"content": None})`` (a rewrite path that skips
-        # validation); without the guard message_content_to_text stringifies
-        # it to "None" and the backfill would be skipped, re-poisoning the
-        # thread this fix is meant to protect.
+        # Keep local falsey-content normalization as a defensive guard; the
+        # shared helper also handles None from validation-skipping rewrites.
+        # The trailing strip() makes whitespace-only content blank as well.
         content_is_blank = not message_content_to_text(last.content or "").strip()
         if not tool_calls and not content_is_blank:
             return None

@@ -469,3 +469,39 @@ def test_get_skill_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, 
         response = client.get("/api/skills/pdf-export")
 
     assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize("mode", ["filtered", "fail_closed", "fail_open", "anonymous", "disabled"])
+def test_capability_skill_discovery_matches_skill_listing_policy(monkeypatch, mode):
+    """The capability projection must not reopen a filtered skill-list surface."""
+    from app.gateway import capabilities
+    from app.gateway.routers import capabilities as capability_router
+
+    fail_closed = mode != "fail_open"
+    provider = _RecordingProvider(denied={"private-skill"}, errors={"skill"} if mode in {"fail_closed", "fail_open"} else set())
+    _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
+    if mode == "disabled":
+        monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
+    config = _make_app_config()
+    config.authorization.fail_closed = fail_closed
+    _stub_user(monkeypatch, None if mode == "anonymous" else _user())
+    _stub_storage(monkeypatch, _FakeStorage([_skill("visible-skill", enabled=False), _skill("private-skill", category=SkillCategory.CUSTOM)]))
+    monkeypatch.setattr(capabilities, "is_admin_user", AsyncMock(return_value=False))
+    app = _make_skills_app(config)
+    app.include_router(capability_router.router)
+    with TestClient(app) as client:
+        legacy = client.get("/api/skills")
+        projection = client.get("/api/capabilities/installations/skills")
+    assert legacy.status_code == projection.status_code == 200
+    expected = [] if mode == "fail_closed" else ["visible-skill"] if mode == "filtered" else ["visible-skill", "private-skill"]
+    assert [skill["name"] for skill in legacy.json()["skills"]] == expected
+    assert [item["name"] for item in projection.json()["items"]] == expected
+    assert projection.json()["can_manage"] is False
+    if "private-skill" not in expected:
+        assert "private-skill" not in projection.text
+    if expected:
+        assert projection.json()["items"][0]["enabled"] is False
+    if mode in {"anonymous", "disabled"}:
+        assert provider.filter_requests == []
+    else:
+        assert len(provider.filter_requests) == 2

@@ -555,6 +555,20 @@ For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
 
+Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
+
+For plugin manifests, adapter registration, and Agent capability selection, see
+[Capability Center integration contract](docs/capability-center.md).
+
+DingTalk and WeCom group notifications and HubSpot CRM are bundled configurable
+plugins. Administrators supply robot credentials or a HubSpot private app token;
+Agents can then send requested group notifications, list companies, or create
+contacts. Saving configuration performs no external write. These plugins reuse
+the existing MCP lifecycle and require no separate plugin service. See the
+integration contract above for required fields, scopes, and feature boundaries.
+
+Plugin brand icons are bundled locally. When adding or editing one MCP plugin, administrators can upload a PNG, JPG, or WebP image (up to 2 MB), preview it, or restore the default icon. Changes take effect only after Save; custom icons persist across browsers as a normalized 128px PNG in the server entry's display-only `presentation.icon` metadata. They are not sent to the MCP transport.
+
 Capability Center > Plugins adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
@@ -1154,6 +1168,8 @@ This release does not add an independent Knowledge item to the workspace
 sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
 delete datasets and documents directly in RAGFlow.
 
+Each message can still select up to 1000 documents. When more than 100 documents are selected from a single dataset, DeerFlow validates them in batches of at most 100 while preserving the complete selection. If any batch contains an inaccessible or non-searchable document, retrieval is rejected.
+
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.
@@ -1402,6 +1418,15 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 ### Manual Context Compaction
 
+Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
+remote tool results, compaction input, reinjected summaries, and configured
+LLM title input. It is off by default. Existing summary placeholders reserve
+indices so new values do not reuse them after compaction. No PII mapping is
+persisted, so repeated values cannot be linked to a compacted source; numbering
+may change when history or summary placeholders disappear. Raw thread text and
+local fallback titles remain available for display; memory extraction is outside
+this feature's scope.
+
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
 Compaction keeps the current user request and summarizes older assistant/tool activity. When rescuing that request leaves an assistant/tool-only summary window, input trimming favors its most recent content. For mixed histories whose user-message anchor falls outside the trimming budget, compaction retains the existing final-message fallback. `summarization.trim_tokens_to_summarize` (4000 by default) controls trimming of the raw summary input; escaping and prompt formatting add overhead beyond that budget. Setting this option to `null` disables input trimming for the summary model; choose that only when the model can accept the full history being compacted.
@@ -1450,9 +1475,16 @@ same optional field is supported in the agent's `config.yaml`.
 
 Sub-agents are an optimization, not the default response to a complex request.
 
+After Stop interrupts a delegated task before it returns a reply, the next user
+turn marks that earlier task as cancelled in the agent's durable context so it
+can retry. Existing replies are preserved. Older replies without status metadata
+may still appear in progress; their outcome is not inferred from their text.
+
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+
+Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
@@ -1534,6 +1566,8 @@ The built-in `grep` tool searches either one text file or all matching text file
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
+UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
+outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
@@ -1639,6 +1673,13 @@ in the composer and in the transcript. There is no automatic history search. See
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
+
+For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
+summary reads while keeping JSON writes and the existing UI. A hand-edited
+`memory.json` can contain its JSON object inside a fenced `memory-json` block;
+embedded backticks and later fenced notes are supported. Unparseable summary
+text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+`storage_path` must point to the data root directory, not an existing JSON file.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime
