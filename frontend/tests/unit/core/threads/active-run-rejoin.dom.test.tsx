@@ -11,9 +11,12 @@ import { useThreadStream } from "@/core/threads/hooks";
 
 type StreamOptions = {
   onError?: (error: unknown) => void;
-  onFinish?: (state: {
-    values: { artifacts: never[]; messages: never[]; title: string };
-  }) => void;
+  onFinish?: (
+    state: {
+      values: { artifacts: never[]; messages: never[]; title: string };
+    },
+    run?: { thread_id: string; run_id: string },
+  ) => void;
 };
 
 const apiMockState = rs.hoisted(() => ({
@@ -207,5 +210,103 @@ test("does not retry after the recovered run finishes", async () => {
   });
 
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  unmount();
+});
+
+test.each(["submitted", "same-tab reconnect"])(
+  "does not rejoin a finished %s run while the runs cache is stale",
+  async (kind) => {
+    if (kind === "same-tab reconnect") {
+      window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+    }
+    streamMockState.isLoading = true;
+    const { rerender, unmount } = renderThread();
+    await flushFrames();
+    expect(streamMockState.joinStream).not.toHaveBeenCalled();
+
+    // The SDK removes its pointer before onFinish. Keep the runs refetch
+    // pending so the effect still sees the previous "running" snapshot.
+    apiMockState.listRuns.mockImplementation(
+      () =>
+        new Promise(() => {
+          // Keep the cached running snapshot until the hook unmounts.
+        }),
+    );
+    act(() => {
+      window.sessionStorage.removeItem("lg:stream:thread-1");
+      streamMockState.options?.onFinish?.(
+        { values: { artifacts: [], messages: [], title: "Done" } },
+        { thread_id: "thread-1", run_id: "run-active" },
+      );
+      streamMockState.isLoading = false;
+    });
+    rerender({ activeThreadId: "thread-1" });
+    await flushFrames();
+
+    expect(streamMockState.joinStream).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
+    unmount();
+  },
+);
+
+test("does not rejoin a finished run discovered by a delayed initial runs read", async () => {
+  let resolveRuns!: (runs: Run[]) => void;
+  apiMockState.listRuns.mockImplementation(
+    () =>
+      new Promise<Run[]>((resolve) => {
+        resolveRuns = resolve;
+      }),
+  );
+  streamMockState.isLoading = true;
+  const { rerender, unmount } = renderThread();
+  await flushFrames();
+
+  act(() => {
+    streamMockState.options?.onFinish?.(
+      { values: { artifacts: [], messages: [], title: "Done" } },
+      { thread_id: "thread-1", run_id: "run-active" },
+    );
+    streamMockState.isLoading = false;
+    resolveRuns([ACTIVE_RUN]);
+  });
+  rerender({ activeThreadId: "thread-1" });
+  await flushFrames();
+
+  expect(streamMockState.joinStream).not.toHaveBeenCalled();
+  unmount();
+});
+
+test("still recovers a different active run after an earlier run finishes", async () => {
+  streamMockState.isLoading = true;
+  const { queryClient, rerender, unmount } = renderThread();
+  await flushFrames();
+
+  apiMockState.listRuns.mockImplementation(
+    () =>
+      new Promise(() => {
+        // Keep the cached running snapshot until the hook unmounts.
+      }),
+  );
+  act(() => {
+    streamMockState.options?.onFinish?.(
+      { values: { artifacts: [], messages: [], title: "Done" } },
+      { thread_id: "thread-1", run_id: "run-active" },
+    );
+    streamMockState.isLoading = false;
+  });
+  rerender({ activeThreadId: "thread-1" });
+  await flushFrames();
+  expect(streamMockState.joinStream).not.toHaveBeenCalled();
+
+  act(() => {
+    queryClient.setQueryData(
+      ["thread", "thread-1"],
+      [{ ...ACTIVE_RUN, run_id: "run-next", status: "pending" }],
+    );
+  });
+  await flushFrames();
+
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  expect(streamMockState.joinStream).toHaveBeenCalledWith("run-next");
   unmount();
 });

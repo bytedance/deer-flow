@@ -1844,6 +1844,10 @@ export function useThreadStream({
     createActiveRunRejoinState(),
   );
   const [activeRunRejoinRetry, setActiveRunRejoinRetry] = useState(0);
+  // Runs reads can lag behind SDK completion, including the initial read.
+  // Keep completed IDs across recovery-state resets so stale "running" data
+  // cannot restart a submitted or natively reconnected stream.
+  const completedRunIdsRef = useRef(new Set<string>());
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -2127,7 +2131,10 @@ export function useThreadStream({
         });
       }
     },
-    onFinish(state) {
+    onFinish(state, run) {
+      if (run) {
+        completedRunIdsRef.current.add(run.run_id);
+      }
       if (settleActiveRunRejoin() && !isMock) {
         void runsQuery.refetch();
       }
@@ -2167,6 +2174,7 @@ export function useThreadStream({
     if (
       !resolvedThreadId ||
       !resolvedRunId ||
+      completedRunIdsRef.current.has(resolvedRunId) ||
       rejoin.inFlight ||
       rejoin.retryTimer !== null ||
       rejoin.settled ||
