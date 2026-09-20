@@ -1,10 +1,9 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Empty remote artifacts**: Both acceptance file probes accept GNU `stat -c %F`'s
-`regular file` and `regular empty file` labels. An empty regular file can satisfy
-`exists` and `file_written`, but must deterministically fail `non-empty`.
-Keep real-shell coverage for empty files under direct and symlinked mount roots;
-symlink leaves, directories, and FIFOs must still be rejected before opening.
+**Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
+`regular file` and `regular empty file` as regular files. Empty files satisfy
+`exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and
+FIFOs remain rejected.
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
