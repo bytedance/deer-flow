@@ -24,6 +24,13 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
+The v46 upgrade treats an existing `tools[]` entry in the `knowledge` group as
+pre-gate enablement and sets `knowledge_base.enabled: true` only when that flag
+was absent. Explicit `true` or `false` values remain authoritative. Moving
+legacy provider settings out of `knowledge_base` remains specific to the
+RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
+their tool-local settings unchanged.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
@@ -46,6 +53,14 @@ Configuration priority:
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
+
+`ModelConfig.request_admission` is optional and is not a provider parameter.
+Its positive RPM, finite wait deadline, queue bound and optional quota-group name
+configure process-local model pacing. Models sharing an explicit group must use
+identical policies. Restart after changing, disabling or regrouping an active
+policy; conflicting policies fail construction rather than silently resetting
+an active budget. This nested model option is enforced by its limiter registry,
+not by the top-level infrastructure reload-boundary registry.
 
 **Extensions Configuration** (`extensions_config.json`):
 
@@ -82,6 +97,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `subagent_batches` - Startup-only explicit durable batch scheduler limits (disabled by default), including separate total, live, and running dimensions plus leases/retries/result bounds
 - `conversation_sharing` - Off-by-default backend/API snapshot sharing (`enabled`, `default_expiry_days`, `allow_no_expiry`); SQL persistence is required, while `SHARE_TOKEN_PEPPER` stays in the environment or a 0600 local secret file rather than YAML
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
+- `knowledge_base` - Hot-reloadable, provider-agnostic knowledge capability and custom-agent scope-selector flags. It gates the read-only Agent tools and selector; provider connection, allowlist, and retrieval defaults belong to the matching entry in `tools[]` (for example, the RAGFlow `knowledge_search` tool).
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
@@ -96,3 +112,24 @@ Values beginning with `$` are resolved from the environment when the file is loa
 `conversation_sharing` fields are read at request time and are not in the
 startup-only registry. The pepper is process-wide cached state rather than an
 `AppConfig` field; changing `SHARE_TOKEN_PEPPER` requires a Gateway restart.
+
+`AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
+Gateway new-turn default. The API preserves omitted updates and clears explicit
+null; file and SQL stores persist it in the existing config document. Keep it
+outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+`setup_agent` also preserves the binding when re-bootstrapping. Admission uses
+explicit message scope before this default and snapshots it onto the current
+human message. Resolve the executing agent with runtime context over configurable,
+including legacy callers using `context.agent_name`; bootstrap skips defaults.
+Recovery (including a legacy null scope) never reapplies defaults.
+The operator allowlist is still checked by retrieval; this is not authorization.
+
+Unscoped new runs persist pre-default request digests even for unbound agents.
+Digest-free legacy retries compare pre-default canonical input; explicit scopes
+and recovery are excluded. Retries preserve the original run across binding edits.
+
+The file-backed singleton entrypoints additionally merge administrator-managed shared
+models from the encrypted runtime-home catalog. YAML entries win name conflicts;
+managed changes create new effective snapshots and do not alter an active runtime
+or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and reload
+boundaries. `AppConfig.from_file()` remains YAML-only.

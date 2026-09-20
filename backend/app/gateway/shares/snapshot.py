@@ -1088,6 +1088,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     segment_quote_depth = 0
     saw_quotelike = False
     reference_region = False
+    reference_ambiguous_block = False
 
     def flush_segment() -> None:
         # Resets the segment on flush: a caller that keeps extending the
@@ -1120,7 +1121,13 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             # separated by a blank line, but cannot publish hidden reasoning.
             content = text[start:content_end]
             saw_quotelike = saw_quotelike or _BLOCKQUOTE_RE.match(content) is not None or _LIST_ITEM_RE.match(content) is not None
-            if _is_commonmark_blank(content) or re.fullmatch(r" {0,3}>[ \t]*(?:>[ \t]*)*", content) is not None:
+            body, _ = _container_body(content)
+            # A skipped fence/raw-HTML/math opener may outlive a blank line.
+            # Re-entering the walker would reinterpret its closer as an
+            # opener and grant phantom code protection. Once ambiguous, the
+            # remaining message stays unprotected (bounded, fail-closed).
+            reference_ambiguous_block = reference_ambiguous_block or _FENCE_OPEN_RE.match(body) is not None or _html_open(body)[0] is not None or _DISPLAY_MATH_OPEN_RE.match(body) is not None
+            if not reference_ambiguous_block and (_is_commonmark_blank(content) or re.fullmatch(r" {0,3}>[ \t]*(?:>[ \t]*)*", content) is not None):
                 reference_region = False
                 indented_eligible = True
             continue
@@ -1204,10 +1211,12 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
         # is open. Already-open fences/HTML/indented code were handled above.
         quote = _BLOCKQUOTE_RE.match(content) is not None
         item = _LIST_ITEM_RE.match(content) is not None
-        new_container = item or (quote and (segment_kind != "quote" or _quote_depth(content) > segment_quote_depth))
-        if "[" in content and (segment_start is None or new_container) and not (indented_eligible and not saw_quotelike and _indent_columns(content) >= 4):
+        if "[" in content and not (indented_eligible and not saw_quotelike and _indent_columns(content) >= 4):
             body, _ = _container_body(content)
-            if _starts_reference_definition(text, start + len(content) - len(body)):
+            prefix_len = len(content) - len(body)
+            # A new list item can be nested inside an unchanged quote depth.
+            new_container = item or _CONTAINER_LIST_MARKER_RE.search(content[:prefix_len]) is not None or (quote and (segment_kind != "quote" or _quote_depth(content) > segment_quote_depth))
+            if (segment_start is None or new_container) and _starts_reference_definition(text, start + prefix_len):
                 flush_segment()
                 reference_region = True
                 saw_quotelike = saw_quotelike or quote or item

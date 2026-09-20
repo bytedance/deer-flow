@@ -20,12 +20,18 @@ def _runtime():
             "run_id": "run-1",
             "user_id": "user-1",
             "user_role": "member",
+            "__knowledge_scope_execution": {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-1"],
+            },
         },
         config={
             "metadata": {
                 "model_name": "model-a",
                 "allowed_subagents": ["general-purpose"],
                 "tool_groups": ["web"],
+                "mcp_plugins": ["stable-plugin"],
             },
             "configurable": {"thread_id": "thread-1"},
         },
@@ -77,10 +83,16 @@ async def test_batch_task_is_explicit_idempotent_submission(monkeypatch) -> None
     message = _message(command)
     request = submitter.submit.await_args.args[0]
     assert request.submission_key == "run-1:call-1"
+    assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]
     assert request.max_live_items == 20
     assert request.max_running_items == 5
+    assert request.execution_spec["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
     assert "running independently" in message.content
 

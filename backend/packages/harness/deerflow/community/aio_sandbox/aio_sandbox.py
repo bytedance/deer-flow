@@ -197,6 +197,25 @@ class AioSandbox(Sandbox):
         exit_code = getattr(data, "exit_code", None) if data else None
         return output, exit_code
 
+    @staticmethod
+    def _is_missing_shell_session_error(error: ApiError) -> bool:
+        body = error.body
+        if error.status_code != 404 or not isinstance(body, dict):
+            return False
+        message = body.get("message")
+        return isinstance(message, str) and "session not found" in message.casefold()
+
+    @staticmethod
+    def _cleanup_bash_session_best_effort(client, session_id: str) -> None:
+        try:
+            client.bash.close_session(session_id)
+        except Exception as cleanup_error:
+            logger.warning(
+                "Failed to release transient bash session %s: %s",
+                session_id,
+                cleanup_error,
+            )
+
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
         client.shell.create_session(id=session_id)
@@ -289,12 +308,24 @@ class AioSandbox(Sandbox):
                     raise RuntimeError("sandbox client is closed")
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
-                output, exit_code = self._exec_shell(
-                    client,
-                    command,
-                    session_id=scoped.session_id,
-                )
-                if output and _ERROR_OBSERVATION_SIGNATURE in output:
+                try:
+                    output, exit_code = self._exec_shell(
+                        client,
+                        command,
+                        session_id=scoped.session_id,
+                    )
+                except ApiError as error:
+                    if not self._is_missing_shell_session_error(error):
+                        raise
+                    logger.warning("Execution-scoped sandbox shell session is missing; recreating it once")
+                    scoped.session_id = None
+                    output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
+                        client,
+                        command,
+                        corrupted_session_id=None,
+                        context="execution scope after missing session",
+                    )
+                if scoped.session_id is not None and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
                     output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
                         client,
@@ -372,11 +403,11 @@ class AioSandbox(Sandbox):
             command: The command to execute.
             env: Optional per-call environment variables (request-scoped secrets,
                 issue #3861). When provided, the command runs via the ``bash.exec``
-                API (which supports per-command env) on a fresh auto-created session
-                so the secrets are scoped to this single command and never persist;
-                secret values travel in the structured ``env`` field, never in the
-                command string. When ``None`` the legacy persistent-shell path runs
-                unchanged.
+                API (which supports per-command env) on a fresh explicitly released
+                session, so the secrets are scoped to this single command and never
+                persist; secret values travel in the structured ``env`` field, never
+                in the command string. When ``None`` the legacy persistent-shell path
+                runs unchanged.
             timeout: Optional per-call timeout. The current sandbox SDK does not
                 expose a command-level timeout distinct from its client/request
                 timeout, so DeerFlow keeps using the backend's default here.
@@ -403,13 +434,28 @@ class AioSandbox(Sandbox):
                     # target it again. A failed replacement is cleaned up and
                     # the next call starts another explicit session.
                     self._recovery_session_id = self._create_shell_session(client)
-                output, exit_code = self._exec_shell(
-                    client,
-                    command,
-                    session_id=self._recovery_session_id,
-                )
+                recovered_missing_session = False
+                try:
+                    output, exit_code = self._exec_shell(
+                        client,
+                        command,
+                        session_id=self._recovery_session_id,
+                    )
+                except ApiError as error:
+                    if not self._is_missing_shell_session_error(error):
+                        raise
+                    logger.warning("Default sandbox shell session is missing; recreating it once")
+                    self._default_shell_corrupted = True
+                    self._recovery_session_id = None
+                    recovered_missing_session = True
+                    output, exit_code, self._recovery_session_id = self._rotate_and_retry_shell(
+                        client,
+                        command,
+                        corrupted_session_id=None,
+                        context="default shell after missing session",
+                    )
 
-                if output and _ERROR_OBSERVATION_SIGNATURE in output:
+                if not recovered_missing_session and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     self._default_shell_corrupted = True
                     logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
                     output, exit_code, self._recovery_session_id = self._rotate_and_retry_shell(
@@ -429,10 +475,11 @@ class AioSandbox(Sandbox):
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
         injected commands use the ``bash.exec`` API which accepts per-command env.
-        Each call lets the sandbox auto-create a fresh session (no ``session_id``),
-        so injected request-scoped secrets are scoped to this command and never
-        persist across calls. Secret values travel in the structured ``env`` field,
-        never in the command string.
+        Each call creates an explicit transient session and closes it after the
+        command, so injected request-scoped secrets are scoped to this command,
+        never persist across calls, and do not consume the server's session
+        capacity after completion. Secret values travel in the structured
+        ``env`` field, never in the command string.
 
         Trade-off of the fresh-session choice: consecutive env-bearing bash calls
         within the same skill do not share session state (cwd, sourced venv,
@@ -463,36 +510,52 @@ class AioSandbox(Sandbox):
         return output
 
     def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
-        """Single bash.exec invocation with injected env (one fresh session)."""
+        """Single bash.exec invocation in an explicitly released fresh session."""
         with self._lock:
-            try:
-                result = self._client.bash.exec(
-                    command=command,
-                    env=env,
-                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
-                )
-                data = result.data if result else None
-                stdout = (data.stdout or "") if data else ""
-                stderr = (data.stderr or "") if data else ""
-                exit_code = getattr(data, "exit_code", None) if data else None
-                output = stdout
-                if stderr:
-                    output += f"\nStd Error:\n{stderr}" if output else stderr
-                if exit_code not in (0, None):
-                    # Mirror LocalSandbox: keep the actual shell status in the
-                    # output text (acceptance-checklist evidence).
-                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                return output if output else "(no output)"
-            except ApiError as e:
-                if e.status_code == 404:
-                    self._bash_exec_unsupported = True
-                    logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
-                    return _BASH_EXEC_UNSUPPORTED_ERROR
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
-            except Exception as e:
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
+            for attempt in range(2):
+                session_id = str(uuid.uuid4())
+                session_created = False
+                try:
+                    self._client.bash.create_session(session_id=session_id)
+                    session_created = True
+                    result = self._client.bash.exec(
+                        command=command,
+                        session_id=session_id,
+                        env=env,
+                        hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                    )
+                    data = result.data if result else None
+                    stdout = (data.stdout or "") if data else ""
+                    stderr = (data.stderr or "") if data else ""
+                    exit_code = getattr(data, "exit_code", None) if data else None
+                    output = stdout
+                    if stderr:
+                        output += f"\nStd Error:\n{stderr}" if output else stderr
+                    if exit_code not in (0, None):
+                        # Mirror LocalSandbox: keep the actual shell status in the
+                        # output text (acceptance-checklist evidence).
+                        output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
+                    return output if output else "(no output)"
+                except ApiError as e:
+                    if self._is_missing_shell_session_error(e):
+                        if attempt == 0:
+                            logger.warning("Transient bash.exec session disappeared; retrying once")
+                            continue
+                        logger.error("Failed to execute command with injected env: bash.exec session disappeared after retry")
+                        return "Error: bash.exec session disappeared after retry"
+                    if e.status_code == 404:
+                        self._bash_exec_unsupported = True
+                        logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
+                        return _BASH_EXEC_UNSUPPORTED_ERROR
+                    logger.error(f"Failed to execute command with injected env in sandbox: {e}")
+                    return f"Error: {e}"
+                except Exception as e:
+                    logger.error(f"Failed to execute command with injected env in sandbox: {e}")
+                    return f"Error: {e}"
+                finally:
+                    if session_created:
+                        self._cleanup_bash_session_best_effort(self._client, session_id)
+            return "Error: bash.exec session disappeared after retry"
 
     def read_file(
         self,
@@ -630,8 +693,15 @@ class AioSandbox(Sandbox):
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
                 matches.append(entry.path)
-                if len(matches) >= max_results:
-                    return matches, True
+                # Look one match past the cap before deciding. Returning on
+                # the max-th match cannot tell a listing that held exactly
+                # ``max_results`` from one that held more, so an exhausted
+                # listing was reported as truncated; it also returned a match
+                # for ``max_results=0``. The ``include_dirs=False`` branch
+                # below and the shared ``parse_remote_search_output`` path
+                # decide the same way.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, False
 
     def grep(
@@ -687,9 +757,12 @@ class AioSandbox(Sandbox):
                     line=truncate_line(match.line_content),
                 )
             )
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Look one match past the cap before deciding, as ``glob`` above
+            # does. Returning on the ``max_results``-th match cannot tell a
+            # search that held exactly that many from one that held more, so an
+            # exhausted search was reported as truncated.
+            if len(matches) > max_results:
+                return matches[:max_results], True
 
         return matches, truncated
 

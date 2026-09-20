@@ -13,11 +13,12 @@ import json
 import logging
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
 import pytest
 
-from deerflow.logging_config import JsonTraceFormatter, ShareTokenRedactionFilter, install_share_token_redaction
+from deerflow.logging_config import JsonTraceFormatter, ShareTokenRedactionFilter, configure_logging, install_share_token_redaction
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NGINX_CONFIGS = (
@@ -59,6 +60,20 @@ def _restore_filters():
 
 def _record(msg, args=None):
     return logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, msg, args, None)
+
+
+@pytest.mark.parametrize("enhanced", [False, True])
+def test_logging_configuration_masks_share_tokens_and_signed_urls_together(_restore_filters, enhanced):
+    stream = io.StringIO()
+    root = logging.getLogger()
+    root.handlers = [logging.StreamHandler(stream)]
+    configure_logging(SimpleNamespace(log_level="info", logging=SimpleNamespace(enhance=SimpleNamespace(enabled=enhanced, format="json"))))
+    root.warning("share=%s media=%s", _TOKEN, "https://cdn.example/private-file?signature=MediaSecret")
+    output = stream.getvalue()
+    assert _TOKEN not in output
+    assert "private-file" not in output
+    assert "MediaSecret" not in output
+    assert "https://cdn.example" in output
 
 
 def test_filter_masks_token_in_access_log_line():

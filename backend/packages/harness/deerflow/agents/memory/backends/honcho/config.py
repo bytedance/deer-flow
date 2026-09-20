@@ -9,6 +9,7 @@ plain HTTP; a configured ``api_key`` over plain HTTP requires the explicit
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
@@ -21,13 +22,48 @@ def sanitize_id(raw: str) -> str:
     return _ID_RE.sub("-", str(raw)).strip("-")[:64]
 
 
+def _mapping(value: Any, name: str) -> dict[str, Any]:
+    """Narrow an operator-supplied nested value to a mapping.
+
+    Falsy values (absent key, YAML null, ``{}``, ``""``) mean "unset" and keep
+    the default. A truthy non-mapping — a bare string, a YAML list — is a
+    config mistake, and naming the key here beats the ``AttributeError`` that
+    ``.get``/``.items`` would otherwise raise inside backend construction. The
+    mem0 and OpenViking backends already report these keys as ``ValueError``.
+    """
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Honcho backend: {name} must be a mapping, got {type(value).__name__}")
+    return value
+
+
+def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:
+    """Narrow an operator-supplied numeric knob.
+
+    Falsy values (absent key, YAML null, empty string) mean "unset" and keep the
+    default — the same line ``_mapping`` draws above. Anything else that cannot be
+    cast is a config mistake, and naming the key here beats the ``TypeError`` that
+    ``float(None)`` or ``int({...})`` raise from inside backend construction
+    without mentioning which knob or which file is wrong. Numeric strings keep
+    working, because that is what ``float``/``int`` already accept.
+    """
+    value = cfg.get(key, default)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Honcho backend: {key} must be a number, got {type(value).__name__}") from None
+
+
 def _parse_override_map(cfg: dict[str, Any], key: str) -> dict[str, str]:
     """Overrides map raw user ids to explicit workspace/peer ids; an empty or
     null VALUE is always a config mistake (empty string is falsy and would
     silently fall through to the default derivation; YAML null would stringify
     into an id literally named "None"), so fail fast at parse time."""
     out: dict[str, str] = {}
-    for k, v in (cfg.get(key) or {}).items():
+    for k, v in _mapping(cfg.get(key), key).items():
         if v is None or not str(v).strip():
             raise ValueError(f"Honcho backend: {key}[{k!r}] has an empty value; remove the entry or set a non-empty id.")
         out[str(k)] = str(v)
@@ -65,7 +101,7 @@ class HonchoConfig:
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> HonchoConfig:
         cfg = dict(backend_config or {})
-        failure_policy = cfg.get("failure_policy") or {}
+        failure_policy = _mapping(cfg.get("failure_policy"), "failure_policy")
         base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
         api_key = cfg.get("api_key") or None
         allow_insecure = bool(cfg.get("allow_insecure_http", False))
@@ -78,10 +114,10 @@ class HonchoConfig:
             workspace_overrides=_parse_override_map(cfg, "workspace_overrides"),
             user_peer_overrides=_parse_override_map(cfg, "user_peer_overrides"),
             assistant_peer=str(cfg.get("assistant_peer", "deerflow")),
-            timeout_seconds=float(cfg.get("timeout_seconds", 10.0)),
-            connect_timeout_seconds=float(cfg.get("connect_timeout_seconds", 3.0)),
-            message_char_limit=int(cfg.get("message_char_limit", 8000)),
-            max_injection_chars=int(cfg.get("max_injection_chars", 6000)),
+            timeout_seconds=_number(cfg, "timeout_seconds", 10.0, float),
+            connect_timeout_seconds=_number(cfg, "connect_timeout_seconds", 3.0, float),
+            message_char_limit=_number(cfg, "message_char_limit", 8000, int),
+            max_injection_chars=_number(cfg, "max_injection_chars", 6000, int),
             allow_insecure_http=allow_insecure,
             read_fail_closed=str(failure_policy.get("read", "")).lower() == "fail_closed",
             storage_path=str(cfg.get("storage_path") or ""),

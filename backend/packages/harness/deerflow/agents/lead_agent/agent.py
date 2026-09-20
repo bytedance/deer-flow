@@ -34,6 +34,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
@@ -77,7 +78,6 @@ from deerflow.tracing import build_tracing_callbacks
 logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
-_NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 
 # Channels whose inbound messages originate from untrusted external
 # commenters (anyone on a GitHub repo, etc.) and whose run context is
@@ -180,17 +180,40 @@ def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
     return default
 
 
+def _append_named_tools_without_conflicts(tools: list, new_tools: list, *, kind: str) -> None:
+    """Append tools without dropping unrelated duplicate-named tools."""
+    existing_names = {getattr(tool, "name", None) for tool in tools}
+    for new_tool in new_tools:
+        if new_tool.name in existing_names:
+            logger.warning("%s tool name %r already exists and was skipped.", kind, new_tool.name)
+            continue
+        tools.append(new_tool)
+        existing_names.add(new_tool.name)
+
+
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
     """Append memory tools without dropping unrelated duplicate-named tools."""
     from deerflow.agents.memory.tools import get_memory_tools
 
-    existing_names = {getattr(tool, "name", None) for tool in tools}
-    for memory_tool in get_memory_tools():
-        if memory_tool.name in existing_names:
-            logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
-            continue
-        tools.append(memory_tool)
-        existing_names.add(memory_tool.name)
+    _append_named_tools_without_conflicts(tools, get_memory_tools(), kind="Memory")
+
+
+def _append_project_document_tools_if_pinned(tools: list, cfg: dict) -> None:
+    """Append the project shelf tools only for runs with a pinned project context.
+
+    Registration follows the admission-pinned ``PROJECT_CONTEXT_KEY`` and
+    nothing else (§10.11): a non-project run never pays the tools' schema
+    tokens and never sees them, while a project run keeps them even when
+    instructions and shelf are both empty. The tools themselves read the same
+    pinned key at call time and fail closed without it.
+    """
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    if PROJECT_CONTEXT_KEY not in cfg:
+        return
+    from deerflow.projects.tools import get_project_document_tools
+
+    _append_named_tools_without_conflicts(tools, get_project_document_tools(), kind="Project document")
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -585,6 +608,7 @@ def build_middlewares(
             skills_container_path=resolved_app_config.skills.container_path,
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
             task_continuity_enabled=getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True,
+            pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
         )
     )
 
@@ -693,15 +717,15 @@ def build_middlewares(
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
 
-    # A provider may return an empty AIMessage after tool execution. Retry the
-    # final response once, then persist a visible error fallback rather than
-    # allowing LangChain's no-tool-call router to end a silent successful run.
+    # LLMErrorHandlingMiddleware gives a run one model-boundary retry for a true
+    # empty stop. Keep a terminal fallback for post-tool responses that still have
+    # no user-visible text, without adding a graph-level recovery turn.
     middlewares.append(TerminalResponseMiddleware())
 
     # A provider may also cap the final assistant response at the model output
-    # limit. Preserve the assistant content unchanged, but stamp a run-level
-    # stop_reason so Gateway consumers can tell a length-capped completion from
-    # a clean one.
+    # limit. Detector-matched caps stamp stop_reason=model_length_capped,
+    # suppress that response's tool calls, and append a length notice when no
+    # visible text was produced.
     middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
@@ -922,7 +946,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
-    non_interactive = bool(cfg.get("non_interactive", False))
+    interaction_policy = resolve_run_interaction_policy(config)
+    non_interactive = not interaction_policy.allows_clarification
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
@@ -993,6 +1018,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
+            "mcp_plugins": getattr(agent_config, "mcp_plugins", None),
             "available_skills": sorted(available_skills) if available_skills is not None else None,
             "allowed_subagents": list(allowed_subagents) if allowed_subagents is not None else None,
             "memory_enabled": memory_enabled,
@@ -1031,15 +1057,16 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             enabled=skill_search_enabled,
             container_base_path=container_base_path,
         )
-        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
         configured_tools = raw_tools
-        if non_interactive:
-            configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
             authorization_candidates.append(skill_setup.describe_skill_tool)
         if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
             _append_memory_tools_without_name_conflicts(authorization_candidates)
+        _append_project_document_tools_if_pinned(authorization_candidates, cfg)
         append_task_continuity_tools(authorization_candidates, resolved_app_config)
         configured_tool_ids = {id(tool) for tool in configured_tools}
         authorized_tools, _authz_provider = apply_tool_authorization(
@@ -1081,10 +1108,11 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             skill_names=skill_setup.skill_names or None,
             allowed_subagents=allowed_subagents,
             subagent_execution_capacity=subagent_execution_capacity,
+            interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
         )
         graph = create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+            model=chat_model,
             tools=final_tools,
             middleware=normalize_middleware_state_schemas(middlewares, mode),
             system_prompt=system_prompt,
@@ -1150,22 +1178,25 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
-    # Default lead agent (unchanged behavior)
+    # Resolve the model once so tool guidance uses the same effective settings.
+    chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
+        mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         app_config=resolved_app_config,
+        chat_model=chat_model,
     )
     configured_tools = raw_tools + extra_tools
-    if non_interactive:
-        configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:
         authorization_candidates.append(skill_setup.describe_skill_tool)
     if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(authorization_candidates)
+    _append_project_document_tools_if_pinned(authorization_candidates, cfg)
     append_task_continuity_tools(authorization_candidates, resolved_app_config)
     configured_tool_ids = {id(tool) for tool in configured_tools}
     authorized_tools, _authz_provider = apply_tool_authorization(
@@ -1209,10 +1240,11 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
         subagent_execution_capacity=subagent_execution_capacity,
+        interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
     )
     graph = create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
+        model=chat_model,
         tools=final_tools,
         middleware=normalize_middleware_state_schemas(middlewares, mode),
         system_prompt=system_prompt,

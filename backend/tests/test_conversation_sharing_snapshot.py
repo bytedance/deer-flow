@@ -51,6 +51,9 @@ def _row(seq: int, content: dict) -> dict:
         '> - [x]: /url "`"\n>   <think>private-reference-reasoning</think> ` public answer',
         '[one]: /url "`"\n[two]: /other\n<think>private-reference-reasoning</think> ` public answer',
         'paragraph\n> [x]: /url "`"\n> <think>private-reference-reasoning</think> ` public answer',
+        '> paragraph\n> - [x]: /url "`"\n>   <think>private-reference-reasoning</think> ` public answer',
+        '[x]: /url "title"\n```\nexample\n\n```\n<think>private-reference-reasoning</think>\npublic answer',
+        '[x]: /url "title"\n<script>\n\n`<think>private-reference-reasoning</think>`\n</script>\npublic answer',
     ],
 )
 async def test_reference_definition_cannot_publish_reasoning_on_create_or_read(monkeypatch, content):

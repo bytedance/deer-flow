@@ -41,6 +41,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -56,6 +57,7 @@ from deerflow.runtime.context_keys import (
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
@@ -79,6 +81,7 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -166,16 +169,6 @@ def _schedule_terminal_cycle_collection() -> None:
     # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
     # short-lived embedded-client event loop alive.
     loop.call_later(delay, _start_collection, context=Context())
-
-
-async def _close_agent_stream(stream: Any) -> None:
-    """Close a LangGraph stream deterministically after completion or early exit."""
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
 
 
 def _remove_callback(config: dict[str, Any], handler: Any) -> None:
@@ -521,6 +514,16 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
+            # The Gateway pins the run's project snapshot under this key at
+            # admission (spec §7.1); a caller-supplied value in
+            # ``config['context']`` must never be merged (§12).
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -574,6 +577,23 @@ def _build_runtime_context(
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
+
+
+def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject the admission-pinned project snapshot into the runtime context.
+
+    The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
+    after stripping client-supplied values at admission (``build_run_config``
+    drops ``__``-prefixed context keys; the services pop-set covers both
+    sections), so a value surviving to this point is server-authoritative.
+    ``_build_runtime_context`` refuses server-owned keys from the caller
+    merge, and ``_install_runtime_context`` treats the runtime context as the
+    authoritative view — hoisting here is what lets middleware and tools read
+    exactly the snapshot admission pinned.
+    """
+    caller_context = config.get("context")
+    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+        runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
 
 
 @dataclass(frozen=True)
@@ -790,6 +810,7 @@ async def run_agent(
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
+    knowledge_scope: dict[str, Any] | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -1069,6 +1090,9 @@ async def run_agent(
             checkpoint_metadata = {}
             config["metadata"] = checkpoint_metadata
         checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        _pin_admission_project_context(config, runtime_ctx)
+        if knowledge_scope is not None:
+            runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
@@ -1253,7 +1277,7 @@ async def run_agent(
                         finally:
                             close_error = sys.exception()
                             try:
-                                await _close_agent_stream(stream)
+                                await close_agent_stream(stream)
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1302,7 +1326,7 @@ async def run_agent(
                     finally:
                         close_error = sys.exception()
                         try:
-                            await _close_agent_stream(stream)
+                            await close_agent_stream(stream)
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
@@ -1792,6 +1816,23 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     return _message_type(visible_messages[-1]) == "ai"
 
 
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. The goal evaluator only reads human and AI text and never sees it.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
+
+
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
     if evaluation["satisfied"]:
         return None
@@ -1948,6 +1989,19 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(

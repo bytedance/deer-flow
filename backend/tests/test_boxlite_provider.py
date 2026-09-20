@@ -1327,19 +1327,21 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     assert truncated is False
 
 
-def test_list_dir_raises_when_find_returns_no_entries() -> None:
+@pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+def test_list_dir_classifies_empty_failure(marker, error) -> None:
     class _EmptyBox:
         async def exec(self, *argv, env=None, timeout=None):
-            return types.SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+            return types.SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
 
     box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(error) as exc:
         box.list_dir("/mnt/user-data/workspace")
+    assert type(exc.value) is error
 
 
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
-    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    # 127 (no binary) must not look like a missing path.
     class _MissingBinaryBox:
         async def exec(self, *argv, env=None, timeout=None):
             return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
@@ -1447,6 +1449,27 @@ def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tm
         result = box.glob(str(tmp_path), "src/*.js", max_results=1)
 
     assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
 
 
 @_RS_POSIX

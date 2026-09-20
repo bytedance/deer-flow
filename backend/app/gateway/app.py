@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI, Request, Response
@@ -20,6 +20,7 @@ from app.gateway.routers import (
     assistants_compat,
     auth,
     browser,
+    capabilities,
     channel_connections,
     channels,
     console,
@@ -28,10 +29,13 @@ from app.gateway.routers import (
     github_webhooks,
     input_polish,
     integrations,
+    knowledge,
     mcp,
     mcp_tasks,
     memory,
     models,
+    project_documents,
+    project_thread_files,
     projects,
     runs,
     scheduled_tasks,
@@ -42,6 +46,7 @@ from app.gateway.routers import (
     suggestions,
     thread_runs,
     threads,
+    trash,
     uploads,
     user_preferences,
 )
@@ -55,6 +60,7 @@ from deerflow.logging_config import (
 )
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
+from deerflow.utils.file_io import await_drained
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -71,9 +77,9 @@ install_share_token_redaction()
 
 logger = logging.getLogger(__name__)
 
-# Upper bound (seconds) each lifespan shutdown hook is allowed to run.
-# Bounds worker exit time so uvicorn's reload supervisor does not keep
-# firing signals into a worker that is stuck waiting for shutdown cleanup.
+# Grace budget (seconds) lifespan shutdown hooks get for ordinary completion.
+# Hooks that own uncancellable executor work may spend additional time draining
+# already-started work after cancellation rather than detach it from teardown.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
 # The retrieval index is derived state, so shutdown only waits briefly for its
@@ -202,6 +208,114 @@ async def _warm_memory_retrieval(manager) -> None:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
 
+async def _shutdown_memory_backend(*, retrieval_warm_finished: bool) -> None:
+    """Resolve, drain, and close memory within the caller's cancellation shield.
+
+    Backend ``close()`` overrides must be quick or internally bounded: unlike
+    ``shutdown_flush``, close has no host timeout and is drained even on cancellation.
+    """
+    manager = None
+    try:
+        app_cfg: AppConfig = await asyncio.to_thread(get_app_config)
+        if app_cfg.memory.enabled:
+            from deerflow.agents.memory import get_memory_manager
+
+            manager = await asyncio.to_thread(get_memory_manager)
+            flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
+            completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
+            if completed:
+                logger.info("Memory queue flush completed within %.1fs", flush_timeout)
+            else:
+                logger.warning(
+                    "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
+                    flush_timeout,
+                )
+    except Exception:
+        logger.exception("Failed to flush memory queue on shutdown")
+    finally:
+        close = getattr(manager, "close", None)
+        if callable(close) and retrieval_warm_finished:
+            try:
+                await asyncio.to_thread(close)
+            except Exception:
+                logger.exception("Failed to close memory backend on shutdown")
+
+
+async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
+    """One trash retention sweep at gateway startup (Phase-2 spec §8.3).
+
+    Runs beside the lazy trigger on the trash listing — no daemon, no
+    scheduler (§15.9). Sweeps every user (``user_id=None``) with the
+    configured retention window, including the full reconciliation. A sweep
+    failure is logged and never blocks gateway readiness; on shutdown the
+    lifespan gives it a bounded graceful-completion budget, then cancels an
+    overrun while draining any already-started file reconciliation before
+    teardown continues.
+    """
+    try:
+        from deerflow.config.paths import get_paths
+        from deerflow.config.projects_config import ProjectsConfig
+        from deerflow.projects.trash import run_trash_retention_sweep
+
+        project_document_repo = getattr(app.state, "project_document_repo", None)
+        if project_document_repo is None:
+            return
+        projects_config = getattr(startup_config, "projects", None)
+        retention_days = projects_config.trash_retention_days if projects_config is not None else ProjectsConfig().trash_retention_days
+        sweep_report = await run_trash_retention_sweep(project_document_repo, get_paths(), retention_days=retention_days, user_id=None)
+        if sweep_report.purged or sweep_report.orphans_removed or sweep_report.staging_removed or sweep_report.content_missing:
+            logger.info(
+                "Trash retention sweep: purged=%d failures=%d orphans=%d staging=%d content_missing=%d",
+                sweep_report.purged,
+                sweep_report.purge_failures,
+                sweep_report.orphans_removed,
+                sweep_report.staging_removed,
+                len(sweep_report.content_missing),
+            )
+    except Exception:
+        logger.warning("Trash retention sweep skipped", exc_info=True)
+
+
+async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
+    """Grace-budgeted shutdown for the background startup sweep (§8.3).
+
+    Waits ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS`` for graceful completion, then
+    cancels an overrun. That budget is not a hard upper bound for this hook:
+    reconciliation runs in executor threads that cannot be safely killed, so
+    cancellation drains any already-started filesystem worker before returning.
+    This keeps the sweep's file ownership intact until the teardown below can
+    safely dispose the document repo and DB engine.
+    """
+    task = getattr(app.state, "startup_trash_sweep_task", None)
+    if task is None or task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # Cancellation prevents later sweep stages from starting, but an
+        # executor-backed reconciliation that already started drains before
+        # ``CancelledError`` reaches this task. The final await may therefore
+        # exceed the graceful-completion budget; detaching that worker would
+        # reintroduce teardown/file-mutation overlap. A ``cancel()`` that
+        # returns False means the sweep finished inside the window between the
+        # deadline firing and this call — report that as the late finish it is.
+        cancelled = task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        if cancelled:
+            logger.warning(
+                "Startup trash sweep exceeded %.1fs during shutdown; cancelled and drained before proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.info(
+                "Startup trash sweep finished just after the %.1fs shutdown budget; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+    except Exception:
+        logger.exception("Startup trash sweep failed during shutdown")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -315,6 +429,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
+
+        # Phase-2 trash tier (§8.3): one retention sweep at startup, beside
+        # the lazy trigger on the trash listing — no daemon, no scheduler.
+        # Runs after langgraph_runtime so app.state.project_document_repo is
+        # available. The per-user reconciliation walks every row and file, so
+        # it is scheduled as a background task: gateway readiness never waits
+        # on it, a failure is logged by the task itself, and shutdown gives the
+        # in-flight sweep a bounded graceful budget before cancelling it; any
+        # already-started file worker drains before the runtime is torn down.
+        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         try:
             from app.gateway.services import launch_scheduled_thread_run
@@ -447,6 +571,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         yield
 
+        await _shutdown_startup_trash_sweep(app)
+
         try:
             await auth.close_oidc_service()
         except Exception:
@@ -533,9 +659,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
         # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # session close + the brief retrieval-warm wait + config/backend
+        # resolution + this drain + backend close + buffer),
         # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
         # mid-flight and the loss this is fixing is silently re-introduced.
+        # Backend close has no host timeout: overrides must be quick or
+        # internally bounded, since cancellation waits for that worker too.
         # The retrieval index is derived from canonical memory files, so its
         # wait is independently capped and never consumes the flush budget.
         retrieval_warm_finished = True
@@ -552,9 +681,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 retrieval_warm_finished = False
                 logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
 
-        manager = None
         try:
-            # Memory shutdown runs on a worker thread and can trigger detached
+            # Memory shutdown runs on worker threads and can trigger detached
             # system-model callbacks. Stop accepting those callbacks before
             # flushing, while keeping the registered loop alive for awaited
             # task hooks until langgraph_runtime drains runs and subagents.
@@ -564,30 +692,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
 
-        try:
-            app_cfg = get_app_config()
-            if app_cfg.memory.enabled:
-                from deerflow.agents.memory import get_memory_manager
-
-                manager = await asyncio.to_thread(get_memory_manager)
-                flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
-                completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
-                if completed:
-                    logger.info("Memory queue flush completed within %.1fs", flush_timeout)
-                else:
-                    logger.warning(
-                        "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
-                        flush_timeout,
-                    )
-        except Exception:
-            logger.exception("Failed to flush memory queue on shutdown")
-        finally:
-            close = getattr(manager, "close", None)
-            if callable(close) and retrieval_warm_finished:
-                try:
-                    await asyncio.to_thread(close)
-                except Exception:
-                    logger.exception("Failed to close memory backend on shutdown")
+        # ``asyncio.to_thread`` cancellation only detaches the awaiter; the
+        # worker keeps running. Treat resolve + flush + close as one owned
+        # shutdown operation so lifespan cancellation cannot close the backend
+        # underneath an in-flight flush or return while either worker is live.
+        await await_drained(
+            _shutdown_memory_backend(
+                retrieval_warm_finished=retrieval_warm_finished,
+            )
+        )
 
     logger.info("Shutting down API Gateway")
 
@@ -801,6 +914,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Include routers
     # Models API is mounted at /api/models
+    from app.gateway.routers import managed_models
+
+    app.include_router(managed_models.router)
     app.include_router(models.router)
 
     # Features API is mounted at /api/features
@@ -810,6 +926,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(console.router)
 
     # MCP API is mounted at /api/mcp
+    app.include_router(capabilities.router)
     app.include_router(mcp.router)
 
     # Durable MCP tasks are scoped to their owning thread.
@@ -824,6 +941,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)
+
+    # Read-only RAGFlow catalog for chat knowledge-scope selection.
+    app.include_router(knowledge.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
@@ -845,6 +965,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(agents.router)
     # Projects API is mounted at /api/projects
     app.include_router(projects.router)
+    # Project document shelf API is mounted at /api/projects/{id}/documents
+    app.include_router(project_documents.router)
+    # Project conversation-files view is mounted at /api/projects/{id}/thread-files
+    app.include_router(project_thread_files.router)
+    # Trash API is mounted at /api/trash
+    app.include_router(trash.router)
 
     # Deployment-level subagent catalog and admin management.
     app.include_router(subagents.router)

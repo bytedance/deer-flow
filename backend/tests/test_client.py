@@ -3,6 +3,9 @@
 import asyncio
 import concurrent.futures
 import json
+import os
+import shutil
+import stat
 import tempfile
 import zipfile
 from enum import Enum
@@ -704,6 +707,68 @@ class TestStream:
         assert any(event.data.get("content") == "Hello!" for event in ai_events)
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
 
+    @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
+        """A guard's ``after_model`` replaces the message under the same id after it was sent."""
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        sent = AIMessage(content="Checking again.", id="ai-1", tool_calls=[call])
+        stopped = AIMessage(content="Checking again.\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit.", id="ai-1")
+        chunks = [
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+        ]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content="Checking again.", id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-replaced"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
+
+    def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
+        """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
+        sent = AIMessage(content="Let me look.", id="ai-1")
+        rewritten = AIMessage(content="The model returned no final response.", id="ai-1")
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), rewritten]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-rewritten"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Let me look."]
+
+    def test_stream_emits_metadata_a_later_node_adds_to_a_sent_ai_message(self, client):
+        attribution = {"version": 1, "kind": "final_answer", "shared_attribution": False, "actions": []}
+        sent = AIMessage(content="Hello!", id="ai-1")
+        attributed = AIMessage(content="Hello!", id="ai-1", additional_kwargs={"token_usage_attribution": attribution})
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), attributed]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-attributed"))
+
+        ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert [(event.data["content"], event.data.get("additional_kwargs")) for event in ai_events] == [("Hello!", None), ("", {"token_usage_attribution": attribution})]
+
     def test_stream_emits_new_additional_kwargs_after_prior_metadata(self, client):
         """stream() emits later attribution metadata even after earlier kwargs for the same id."""
         attribution = {
@@ -1131,6 +1196,40 @@ class TestChat:
             result = client.chat("q", thread_id="t6")
 
         assert result == "final answer"
+
+    def test_returns_the_loop_detection_stop_notice(self, client):
+        """Real graph: the hard stop rewrites the last AI message after it was sent."""
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        @tool
+        def bash(command: str) -> str:
+            """Run a command."""
+            return "ok"
+
+        responses = [AIMessage(content="Checking again.", id=f"ai-{i}", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": f"call-{i}"}]) for i in range(3)]
+        graph = create_agent(
+            model=_ToolCallingFakeModel(responses=[*responses, AIMessage(content="unreachable", id="ai-end")]),
+            tools=[bash],
+            middleware=[LoopDetectionMiddleware(warn_threshold=10, hard_limit=3)],
+            state_schema=ThreadState,
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+        ):
+            result = client.chat("q", thread_id="t-loop-stop")
+
+        assert result.startswith("Checking again.")
+        assert "[FORCED STOP]" in result
 
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""
@@ -2612,6 +2711,51 @@ class TestUploads:
             assert result["files"][1]["markdown_file"] == "a.md"
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
             assert not (uploads_dir / "a_1.md").exists()
+
+    def test_upload_files_rejects_reuploading_a_file_already_in_the_thread(self, client):
+        """Uploading an existing upload onto itself must not destroy its bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+            existing = uploads_dir / "existing.txt"
+            existing.write_text("IMPORTANT BYTES")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(shutil.SameFileError):
+                    client.upload_files("thread-1", [existing])
+
+            assert existing.read_text() == "IMPORTANT BYTES"
+
+    def test_upload_files_markdown_companion_keeps_converted_permissions(self, client):
+        """The companion stays as readable as the converter wrote it (sandbox reads it)."""
+        if os.chmod not in os.supports_fd:
+            pytest.skip("descriptor-based chmod is unavailable on this platform")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("converted", encoding="utf-8")
+                os.chmod(md_path, 0o644)
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["files"][0]["markdown_file"] == "report.md"
+            companion = uploads_dir / "report.md"
+            assert companion.read_text(encoding="utf-8") == "converted"
+            assert stat.S_IMODE(companion.stat().st_mode) == 0o644
 
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4244,6 +4388,104 @@ class TestUploadDeleteSymlink:
 
             # The outside file must NOT have been deleted.
             assert outside.exists()
+
+    def test_delete_upload_symlink_to_sibling_upload(self, client):
+        """A symlink aliasing another upload is not followed to delete that upload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+
+            victim = uploads_dir / "victim.txt"
+            victim.write_text("keep me")
+
+            link = uploads_dir / "alias.txt"
+            try:
+                link.symlink_to(victim.name)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(FileNotFoundError):
+                    client.delete_upload("thread-1", "alias.txt")
+
+            assert victim.read_text() == "keep me"
+            assert link.is_symlink()
+
+    def test_upload_files_skips_symlinked_destination(self, client):
+        """A symlink planted at an upload name is skipped, not written through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.txt"
+            outside.write_text("original")
+            link = uploads_dir / "note.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            src_dir = tmp_path / "src"
+            src_dir.mkdir()
+            (src_dir / "note.txt").write_text("uploaded")
+            (src_dir / "other.txt").write_text("other")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("thread-1", [src_dir / "note.txt", src_dir / "other.txt"])
+
+            parsed = UploadResponse(**result)
+            assert parsed.success is False
+            assert parsed.skipped_files == ["note.txt"]
+            assert [f.filename for f in parsed.files] == ["other.txt"]
+            assert parsed.message == "Successfully uploaded 1 file(s); skipped 1 unsafe file(s)"
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "other.txt").read_text() == "other"
+
+    def test_upload_files_does_not_write_markdown_companion_through_symlink(self, client):
+        """A symlink planted at the companion name does not receive converted text."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.md"
+            outside.write_text("original")
+            link = uploads_dir / "report.md"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert [f["filename"] for f in result["files"]] == ["report.pdf"]
+            assert "markdown_file" not in result["files"][0]
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "report.pdf").read_bytes() == b"PDF"
 
     def test_upload_filename_with_spaces_and_unicode(self, client):
         """Files with spaces and unicode characters in names upload correctly."""

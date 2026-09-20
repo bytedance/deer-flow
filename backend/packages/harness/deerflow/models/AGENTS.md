@@ -1,5 +1,13 @@
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+Request-admission waits follow the next scheduled admission and configured
+interval, capped at 50 ms; the cap must not become a minimum poll interval that
+limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
+in LLM error handling regardless of its message text. Immediate admission and
+joining the blocking FIFO are one lock-protected decision: do not split the
+fast-path permit check from queue insertion, or an older caller can be overtaken
+while handing off to the wait queue.
+
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
@@ -7,6 +15,7 @@
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
+- Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
 
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
@@ -19,3 +28,26 @@
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
+
+### Managed shared models (`config/managed_models.py`)
+
+`ManagedModelStore` persists a Fernet-encrypted catalog plus its generated local key
+under `runtime_home()/managed-models`. Files are atomically replaced with temporary
+file permissions; complete read/modify/write transactions hold the process lock and
+cross-process sidecar lock. Missing keys and invalid catalogs fail closed. Backups
+and shared deployments must include both files. SQL storage does not replicate this
+catalog. Admin-supplied endpoints can address local providers; only trusted admins
+may create or probe them.
+
+`get_app_config()` and `reload_app_config()` merge enabled managed models after YAML
+profiles, with YAML names winning conflicts. A cached effective snapshot uses the
+base config identity and content signatures of both files. Never mutate a previously
+returned AppConfig: runtime-scoped and explicitly injected configurations remain
+authoritative. `_managed_model_names` is private source metadata, not provider kwargs.
+Direct `AppConfig.from_file()` continues to read only operator configuration.
+
+The MVP uses only the registered `langchain_openai:ChatOpenAI` adapter. Full updates
+require the current revision; omission means create, an omitted API key retains the
+saved key and an empty string clears it. Never serialize SecretStr masking as a saved
+key. Read APIs return `has_api_key`, never a credential. Tests live in
+`tests/test_managed_models.py` and `tests/blocking_io/test_managed_models.py`.

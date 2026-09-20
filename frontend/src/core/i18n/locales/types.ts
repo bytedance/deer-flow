@@ -6,6 +6,86 @@ export interface Translations {
     localName: string;
   };
 
+  capabilities: {
+    icon: {
+      title: string;
+      upload: string;
+      change: string;
+      reset: string;
+      hint: string;
+      singleServer: string;
+      errors: { type: string; size: string; invalid: string };
+    };
+    directory: {
+      categories: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      hints: {
+        office: string;
+        knowledge: string;
+        research: string;
+        business: string;
+        development: string;
+        custom: string;
+      };
+      connected: string;
+      native: string;
+      guide: string;
+      candidate: string;
+      view: string;
+      allCategories: string;
+      source: string;
+      setup: string;
+      notice: string;
+      configured: string;
+      nativeHint: string;
+      guideHint: string;
+      unknownStatus: string;
+      notConnected: string;
+    };
+    integrationSkills: string;
+    sharedSkills: string;
+    title: string;
+    description: string;
+    plugins: string;
+    skills: string;
+    searchPlugins: string;
+    searchSkills: string;
+    allPlugins: string;
+    installed: string;
+    enabled: string;
+    disabled: string;
+    configure: string;
+    details: string;
+    addPlugin: string;
+    builtin: string;
+    community: string;
+    custom: string;
+    allSkills: string;
+    availablePlugins: string;
+    availableSkills: string;
+    pluginHint: string;
+    skillHint: string;
+    noResults: string;
+    larkName: string;
+    larkDescription: string;
+    larkTag: string;
+    connect: string;
+    notInstalled: string;
+    mcpDescription: string;
+    mcpLabel: string;
+    pluginSettings: string;
+    communityTitle: string;
+    communityDescription: string;
+    skillEnabled: string;
+    manage: string;
+  };
+
   // Common
   common: {
     home: string;
@@ -20,6 +100,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
     artifacts: string;
@@ -134,8 +215,23 @@ export interface Translations {
     downloadFailed: string;
   };
 
+  modelPicker: {
+    title: string;
+    favorites: string;
+    otherModels: string;
+    noModels: string;
+    favoriteModel: (displayName: string, name: string) => string;
+    sessionOnly: string;
+  };
+
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => string;
+    sourcePages: (pages: string) => string;
+    retrievedExcerpt: string;
+    excerptTruncated: string;
+    sourceUnavailable: string;
+    knowledgeSourcesSummary: (count: number) => string;
     sourcesSummary: (count: number) => string;
     citeCount: (count: number) => string;
     copyReference: (title: string) => string;
@@ -169,6 +265,13 @@ export interface Translations {
     disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
+    referenceConversations: string;
+    referenceConversationsSearch: string;
+    referenceConversationsEmpty: string;
+    referenceConversationsLimit: (max: number) => string;
+    referenceConversationsRemove: (title: string) => string;
+    referencedConversations: string;
+    removeProjectAttachment: string;
     inputPolish: string;
     inputPolishing: string;
     inputPolishNoChanges: string;
@@ -205,7 +308,6 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
-    searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
@@ -246,6 +348,7 @@ export interface Translations {
     )[];
     pleaseWaitStreaming: string;
     stopStreamingUnavailable: string;
+    startTurnUnavailable: string;
   };
 
   // Sidebar
@@ -290,6 +393,110 @@ export interface Translations {
     settings: string;
     notFound: string;
     projectUnavailable: string;
+    // Project page — Documents / Instructions tabs (Phase 2)
+    documents: string;
+    documentsEmptyTitle: string;
+    documentsEmptyHint: string;
+    instructions: string;
+    instructionsPlaceholder: string;
+    instructionsByteCount: (used: number, max: number) => string;
+    instructionsTooLong: (max: number) => string;
+    instructionsSaved: string;
+    instructionsSaveFailed: string;
+    // Project page — Documents tab shelf (Phase 2 Slice E)
+    documentsShelf: string;
+    documentsShelfHint: string;
+    uploadDocuments: string;
+    uploadingDocuments: string;
+    uploadDocumentFailed: string;
+    documentFromThread: (threadName: string, kind: string) => string;
+    documentKindUpload: string;
+    documentKindOutput: string;
+    attachToThread: string;
+    attachDialogTitle: string;
+    attachDialogHint: string;
+    attachNoThreads: string;
+    attachFailed: string;
+    attachedToThread: (name: string) => string;
+    moveDocumentToTrash: string;
+    moveDocumentToTrashTitle: string;
+    moveDocumentToTrashConfirm: (name: string, days: number) => string;
+    deleteDocumentFailed: string;
+    contentMissing: string;
+    previewUnsupported: string;
+    archivedDocumentsBanner: string;
+    conversationFiles: string;
+    conversationFilesEmpty: string;
+    threadFilesTruncated: (count: number) => string;
+    threadFilesBrowseInThread: string;
+    saveToProject: string;
+    saveToProjectFailed: string;
+    savedToProject: (name: string) => string;
+    shelfNameLabel: string;
+    viewTrash: string;
+    documentsLoadFailed: string;
+    threadFilesLoadFailed: string;
+    interimMemoryNotice: string;
+  };
+
+  // Trash view (Projects Phase 2)
+  trash: {
+    title: string;
+    empty: string;
+    loadFailed: string;
+    retry: string;
+    originProject: (projectName: string) => string;
+    unknownProject: string;
+    retentionLeft: (days: number) => string;
+    restore: string;
+    restoreFailed: string;
+    restoredToast: (name: string) => string;
+    restoreMergedToast: (name: string) => string;
+    restoreConflict: string;
+    restorePickProjectTitle: string;
+    restorePickProjectHint: string;
+    deletePermanently: string;
+    deletePermanentlyTitle: string;
+    deletePermanentlyConfirm: (name: string) => string;
+    purgeFailed: string;
+    emptyTrash: string;
+    emptyTrashTitle: string;
+    emptyTrashConfirm: (count: number) => string;
+    emptyTrashFailed: string;
+  };
+
+  // Knowledge scope for custom-agent chat
+  knowledge: {
+    scope: {
+      title: string;
+      description: string;
+      buttonAll: string;
+      buttonDisabled: string;
+      buttonDatasets: (datasets: number) => string;
+      buttonDatasetsAndDocuments: (
+        datasets: number,
+        documents: number,
+      ) => string;
+      allDatasets: string;
+      selectedDatasets: string;
+      disabled: string;
+      allDocuments: string;
+      selectedDocuments: string;
+      searchDatasets: string;
+      searchDocuments: string;
+      selectedCount: (count: number) => string;
+      files: string;
+      notSearchable: string;
+      loadFailed: string;
+      selectionInvalid: string;
+      previous: string;
+      next: string;
+      agentUnavailable: string;
+      apply: string;
+      historyAll: string;
+      historyDisabled: string;
+      historySelected: (datasets: number, documents: number) => string;
+    };
   };
 
   // Thread-scoped MCP background tasks
@@ -379,6 +586,7 @@ export interface Translations {
       cron: string;
       cronPlaceholder: string;
       runAt: string;
+      invalidRunAt: string;
       timezone: string;
       intervalAmount: string;
       intervalUnitSeconds: string;
@@ -413,6 +621,7 @@ export interface Translations {
       reuseNoticeTitle: string;
       reuseNoticeDescription: string;
     };
+    search: { placeholder: string; clear: string; noResults: string };
     filters: {
       allStatuses: string;
       enabled: string;
@@ -546,6 +755,9 @@ export interface Translations {
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
     settingsDescription: string;
+    settingsKnowledge: string;
+    settingsKnowledgeHint: string;
+    settingsKnowledgeReset: string;
     settingsModel: string;
     settingsModelDefault: string;
     settingsTemperature: string;
@@ -668,6 +880,59 @@ export interface Translations {
     setupTitle: (name: string) => string;
     setupEditTitle: (name: string) => string;
     setupDescription: string;
+    wechatQr: {
+      restart: string;
+      restartHint: string;
+      restartKeepCommand: string;
+      autoSave: string;
+      verifyTitle: string;
+      verifyDescription: string;
+      verifyLabel: string;
+      verifySubmit: string;
+      verifying: string;
+      network: string;
+      invalid_response: string;
+      verification_rejected: string;
+      verification_blocked: string;
+      already_bound: string;
+      saved: string;
+      savedDescription: string;
+      bindTitle: string;
+      bindDescription: string;
+      bindWaiting: string;
+      bindLoading: string;
+      bindFailed: string;
+      bindExpired: string;
+      bindRetry: string;
+      copyCommand: string;
+      copied: string;
+      copyFailed: string;
+      connectedTitle: string;
+      connectedDescription: string;
+      done: string;
+
+      methodLabel: string;
+      tokenTitle: string;
+      tokenDescription: string;
+      tokenPlaceholder: string;
+      tokenHint: string;
+      privacy: string;
+      waiting: string;
+      scannedTitle: string;
+      expiredTitle: string;
+      failedTitle: string;
+      login: string;
+      manual: string;
+      description: string;
+      loading: string;
+      imageTitle: string;
+      scan: string;
+      scanned: string;
+      expired: string;
+      failed: string;
+      confirmed: string;
+      retry: string;
+    };
     saveAndConnect: string;
     saveChanges: string;
     descriptions: Record<string, string>;
@@ -814,15 +1079,50 @@ export interface Translations {
   settings: {
     title: string;
     description: string;
+    models: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      add: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      yaml: string;
+      enabled: string;
+      disabled: string;
+      conflict: string;
+      edit: string;
+      enable: string;
+      disable: string;
+      formDescription: string;
+      provider: string;
+      name: string;
+      displayName: string;
+      endpoint: string;
+      modelId: string;
+      keepKey: string;
+      optionalKey: string;
+      clearKey: string;
+      contextWindow: string;
+      maxTokens: string;
+      vision: string;
+      cancel: string;
+      test: string;
+      working: string;
+      save: string;
+      saved: string;
+      success: string;
+      tool_call_missing: string;
+      connection_failed: string;
+    };
     sections: {
+      models: string;
       account: string;
       appearance: string;
       channels: string;
-      integrations: string;
       memory: string;
-      tools: string;
       subagents: string;
-      skills: string;
       notification: string;
       about: string;
     };
@@ -912,8 +1212,6 @@ export interface Translations {
       languageDescription: string;
     };
     tools: {
-      title: string;
-      description: string;
       adminRequired: string;
       empty: string;
       addServer: string;
@@ -1123,8 +1421,6 @@ export interface Translations {
       exportTimeout: string;
       exportLimit: string;
       exportNotFound: string;
-      title: string;
-      description: string;
       createSkill: string;
       emptyTitle: string;
       emptyDescription: string;
