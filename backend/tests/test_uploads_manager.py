@@ -2,6 +2,7 @@
 
 import errno
 import os
+import shutil
 import stat
 from unittest.mock import patch
 
@@ -247,6 +248,34 @@ class TestCopyUploadFileNoSymlink:
 
         assert outside.read_bytes() == b"original"
         assert link.is_symlink()
+
+    def test_rejects_copying_a_file_onto_itself(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = uploads / "notes.txt"
+        src.write_bytes(b"IMPORTANT")
+
+        with pytest.raises(shutil.SameFileError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert src.read_bytes() == b"IMPORTANT"
+
+    def test_rejects_a_hardlink_to_the_destination(self, tmp_path):
+        """Identity, not path text: another name for the same inode is the same file."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        dest = uploads / "notes.txt"
+        dest.write_bytes(b"IMPORTANT")
+        src = uploads / "same-inode.txt"
+        try:
+            os.link(dest, src)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"hardlinks unavailable on this platform: {exc}")
+
+        with pytest.raises(shutil.SameFileError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"IMPORTANT"
 
     def test_missing_source_leaves_existing_destination_untouched(self, tmp_path):
         uploads = tmp_path / "uploads"

@@ -79,7 +79,6 @@ from deerflow.uploads.manager import (
     list_files_in_dir,
     upload_artifact_url,
     upload_virtual_path,
-    write_upload_file_no_symlink,
 )
 from deerflow.utils.thread_id import resolve_thread_id, validate_thread_id
 
@@ -1698,7 +1697,10 @@ class DeerFlowClient:
                                 converted = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
                             md_path = None
                             if converted is not None:
-                                md_path = write_upload_file_no_symlink(uploads_dir, unique_md_name, converted.read_bytes())
+                                # copy, not write_bytes: the companion keeps the
+                                # converter's permissions, so a sandbox running as
+                                # another uid can still read it.
+                                md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None

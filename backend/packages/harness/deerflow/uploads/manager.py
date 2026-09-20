@@ -285,6 +285,24 @@ def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> 
     return dest
 
 
+def _reject_same_file(base_dir: Path, filename: str, src: Path, src_stat: os.stat_result) -> None:
+    """Raise :class:`shutil.SameFileError` when *filename* already is *src*.
+
+    Compares identity with ``os.path.samestat`` — what ``copy2`` itself uses —
+    rather than the path text, so a hardlink or a differently spelled path to
+    the same file is caught too.
+    ``lstat`` keeps a planted symlink from being resolved here; the open
+    itself rejects that destination.
+    """
+    dest = base_dir / normalize_filename(filename)
+    try:
+        dest_stat = os.lstat(dest)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    if os.path.samestat(src_stat, dest_stat):
+        raise shutil.SameFileError(f"{src!r} and {dest!r} are the same file")
+
+
 def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Path:
     """Copy *src* into an upload destination without following a destination symlink.
 
@@ -294,9 +312,16 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
     opened first, so a missing source leaves an existing destination intact.
     Where descriptor-based ``chmod``/``utime`` are unavailable (Windows), the
     destination keeps its default mode and the copy time.
+
+    Copying a file onto itself raises :class:`shutil.SameFileError` as
+    ``copy2`` does, and does so before the destination is opened: opening it
+    truncates, which would otherwise leave the caller copying an emptied file
+    over itself. Re-uploading a file that already sits in the uploads
+    directory takes exactly that path.
     """
     with open(src, "rb") as src_fh:
         src_stat = os.fstat(src_fh.fileno())
+        _reject_same_file(base_dir, filename, src, src_stat)
         dest, fh = open_upload_file_no_symlink(base_dir, filename)
         with fh:
             shutil.copyfileobj(src_fh, fh)
