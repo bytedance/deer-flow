@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -6,6 +7,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
@@ -55,6 +57,147 @@ async def _create_working_task(
         next_poll_at=now - timedelta(seconds=1),
         driver_data={"status_tool": "status"},
     )
+
+
+@contextlib.asynccontextmanager
+async def _pause_claim_mutation(monkeypatch, operation):
+    """Pause an old mutation while another session reclaims its row.
+
+    The former SELECT/ORM-flush implementation must pause after its ownership
+    read has loaded the old row. The atomic implementation pauses before its
+    conditional UPDATE. Both leave the competing claim free to commit using
+    the production SQLite engine, without replacing any persistence logic.
+    """
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    original_execute = AsyncSession.execute
+    intercepted = False
+
+    async def execute(session, statement, *args, **kwargs):
+        nonlocal intercepted
+        if asyncio.current_task() is not task or intercepted:
+            return await original_execute(session, statement, *args, **kwargs)
+        intercepted = True
+        if statement.is_select:
+            result = await original_execute(session, statement, *args, **kwargs)
+        entered.set()
+        await resume.wait()
+        if statement.is_select:
+            return result
+        return await original_execute(session, statement, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncSession, "execute", execute)
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            yield task, resume
+        finally:
+            resume.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["release_claim", "apply_snapshot", "apply_cancel_snapshot"])
+async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp_path, monkeypatch, operation):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "interleaved-claim"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    claim = repo.claim_due_tasks
+    if operation == "apply_cancel_snapshot":
+        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", requested_at=now)
+        claim = repo.claim_cancel_requests
+    first = await claim(now=now, lease_owner="worker-1", lease_seconds=60, limit=1)
+    kwargs = {"lease_owner": "worker-1", "lease_token": first[0]["lease_token"]}
+    if operation == "release_claim":
+        kwargs.update(next_poll_at=now + timedelta(seconds=30), error="old poll failed")
+    else:
+        kwargs.update(
+            status="cancelled" if operation == "apply_cancel_snapshot" else "completed",
+            result={"stale": True},
+            result_preview="old result",
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+        )
+        if operation == "apply_snapshot":
+            kwargs.update(next_poll_at=None, polled_at=now)
+        else:
+            kwargs.update(completed_at=now)
+
+    async with _pause_claim_mutation(monkeypatch, getattr(repo, operation)(task_id, **kwargs)) as (pending, resume):
+        # Advance only the claim clock, not the stale operation's completion
+        # timestamp: expiry must not reject it before the token fence is tested.
+        second = await asyncio.wait_for(claim(now=now + timedelta(seconds=61), lease_owner="worker-1", lease_seconds=60, limit=1), timeout=5)
+        assert len(second) == 1
+        assert second[0]["lease_token"] != first[0]["lease_token"]
+        before = await repo.get(task_id, user_id="user-1")
+        resume.set()
+        applied = await asyncio.wait_for(pending, timeout=5)
+
+    # Check the entire row, including scheduling, errors, results and event
+    # versions, not just the new lease: stale work must have no side effects.
+    assert await repo.get(task_id, user_id="user-1") == before
+    assert applied is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivered", [True, False], ids=["success", "failure"])
+async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_path, monkeypatch, delivered):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "interleaved-notification"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    assert await repo.apply_snapshot(
+        task_id,
+        lease_owner="poller",
+        lease_token=poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    launch = await repo.claim_notification_work(now=now, **claim_kwargs)
+    assert await repo.mark_notification_dispatched(
+        task_id,
+        lease_owner="notifier",
+        notification_lease_token=launch[0]["notification_lease_token"],
+        dispatch_version=launch[0]["dispatch_version"],
+        run_id="notification-run",
+        now=now,
+    )
+    first = await repo.claim_notification_work(now=now, **claim_kwargs)
+    operation = repo.finish_notification_run(
+        task_id,
+        lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        delivered=delivered,
+        next_notification_at=None if delivered else now + timedelta(seconds=30),
+        error=None if delivered else "old notification failed",
+        now=now,
+    )
+    async with _pause_claim_mutation(monkeypatch, operation) as (pending, resume):
+        second = await asyncio.wait_for(repo.claim_notification_work(now=now + timedelta(seconds=61), **claim_kwargs), timeout=5)
+        assert len(second) == 1
+        assert second[0]["notification_lease_token"] != first[0]["notification_lease_token"]
+        before = await repo.get(task_id, user_id="user-1")
+        resume.set()
+        applied = await asyncio.wait_for(pending, timeout=5)
+
+    assert await repo.get(task_id, user_id="user-1") == before
+    assert applied is False
 
 
 @pytest.mark.asyncio
