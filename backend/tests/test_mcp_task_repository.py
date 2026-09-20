@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -6,6 +7,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
@@ -74,6 +76,147 @@ async def _create_working_task(
         next_poll_at=now - timedelta(seconds=1),
         driver_data={"status_tool": "status"},
     )
+
+
+@contextlib.asynccontextmanager
+async def _pause_claim_mutation(monkeypatch, operation):
+    """Pause an old mutation while another session reclaims its row.
+
+    The former SELECT/ORM-flush implementation must pause after its ownership
+    read has loaded the old row. The atomic implementation pauses before its
+    conditional UPDATE. Both leave the competing claim free to commit using
+    the production SQLite engine, without replacing any persistence logic.
+    """
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    original_execute = AsyncSession.execute
+    intercepted = False
+
+    async def execute(session, statement, *args, **kwargs):
+        nonlocal intercepted
+        if asyncio.current_task() is not task or intercepted:
+            return await original_execute(session, statement, *args, **kwargs)
+        intercepted = True
+        if statement.is_select:
+            result = await original_execute(session, statement, *args, **kwargs)
+        entered.set()
+        await resume.wait()
+        if statement.is_select:
+            return result
+        return await original_execute(session, statement, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncSession, "execute", execute)
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            yield task, resume
+        finally:
+            resume.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["release_claim", "apply_snapshot", "apply_cancel_snapshot"])
+async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp_path, monkeypatch, operation):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "interleaved-claim"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    claim = repo.claim_due_tasks
+    if operation == "apply_cancel_snapshot":
+        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", requested_at=now)
+        claim = repo.claim_cancel_requests
+    first = await claim(now=now, lease_owner="worker-1", lease_seconds=60, limit=1)
+    kwargs = {"lease_owner": "worker-1", "lease_token": first[0]["lease_token"]}
+    if operation == "release_claim":
+        kwargs.update(next_poll_at=now + timedelta(seconds=30), error="old poll failed")
+    else:
+        kwargs.update(
+            status="cancelled" if operation == "apply_cancel_snapshot" else "completed",
+            result={"stale": True},
+            result_preview="old result",
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+        )
+        if operation == "apply_snapshot":
+            kwargs.update(next_poll_at=None, polled_at=now)
+        else:
+            kwargs.update(completed_at=now)
+
+    async with _pause_claim_mutation(monkeypatch, getattr(repo, operation)(task_id, **kwargs)) as (pending, resume):
+        # Advance only the claim clock, not the stale operation's completion
+        # timestamp: expiry must not reject it before the token fence is tested.
+        second = await asyncio.wait_for(claim(now=now + timedelta(seconds=61), lease_owner="worker-1", lease_seconds=60, limit=1), timeout=5)
+        assert len(second) == 1
+        assert second[0]["lease_token"] != first[0]["lease_token"]
+        before = await repo.get(task_id, user_id="user-1")
+        resume.set()
+        applied = await asyncio.wait_for(pending, timeout=5)
+
+    # Check the entire row, including scheduling, errors, results and event
+    # versions, not just the new lease: stale work must have no side effects.
+    assert await repo.get(task_id, user_id="user-1") == before
+    assert applied is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivered", [True, False], ids=["success", "failure"])
+async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_path, monkeypatch, delivered):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "interleaved-notification"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    assert await repo.apply_snapshot(
+        task_id,
+        lease_owner="poller",
+        lease_token=poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    launch = await repo.claim_notification_work(now=now, **claim_kwargs)
+    assert await repo.mark_notification_dispatched(
+        task_id,
+        lease_owner="notifier",
+        notification_lease_token=launch[0]["notification_lease_token"],
+        dispatch_version=launch[0]["dispatch_version"],
+        run_id="notification-run",
+        now=now,
+    )
+    first = await repo.claim_notification_work(now=now, **claim_kwargs)
+    operation = repo.finish_notification_run(
+        task_id,
+        lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        delivered=delivered,
+        next_notification_at=None if delivered else now + timedelta(seconds=30),
+        error=None if delivered else "old notification failed",
+        now=now,
+    )
+    async with _pause_claim_mutation(monkeypatch, operation) as (pending, resume):
+        second = await asyncio.wait_for(repo.claim_notification_work(now=now + timedelta(seconds=61), **claim_kwargs), timeout=5)
+        assert len(second) == 1
+        assert second[0]["notification_lease_token"] != first[0]["notification_lease_token"]
+        before = await repo.get(task_id, user_id="user-1")
+        resume.set()
+        applied = await asyncio.wait_for(pending, timeout=5)
+
+    assert await repo.get(task_id, user_id="user-1") == before
+    assert applied is False
 
 
 @pytest.mark.asyncio
@@ -514,7 +657,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-2", now=now)
-    await repo.claim_due_tasks(
+    claimed = await repo.claim_due_tasks(
         now=now,
         lease_owner="worker-new",
         lease_seconds=60,
@@ -524,6 +667,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     stale_applied = await repo.apply_snapshot(
         "task-2",
         lease_owner="worker-old",
+        lease_token=claimed[0]["lease_token"],
         status="failed",
         result=None,
         result_preview=None,
@@ -539,6 +683,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     applied = await repo.apply_snapshot(
         "task-2",
         lease_owner="worker-new",
+        lease_token=claimed[0]["lease_token"],
         status="completed",
         result={"report": "ready"},
         result_preview=None,
@@ -578,7 +723,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-expired", now=now)
-    await repo.claim_due_tasks(
+    claimed = await repo.claim_due_tasks(
         now=now,
         lease_owner="worker-1",
         lease_seconds=60,
@@ -588,6 +733,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
     applied = await repo.apply_snapshot(
         "task-expired",
         lease_owner="worker-1",
+        lease_token=claimed[0]["lease_token"],
         status="completed",
         result={"report": "stale"},
         result_preview=None,
@@ -611,7 +757,7 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-3", now=now)
-    await repo.claim_due_tasks(
+    claimed = await repo.claim_due_tasks(
         now=now,
         lease_owner="worker-1",
         lease_seconds=60,
@@ -621,6 +767,7 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
     applied = await repo.apply_snapshot(
         "task-3",
         lease_owner="worker-1",
+        lease_token=claimed[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -645,7 +792,7 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-4", now=now)
-    await repo.claim_due_tasks(
+    claimed = await repo.claim_due_tasks(
         now=now,
         lease_owner="worker-1",
         lease_seconds=60,
@@ -656,6 +803,7 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     released = await repo.release_claim(
         "task-4",
         lease_owner="worker-1",
+        lease_token=claimed[0]["lease_token"],
         next_poll_at=retry_at,
         error="temporary network failure",
     )
@@ -670,16 +818,242 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_release_claim_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A stale release from an older generation must be a no-op once the same
+    worker reclaims the task with a fresh per-claim token (token fencing)."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)  # after the 60s lease expires
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    assert reclaimed
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    # The stale release (old owner + old token) must not clear the new claim.
+    released = await repo.release_claim(
+        "task-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        next_poll_at=reclaim_at + timedelta(seconds=30),
+        error="stale release",
+    )
+    assert released is False
+
+    stored = await repo.get("task-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["lease_expires_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_apply_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A poll snapshot from an older generation must not overwrite a newer claim."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-apply-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    applied = await repo.apply_snapshot(
+        "task-apply-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        status="completed",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=reclaim_at,
+    )
+    assert applied is False
+
+    stored = await repo.get("task-apply-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["status"] == "working"
+
+
+@pytest.mark.asyncio
+async def test_apply_cancel_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A cancel snapshot from an older generation must not overwrite a newer claim."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-cancel-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    applied = await repo.apply_cancel_snapshot(
+        "task-cancel-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        status="cancelled",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        completed_at=reclaim_at,
+    )
+    assert applied is False
+
+    stored = await repo.get("task-cancel-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["status"] == "working"
+
+
+@pytest.mark.asyncio
+async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_path):
+    """A stale notification finish must not clear a newer notification lease."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-notify-fence", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify-fence",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    await repo.mark_notification_dispatched(
+        "task-notify-fence",
+        lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        run_id="notify-run-1",
+        now=now,
+    )
+    reclaimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert reclaimed
+    new_notify_token = reclaimed[0]["notification_lease_token"]
+
+    finished = await repo.finish_notification_run(
+        "task-notify-fence",
+        lease_owner="notifier",
+        notification_lease_token="stale-notify-token",
+        dispatch_version=reclaimed[0]["dispatch_version"],
+        delivered=True,
+        next_notification_at=None,
+        error=None,
+        now=now,
+    )
+    assert finished is False
+
+    stored = await repo.get("task-notify-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["notification_lease_owner"] == "notifier"
+    assert stored["notification_lease_token"] == new_notify_token
+
+
+@pytest.mark.asyncio
+async def test_release_poll_claim_after_cancellation_preserves_poll_failure_state(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-cancelled-poll", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    retry_at = now + timedelta(seconds=30)
+    await repo.release_claim(
+        "task-cancelled-poll",
+        lease_owner="worker-1",
+        lease_token=claimed[0]["lease_token"],
+        next_poll_at=retry_at,
+        error="temporary network failure",
+    )
+    before = await repo.get("task-cancelled-poll", user_id="user-1")
+    assert before is not None
+
+    reclaimed = await repo.claim_due_tasks(now=retry_at, lease_owner="worker-2", lease_seconds=60, limit=10)
+    released = await repo.release_poll_claim_after_cancellation(
+        "task-cancelled-poll",
+        lease_owner="worker-2",
+        lease_token=reclaimed[0]["lease_token"],
+    )
+
+    assert released is True
+    stored = await repo.get("task-cancelled-poll", user_id="user-1")
+    assert stored is not None
+    assert stored["next_poll_at"] == before["next_poll_at"]
+    assert stored["last_poll_error"] == before["last_poll_error"]
+    assert stored["consecutive_poll_error_count"] == before["consecutive_poll_error_count"]
+    assert stored["poll_attempt_count"] == before["poll_attempt_count"] + 1
+    assert stored["lease_owner"] is None
+    assert stored["lease_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_release_poll_claim_after_cancellation_requires_current_owner(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-stale-cancel", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-current", lease_seconds=60, limit=10)
+
+    released = await repo.release_poll_claim_after_cancellation(
+        "task-stale-cancel",
+        lease_owner="worker-stale",
+        lease_token=claimed[0]["lease_token"],
+    )
+
+    assert released is False
+    stored = await repo.get("task-stale-cancel", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-current"
+    assert stored["lease_expires_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-6", now=now)
 
     for expected_errors in (1, 2):
-        await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+        claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
         await repo.release_claim(
             "task-6",
             lease_owner="worker-1",
+            lease_token=claimed[0]["lease_token"],
             next_poll_at=now - timedelta(seconds=1),
             error="temporary network failure",
         )
@@ -687,10 +1061,11 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
         assert stored is not None
         assert stored["consecutive_poll_error_count"] == expected_errors
 
-    await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
     applied = await repo.apply_snapshot(
         "task-6",
         lease_owner="worker-1",
+        lease_token=claimed[0]["lease_token"],
         status="working",
         result=None,
         result_preview=None,
@@ -713,10 +1088,11 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-notify", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-notify",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -738,10 +1114,11 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
     assert first[0]["dispatch_version"] == 1
     assert first[0]["dispatch_event"]["input_required"] == {"prompt": "Approve?"}
 
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-notify",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="completed",
         result={"done": True},
         result_preview=None,
@@ -761,11 +1138,12 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
     await repo.mark_notification_dispatched(
         "task-notify",
         lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
         dispatch_version=1,
         run_id="notify-run-1",
         now=now,
     )
-    await repo.claim_notification_work(
+    dispatched_claim = await repo.claim_notification_work(
         now=now,
         lease_owner="notifier",
         lease_seconds=60,
@@ -775,6 +1153,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
     await repo.finish_notification_run(
         "task-notify",
         lease_owner="notifier",
+        notification_lease_token=dispatched_claim[0]["notification_lease_token"],
         dispatch_version=1,
         delivered=True,
         next_notification_at=None,
@@ -797,10 +1176,11 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-retry-latest", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-retry-latest",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -821,11 +1201,12 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
     await repo.mark_notification_dispatched(
         "task-retry-latest",
         lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
         dispatch_version=first[0]["dispatch_version"],
         run_id="notify-run-1",
         now=now,
     )
-    await repo.claim_notification_work(
+    dispatched_claim = await repo.claim_notification_work(
         now=now,
         lease_owner="notifier",
         lease_seconds=60,
@@ -836,6 +1217,7 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
     await repo.finish_notification_run(
         "task-retry-latest",
         lease_owner="notifier",
+        notification_lease_token=dispatched_claim[0]["notification_lease_token"],
         dispatch_version=first[0]["dispatch_version"],
         delivered=False,
         next_notification_at=retry_at,
@@ -848,10 +1230,11 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
     assert failed["dispatch_attempt"] == 1
     assert failed["notification_attempt_count"] == 1
 
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-retry-latest",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="completed",
         result={"done": True},
         result_preview=None,
@@ -881,10 +1264,11 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-notify-release", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-notify-release",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -895,7 +1279,7 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
         next_poll_at=now,
         polled_at=now,
     )
-    await repo.claim_notification_work(
+    claimed = await repo.claim_notification_work(
         now=now,
         lease_owner="notifier",
         lease_seconds=60,
@@ -907,6 +1291,7 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
     assert await repo.release_notification_lease(
         "task-notify-release",
         lease_owner="notifier",
+        notification_lease_token=claimed[0]["notification_lease_token"],
         next_notification_at=retry_at,
         error="run store unavailable",
     )
@@ -924,10 +1309,11 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-launch-retry", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-launch-retry",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -950,6 +1336,7 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
     assert await repo.release_notification_claim(
         "task-launch-retry",
         lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
         next_notification_at=retry_at,
         error="run store unavailable",
         replace_with_latest=True,
@@ -978,10 +1365,11 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-dead-letter", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-dead-letter",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="completed",
         result={"done": True},
         result_preview=None,
@@ -1003,6 +1391,7 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
     assert await repo.dead_letter_notification(
         "task-dead-letter",
         lease_owner="notifier",
+        notification_lease_token=claimed[0]["notification_lease_token"],
         dispatch_version=claimed[0]["dispatch_version"],
         error="Thread deleted-thread not found",
         count_failure=True,
@@ -1031,10 +1420,11 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-dispatched-budget", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-dispatched-budget",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="completed",
         result={"done": True},
         result_preview=None,
@@ -1056,6 +1446,7 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
     assert await repo.mark_notification_dispatched(
         "task-dispatched-budget",
         lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
         dispatch_version=dispatch_version,
         run_id="notify-run-1",
         now=now,
@@ -1072,6 +1463,7 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
     assert await repo.dead_letter_notification(
         "task-dispatched-budget",
         lease_owner="budget-checker",
+        notification_lease_token=claimed[0]["notification_lease_token"],
         dispatch_version=dispatch_version,
         error="Notification delivery stopped after 5 failed attempts",
         count_failure=False,
@@ -1089,10 +1481,11 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-dispatched-latest", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-dispatched-latest",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="input_required",
         result=None,
         result_preview=None,
@@ -1114,15 +1507,17 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
     assert await repo.mark_notification_dispatched(
         "task-dispatched-latest",
         lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
         dispatch_version=dispatch_version,
         run_id="notify-run-1",
         now=now,
     )
 
-    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
         "task-dispatched-latest",
         lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
         status="completed",
         result={"done": True},
         result_preview=None,
@@ -1144,6 +1539,7 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
     assert await repo.dead_letter_notification(
         "task-dispatched-latest",
         lease_owner="budget-checker",
+        notification_lease_token=claimed[0]["notification_lease_token"],
         dispatch_version=dispatch_version,
         error="old snapshot exhausted its retry budget",
         count_failure=False,
@@ -1171,7 +1567,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-cancel", now=now)
-    await repo.claim_due_tasks(now=now, lease_owner="stale-poller", lease_seconds=60, limit=1)
+    stale_poll_claim = await repo.claim_due_tasks(now=now, lease_owner="stale-poller", lease_seconds=60, limit=1)
 
     requested = await repo.request_cancel(
         "task-cancel",
@@ -1186,6 +1582,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         await repo.apply_snapshot(
             "task-cancel",
             lease_owner="stale-poller",
+            lease_token=stale_poll_claim[0]["lease_token"],
             status="completed",
             result={"stale": True},
             result_preview=None,
@@ -1221,6 +1618,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
     assert await repo.apply_cancel_snapshot(
         "task-cancel",
         lease_owner="canceller",
+        lease_token=claimed[0]["lease_token"],
         status="cancelled",
         result=None,
         result_preview=None,
@@ -1234,3 +1632,188 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
     assert stored is not None
     assert stored["status"] == "cancelled"
     assert stored["notification_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_late_poll_release_after_same_worker_reclaim_is_fenced(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-late-poll", now=now)
+
+    first = await repo.claim_due_tasks(
+        now=now,
+        lease_owner="worker-same",
+        lease_seconds=1,
+        limit=10,
+    )
+    assert [row["id"] for row in first] == ["task-late-poll"]
+    first_token = first[0]["lease_token"]
+    assert first_token
+
+    reclaimed = await repo.claim_due_tasks(
+        now=now + timedelta(seconds=5),
+        lease_owner="worker-same",
+        lease_seconds=60,
+        limit=10,
+    )
+    assert [row["id"] for row in reclaimed] == ["task-late-poll"]
+    assert reclaimed[0]["lease_token"] != first_token
+
+    released = await repo.release_poll_claim_after_cancellation(
+        "task-late-poll",
+        lease_owner="worker-same",
+        lease_token=first_token,
+    )
+    assert released is False
+
+    stored = await repo.get("task-late-poll", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-same"
+    assert stored["lease_token"] == reclaimed[0]["lease_token"]
+
+
+@pytest.mark.asyncio
+async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-late-cancel", now=now)
+    await repo.request_cancel(
+        "task-late-cancel",
+        user_id="user-1",
+        thread_id="thread-1",
+        requested_at=now,
+    )
+
+    first = await repo.claim_cancel_requests(
+        now=now,
+        lease_owner="worker-same",
+        lease_seconds=1,
+        limit=1,
+    )
+    assert [row["id"] for row in first] == ["task-late-cancel"]
+    first_token = first[0]["lease_token"]
+    assert first_token
+
+    reclaimed = await repo.claim_cancel_requests(
+        now=now + timedelta(seconds=5),
+        lease_owner="worker-same",
+        lease_seconds=60,
+        limit=1,
+    )
+    assert [row["id"] for row in reclaimed] == ["task-late-cancel"]
+    assert reclaimed[0]["lease_token"] != first_token
+
+    released = await repo.release_cancel_claim(
+        "task-late-cancel",
+        lease_owner="worker-same",
+        lease_token=first_token,
+        next_cancel_at=now + timedelta(seconds=30),
+        error="cancelled",
+    )
+    assert released is False
+
+    stored = await repo.get("task-late-cancel", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-same"
+    assert stored["lease_token"] == reclaimed[0]["lease_token"]
+
+
+@pytest.mark.asyncio
+async def test_late_notification_release_after_same_worker_reclaim_is_fenced(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-late-notify", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-late-notify",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier-same",
+        lease_seconds=1,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert [row["id"] for row in first] == ["task-late-notify"]
+    first_token = first[0]["notification_lease_token"]
+    assert first_token
+
+    reclaimed = await repo.claim_notification_work(
+        now=now + timedelta(seconds=5),
+        lease_owner="notifier-same",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert [row["id"] for row in reclaimed] == ["task-late-notify"]
+    assert reclaimed[0]["notification_lease_token"] != first_token
+
+    released = await repo.release_notification_lease(
+        "task-late-notify",
+        lease_owner="notifier-same",
+        notification_lease_token=first_token,
+        next_notification_at=now + timedelta(seconds=30),
+        error="cancelled",
+    )
+    assert released is False
+
+    stored = await repo.get("task-late-notify", user_id="user-1")
+    assert stored is not None
+    assert stored["notification_lease_owner"] == "notifier-same"
+    assert stored["notification_lease_token"] == reclaimed[0]["notification_lease_token"]
+
+
+@pytest.mark.asyncio
+async def test_late_snapshot_apply_after_same_worker_reclaim_is_fenced(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-late-apply", now=now)
+
+    first = await repo.claim_due_tasks(
+        now=now,
+        lease_owner="worker-same",
+        lease_seconds=1,
+        limit=10,
+    )
+    first_token = first[0]["lease_token"]
+    reclaimed = await repo.claim_due_tasks(
+        now=now + timedelta(seconds=5),
+        lease_owner="worker-same",
+        lease_seconds=60,
+        limit=10,
+    )
+    assert [row["id"] for row in reclaimed] == ["task-late-apply"]
+    assert reclaimed[0]["lease_token"] != first_token
+
+    applied = await repo.apply_snapshot(
+        "task-late-apply",
+        lease_owner="worker-same",
+        lease_token=first_token,
+        status="completed",
+        result={"stale": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now + timedelta(seconds=5),
+    )
+    assert applied is False
+
+    stored = await repo.get("task-late-apply", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-same"
+    assert stored["lease_token"] == reclaimed[0]["lease_token"]

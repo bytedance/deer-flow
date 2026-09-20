@@ -121,7 +121,11 @@ def test_command_checks_root_first_and_records_status_after_head() -> None:
     # One line past the limit is what lets the parser tell a full result from a cut one.
     assert command.index("[ ! -e ") < command.index("grep ") < command.index("head -n 451")
     assert command.index("head -n 451") < command.rindex("__DF_SEARCH_STATUS__:")
-    assert command.endswith("exit 0")
+    # The command ends with a subshell-wrapped exit: a bare top-level exit would
+    # kill the implicit persistent session's shell and wedge the AIO server
+    # response for that request (verified); a subshell exit only kills the
+    # subshell and the exit code propagates unchanged.
+    assert command.endswith("exit 0 )")
 
 
 # ── real POSIX sh ─────────────────────────────────────────────────────────
