@@ -102,6 +102,12 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
     def _redact_queued_messages(self, messages: list) -> list:
         """Redact the conversation payload queued for extraction (#3190 vector 5)."""
         redactor = _Redactor(active_pii_detectors(self._pii_redaction_config))
+        # Reserve existing placeholder indices across the whole batch first:
+        # thread state is mixed by design (raw user turns next to
+        # already-redacted tool results / summaries), so a token in a later
+        # message must not collide with a new value in an earlier one.
+        for message in messages:
+            redactor.reserve(message.content)
         redacted = []
         for message in messages:
             content, changed = _redact_content(message.content, redactor)

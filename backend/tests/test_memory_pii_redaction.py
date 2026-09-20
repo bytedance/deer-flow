@@ -75,3 +75,25 @@ def test_same_value_shares_token_across_turns(monkeypatch):
     queued = call.args[1]
     assert queued[0].content == EMAIL_TOKEN
     assert EMAIL_TOKEN in queued[1].content
+
+
+def test_existing_placeholder_in_later_message_reserves_index(monkeypatch):
+    # Review round 1 on #5577: thread state is mixed by design — a raw user
+    # turn can preceden an already-redacted message; the pre-scan must reserve
+    # existing indices so Bob's new value cannot collide with Alice's token.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    alice_token = redact_text("alice@example.com", PiiRedactionConfig(enabled=True))
+    call = _run(
+        mw,
+        manager,
+        monkeypatch,
+        [
+            HumanMessage("Bob's email is bob@example.com"),
+            AIMessage(f"Alice's email is {alice_token}"),
+        ],
+    )
+    queued = call.args[1]
+    assert queued[1].content == f"Alice's email is {alice_token}"
+    # Alice's existing [EMAIL_1] was reserved by the pre-scan, so Bob's new
+    # value allocates the next index instead of colliding with it.
+    assert queued[0].content == "Bob's email is [EMAIL_2]"
