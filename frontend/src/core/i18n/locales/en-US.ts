@@ -871,6 +871,14 @@ export const enUS: Translations = {
     featureDisabledTitle: "Agents feature is not enabled",
     featureDisabledDescription:
       "This feature is not enabled on this server. Please contact your administrator.",
+    apiDisabledTitle: "Custom-agent management is disabled",
+    apiDisabledDescription:
+      "Set agents_api.enabled=true in config.yaml to create, edit, and list custom agents over HTTP.",
+    apiDisabledConfigHint:
+      "Add the following to config.yaml, then refresh once DeerFlow reloads the configuration:",
+    apiStatusErrorTitle: "Could not load agent settings",
+    apiStatusErrorDescription:
+      "DeerFlow could not determine whether the custom-agent management API is available.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:
