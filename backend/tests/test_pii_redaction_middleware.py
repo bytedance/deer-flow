@@ -1,9 +1,9 @@
 """Tests for PiiRedactionMiddleware (issue #3190).
 
-Verifies deterministic detector coverage (including checksum gates), stable
-placeholder numbering across a conversation, that the rewrite is request-scoped
-without mutating the original request or messages, the tool-boundary allowlist,
-and the pinned detector registry.
+Verifies deterministic detector coverage (including checksum gates),
+value-derived placeholder identity (stable across turns, batches, and seams),
+that the rewrite is request-scoped without mutating the original request or
+messages, the tool-boundary allowlist, and the pinned detector registry.
 """
 
 import re
@@ -21,10 +21,29 @@ from pydantic import Field
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
     PiiRedactionMiddleware,
+    _placeholder_token,
     redact_text,
 )
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY
+
+EMAIL_ALICE = _placeholder_token("email", "alice@example.com")
+EMAIL_BOB_COM = _placeholder_token("email", "bob@example.com")
+EMAIL_BOB_ORG = _placeholder_token("email", "bob@example.org")
+EMAIL_CAROL = _placeholder_token("email", "carol@example.com")
+EMAIL_CHARLIE = _placeholder_token("email", "charlie@example.net")
+PHONE_INTL = _placeholder_token("phone", "+86 138 0013 8000")
+PHONE_CN = _placeholder_token("phone", "13800138000")
+PHONE_US = _placeholder_token("phone", "(212) 555-0123")
+PHONE_US2 = _placeholder_token("phone", "+1 415 555 2671")
+KEY_SK = _placeholder_token("api_key", "sk-proj4aaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+KEY_AWS = _placeholder_token("api_key", "AKIAIOSFODNN7EXAMPLE")
+CARD_VISA = _placeholder_token("credit_card", "4111 1111 1111 1111")
+ID_X = _placeholder_token("national_id", "11010519491231002X")
+ID_L150 = _placeholder_token("national_id", "110105194912310150")
+ID_W239 = _placeholder_token("national_id", "110105197506150239")
+ID_CUIT = _placeholder_token("national_id", "20-12345678-6")
+ID_CPF = _placeholder_token("national_id", "529.982.247-25")
 
 
 def _make_middleware(**config_overrides) -> PiiRedactionMiddleware:
@@ -72,7 +91,7 @@ class TestDetectors:
         # national-id detector must claim it before the credit-card detector
         # (review finding on #5527, reproduced at 0a2a9d0).
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage("id 110105194912310150")])
-        assert "id [NATIONAL_ID_1]" in messages[0].content
+        assert f"id {ID_L150}" in messages[0].content
 
     def test_email_redacted(self):
         result = _make_middleware()._detectors[0].pattern.sub("X", "ping me at alice@example.com today")
@@ -84,7 +103,7 @@ class TestDetectors:
             middleware,
             [HumanMessage("from alice@example.com to bob@example.org")],
         )
-        assert "from [EMAIL_1] to [EMAIL_2]" in messages[0].content
+        assert f"from {EMAIL_ALICE} to {EMAIL_BOB_ORG}" in messages[0].content
 
     def test_same_email_shares_placeholder(self):
         middleware = _make_middleware()
@@ -95,29 +114,29 @@ class TestDetectors:
                 HumanMessage("reply to alice@example.com"),
             ],
         )
-        assert messages[0].content == "[EMAIL_1] here"
-        assert messages[1].content == "reply to [EMAIL_1]"
+        assert messages[0].content == f"{EMAIL_ALICE} here"
+        assert messages[1].content == f"reply to {EMAIL_ALICE}"
 
     def test_openai_style_api_key_redacted(self):
         messages, _ = _run_model_call(
             _make_middleware(),
             [HumanMessage("key: sk-proj4aaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
         )
-        assert "[API_KEY_1]" in messages[0].content
+        assert KEY_SK in messages[0].content
 
     def test_aws_access_key_redacted(self):
         messages, _ = _run_model_call(
             _make_middleware(),
             [HumanMessage("use AKIAIOSFODNN7EXAMPLE please")],
         )
-        assert "[API_KEY_1]" in messages[0].content
+        assert KEY_AWS in messages[0].content
 
     def test_credit_card_luhn_valid_redacted(self):
         messages, _ = _run_model_call(
             _make_middleware(),
             [HumanMessage("card 4111 1111 1111 1111 on file")],
         )
-        assert "card [CREDIT_CARD_1] on file" in messages[0].content
+        assert f"card {CARD_VISA} on file" in messages[0].content
 
     def test_credit_card_luhn_invalid_untouched(self):
         original = "card 1234 5678 9012 3456 on file"
@@ -134,22 +153,22 @@ class TestDetectors:
             _make_middleware(),
             [HumanMessage("call +86 138 0013 8000 now")],
         )
-        assert "call [PHONE_1] now" in messages[0].content
+        assert f"call {PHONE_INTL} now" in messages[0].content
 
     def test_cn_mobile_redacted(self):
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage("phone 13800138000")])
-        assert "phone [PHONE_1]" in messages[0].content
+        assert f"phone {PHONE_CN}" in messages[0].content
 
     def test_us_phone_redacted(self):
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage("dial (212) 555-0123")])
-        assert "dial [PHONE_1]" in messages[0].content
+        assert f"dial {PHONE_US}" in messages[0].content
 
     def test_cn_resident_id_valid_redacted(self):
         messages, _ = _run_model_call(
             _make_middleware(),
             [HumanMessage("id 11010519491231002X")],
         )
-        assert "id [NATIONAL_ID_1]" in messages[0].content
+        assert f"id {ID_X}" in messages[0].content
 
     def test_cn_resident_id_invalid_checksum_untouched(self):
         original = "id 110105194912310020"
@@ -160,11 +179,11 @@ class TestDetectors:
         # Review vector on #5527: numeric-check-digit resident ID whose digits
         # also pass Luhn must render NATIONAL_ID, not CREDIT_CARD.
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage("id 110105197506150239")])
-        assert "id [NATIONAL_ID_1]" in messages[0].content
+        assert f"id {ID_W239}" in messages[0].content
 
     def test_cuit_valid_form_redacted(self):
         messages, _ = _run_model_call(_make_middleware(), [HumanMessage("CUIT 20-12345678-6")])
-        assert "CUIT [NATIONAL_ID_1]" in messages[0].content
+        assert f"CUIT {ID_CUIT}" in messages[0].content
 
     def test_cuit_wrong_digit_count_untouched(self):
         original = "CUIT 20-1234567890-6"
@@ -179,7 +198,7 @@ class TestDetectors:
             [HumanMessage("身份证11010519491231002X 手机号13800138000 信用卡4111 1111 1111 1111")],
         )
         content = messages[0].content
-        assert "[NATIONAL_ID_1]" in content and "[PHONE_1]" in content and "[CREDIT_CARD_1]" in content
+        assert ID_X in content and PHONE_CN in content and CARD_VISA in content
         assert "11010519491231002X" not in content and "13800138000" not in content and "4111" not in content
 
     def test_international_phone_does_not_consume_next_line(self):
@@ -187,14 +206,14 @@ class TestDetectors:
             _make_middleware(),
             [HumanMessage("Call +1 415 555 2671\n20260918")],
         )
-        assert messages[0].content == "Call [PHONE_1]\n20260918"
+        assert messages[0].content == f"Call {PHONE_US2}\n20260918"
 
     def test_cpf_valid_redacted(self):
         messages, _ = _run_model_call(
             _make_middleware(),
             [HumanMessage("cpf 529.982.247-25")],
         )
-        assert "cpf [NATIONAL_ID_1]" in messages[0].content
+        assert f"cpf {ID_CPF}" in messages[0].content
 
     def test_cpf_invalid_untouched(self):
         original = "cpf 529.982.247-11"
@@ -213,12 +232,12 @@ class TestModelCallBoundary:
             _make_middleware(),
             [HumanMessage("my email is alice@example.com")],
         )
-        assert messages[0].content == "my email is [EMAIL_1]"
+        assert messages[0].content == f"my email is {EMAIL_ALICE}"
 
     def test_original_request_not_mutated(self):
         original = HumanMessage("my email is alice@example.com")
         messages, request = _run_model_call(_make_middleware(), [original])
-        assert messages[0].content == "my email is [EMAIL_1]"
+        assert messages[0].content == f"my email is {EMAIL_ALICE}"
         assert request.messages[0].content == "my email is alice@example.com"
 
     def test_additional_kwargs_preserved(self):
@@ -245,14 +264,14 @@ class TestModelCallBoundary:
                 HumanMessage("then bob@example.org"),
             ],
         )
-        assert "first [EMAIL_1]" in messages[0].content
-        assert "then [EMAIL_2]" in messages[2].content
+        assert f"first {EMAIL_ALICE}" in messages[0].content
+        assert f"then {EMAIL_BOB_ORG}" in messages[2].content
 
     def test_redaction_deterministic_across_calls(self):
         middleware = _make_middleware()
         messages_a, _ = _run_model_call(middleware, [HumanMessage("alice@example.com")])
         messages_b, _ = _run_model_call(middleware, [HumanMessage("alice@example.com")])
-        assert messages_a[0].content == messages_b[0].content == "[EMAIL_1]"
+        assert messages_a[0].content == messages_b[0].content == EMAIL_ALICE
 
     def test_disabled_detector_untouched(self):
         messages, _ = _run_model_call(
@@ -271,10 +290,10 @@ class TestModelCallBoundary:
             ]
         )
         messages, _ = _run_model_call(_make_middleware(), [original])
-        assert messages[0].content[0] == "reach me at [EMAIL_1]"
+        assert messages[0].content[0] == f"reach me at {EMAIL_ALICE}"
         # LangChain rebuilds content blocks on construction, so compare by value.
         assert messages[0].content[1] == image_block
-        assert messages[0].content[2] == "or [EMAIL_2]"
+        assert messages[0].content[2] == f"or {EMAIL_BOB_ORG}"
         # The original message object is untouched.
         assert original.content[0] == "reach me at alice@example.com"
 
@@ -292,7 +311,7 @@ class TestToolBoundary:
             name="web_fetch",
         )
         final = _run_tool_call(_make_middleware(), "web_fetch", result)
-        assert final.content == "page says contact [EMAIL_1]"
+        assert final.content == f"page says contact {EMAIL_ALICE}"
         transforms = final.additional_kwargs["deerflow_tool_transforms"]
         assert transforms[-1]["kind"] == "pii_redaction"
         assert transforms[-1]["by"] == "PiiRedactionMiddleware"
@@ -314,7 +333,7 @@ class TestToolBoundary:
         )
         tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
         final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
-        assert final.content == "[EMAIL_1]"
+        assert final.content == EMAIL_ALICE
 
     def test_command_result_passthrough(self):
         result = Command(update={"events": ["alice@example.com"]})
@@ -327,7 +346,7 @@ class TestToolBoundary:
         final = _run_tool_call(_make_middleware(), "web_fetch", result)
         assert isinstance(final, Command)
         new_message = final.update["messages"][0]
-        assert new_message.content == "page says [EMAIL_1]"
+        assert new_message.content == f"page says {EMAIL_ALICE}"
         assert new_message.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "pii_redaction"
         # The original Command and its message are untouched.
         assert tool_message.content == "page says alice@example.com"
@@ -346,7 +365,7 @@ class TestToolBoundary:
             response_metadata={"latency_ms": 12},
         )
         final = _run_tool_call(_make_middleware(), "web_fetch", result)
-        assert final.content == "[EMAIL_1]"
+        assert final.content == EMAIL_ALICE
         assert final.artifact == {"rows": 3}
         assert final.response_metadata == {"latency_ms": 12}
         assert final.status == "success"
@@ -368,8 +387,8 @@ class TestToolBoundary:
         result = Command(update={"messages": [first, second]})
         final = _run_tool_call(_make_middleware(), "web_fetch", result)
         messages = final.update["messages"]
-        assert messages[0].content == "[EMAIL_1]"
-        assert messages[1].content == "then [EMAIL_2] and [EMAIL_1]"
+        assert messages[0].content == EMAIL_ALICE
+        assert messages[1].content == f"then {EMAIL_BOB_ORG} and {EMAIL_ALICE}"
 
     def test_placeholder_restarts_per_result(self):
         middleware = _make_middleware()
@@ -383,8 +402,8 @@ class TestToolBoundary:
             "web_fetch",
             ToolMessage(content="bob@example.com", tool_call_id="c2", name="web_fetch"),
         )
-        assert first.content == "[EMAIL_1]"
-        assert second.content == "[EMAIL_1]"
+        assert first.content == EMAIL_ALICE
+        assert second.content == EMAIL_BOB_COM
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +489,7 @@ class TestRedactTextSharedSeam:
         assert redact_text("alice@example.com", PiiRedactionConfig(enabled=False)) == "alice@example.com"
 
     def test_enabled_config_redacts(self):
-        assert redact_text("call alice@example.com", PiiRedactionConfig(enabled=True)) == "call [EMAIL_1]"
+        assert redact_text("call alice@example.com", PiiRedactionConfig(enabled=True)) == f"call {EMAIL_ALICE}"
 
     def test_non_string_passthrough(self):
         assert redact_text(None, PiiRedactionConfig(enabled=True)) is None
@@ -503,7 +522,7 @@ class TestDurableContextReinjection:
         # insert_after_leading_system_messages puts the injected pair up front:
         # [authority SystemMessage, durable-context data block, original…].
         block = final.messages[1].content
-        assert "[EMAIL_1]" in block and "alice@example.com" not in block
+        assert EMAIL_ALICE in block and "alice@example.com" not in block
 
     def test_reinjected_summary_untouched_without_config(self):
         mw = self._make_dc(None)
@@ -538,7 +557,7 @@ class TestSummarizationCompactionInput:
         mw = self._middleware(PiiRedactionConfig(enabled=True))
         prompt = mw._build_summary_prompt([HumanMessage("reach alice@example.com")], previous_summary=None)
         assert prompt is not None
-        assert "[EMAIL_1]" in prompt and "alice@example.com" not in prompt
+        assert EMAIL_ALICE in prompt and "alice@example.com" not in prompt
 
     def test_compaction_input_untouched_when_disabled(self):
         mw = self._middleware(PiiRedactionConfig(enabled=False))
@@ -555,7 +574,7 @@ class _RecordingPiiModel(FakeToolCallingModel):
         self.seen.append(text)
         if self.echo_summary:
             # Preserve the exact placeholder received, rather than inventing one.
-            token = re.search(r"\[EMAIL_[0-9]+\]", text).group(0)
+            token = re.search(r"\[EMAIL_[0-9a-f]{6}\]", text).group(0)
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"Alice's email is {token}"))])
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -585,7 +604,7 @@ async def test_async_graph_redacts_configured_title_model_input(monkeypatch, ena
         assert "alice@example.com" not in primary.seen[0]
         assert "alice@example.com" not in prompt
         assert "charlie@example.net" not in prompt
-        assert "[EMAIL_1]" in prompt and "[EMAIL_2]" in prompt
+        assert EMAIL_ALICE in prompt and EMAIL_CHARLIE in prompt
     else:
         assert "alice@example.com" in primary.seen[0]
         assert "alice@example.com" in prompt and "charlie@example.net" in prompt
@@ -618,21 +637,23 @@ def test_compiled_graph_keeps_summary_and_retained_pii_distinct(async_mode):
     result = asyncio.run(graph.ainvoke(state)) if async_mode else graph.invoke(state)
 
     assert summary.seen and "alice@example.com" not in summary.seen[0]
-    assert result["summary_text"] == "Alice's email is [EMAIL_1]"
-    assert "Alice's email is [EMAIL_1]" in primary.seen[0]
-    assert "Bob's email is [EMAIL_2]" in primary.seen[0]
+    assert result["summary_text"] == f"Alice's email is {EMAIL_ALICE}"
+    assert f"Alice's email is {EMAIL_ALICE}" in primary.seen[0]
+    assert f"Bob's email is {EMAIL_BOB_COM}" in primary.seen[0]
     assert "bob@example.com" not in primary.seen[0]
     assert any(message.content == messages[2].content for message in result["messages"])
 
 
-def test_summary_redaction_reserves_existing_placeholders():
+def test_existing_placeholder_text_passes_through_and_new_value_gets_token():
     config = PiiRedactionConfig(enabled=True)
-    assert redact_text("Alice [EMAIL_1], Bob bob@example.com", config) == "Alice [EMAIL_1], Bob [EMAIL_2]"
+    # Placeholder text is not a detector match, so pre-existing tokens pass
+    # through unchanged while the new raw value gets its own token.
+    assert redact_text("Alice [EMAIL_1], Bob bob@example.com", config) == f"Alice [EMAIL_1], Bob {EMAIL_BOB_COM}"
 
 
-def test_existing_placeholder_in_later_content_block_is_reserved_first():
+def test_existing_placeholder_in_later_content_block_keeps_identity():
     messages, _ = _run_model_call(_make_middleware(), [HumanMessage(content=["bob@example.com", {"type": "text", "text": "Alice [EMAIL_1]"}])])
-    assert messages[0].content == ["[EMAIL_2]", {"type": "text", "text": "Alice [EMAIL_1]"}]
+    assert messages[0].content == [EMAIL_BOB_COM, {"type": "text", "text": "Alice [EMAIL_1]"}]
 
 
 def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
@@ -644,17 +665,17 @@ def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
     redacted = PiiRedactionMiddleware(pii)._process_request(request)
     final = DurableContextMiddleware(pii_redaction_config=pii)._inject(redacted)
     text = get_buffer_string(final.messages)
-    assert "Alice [EMAIL_1]" in text and "Bob [EMAIL_2]" in text
+    assert f"Alice {EMAIL_ALICE}" in text and f"Bob {EMAIL_BOB_COM}" in text
     assert "alice@example.com" not in text and "bob@example.com" not in text
     assert state == {"summary_text": "Alice alice@example.com"}
     assert request.messages[0].content == "Alice alice@example.com; Bob bob@example.com"
 
 
-def test_repeated_compaction_reserves_prior_summary_tokens():
+def test_repeated_compaction_keeps_prior_summary_tokens():
     middleware = TestSummarizationCompactionInput()._middleware(PiiRedactionConfig(enabled=True))
     prompt = middleware._build_summary_prompt([HumanMessage("Carol carol@example.com")], previous_summary="Alice [EMAIL_1], Bob [EMAIL_2]")
     assert "Alice [EMAIL_1], Bob [EMAIL_2]" in prompt
-    assert "Carol [EMAIL_3]" in prompt
+    assert f"Carol {EMAIL_CAROL}" in prompt
 
 
 def test_title_redacts_identifiers_before_field_truncation():

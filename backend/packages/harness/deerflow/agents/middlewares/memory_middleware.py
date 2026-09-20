@@ -27,19 +27,14 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     """Redact a conversation payload queued for memory extraction (#3190 vector 5).
 
     Shared by MemoryMiddleware's enqueue boundary and the compaction-triggered
-    ``memory_flush_hook``: thread state is mixed by design (raw user turns next
-    to already-redacted tool results / summaries), so existing placeholder
-    indices are reserved across the whole batch before any new value allocates,
-    and message objects are rebuilt rather than mutated. Structured tool-call
-    arguments are covered too — backends like OpenViking retain the full
+    ``memory_flush_hook``: placeholders are value-derived, so the same identity
+    renders the same token across the batch, across enqueues, and across
+    seams; message objects are rebuilt rather than mutated. Structured
+    tool-call arguments are covered too — backends like OpenViking retain the full
     message object, including ``tool_calls`` and provider-format arguments in
     ``additional_kwargs``.
     """
     redactor = _Redactor(active_pii_detectors(pii_redaction_config))
-    for message in messages:
-        redactor.reserve(message.content)
-        for call in _iter_tool_calls(message):
-            redactor.reserve(call.get("args"))
 
     redacted = []
     for message in messages:
