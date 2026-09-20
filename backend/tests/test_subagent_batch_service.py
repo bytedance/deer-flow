@@ -69,6 +69,53 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
     assert repository.create_batch.await_args.kwargs["max_running_items"] == 10
 
 
+def _limit_service() -> SubagentBatchService:
+    repository = SimpleNamespace(create_batch=AsyncMock(side_effect=lambda **kwargs: {k: v for k, v in kwargs.items() if k.startswith("max_")}))
+    return SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides", [{"max_live_items": 0}, {"max_running_items": 0}, {"max_live_items": -1}, {"max_running_items": -1}])
+async def test_submit_rejects_explicit_zero_limit_like_negative(overrides: dict) -> None:
+    """An explicit 0 is out of range, not "unset" — it must not become the default."""
+    with pytest.raises(ValueError) as excinfo:
+        await _limit_service().submit(_request(**overrides))
+
+    field = next(iter(overrides))
+    assert field in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_submit_reports_the_offending_running_limit_not_a_live_comparison() -> None:
+    """``max_running_items=0`` failed its own range, so blame that range.
+
+    Before the resolution fix the caller's 0 was replaced by the default, and the
+    only surviving error blamed ``max_running_items > max_live_items`` — a
+    constraint a ``max_live_items=1`` request never violated.
+    """
+    with pytest.raises(ValueError, match="max_running_items must be between 1 and"):
+        await _limit_service().submit(_request(max_live_items=1, max_running_items=0))
+
+
+@pytest.mark.asyncio
+async def test_submit_still_defaults_absent_limits() -> None:
+    """``None`` keeps meaning "use the configured default"."""
+    batch = await _limit_service().submit(_request())
+
+    assert batch == {"max_live_items": 100, "max_running_items": 3, "max_attempts": 3}
+
+
+@pytest.mark.asyncio
+async def test_submit_persists_an_explicit_minimum_limit() -> None:
+    batch = await _limit_service().submit(_request(max_live_items=1, max_running_items=1))
+
+    assert batch == {"max_live_items": 1, "max_running_items": 1, "max_attempts": 3}
+
+
 @pytest.mark.asyncio
 async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
     result = SimpleNamespace(
