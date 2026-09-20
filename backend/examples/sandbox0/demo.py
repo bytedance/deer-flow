@@ -150,6 +150,8 @@ This must use the previous turn's files after runtime pause/resume. Do not ask q
             evidence["passed"] = False
             raise
         finally:
+            evidence["tools"] = sorted(calls)
+            evidence["sandboxes"] = snapshots
             (output / "evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
             print("Evidence:", output / "evidence.json", flush=True)
 
