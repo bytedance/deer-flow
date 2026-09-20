@@ -28,6 +28,7 @@ patches keep binding to the one pipeline both callers use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -59,6 +60,32 @@ def _close_fd(fd: int | None) -> None:
         os.close(fd)
     except OSError:
         logger.warning("Failed to close upload conversion descriptor", exc_info=True)
+
+
+def _close_abandoned_fd(duplication: asyncio.Future) -> None:
+    """Close a descriptor whose owner was cancelled before it could take it."""
+    if duplication.cancelled() or duplication.exception() is not None:
+        return
+    _close_fd(duplication.result())
+
+
+async def _dup_for_conversion(fileno: int) -> int:
+    """Duplicate *fileno* off-thread so cancellation cannot strand the copy.
+
+    ``run_file_io`` cannot interrupt its worker: cancelling the await only
+    abandons the result, and here that result is an open descriptor nothing
+    would ever close — repeated cancellations would exhaust the Gateway's
+    descriptor limit and pin the staged bytes of every unlinked upload. The
+    duplication therefore runs as its own task, shielded from the caller's
+    cancellation, and closes itself if the caller is gone by the time the
+    worker finishes.
+    """
+    duplication = asyncio.ensure_future(run_file_io(os.dup, fileno))
+    try:
+        return await asyncio.shield(duplication)
+    except BaseException:
+        duplication.add_done_callback(_close_abandoned_fd)
+        raise
 
 
 def _copy_fd_to_path(fd: int, dest: Path) -> None:
@@ -238,7 +265,7 @@ class ThreadUploadIngestionService:
                 # symlink, and converting by name would then pull a host file
                 # into this thread's uploads. A descriptor on the staged inode
                 # cannot be redirected that way.
-                convert_source_fd = await run_file_io(os.dup, upload_temp.handle.fileno())
+                convert_source_fd = await _dup_for_conversion(upload_temp.handle.fileno())
             # Link-commit with collision retry: the FileExistsError arm
             # leaves the staged part in place for the retry under the next
             # suffix (the handle's second close is idempotent).
@@ -254,8 +281,12 @@ class ThreadUploadIngestionService:
             if upload_temp is not None:
                 await run_file_io(uploads._abort_upload_temp, upload_temp)
             raise UnsafeUploadDestinationError(safe_filename) from exc
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a cancellation between the
+            # duplication and the commit would otherwise leave the descriptor
+            # open, and nothing downstream owns it yet.
             _close_fd(convert_source_fd)
+            convert_source_fd = None
             if upload_temp is not None:
                 await run_file_io(uploads._abort_upload_temp, upload_temp)
             raise

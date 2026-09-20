@@ -1051,6 +1051,132 @@ def test_upload_files_closes_conversion_descriptor_when_private_dir_fails(tmp_pa
     assert duplicated[0] in closed
 
 
+def test_upload_files_closes_conversion_descriptor_when_ingestion_is_cancelled(tmp_path):
+    """Cancelling mid-duplication must not strand the descriptor the worker still produces."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    started = threading.Event()
+    release = threading.Event()
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+
+    def slow_dup(fd: int) -> int:
+        # Allocate first, then stall: the descriptor exists while the caller
+        # is cancelled, which is exactly what must not be abandoned.
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        started.set()
+        release.wait(5)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    async def scenario() -> None:
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The worker cannot be interrupted; it finishes after the cancellation.
+        release.set()
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion.os, "dup", side_effect=slow_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1, "the duplication worker must have run"
+    assert duplicated[0] in closed, "the abandoned descriptor was never closed"
+
+
+def test_upload_files_closes_conversion_descriptor_when_cancelled_during_commit(tmp_path):
+    """Cancellation after the descriptor is owned must still close it."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    started = threading.Event()
+    release = threading.Event()
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+    real_commit = uploads._commit_upload_temp_no_overwrite
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def slow_commit(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        return real_commit(*args, **kwargs)
+
+    async def scenario() -> None:
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel-commit", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(uploads, "_commit_upload_temp_no_overwrite", side_effect=slow_commit),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed, "the owned descriptor was not closed on cancellation"
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
