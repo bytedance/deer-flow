@@ -146,6 +146,7 @@ test("joins the newest active run when a reopened tab has no reconnect pointer",
   );
 
   unmount();
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
 });
 
 test("leaves a matching reconnect pointer to the SDK without joining twice", async () => {
@@ -210,6 +211,44 @@ test("does not retry after the recovered run finishes", async () => {
   });
 
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  unmount();
+});
+
+test("cancels a pending retry when the recovered stream unmounts", async () => {
+  const { unmount } = renderThread();
+  await flushFrames();
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+
+  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  unmount();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
+});
+
+test("clears the old retry when the active run changes", async () => {
+  const { queryClient, unmount } = renderThread();
+  await flushFrames();
+  expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
+
+  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => {
+    queryClient.setQueryData(
+      ["thread", "thread-1"],
+      [{ ...ACTIVE_RUN, run_id: "run-next", status: "pending" }],
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(2);
+  expect(streamMockState.joinStream).toHaveBeenLastCalledWith("run-next");
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBe("run-next");
   unmount();
 });
 

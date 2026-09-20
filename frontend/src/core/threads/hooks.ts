@@ -1920,10 +1920,10 @@ export function useThreadStream({
     }, retryDelay);
   }, []);
 
-  const settleActiveRunRejoin = useCallback((): boolean => {
+  const settleActiveRunRejoin = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
     if (!rejoin.inFlight) {
-      return false;
+      return;
     }
     rejoin.inFlight = false;
     rejoin.settled = true;
@@ -1931,7 +1931,6 @@ export function useThreadStream({
       clearTimeout(rejoin.retryTimer);
       rejoin.retryTimer = null;
     }
-    return true;
   }, []);
 
   const clearPreparedReplayMasks = useCallback(
@@ -2135,9 +2134,7 @@ export function useThreadStream({
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
       }
-      if (settleActiveRunRejoin() && !isMock) {
-        void runsQuery.refetch();
-      }
+      settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -2148,6 +2145,7 @@ export function useThreadStream({
       invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+  const { isLoading: isThreadLoading, joinStream } = thread;
 
   // reconnectOnMount only knows the run id stored in this tab's
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
@@ -2179,7 +2177,7 @@ export function useThreadStream({
       rejoin.retryTimer !== null ||
       rejoin.settled ||
       rejoin.attempts >= MAX_ACTIVE_RUN_REJOIN_ATTEMPTS ||
-      thread.isLoading
+      isThreadLoading
     ) {
       return;
     }
@@ -2193,13 +2191,13 @@ export function useThreadStream({
     rejoin.attempts += 1;
     rejoin.inFlight = true;
     rememberReconnectRun(resolvedThreadId, resolvedRunId);
-    void thread.joinStream(resolvedRunId);
+    void joinStream(resolvedRunId);
   }, [
     activeRunId,
     activeRunRejoinRetry,
+    isThreadLoading,
+    joinStream,
     onStreamThreadId,
-    thread.isLoading,
-    thread.joinStream,
   ]);
 
   useEffect(
@@ -3442,6 +3440,7 @@ export function useThreadRuns(
     },
     enabled: enabled && Boolean(threadId),
     refetchOnWindowFocus: false,
+    retry: false,
   });
 }
 
