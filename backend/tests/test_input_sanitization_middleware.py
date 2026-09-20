@@ -215,6 +215,13 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     # prompts carrying acceptance criteria.
     "report_contract",
     "acceptance_criteria",
+    # Request-scoped project context blocks (projects/context.py, Projects
+    # Phase 2): rendered into every model request of a project run, carrying
+    # user-managed project identity/instructions and the bounded shelf index.
+    # Forging either in untrusted input impersonates the run's pinned project
+    # configuration or fabricates shelf entries and tool-callable IDs.
+    "project",
+    "documents",
 ]
 
 

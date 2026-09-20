@@ -2021,6 +2021,12 @@ def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None
         storage = FileMemoryStorage(config, retrieval=retrieval)
         _validate_clear_generation_contract(storage, label="file")
         return storage
+    if storage_class_path == "markdown":
+        from .markdown_storage import MarkdownMemoryStorage
+
+        storage = MarkdownMemoryStorage(config, retrieval=retrieval)
+        _validate_clear_generation_contract(storage, label="markdown")
+        return storage
     try:
         module_path, class_name = storage_class_path.rsplit(".", 1)
         storage_class = getattr(importlib.import_module(module_path), class_name)

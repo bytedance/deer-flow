@@ -1950,7 +1950,16 @@ class RunManager:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
+        """Remove a run record after an optional delay.
+
+        Eviction is only safe when a ``RunStore`` backs this manager: history
+        then stays readable through the store fallback in ``get()`` /
+        ``list_by_thread()``. Without one, dropping the record would erase the
+        run's history entirely, so a store-less manager keeps the previous
+        retain-forever behaviour and this returns immediately.
+        """
+        if self._store is None:
+            return
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:

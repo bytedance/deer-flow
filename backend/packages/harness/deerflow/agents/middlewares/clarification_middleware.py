@@ -71,30 +71,6 @@ class ClarificationMiddlewareState(AgentState):
     pass
 
 
-def _filter_content_tool_use(content: Any, kept_ids: set[str], kept_names: set[str]) -> Any:
-    """Drop provider tool-use blocks that were stripped from ``tool_calls``.
-
-    Anthropic ``tool_use`` blocks carry an ``id`` that matches ``tool_calls``.
-    Gemini-style ``function_call`` blocks often have no ``id`` (langchain
-    synthesizes ids onto ``tool_calls`` only), so those are matched by ``name``.
-    """
-    if not isinstance(content, list):
-        return content
-    filtered: list[Any] = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") in {"tool_use", "function_call"}:
-            block_id = block.get("id")
-            if isinstance(block_id, str) and block_id:
-                if block_id not in kept_ids:
-                    continue
-            elif block.get("type") == "function_call":
-                name = block.get("name")
-                if not isinstance(name, str) or name not in kept_names:
-                    continue
-        filtered.append(block)
-    return filtered
-
-
 class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     """Intercepts clarification tool calls and interrupts execution to present questions to the user.
 
@@ -464,15 +440,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             dropped_names,
         )
 
-        kept_for_content = clarification_calls + invalid_clarification_calls
-        kept_ids = {tc["id"] for tc in kept_for_content if isinstance(tc.get("id"), str) and tc["id"]}
-        kept_names = {str(tc["name"]) for tc in kept_for_content if isinstance(tc.get("name"), str) and tc["name"]}
-        new_content = _filter_content_tool_use(last.content, kept_ids, kept_names)
-        patched = clone_ai_message_with_tool_calls(
-            last,
-            clarification_calls,
-            content=new_content if new_content is not last.content else None,
-        )
+        # The clone also drops the siblings' provider content blocks, keeping
+        # blocks for calls that remain on tool_calls or invalid_tool_calls.
+        patched = clone_ai_message_with_tool_calls(last, clarification_calls)
         return {"messages": [patched]}
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:

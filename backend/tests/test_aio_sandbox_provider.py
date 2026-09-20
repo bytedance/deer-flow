@@ -44,8 +44,12 @@ def test_load_config_preserves_thread_data_mounts_override(sandbox_overrides, ex
     monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
-    assert provider._load_config()["thread_data_mounts"] is expected
-    assert provider._load_config()["skills_container_path"] == "/mnt/skills"
+    loaded = provider._load_config()
+
+    assert loaded["thread_data_mounts"] is expected
+    assert loaded["skills_container_path"] == "/mnt/skills"
+    assert loaded["max_shell_sessions"] is None
+    assert "MAX_SHELL_SESSIONS" not in loaded["environment"]
 
 
 def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
@@ -62,6 +66,102 @@ def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
     assert provider._load_config()["skills_container_path"] == "/custom-skills"
+
+
+def test_load_config_sizes_aio_shell_capacity_for_subagent_runtime(monkeypatch):
+    """Twelve subagents must not exceed AIO 1.11's ten-session default."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+    )
+    app_config = SimpleNamespace(
+        sandbox=sandbox_config,
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=12),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    loaded = provider._load_config()
+
+    assert loaded["max_shell_sessions"] == 13
+    assert loaded["environment"]["MAX_SHELL_SESSIONS"] == str(loaded["max_shell_sessions"])
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["docker", "provisioner"])
+@pytest.mark.parametrize("persisted_capacity", [4, 9, 13])
+def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeypatch, remote, persisted_capacity):
+    """Removing a four-session override must not reuse it for eight subagents."""
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_mod
+    from deerflow.community.aio_sandbox import local_backend as local_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    app_config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            container_prefix="sandbox",
+            provisioner_url="http://provisioner:8002" if remote else None,
+            environment={"MAX_SHELL_SESSIONS": "4"},
+        ),
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=3),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    assert provider._load_config()["max_shell_sessions"] == 4
+    app_config.subagent_runtime.max_running = 8
+    app_config.sandbox.environment = {}
+    provider._config = provider._load_config()
+    assert provider._config["max_shell_sessions"] is None
+    assert "MAX_SHELL_SESSIONS" not in provider._config["environment"]
+    monkeypatch.setattr(local_mod.LocalContainerBackend, "_detect_runtime", lambda _self: "docker")
+    backend = provider._create_backend()
+    if remote:
+        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity}
+
+        def get(url, **_kwargs):
+            data = {"sandboxes": [payload]} if url.endswith("/api/sandboxes") else payload
+            return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: data)
+
+        monkeypatch.setattr(remote_mod.requests, "get", get)
+    else:
+        monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+        monkeypatch.setattr(local_mod, "wait_for_sandbox_ready", lambda *_a, **_kw: True)
+        monkeypatch.setattr(local_mod.subprocess, "run", lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout="sandbox-example\n"))
+        inspection = local_mod._ContainerInspection(
+            created_at=1.0,
+            host_port=18080,
+            image="sandbox:latest",
+            networks=frozenset({"bridge"}),
+            labels={"deerflow.role": "sandbox", "deerflow.sandbox_id": "example", "deerflow.network_mode": "open"},
+            max_shell_sessions=persisted_capacity,
+        )
+        monkeypatch.setattr(backend, "_batch_inspect", lambda *_a, **_kw: {"sandbox-example": inspection})
+
+    discovered = backend.discover("example")
+    assert discovered is not None
+    assert discovered.requires_replacement is (persisted_capacity < 9)
+    listed = backend.list_running()
+    assert len(listed) == 1
+    assert listed[0].requires_replacement is (persisted_capacity < 9)
+
+
+def test_load_config_rejects_shell_capacity_below_subagent_runtime(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        environment={"MAX_SHELL_SESSIONS": "12"},
+    )
+    app_config = SimpleNamespace(
+        sandbox=sandbox_config,
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=12),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    with pytest.raises(ValueError, match=r"at least subagent_runtime\.max_running \+ 1"):
+        provider._load_config()
 
 
 @pytest.mark.parametrize(
@@ -977,6 +1077,33 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     assert posted["json"]["user_id"] == "ou-user"
     assert posted["json"]["include_legacy_skills"] is False
+
+
+def test_remote_backend_forwards_shell_capacity_to_provisioner(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    backend = remote_mod.RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+    posted: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://sandbox.local", "max_shell_sessions": 13}
+
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
+        posted.update({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "post", _post)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    backend.create("thread-42", "sandbox-42", user_id="user-7")
+
+    assert posted["json"]["max_shell_sessions"] == 13
 
 
 def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypatch):

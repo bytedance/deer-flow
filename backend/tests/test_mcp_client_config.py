@@ -243,7 +243,7 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     assert parallel["enabled"] is False
     assert parallel["type"] == "http"
     assert parallel["url"] == "https://search.parallel.ai/mcp"
-    assert "headers" not in parallel
+    assert parallel["headers"] == {"User-Agent": "deer-flow"}
 
     config = ExtensionsConfig.model_validate(example)
     assert "parallel-search" not in build_servers_config(config)
@@ -252,4 +252,5 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     assert build_servers_config(config)["parallel-search"] == {
         "transport": "http",
         "url": "https://search.parallel.ai/mcp",
+        "headers": {"User-Agent": "deer-flow"},
     }

@@ -10,6 +10,7 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import (
     TOOL_META_KEY,
+    TOOL_RESULT_ERROR_TYPES,
     ToolResultMeta,
     normalize_tool_message,
     normalize_tool_result,
@@ -66,6 +67,7 @@ def test_error_prefix_classification(snippet: str, expected_type: str):
     m = _meta(result)
     assert m["status"] == "error"
     assert m["error_type"] == expected_type
+    assert m["error_type"] in TOOL_RESULT_ERROR_TYPES
     assert m["source"] == "tool_return"
 
 

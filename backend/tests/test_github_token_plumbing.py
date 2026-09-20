@@ -110,10 +110,17 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     captured: dict = {}
 
     class _FakeBash:
+        def create_session(self, *, session_id):
+            captured["created_session"] = session_id
+
         def exec(self, *, command, env=None, **kwargs):
             captured["command"] = command
             captured["env"] = env
+            captured["exec_session"] = kwargs["session_id"]
             return SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))
+
+        def close_session(self, session_id):
+            captured["closed_session"] = session_id
 
     sbx = AioSandbox.__new__(AioSandbox)
     sbx._lock = __import__("threading").Lock()
@@ -127,6 +134,7 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     assert out == "ok"
     assert captured["command"] == "gh pr create"
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
+    assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
 
 
 def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
