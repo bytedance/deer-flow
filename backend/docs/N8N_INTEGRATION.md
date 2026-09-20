@@ -462,7 +462,18 @@ for (let i = 0; i < lines.length; i++) {
       if (aiMessages.length > 0) {
         const lastAiMsg = aiMessages[aiMessages.length - 1];
         // Overwrite instead of appending to avoid duplicating historical messages.
-        if (lastAiMsg.content) finalContent = lastAiMsg.content;
+        if (lastAiMsg.content) {
+          if (Array.isArray(lastAiMsg.content)) {
+            // Extract and join text blocks if content is an array
+            finalContent = lastAiMsg.content
+              .filter((block) => block.type === 'text')
+              .map((block) => block.text)
+              .join('');
+          } else {
+            // Handle the string-content path
+            finalContent = lastAiMsg.content;
+          }
+        }
       }
     }
 
@@ -936,7 +947,18 @@ for (let i = 0; i < lines.length; i++) {
       if (aiMessages.length > 0) {
         const lastAiMsg = aiMessages[aiMessages.length - 1];
         // Overwrite instead of appending to avoid duplicating historical messages.
-        if (lastAiMsg.content) finalContent = lastAiMsg.content;
+        if (lastAiMsg.content) {
+          if (Array.isArray(lastAiMsg.content)) {
+            // Extract and join text blocks if content is an array
+            finalContent = lastAiMsg.content
+              .filter((block) => block.type === 'text')
+              .map((block) => block.text)
+              .join('');
+          } else {
+            // Handle the string-content path
+            finalContent = lastAiMsg.content;
+          }
+        }
       }
     }
 
