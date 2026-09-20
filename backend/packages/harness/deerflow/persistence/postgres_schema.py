@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+from deerflow.utils.file_io import await_drained
+
 
 def build_asyncpg_connect_args(schema: str) -> dict:
     """Return SQLAlchemy ``connect_args`` that pin asyncpg's search_path.
@@ -254,4 +256,4 @@ async def ensure_postgres_schema_async(conn_string: str, schema: str, *, install
     try:
         await conn.execute(statement)
     finally:
-        await conn.close()
+        await await_drained(conn.close())
