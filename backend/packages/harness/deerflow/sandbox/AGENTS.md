@@ -115,3 +115,8 @@ silent empty replacement. Commands use fresh bash processes; skill projections
 replace `/mnt/skills` and uploads are copied on acquire. Tests live in
 `tests/test_sandbox0_provider.py` and `tests/test_sandbox0_transfer.py`; the real
 Agent validation entry is `examples/sandbox0/demo.py`.
+Pending lifecycle handles are not execution-ready: `get()` hides them from
+lease reuse, and acquire reconciles an uncertain pause before resuming. Keep the
+retry handle and durable binding until completion; release retries skip artifact
+I/O because the runtime may already be paused. Uncertain deletion requires an
+explicit destroy retry and must not fall through to claim or resume.

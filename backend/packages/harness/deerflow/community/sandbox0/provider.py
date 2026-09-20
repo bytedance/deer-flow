@@ -85,6 +85,9 @@ class Sandbox0Provider(SandboxProvider):
         self._registry_lock = None
         self._sandboxes: dict[str, Sandbox0Sandbox] = {}
         self._owners: dict[str, tuple[str, str]] = {}
+        # Keep retry handles separate from readiness: a timed-out mutation can
+        # still commit remotely after its caller stops waiting.
+        self._pending_actions: dict[str, str] = {}
         self._closed = False
 
     def _initialize(self):
@@ -134,6 +137,14 @@ class Sandbox0Provider(SandboxProvider):
         sid = derive_sandbox_scope_token(user_id=user, thread_id=thread)
         with self._lifecycle:
             client = self._initialize()
+            with self._lock:
+                pending = self._pending_actions.get(sid)
+            if pending == "delete":
+                raise RuntimeError("Sandbox0 workspace deletion is pending; retry destroy()")
+            if pending == "pause":
+                # Finish the previous pause before resuming. Otherwise a late
+                # checkpoint could stop the runtime handed to the next turn.
+                self.release(sid)
             with self._lock:
                 if sid in self._sandboxes:
                     return sid
@@ -213,7 +224,7 @@ class Sandbox0Provider(SandboxProvider):
 
         with self._lifecycle:
             with self._lock:
-                sandbox = self._sandboxes.get(sandbox_id)
+                sandbox = self.get(sandbox_id)
                 owner = self._owners.get(sandbox_id)
             if sandbox is None or owner != (user_id, thread_id):
                 raise RuntimeError("Sandbox0 skill synchronization requires the exact active owner")
@@ -221,6 +232,8 @@ class Sandbox0Provider(SandboxProvider):
 
     def get(self, sandbox_id: str) -> Sandbox0Sandbox | None:
         with self._lock:
+            if self._closed or sandbox_id in self._pending_actions:
+                return None
             return self._sandboxes.get(sandbox_id)
 
     def _sync_artifacts(self, sandbox: Sandbox0Sandbox, user_id: str, thread_id: str):
@@ -233,19 +246,37 @@ class Sandbox0Provider(SandboxProvider):
             with self._lock:
                 sandbox = self._sandboxes.get(sandbox_id)
                 owner = self._owners.get(sandbox_id)
+                pending = self._pending_actions.get(sandbox_id)
+                if pending == "delete":
+                    raise RuntimeError("Sandbox0 workspace deletion is pending; retry destroy()")
+                if sandbox is not None:
+                    self._pending_actions[sandbox_id] = "pause"
             if sandbox is None:
                 return
             sync_error = None
-            try:
-                self._sync_artifacts(sandbox, *owner)
-            except Exception as exc:
-                sync_error = exc
-            # Only a completed checkpoint permits dropping the active handle.
-            # A failed pause leaves it registered so release can be retried.
-            self._await_lifecycle(sandbox.remote_id, "pause", lambda s: str(s.status) == "paused" and s.paused)
+            if pending != "pause":
+                try:
+                    self._sync_artifacts(sandbox, *owner)
+                except Exception as exc:
+                    sync_error = exc
+
+            # Retried releases must not read artifacts from a runtime which
+            # may already be paused. The mirror was attempted before pause.
+            def paused(state):
+                return str(state.status) == "paused" and state.paused
+
+            if pending == "pause":
+                state = self._client.sandboxes.get(sandbox.remote_id)
+                if str(state.status) == "pausing":
+                    self._client.sandboxes.wait_for_lifecycle(sandbox.remote_id, paused, timeout_sec=self._lifecycle_timeout)
+                elif not paused(state):
+                    self._await_lifecycle(sandbox.remote_id, "pause", paused)
+            else:
+                self._await_lifecycle(sandbox.remote_id, "pause", paused)
             with self._lock:
                 self._sandboxes.pop(sandbox_id, None)
                 self._owners.pop(sandbox_id, None)
+                self._pending_actions.pop(sandbox_id, None)
             if sync_error is not None:
                 raise sync_error
 
@@ -289,11 +320,14 @@ class Sandbox0Provider(SandboxProvider):
             if not path.exists():
                 return
             remote_id = json.loads(path.read_text(encoding="utf-8"))["remote_id"]
+            with self._lock:
+                self._pending_actions[sandbox_id] = "delete"
             self._delete_remote(remote_id)
             path.unlink()
             with self._lock:
                 self._sandboxes.pop(sandbox_id, None)
                 self._owners.pop(sandbox_id, None)
+                self._pending_actions.pop(sandbox_id, None)
 
     def reset(self):
         self.shutdown()

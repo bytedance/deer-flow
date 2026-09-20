@@ -62,13 +62,14 @@ def test_release_waits_for_checkpoint_and_reacquire_resumes(provider):
     assert client.sandboxes.claim.call_count == 1
 
 
-def test_checkpoint_failure_keeps_client_for_retry(provider):
+def test_checkpoint_failure_keeps_retry_handle_but_hides_it_from_reuse(provider):
     p, client = provider
     sid = p.acquire("thread", user_id="alice")
     client.sandboxes.pause_and_wait.side_effect = TimeoutError("checkpoint")
     with pytest.raises(TimeoutError):
         p.release(sid)
-    assert p.get(sid) is not None
+    assert p.get(sid) is None
+    assert p._binding_path(sid).exists()
     client.sandboxes.pause_and_wait.side_effect = None
     p.release(sid)
     assert p.get(sid) is None
@@ -284,6 +285,12 @@ def test_delete_timeout_retains_binding_for_retry(provider, monkeypatch):
     with pytest.raises(TimeoutError, match="binding retained"):
         p.destroy(sid)
     assert p._binding_path(sid).exists()
+    assert p.get(sid) is None
+    missing = RuntimeError("deleted remotely")
+    missing.status_code = 404
+    client.sandboxes.delete.side_effect = missing
+    p.destroy(sid)
+    assert not p._binding_path(sid).exists()
 
 
 def test_missing_file_uses_filesystem_error_contract():
@@ -294,3 +301,111 @@ def test_missing_file_uses_filesystem_error_contract():
     sandbox = Sandbox0Sandbox("scope", remote)
     with pytest.raises(FileNotFoundError):
         sandbox.read_file("/mnt/user-data/workspace/new.txt")
+
+
+@pytest.mark.parametrize("async_lease", [False, True])
+@pytest.mark.parametrize("remote_status", ["paused", "pausing", "running"])
+def test_next_turn_lease_reconciles_uncertain_pause(provider, monkeypatch, async_lease, remote_status):
+    import asyncio
+
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    p, client = provider
+    leases = SandboxLeaseManager(p)
+    state = SimpleNamespace(status="running", paused=False, runtime_generation=1)
+    client.sandboxes.get.return_value = state
+    mirrors = []
+
+    def mirror(*args):
+        assert state.status == "running", "must not read artifacts from a paused runtime"
+        mirrors.append(state.runtime_generation)
+
+    def paused(*args, **kwargs):
+        state.status, state.paused = "paused", True
+        return state
+
+    def resumed(*args, **kwargs):
+        state.status, state.paused, state.runtime_generation = "running", False, 2
+        return state
+
+    monkeypatch.setattr(p, "_sync_artifacts", mirror)
+    client.sandboxes.wait_for_lifecycle.side_effect = paused
+    client.sandboxes.resume_and_wait.side_effect = resumed
+    try:
+        sid = leases.acquire("turn-1", "thread", user_id="alice")
+        old = p.get(sid)
+        client.sandboxes.pause_and_wait.side_effect = TimeoutError("lost pause response")
+        with pytest.raises(TimeoutError):
+            leases.release("turn-1")
+        state.status, state.paused = remote_status, remote_status == "paused"
+        client.sandboxes.pause_and_wait.side_effect = paused
+        assert p.get(sid) is None
+        assert p._binding_path(sid).exists()
+        if async_lease:
+            recovered = asyncio.run(leases.reuse_or_acquire_async("turn-2", sid, thread_id="thread", user_id="alice"))
+        else:
+            recovered = leases.reuse_or_acquire("turn-2", sid, thread_id="thread", user_id="alice")
+        assert recovered == sid
+        assert p.get(sid) is not old
+        assert p.get(sid).remote_id == old.remote_id
+        assert state.runtime_generation == 2
+        assert mirrors == [1]
+        client.sandboxes.resume_and_wait.assert_called_once()
+        assert client.sandboxes.claim.call_count == 1
+        p.get(sid).remote.read_file.return_value = b"persistent data"
+        assert p.get(sid).read_file("/mnt/user-data/workspace/data") == "persistent data"
+        leases.release("turn-2")
+    finally:
+        leases.close()
+
+
+def test_repeated_pause_timeout_keeps_workspace_unavailable(provider):
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    client.sandboxes.pause_and_wait.side_effect = TimeoutError("checkpoint pending")
+    with pytest.raises(TimeoutError):
+        p.release(sid)
+    with pytest.raises(TimeoutError):
+        p.acquire("thread", user_id="alice")
+    assert p.get(sid) is None
+    assert p._binding_path(sid).exists()
+    client.sandboxes.resume_and_wait.assert_not_called()
+    assert client.sandboxes.claim.call_count == 1
+
+
+def test_uncertain_deletion_cannot_reuse_active_handle(provider):
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    client.sandboxes.delete.side_effect = TimeoutError("lost delete response")
+    try:
+        with pytest.raises(TimeoutError):
+            p.destroy(sid)
+        assert p.get(sid) is None
+        with pytest.raises(RuntimeError, match="deletion"):
+            p.acquire("thread", user_id="alice")
+        assert p._binding_path(sid).exists()
+        assert client.sandboxes.claim.call_count == 1
+    finally:
+        client.sandboxes.delete.side_effect = None
+        p.destroy(sid)
+
+
+def test_release_retry_after_remote_checkpoint_does_not_read_or_pause_again(provider, monkeypatch):
+    p, client = provider
+    sid = p.acquire("thread", user_id="alice")
+    mirror = Mock()
+    monkeypatch.setattr(p, "_sync_artifacts", mirror)
+
+    def uncertain(*args, **kwargs):
+        assert p.get(sid) is None
+        raise TimeoutError("checkpoint response lost")
+
+    client.sandboxes.pause_and_wait.side_effect = uncertain
+    with pytest.raises(TimeoutError):
+        p.release(sid)
+    client.sandboxes.get.return_value = SimpleNamespace(status="paused", paused=True)
+    p.release(sid)
+    mirror.assert_called_once()
+    client.sandboxes.pause_and_wait.assert_called_once()
+    assert p.get(sid) is None
+    assert p._binding_path(sid).exists()
