@@ -2404,9 +2404,136 @@ def test_reconcile_never_probes_a_locally_active_sandbox(monkeypatch):
     assert client.timeouts_set == [1800]
 
 
+class _ReconciliationClock:
+    """Control-plane model: connect only extends, set_timeout may shorten."""
+
+    def __init__(self, expiry):
+        self.now = 0.0
+        self.expiry = float(expiry)
+        self.events = []
+
+    def set_timeout(self, seconds):
+        self.expiry = self.now + seconds
+        self.events.append([self.now, "set_timeout", seconds, self.expiry])
+
+    def connect(self, sid, **kwargs):
+        assert self.now < self.expiry, "cannot reconnect an expired running VM"
+        timeout = kwargs.get("timeout") or 300
+        self.expiry = max(self.expiry, self.now + timeout)
+        self.events.append([self.now, "connect", timeout, self.expiry])
+        return FakeClient(sandbox_id=sid)
+
+
+def _bind_clock(monkeypatch, vm):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    # Patch this module's time binding, not the process-global time module.
+    monkeypatch.setattr(mod, "time", SimpleNamespace(time=lambda: vm.now, monotonic=lambda: vm.now))
+
+
+@pytest.mark.parametrize("idle_timeout, interval", [(0, 60), (30, 60), (600, 60), (1800, 60), (30, 300)])
+def test_active_vm_survives_reconciliation_intervals(monkeypatch, idle_timeout, interval):
+    provider = _make_provider(idle_timeout=idle_timeout)
+    provider._config["reconciliation_interval_seconds"] = interval
+    vm = _ReconciliationClock(idle_timeout or 300)
+    _bind_clock(monkeypatch, vm)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [_info("sb-active", "u1", "t1")]
+    sdk.connect_factory = vm.connect
+    client = FakeClient(sandbox_id="sb-active")
+    monkeypatch.setattr(client, "set_timeout", vm.set_timeout)
+    provider._sandboxes["sb-active"] = _make_sandbox(client, sandbox_id="sb-active")
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-active"
+    provider._publish_ownership("sb-active")
+
+    # First pass at 10s, then the configured 60s maintenance cadence.
+    # Reach beyond the initial 300s default without running a real clock.
+    for tick in range(10, interval * 6 + 11, interval):
+        vm.now = tick
+        assert vm.now < vm.expiry, f"active VM expired at t={vm.expiry:g} before reconciliation t={tick} (idle_timeout={idle_timeout})"
+        provider._reconcile_remote_sandboxes(now=vm.now)
+
+
+def test_peer_owned_live_vm_keeps_shared_capacity_until_remote_disappearance(monkeypatch):
+    old = _make_provider(replicas=1, idle_timeout=600, overflow_policy="reject")
+    peer = _make_provider(replicas=1, idle_timeout=600, overflow_policy="reject")
+    contender = _make_provider(replicas=1, idle_timeout=600, overflow_policy="reject")
+    leases = {}
+    for provider, owner in [(old, "owner-a"), (peer, "owner-b"), (contender, "owner-c")]:
+        provider._owner_id = owner
+        provider._ownership = FakeOwnershipStore(leases, owner_id=owner)
+    store = _install_shared_deployment_capacity(old, peer, contender)
+    # Stateful model of a one-slot shared ledger, using the production provider's
+    # reserve path. Redis is replaced only at the store boundary.
+    tracked = {"sb-peer"}
+    reservations = set()
+    released_while_live = []
+    vm = _ReconciliationClock(600)
+    _bind_clock(monkeypatch, vm)
+
+    def release(sid):
+        if sid == "sb-peer" and vm.now < vm.expiry:
+            released_while_live.append({"id": sid, "owner": leases.get(sid), "time": vm.now, "expiry": vm.expiry})
+        tracked.discard(sid)
+
+    def reserve(token):
+        if len(tracked) + len(reservations) >= 1:
+            return ReserveStatus.FULL
+        reservations.add(token)
+        return ReserveStatus.GRANTED
+
+    store.release.side_effect = release
+    store.reserve.side_effect = reserve
+    store.track.side_effect = lambda sid, **kw: tracked.add(sid)
+    store.reconcile.side_effect = lambda **kw: tracked.update(kw["remote_sandboxes"]) or True
+    old_sdk = _install_fake_sdk(monkeypatch, old)
+    old_sdk.connect_factory = vm.connect
+    entry = _info("sb-peer", "u1", "t1")
+    entry.metadata["deer_flow_capacity_ledger"] = store.key
+
+    client = FakeClient(sandbox_id="sb-peer")
+    monkeypatch.setattr(client, "set_timeout", vm.set_timeout)
+    old._sandboxes["sb-peer"] = _make_sandbox(client, sandbox_id="sb-peer")
+    old._thread_sandboxes[old._thread_key("t1", "u1")] = "sb-peer"
+    old._publish_ownership("sb-peer")
+    monkeypatch.setattr(old, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+    old.release("sb-peer")
+    assert "sb-peer" in old._warm_pool
+
+    # Peer takeover and renewal shortly before the old parked deadline.
+    vm.now = 590
+    peer_client = FakeClient(sandbox_id="sb-peer")
+    monkeypatch.setattr(peer_client, "set_timeout", vm.set_timeout)
+    peer._publish_ownership("sb-peer")
+    with peer._lock:
+        peer._register_connected_sandbox("sb-peer", peer_client, thread_id="t1", user_id="u1")
+    peer._refresh_remote_timeout(peer_client)
+    assert leases["sb-peer"] == ("owner-b", "own")
+    assert vm.expiry == 1190
+
+    attempts = []
+
+    def list_during_concurrent_reservation(_metadata):
+        # Deterministic interleaving: reserve after local sweep and before remote
+        # inventory reconciliation can restore a prematurely removed record.
+        try:
+            token = contender._reserve_capacity("t-new", "u-new")
+        except SandboxCapacityExceededError:
+            attempts.append("rejected")
+        else:
+            assert token in reservations
+            attempts.append("granted")
+        return [entry], False, True
+
+    monkeypatch.setattr(old, "_list_remote_entries", list_during_concurrent_reservation)
+    vm.now = 601
+    old._reconcile_remote_sandboxes(now=vm.now)
+    assert released_while_live == [], "old gateway released deployment capacity for a live peer-owned VM"
+    assert attempts == ["rejected"], "a live VM plus another reservation exceeds the deployment limit of 1"
+
+
 def test_reconcile_sweeps_expired_warm_pool_entry(monkeypatch):
-    # A warm entry older than idle_timeout is expected to be dead at the
-    # control plane; drop it so it stops pinning a capacity slot.
+    # Drop old local bookkeeping, but let the remote inventory (including its
+    # missing-entry grace period) decide when shared capacity can be freed.
     p = _make_provider(idle_timeout=600)
     fake_cls = _install_fake_sdk(monkeypatch, p)
     store = _install_shared_deployment_capacity(p)
@@ -2422,7 +2549,9 @@ def test_reconcile_sweeps_expired_warm_pool_entry(monkeypatch):
     assert "sb-old" not in p._owned_sandbox_ids
     assert p._ownership.owner("sb-old") is None
     assert "sb-old" not in p._mount_results
-    store.release.assert_called_once_with("sb-old")
+    store.release.assert_not_called()
+    assert store.reconcile.call_args.kwargs["complete"] is True
+    assert store.reconcile.call_args.kwargs["remote_sandboxes"] == {}
     assert fake_cls.connect_calls == []
     assert stats.adopted == 0
 
@@ -5551,3 +5680,37 @@ def test_remote_search_raises_when_the_client_call_fails(op):
     sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE])))
     with pytest.raises(OSError):
         _rs_search(sb, op, "/mnt/user-data/workspace")
+
+
+@pytest.mark.parametrize("inventory_complete", [False, True])
+def test_warm_sweep_leaves_shared_capacity_to_inventory(monkeypatch, inventory_complete):
+    provider = _make_provider(idle_timeout=30)
+    store = _install_shared_deployment_capacity(provider)
+    provider._warm_pool["sb-old"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    monkeypatch.setattr(provider, "_list_remote_entries", lambda _metadata: ([], False, inventory_complete))
+
+    provider._reconcile_remote_sandboxes()
+
+    assert "sb-old" not in provider._warm_pool
+    store.release.assert_not_called()
+    assert store.reconcile.call_args.kwargs["complete"] is inventory_complete
+    assert store.reconcile.call_args.kwargs["remote_sandboxes"] == {}
+
+
+def test_active_keepalive_does_not_change_warm_idle_timeout(monkeypatch):
+    provider = _make_provider(idle_timeout=30)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-active")
+    provider._sandboxes["sb-active"] = _make_sandbox(client)
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-active"
+    sdk.list_return = [_info("sb-active", "u1", "t1")]
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+
+    provider._reconcile_remote_sandboxes()
+    assert client.timeouts_set[-1] > provider._config["reconciliation_interval_seconds"]
+    provider.release("sb-active")
+    assert client.timeouts_set[-1] == 30
+    before = list(client.timeouts_set)
+    provider._reconcile_remote_sandboxes()
+    assert client.timeouts_set == before
+    assert sdk.connect_calls == []

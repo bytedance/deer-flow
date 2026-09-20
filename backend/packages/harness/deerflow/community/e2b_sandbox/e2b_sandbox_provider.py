@@ -40,6 +40,7 @@ import atexit
 import hashlib
 import json
 import logging
+import math
 import os
 import posixpath
 import shlex
@@ -1540,13 +1541,12 @@ class E2BSandboxProvider(SandboxProvider):
             return True
 
     def _sweep_expired_warm_entries(self) -> None:
-        """Drop warm-pool entries whose VMs have expired at the control plane.
+        """Drop locally expired warm entries without assuming remote death.
 
-        ``release()`` sets the remote TTL to ``idle_timeout`` when parking, so
-        a warm entry older than that is expected to be dead already. Dropping
-        it frees the capacity slot without reconnecting; if the VM turns out
-        to be alive after all, a later pass rediscovers and adopts it as an
-        unknown remote sandbox.
+        A peer may have taken ownership and extended the VM's timeout since
+        it was parked here. Shared capacity stays reserved until the existing
+        remote inventory reconciliation confirms disappearance, with its
+        revision check and missing-inventory grace period.
         """
         idle_timeout = float(self._config["idle_timeout"])
         if idle_timeout <= 0:
@@ -1560,7 +1560,6 @@ class E2BSandboxProvider(SandboxProvider):
         for sandbox_id in expired:
             logger.info("Dropping expired warm-pool e2b sandbox %s (parked longer than idle_timeout=%ss)", sandbox_id, idle_timeout)
             self._forget_mount_result(sandbox_id)
-            self._release_deployment_sandbox(sandbox_id)
             self._release_ownership(sandbox_id)
 
     def _reconcile_remote_sandboxes(self, *, now: float | None = None) -> ReconciliationStats:
@@ -1575,8 +1574,15 @@ class E2BSandboxProvider(SandboxProvider):
         # warm-pool entries are untouched and still expire on schedule.
         with self._lock:
             active_clients = [sandbox.client for sandbox in self._sandboxes.values()]
+        # Preserve connect()'s previous 300s floor, and leave room for another
+        # reconciliation pass plus its sleep when the configured cadence is
+        # longer. The idle timeout still governs release into the warm pool.
+        active_timeout = max(
+            E2BClientSandbox.default_sandbox_timeout,
+            math.ceil(2 * (float(self._config["reconciliation_interval_seconds"]) + float(self._config["reconciliation_max_seconds"]))),
+        )
         for client in active_clients:
-            self._refresh_remote_timeout(client)
+            self._refresh_remote_timeout(client, minimum_timeout=active_timeout)
         capacity_revision = None
         capacity_store = self._deployment_capacity
         if capacity_store is not None:
@@ -1842,9 +1848,9 @@ class E2BSandboxProvider(SandboxProvider):
             self._thread_sandboxes[self._thread_key(thread_id, user_id)] = sandbox_id
         self._acquire_inflight.discard(sandbox_id)
 
-    def _refresh_remote_timeout(self, client: E2BClientSandbox) -> None:
-        """Push the configured idle timeout to the e2b control plane."""
-        idle_timeout = int(self._config["idle_timeout"])
+    def _refresh_remote_timeout(self, client: E2BClientSandbox, *, minimum_timeout: int = 0) -> None:
+        """Refresh remote TTL, optionally flooring it for active keepalive."""
+        idle_timeout = min(MAX_E2B_TIMEOUT, max(int(self._config["idle_timeout"]), minimum_timeout))
         if idle_timeout <= 0:
             return
         set_timeout = getattr(client, "set_timeout", None)
