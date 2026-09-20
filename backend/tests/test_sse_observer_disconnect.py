@@ -14,8 +14,11 @@ import asyncio
 import inspect
 from types import SimpleNamespace
 
+import anyio
+import pytest
+
 from app.gateway.services import sse_consumer
-from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import END_SENTINEL, DisconnectMode, RunRecord, RunStatus
 
 
 def _running_record() -> RunRecord:
@@ -39,6 +42,47 @@ class _StubBridge:
         return _gen()
 
 
+class _FailingBridge:
+    """Fails before yielding: the client remains connected."""
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            raise RuntimeError("stream bridge unavailable")
+            yield
+
+        return _gen()
+
+
+class _BlockingBridge:
+    def __init__(self):
+        self.subscribed = asyncio.Event()
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            self.subscribed.set()
+            await asyncio.Event().wait()
+            yield
+
+        return _gen()
+
+
+class _ExhaustedBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            if False:
+                yield
+
+        return _gen()
+
+
+class _EndBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield END_SENTINEL
+
+        return _gen()
+
+
 class _CancelRecorder:
     """Stands in for the RunManager: records cancel calls, mutates nothing."""
 
@@ -46,6 +90,12 @@ class _CancelRecorder:
         self.cancelled: list[str] = []
 
     async def cancel(self, run_id, action="interrupt"):
+        self.cancelled.append(run_id)
+
+
+class _DrainingCancelRecorder(_CancelRecorder):
+    async def cancel(self, run_id, action="interrupt"):
+        await asyncio.sleep(0)
         self.cancelled.append(run_id)
 
 
@@ -92,6 +142,84 @@ def test_observer_join_disconnect_does_not_cancel():
         recorder = _CancelRecorder()
         consumer = sse_consumer(_StubBridge(), _running_record(), _request(), recorder, apply_on_disconnect=False)
         await _drive_disconnect(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_bridge_failure_does_not_apply_disconnect_policy():
+    """A server-side subscription failure is not a client disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_FailingBridge(), _running_record(), _request(), recorder)
+        with pytest.raises(RuntimeError, match="stream bridge unavailable"):
+            await anext(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_request_cancellation_applies_disconnect_policy():
+    """Cancelling the hosting request task retains creator disconnect semantics."""
+
+    async def scenario():
+        bridge = _BlockingBridge()
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(bridge, _running_record(), _request(), recorder)
+        next_frame = asyncio.create_task(anext(consumer))
+        await bridge.subscribed.wait()
+
+        next_frame.cancel()
+        try:
+            await next_frame
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled request task must propagate cancellation")
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == ["run-1"]
+
+
+def test_creator_stream_anyio_cancel_scope_drains_disconnect_policy():
+    """Level cancellation cannot interrupt the owned run-cancel operation."""
+
+    async def scenario():
+        bridge = _BlockingBridge()
+        recorder = _DrainingCancelRecorder()
+        consumer = sse_consumer(bridge, _running_record(), _request(), recorder)
+
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await anext(consumer)
+
+        return recorder.cancelled
+
+    assert anyio.run(scenario) == ["run-1"]
+
+
+def test_creator_stream_unexpected_exhaustion_does_not_cancel():
+    """A subscription ending without END is a server error, not disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_ExhaustedBridge(), _running_record(), _request(), recorder)
+        with pytest.raises(RuntimeError, match="ended before a terminal event"):
+            await anext(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_close_after_end_does_not_cancel():
+    """Closing after a terminal frame cannot reinterpret END as disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_EndBridge(), _running_record(), _request(), recorder)
+        assert await anext(consumer) == "event: end\ndata: null\n\n"
+        await consumer.aclose()
         return recorder.cancelled
 
     assert asyncio.run(scenario()) == []
