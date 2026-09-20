@@ -4,6 +4,15 @@ Compaction preserves all state-level `SystemMessage`s as framework instructions,
 including untagged legacy reminders. Transient instructions belong in request
 wrappers. A fully rescued partition skips compaction.
 
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+
 After latest-user rescue, if the inherited trimmer empties an AI/Tool-only
 window, format it and use `_build_summary_input_text(strategy="last")`.
 Keep normal human-anchored trimming and the final-message fallback for mixed

@@ -576,6 +576,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
 
+        # Todo reminders are snapshots of state["todos"], not conversation history.
+        # Exclude them before partitioning so neither the summary nor the retained
+        # tail contains stale task statuses. TodoMiddleware restores current context
+        # when needed before the next model call. Keep state untouched if compaction
+        # is skipped or summary generation fails.
+        messages = [message for message in messages if not (isinstance(message, HumanMessage) and message.name == "todo_reminder")]
+
         cutoff_index = self._determine_cutoff_index(messages)
         if cutoff_index <= 0:
             return None
