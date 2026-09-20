@@ -422,6 +422,28 @@ let finalContent = '';
 
 for (let i = 0; i < lines.length; i++) {
   const line = lines[i].trim();
+
+  // Parse the event name
+  if (line.startsWith('event:')) {
+    const eventName = line.replace(/^event:\s*/, '').trim();
+    if (eventName === 'error') {
+      // Extract the error message from data and throw to fail the n8n node, instead of silently outputting
+      const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
+      if (nextLine.startsWith('data:')) {
+        const errDataStr = nextLine.replace(/^data:\s*/, '');
+        let errMessage = errDataStr;
+        try {
+          const errData = JSON.parse(errDataStr);
+          errMessage = errData.message || errDataStr;
+        } catch (jsonErr) {
+          // Ignore JSON parse errors; fall back to the raw string.
+        }
+        throw new Error(`DeerFlow runtime error: ${errMessage}`);
+      }
+      throw new Error(`DeerFlow emitted an error event.`);
+    }
+  }
+
   if (!line.startsWith('data:')) continue;
 
   const jsonStr = line.replace(/^data:\s*/, '');
@@ -430,13 +452,17 @@ for (let i = 0; i < lines.length; i++) {
   try {
     const obj = JSON.parse(jsonStr);
 
-    // Handle the messages array in the values event; extract only AI messages
+    // Handle the messages array in the values event. The values event is a full snapshot,
+    // and each update contains the complete history. Only the last AI message is needed
+    // as the output for the current step.
     if (obj.messages && Array.isArray(obj.messages)) {
-      for (const msg of obj.messages) {
-        // Extract only AI messages; exclude user / human messages
-        if (msg.type === 'ai' || msg.role === 'assistant' || msg.type === 'AIMessage') {
-          if (msg.content) finalContent += msg.content;
-        }
+      const aiMessages = obj.messages.filter(
+        (msg) => msg.type === 'ai' || msg.role === 'assistant' || msg.type === 'AIMessage'
+      );
+      if (aiMessages.length > 0) {
+        const lastAiMsg = aiMessages[aiMessages.length - 1];
+        // Overwrite instead of appending to avoid duplicating historical messages.
+        if (lastAiMsg.content) finalContent = lastAiMsg.content;
       }
     }
 
@@ -461,7 +487,16 @@ Paste this code into the Code node. After execution, you will get the plain-text
 If you do not want to handle SSE streams, you can try the following alternatives:
 
 - **Use the n8n community Streaming HTTP Request node**: This node natively supports SSE and can directly receive streaming responses and output them one by one. Requires installing an additional community node package.
-- **Check whether DeerFlow provides a non-streaming endpoint**: The official API documentation currently only has `/runs/stream`, but future versions may add a synchronous endpoint like `/runs/wait`. Keep an eye on project updates.
+- **Use the non-streaming endpoint (`/api/runs/wait`)**: The Gateway already exposes `/api/runs/wait` for workflows that only need the final completed result. Using this endpoint simplifies the HTTP Request node, as it returns a standard JSON response instead of an SSE stream. You can configure the HTTP Request node normally with `Response Format: JSON` and extract the final message directly without a custom Code parser.
+
+  ```json
+  {
+    "input": {
+      "messages": [{ "role": "user", "content": "..." }]
+    },
+    "config": { "recursion_limit": 100 }
+  }
+  ```
 - **Temporarily reduce streaming complexity**: Set `stream_mode` to `["values"]` in the request body to keep only the final value event and reduce the number of intermediate events. However, you still need to receive it as Text and parse it.
 
 ---
@@ -861,6 +896,28 @@ let finalContent = '';
 
 for (let i = 0; i < lines.length; i++) {
   const line = lines[i].trim();
+
+  // Parse the event name
+  if (line.startsWith('event:')) {
+    const eventName = line.replace(/^event:\s*/, '').trim();
+    if (eventName === 'error') {
+      // Extract the error message from data and throw to fail the n8n node, instead of silently outputting
+      const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
+      if (nextLine.startsWith('data:')) {
+        const errDataStr = nextLine.replace(/^data:\s*/, '');
+        let errMessage = errDataStr;
+        try {
+          const errData = JSON.parse(errDataStr);
+          errMessage = errData.message || errDataStr;
+        } catch (jsonErr) {
+          // Ignore JSON parse errors; fall back to the raw string.
+        }
+        throw new Error(`DeerFlow runtime error: ${errMessage}`);
+      }
+      throw new Error(`DeerFlow emitted an error event.`);
+    }
+  }
+
   if (!line.startsWith('data:')) continue;
 
   const jsonStr = line.replace(/^data:\s*/, '');
@@ -869,13 +926,17 @@ for (let i = 0; i < lines.length; i++) {
   try {
     const obj = JSON.parse(jsonStr);
 
-    // Handle the messages array in the values event; extract only AI messages
+    // Handle the messages array in the values event. The values event is a full snapshot,
+    // and each update contains the complete history. Only the last AI message is needed
+    // as the output for the current step.
     if (obj.messages && Array.isArray(obj.messages)) {
-      for (const msg of obj.messages) {
-        // Extract only AI messages; exclude human / user messages
-        if (msg.type === 'ai' || msg.role === 'assistant' || msg.type === 'AIMessage') {
-          if (msg.content) finalContent += msg.content;
-        }
+      const aiMessages = obj.messages.filter(
+        (msg) => msg.type === 'ai' || msg.role === 'assistant' || msg.type === 'AIMessage'
+      );
+      if (aiMessages.length > 0) {
+        const lastAiMsg = aiMessages[aiMessages.length - 1];
+        // Overwrite instead of appending to avoid duplicating historical messages.
+        if (lastAiMsg.content) finalContent = lastAiMsg.content;
       }
     }
 
