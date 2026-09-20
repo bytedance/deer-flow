@@ -9,6 +9,7 @@ Verifies fixes for reviewer findings on PR #5569:
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from pydantic import BaseModel
 
 from deerflow.config.app_config import AppConfig, ModelConfig, SandboxConfig, ToolConfig
@@ -152,3 +153,56 @@ def test_repeated_assembly_cross_model_isolation():
     assert "PER-RESPONSE BUDGET:" not in wf_none.description
     assert wf_none.description == baseline_desc
     assert write_file_tool.description == baseline_desc
+
+
+@pytest.mark.parametrize(
+    ("profile_overrides", "agent_settings", "thinking_enabled", "bootstrap", "expected"),
+    [
+        ({}, {"max_tokens": 1024}, False, False, 1024),
+        ({"when_thinking_enabled": {"max_tokens": 1024}}, {}, True, False, 1024),
+        ({"when_thinking_disabled": {"max_tokens": 1024}}, {}, False, False, 1024),
+        ({"when_thinking_enabled": {"max_tokens": 1024}}, {"max_tokens": 2048}, True, False, 1024),
+        ({"when_thinking_disabled": {"max_tokens": None}}, {}, False, False, None),
+        ({"when_thinking_enabled": {"max_tokens": 1024}}, {}, True, True, 1024),
+        ({"when_thinking_disabled": {"max_tokens": 1024}}, {}, False, True, 1024),
+    ],
+    ids=["custom-agent", "thinking-on", "thinking-off", "thinking-over-agent", "uncapped", "bootstrap-thinking-on", "bootstrap-thinking-off"],
+)
+def test_lead_write_file_budget_matches_constructed_model(monkeypatch, profile_overrides, agent_settings, thinking_enabled, bootstrap, expected):
+    """Exercise real model and tool assembly, including override precedence."""
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.agents_config import AgentConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    model = ModelConfig(
+        name="budget-model",
+        model="budget-model",
+        use="langchain_openai:ChatOpenAI",
+        api_key="test-key",
+        max_tokens=32768,
+        supports_thinking=True,
+        **profile_overrides,
+    )
+    app_config = _build_minimal_app_config([model])
+    agent_config = AgentConfig(name="researcher", model="budget-model", model_settings=agent_settings)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda *args, **kwargs: agent_config)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "system prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda *args, **kwargs: ExtensionsConfig())
+
+    graph = lead_agent_module._make_lead_agent(
+        {"context": {"agent_name": "researcher", "thinking_enabled": thinking_enabled, "is_bootstrap": bootstrap}},
+        app_config=app_config,
+    )
+
+    assert graph["model"].max_tokens == expected
+    write_tool = next(tool for tool in graph["tools"] if tool.name == "write_file")
+    if expected is None:
+        assert "PER-RESPONSE BUDGET:" not in write_tool.description
+    else:
+        assert f"your output limit is {expected} tokens" in write_tool.description
+        assert "32768 tokens" not in write_tool.description
+    assert "PER-RESPONSE BUDGET:" not in write_file_tool.description

@@ -11,7 +11,13 @@ The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
 results stay inline. Cut messages carry a `message_seq`/`offset` continuation that
 the same host reader serves; keep reading guidance separate from permission enforcement.
 
+Lead and bootstrap assembly pass the constructed `chat_model` to tool assembly.
+The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
+including custom-agent and thinking-mode overrides; an absent cap omits the hint.
+Only standalone tool discovery without a model falls back to the base profile.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
+
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)
 3. **Built-in tools**:

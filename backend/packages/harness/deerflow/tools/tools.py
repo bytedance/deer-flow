@@ -3,6 +3,7 @@ import logging
 import threading
 
 from langchain.tools import BaseTool
+from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel
 
 from deerflow.config import get_app_config
@@ -110,6 +111,7 @@ def get_available_tools(
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
     app_config: AppConfig | None = None,
+    chat_model: BaseChatModel | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -120,6 +122,9 @@ def get_available_tools(
         groups: Optional list of tool groups to filter by.
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
+        chat_model: Constructed model whose effective output cap supplies write_file
+            guidance. When supplied, an absent cap omits the hint; only callers
+            without a model fall back to the configured profile.
         subagent_enabled: Whether to include subagent tools (task, task_status).
         include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
             Ordinary task subagents enable it only after snapshotting the
@@ -194,12 +199,12 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Annotate write_file with the model's configured output budget so the
+    # Annotate write_file with the constructed model's effective output budget so the
     # model does not assume the 80 KB streaming ceiling is the practical limit
     # for a single completion. The tool is cloned to avoid mutating the
     # module-level singleton in-place across assemblies or leaking guidance to
     # models configured without max_tokens.
-    max_tokens = _extract_max_tokens(model_config)
+    max_tokens = _extract_max_tokens(chat_model if chat_model is not None else model_config)
     if max_tokens is not None:
         safe_chars = int(max_tokens * 3 * 0.7)
         budget_note = (
