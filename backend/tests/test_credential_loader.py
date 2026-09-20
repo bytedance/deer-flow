@@ -406,3 +406,45 @@ def test_codex_chat_model_reports_missing_credential_for_non_object_auth_file(tm
 
     with pytest.raises(ValueError, match="Codex CLI credential not found"):
         CodexChatModel(model="gpt-5.4")
+
+
+def test_load_codex_cli_credential_defaults_null_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "codex-access-token",
+                    "account_id": None,
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "codex-access-token"
+    assert cred.account_id == ""
+
+
+def test_load_codex_cli_credential_ignores_non_string_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "codex-access-token",
+                    "account_id": 12345,
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "codex-access-token"
+    assert cred.account_id == ""
