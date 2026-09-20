@@ -57,7 +57,7 @@ class _Session:
 
 
 class WechatQRLogin:
-    """One deployment-wide session, owned by the admin that started it.
+    """One process-local session, owned by the admin that started it.
 
     Network polling runs outside the mutation lock so cancellation can fence a
     late confirmation. Credential application shares the lock with manual setup
@@ -165,7 +165,10 @@ class WechatQRLogin:
                     if not isinstance(token, str) or not token.strip():
                         session.error = "invalid_response"
                     else:
-                        credentials = {"bot_token": token.strip(), "ilink_bot_id": str(data.get("ilink_bot_id") or "")}
+                        credentials = {"bot_token": token.strip()}
+                        ilink_bot_id = str(data.get("ilink_bot_id") or "").strip()
+                        if ilink_bot_id:
+                            credentials["ilink_bot_id"] = ilink_bot_id
                         base_url = data.get("baseurl")
                         if base_url is not None:
                             try:

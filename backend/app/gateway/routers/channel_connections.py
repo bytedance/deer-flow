@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -743,6 +744,18 @@ async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig
     config = await _get_channel_connections_config(request)
     if not config.enabled or not config.wechat.enabled:
         raise HTTPException(status_code=400, detail="WeChat channel connections are disabled")
+    # QR sessions and mutation locks live in one process. Reject every QR route
+    # before session access when requests could land on different workers.
+    # WEB_CONCURRENCY is Uvicorn's fallback when no worker count is supplied.
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", os.environ.get("WEB_CONCURRENCY", "1")))
+    except ValueError:
+        workers = 0
+    if workers != 1:
+        raise HTTPException(
+            status_code=503,
+            detail="WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), or enter a bot token manually.",
+        )
     return config
 
 
