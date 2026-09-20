@@ -16,7 +16,11 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
-from deerflow.mcp_scope import mcp_session_scope_key
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    mcp_session_scope_key,
+    runtime_thread_incarnation,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +35,68 @@ def _legacy_tool_runtime(*, thread_id: str = "default"):
         context={"thread_id": thread_id, "thread_incarnation": None},
         config={},
     )
+
+
+def test_runtime_incarnation_matches_server_thread_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {"thread_incarnation": "incarnation-1"}},
+    )
+
+    assert runtime_thread_incarnation(runtime) == "incarnation-1"
+
+
+@pytest.mark.parametrize("metadata_value", ["incarnation-2", "", False, None])
+def test_runtime_incarnation_rejects_stale_or_invalid_server_thread_metadata(
+    metadata_value,
+):
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {"thread_incarnation": metadata_value}},
+    )
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        runtime_thread_incarnation(runtime)
+
+
+def test_runtime_incarnation_ignores_untrusted_metadata_without_server_guard():
+    runtime = SimpleNamespace(
+        context={"thread_incarnation": "incarnation-1"},
+        config={"metadata": {"thread_incarnation": "attacker"}},
+    )
+
+    assert runtime_thread_incarnation(runtime) == "incarnation-1"
+
+
+def test_guarded_versioned_incarnation_requires_persisted_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {}},
+    )
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        runtime_thread_incarnation(runtime)
+
+
+def test_guarded_legacy_incarnation_allows_missing_persisted_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": None,
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {}},
+    )
+
+    assert runtime_thread_incarnation(runtime) is None
 
 
 # ---------------------------------------------------------------------------

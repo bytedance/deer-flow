@@ -3277,6 +3277,16 @@ def test_task_tool_does_not_invent_missing_thread_incarnation(monkeypatch):
     assert "thread_incarnation" not in task_tool_module.task_tool.tool_call_schema.model_fields
 
 
+def test_task_tool_rejects_stale_standalone_thread_incarnation(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context["thread_incarnation"] = "incarnation-1"
+    runtime.context["__deerflow_thread_incarnation_metadata_guard"] = True
+    runtime.config["metadata"]["thread_incarnation"] = "incarnation-2"
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        _capture_executor_call(monkeypatch, runtime=runtime)
+
+
 def test_task_tool_forwards_acceptance_criteria_to_executor(monkeypatch):
     """RFC #4651 PR3: criteria travel via the executor constructor; the
     executor appends them to the subagent's task HumanMessage as untrusted

@@ -6,6 +6,8 @@ import json
 from typing import Any, TypeGuard
 
 THREAD_INCARNATION_CONTEXT_KEY = "thread_incarnation"
+THREAD_INCARNATION_METADATA_GUARD_KEY = "__deerflow_thread_incarnation_metadata_guard"
+_MISSING = object()
 
 
 def is_valid_thread_incarnation(value: object) -> TypeGuard[str | None]:
@@ -50,4 +52,13 @@ def runtime_thread_incarnation(runtime: Any | None) -> str | None:
     value = context[THREAD_INCARNATION_CONTEXT_KEY]
     if not is_valid_thread_incarnation(value):
         raise RuntimeError("MCP tool execution received an invalid thread incarnation")
+    if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        config = getattr(runtime, "config", None)
+        metadata = config.get("metadata") if isinstance(config, dict) else None
+        persisted = metadata.get(THREAD_INCARNATION_CONTEXT_KEY, _MISSING) if isinstance(metadata, dict) else _MISSING
+        if persisted is _MISSING:
+            if value is not None:
+                raise RuntimeError("MCP tool execution received a stale thread incarnation")
+        elif not is_valid_thread_incarnation(persisted) or persisted != value:
+            raise RuntimeError("MCP tool execution received a stale thread incarnation")
     return value

@@ -49,7 +49,10 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
-from deerflow.mcp_scope import is_valid_thread_incarnation
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    is_valid_thread_incarnation,
+)
 from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
@@ -571,6 +574,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
             # Server-owned pinned project snapshot (spec §7.1): resolved once
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.

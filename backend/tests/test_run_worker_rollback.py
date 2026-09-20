@@ -2564,11 +2564,15 @@ def test_build_runtime_context_uses_server_owned_thread_incarnation():
     ctx = _build_runtime_context(
         "thread-1",
         "run-1",
-        {"thread_incarnation": "spoofed"},
+        {
+            "thread_incarnation": "spoofed",
+            "__deerflow_thread_incarnation_metadata_guard": True,
+        },
         thread_incarnation="server-incarnation",
     )
 
     assert ctx["thread_incarnation"] == "server-incarnation"
+    assert "__deerflow_thread_incarnation_metadata_guard" not in ctx
 
 
 def test_build_runtime_context_ignores_caller_pre_existing_message_ids():

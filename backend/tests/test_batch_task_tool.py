@@ -6,7 +6,10 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 from deerflow.subagents.config import SubagentConfig
 from deerflow.tools.builtins.batch_task_tool import BatchTaskItem
 
@@ -115,6 +118,28 @@ async def test_batch_task_is_explicit_idempotent_submission(
         assert request.execution_spec[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
     assert "running independently" in message.content
+
+
+@pytest.mark.asyncio
+async def test_batch_task_rejects_stale_standalone_thread_incarnation(
+    monkeypatch,
+) -> None:
+    submitter = AsyncMock()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    runtime = _runtime("incarnation-1")
+    runtime.context[THREAD_INCARNATION_METADATA_GUARD_KEY] = True
+    runtime.config["metadata"][THREAD_INCARNATION_CONTEXT_KEY] = "incarnation-2"
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        await tool_module.batch_task.coroutine(
+            runtime=runtime,
+            title="Stale lifecycle",
+            items=[BatchTaskItem(key="record-1", prompt="Process one")],
+            subagent_type="general-purpose",
+            tool_call_id="call-1",
+        )
+
+    submitter.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

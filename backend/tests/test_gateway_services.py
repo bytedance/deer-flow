@@ -3855,6 +3855,7 @@ def test_strip_internal_context_keys_scrubs_audit_attribution_and_recorders():
         "__run_loop_detection_recorder": "forged",
         "__run_tool_promotion_recorder": "forged",
         "__run_tool_progress_recorder": "forged",
+        "__deerflow_thread_incarnation_metadata_guard": True,
     }
     config = build_run_config(
         "thread-1",
