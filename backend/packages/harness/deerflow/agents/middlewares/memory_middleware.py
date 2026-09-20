@@ -22,6 +22,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionConfig | None) -> list:
+    """Redact a conversation payload queued for memory extraction (#3190 vector 5).
+
+    Shared by MemoryMiddleware's enqueue boundary and the compaction-triggered
+    ``memory_flush_hook``: thread state is mixed by design (raw user turns next
+    to already-redacted tool results / summaries), so existing placeholder
+    indices are reserved across the whole batch before any new value allocates,
+    and message objects are rebuilt rather than mutated.
+    """
+    redactor = _Redactor(active_pii_detectors(pii_redaction_config))
+    for message in messages:
+        redactor.reserve(message.content)
+    redacted = []
+    for message in messages:
+        content, changed = _redact_content(message.content, redactor)
+        redacted.append(message.model_copy(update={"content": content}) if changed else message)
+    return redacted
+
+
 class MemoryMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
@@ -101,18 +120,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     def _redact_queued_messages(self, messages: list) -> list:
         """Redact the conversation payload queued for extraction (#3190 vector 5)."""
-        redactor = _Redactor(active_pii_detectors(self._pii_redaction_config))
-        # Reserve existing placeholder indices across the whole batch first:
-        # thread state is mixed by design (raw user turns next to
-        # already-redacted tool results / summaries), so a token in a later
-        # message must not collide with a new value in an earlier one.
-        for message in messages:
-            redactor.reserve(message.content)
-        redacted = []
-        for message in messages:
-            content, changed = _redact_content(message.content, redactor)
-            redacted.append(message.model_copy(update={"content": content}) if changed else message)
-        return redacted
+        return redact_queued_messages(messages, self._pii_redaction_config)
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:

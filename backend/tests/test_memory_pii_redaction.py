@@ -97,3 +97,44 @@ def test_existing_placeholder_in_later_message_reserves_index(monkeypatch):
     # Alice's existing [EMAIL_1] was reserved by the pre-scan, so Bob's new
     # value allocates the next index instead of colliding with it.
     assert queued[0].content == "Bob's email is [EMAIL_2]"
+
+
+def _flush_hook_call(monkeypatch, pii_config, messages):
+    import deerflow.agents.memory.summarization_hook as hook_module
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+
+    manager = MagicMock()
+    monkeypatch.setattr(hook_module, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(hook_module, "resolve_runtime_user_id", lambda runtime: "u1")
+    event = SummarizationEvent(
+        messages_to_summarize=tuple(messages),
+        preserved_messages=(),
+        thread_id="thread-123",
+        agent_name="researcher",
+        runtime=None,
+    )
+    hook_module.memory_flush_hook(event, pii_redaction_config=pii_config)
+    return manager.add_nowait.call_args.args[1]
+
+
+def test_compaction_flush_hook_redacts_queued_payload(monkeypatch):
+    # Review round 2 on #5577: the compaction-triggered memory_flush_hook
+    # queues messages that compaction is about to remove from state, so the
+    # after-agent redaction can never repair a raw batch queued here.
+    queued = _flush_hook_call(
+        monkeypatch,
+        PiiRedactionConfig(enabled=True),
+        [HumanMessage("reach alice@example.com"), AIMessage("noted")],
+    )
+    assert EMAIL_TOKEN in queued[0].content and "alice@example.com" not in queued[0].content
+    assert queued[1].content == "noted"
+
+
+def test_compaction_flush_hook_untouched_without_config(monkeypatch):
+    queued = _flush_hook_call(monkeypatch, None, [HumanMessage("reach alice@example.com")])
+    assert "alice@example.com" in queued[0].content
+
+
+def test_compaction_flush_hook_untouched_when_disabled(monkeypatch):
+    queued = _flush_hook_call(monkeypatch, PiiRedactionConfig(enabled=False), [HumanMessage("reach alice@example.com")])
+    assert "alice@example.com" in queued[0].content
