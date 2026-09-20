@@ -21,6 +21,8 @@ The five reported metrics are:
 
 Semantic model-quality results and deterministic routing results remain in separate report sections. Retrieval ranking/recall is deliberately out of scope; this protocol checks admission and identity routing, not search quality.
 
+Semantic verdicts inspect persisted facts and all user/history summaries, including summary-only contamination. Routing verdicts inspect facts only: summaries are intentionally shared across agents belonging to the same user.
+
 ## Offline run (default)
 
 From `backend/`:
@@ -54,3 +56,5 @@ The command name makes live execution explicit. A missing key fails before model
 Each output directory receives a `run.json` marker bound to the manifest hash, bundled extraction-prompt hash, source Git revision, execution mode, and model settings. Each case is persisted immediately as one row with a fingerprint that also binds its expected outcome and a result-integrity hash over the row. Only an intact matching row is reused on resume; changed protocol artifacts, source revision, prompt, mode, model settings, or row contents require a new row or output directory.
 
 Rows contain synthetic canary verdicts, rendered-prompt hashes, non-secret model metadata, and usage only. `report` validates every row against the current protocol and recomputes metrics. It refuses to overwrite an existing report, preserving the original evidence.
+
+Failed memory updates (including provider, response-parsing, and storage failures) abort the run with a nonzero exit rather than sealing an ordinary result. Completed rows remain reusable; rerunning retries the failed case. Reports reject incomplete runs and unsuccessful rows instead of counting them as successful rejections. Row schema v2 includes summary-aware verdicts; older rows are never reused or graded. Source-revision changes still require a new output directory.

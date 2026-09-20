@@ -31,6 +31,8 @@ def collect_rows(protocol: Protocol, output_dir: Path, marker: dict[str, Any]) -
         row = _read_row(output_dir / "rows" / f"{case.case_id}.json")
         if row.get("row_id") != case.case_id or row.get("suite") != "semantic_model_quality" or row.get("request_fingerprint") != _case_fingerprint(case, marker):
             raise RowIntegrityError(f"row {case.case_id} does not match the current protocol")
+        if row.get("update_succeeded") is not True:
+            raise RowIntegrityError(f"row {case.case_id} contains a failed memory update; rerun the benchmark")
         if (
             row.get("expected_persisted_canaries") != list(case.expected_persisted_canaries)
             or row.get("expected_rejected_canaries") != list(case.expected_rejected_canaries)

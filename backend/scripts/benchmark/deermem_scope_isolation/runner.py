@@ -25,7 +25,7 @@ from .contract import Protocol, SemanticCase
 ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = ROOT.parents[2]
 PROMPT_PATH = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "agents" / "memory" / "backends" / "deermem" / "deermem" / "core" / "prompts" / "memory_update.chat.yaml"
-ROW_SCHEMA_VERSION = 1
+ROW_SCHEMA_VERSION = 2
 MARKER_SCHEMA_VERSION = 1
 
 
@@ -197,6 +197,8 @@ def _load_reusable_row(path: Path, fingerprint: str) -> dict[str, Any] | None:
         return None
     if not isinstance(row, dict) or row.get("schema_version") != ROW_SCHEMA_VERSION or row.get("request_fingerprint") != fingerprint or not row_is_intact(row):
         return None
+    if row.get("suite") == "semantic_model_quality" and row.get("update_succeeded") is not True:
+        return None
     return row
 
 
@@ -217,7 +219,21 @@ def _config(storage_path: Path, model: DeerMemModelConfig | None = None) -> Deer
 
 
 def _contains(memory: dict[str, Any], canary: str) -> bool:
+    """Check agent-local facts only; shared summaries are not routing leaks."""
     return any(canary in str(fact.get("content", "")) for fact in memory.get("facts", []) if isinstance(fact, dict))
+
+
+def _contains_semantic(memory: dict[str, Any], canary: str) -> bool:
+    if _contains(memory, canary):
+        return True
+    for group in ("user", "history"):
+        sections = memory.get(group, {})
+        if not isinstance(sections, dict):
+            continue
+        for section in sections.values():
+            if isinstance(section, dict) and isinstance(summary := section.get("summary"), str) and canary in summary:
+                return True
+    return False
 
 
 def _seed(updater: MemoryUpdater, case: SemanticCase, *, agent_name: str, user_id: str) -> None:
@@ -266,10 +282,12 @@ def _semantic_row(case: SemanticCase, *, mode: str, marker: dict[str, Any], sett
             user_id=user_id,
             bypass_watermark=True,
         )
+        if not succeeded:
+            raise RuntimeError(f"memory update failed for benchmark case {case.case_id}; no result row was saved, rerun to retry")
         memory = updater.get_memory_data(agent_name, user_id=user_id)
-        persisted_present = [canary for canary in case.expected_persisted_canaries if _contains(memory, canary)]
-        rejected_present = [canary for canary in case.expected_rejected_canaries if _contains(memory, canary)]
-        removed_present = [canary for canary in case.expected_removed_canaries if _contains(memory, canary)]
+        persisted_present = [canary for canary in case.expected_persisted_canaries if _contains_semantic(memory, canary)]
+        rejected_present = [canary for canary in case.expected_rejected_canaries if _contains_semantic(memory, canary)]
+        removed_present = [canary for canary in case.expected_removed_canaries if _contains_semantic(memory, canary)]
         correction_success = case.category != "atomic_correction" or (set(persisted_present) == set(case.expected_persisted_canaries) and not removed_present)
         return _seal_row(
             {

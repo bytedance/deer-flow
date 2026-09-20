@@ -8,6 +8,8 @@ def _rate(numerator: int, denominator: int) -> float:
 
 
 def grade_semantic_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if any(row.get("update_succeeded") is not True for row in rows):
+        raise ValueError("failed memory updates cannot be graded as semantic observations")
     durable_total = sum(len(row["expected_persisted_canaries"]) for row in rows)
     durable_present = sum(len(row["persisted_canaries_present"]) for row in rows)
     unsafe_total = sum(len(row["expected_rejected_canaries"]) for row in rows)
