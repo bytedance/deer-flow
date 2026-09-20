@@ -5693,10 +5693,16 @@ def _signal_lifecycle_wait(monkeypatch, provider, worker_name, reached):
     lifecycle = provider._sandbox_lifecycle
 
     @contextmanager
-    def observed(sandbox_id):
+    def observed(sandbox_id, **kwargs):
         if threading.current_thread().name == worker_name:
-            reached.set()
-        with lifecycle(sandbox_id):
+            with provider._lock:
+                entry = provider._lifecycle_locks.get((kwargs.get("domain", "ownership"), sandbox_id))
+                if entry is not None:
+                    if entry[0].acquire(blocking=False):
+                        entry[0].release()
+                    else:
+                        reached.set()
+        with lifecycle(sandbox_id, **kwargs):
             yield
 
     monkeypatch.setattr(provider, "_sandbox_lifecycle", observed)
@@ -5768,11 +5774,11 @@ def test_reconcile_discards_active_snapshot_after_release(monkeypatch):
     lifecycle = provider._sandbox_lifecycle
 
     @contextmanager
-    def pause_before_lock(sandbox_id):
+    def pause_before_lock(sandbox_id, **kwargs):
         if threading.current_thread().name == "stale-active":
             snapshot_taken.set()
             assert continue_renewal.wait(5)
-        with lifecycle(sandbox_id):
+        with lifecycle(sandbox_id, **kwargs):
             yield
 
     monkeypatch.setattr(provider, "_sandbox_lifecycle", pause_before_lock)
@@ -5812,11 +5818,11 @@ def test_warm_sweep_rechecks_entry_after_reclaim_and_release(monkeypatch, repark
     lifecycle = provider._sandbox_lifecycle
 
     @contextmanager
-    def pause_before_lock(sandbox_id):
+    def pause_before_lock(sandbox_id, **kwargs):
         if threading.current_thread().name == "stale-warm":
             snapshot_taken.set()
             assert continue_cleanup.wait(5)
-        with lifecycle(sandbox_id):
+        with lifecycle(sandbox_id, **kwargs):
             yield
 
     monkeypatch.setattr(provider, "_sandbox_lifecycle", pause_before_lock)
@@ -6207,6 +6213,48 @@ def test_cleanup_lifecycle_remains_available_after_acquire_shutdown(monkeypatch)
 
     assert client.killed
     assert provider._ownership.owner("sb-shutdown") is None
+    assert provider._lifecycle_locks == {}
+
+
+def test_slow_active_timeout_does_not_expire_ownership(monkeypatch):
+    from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    now = [0.0]
+    owner = MemoryOwnershipStore(owner_id=provider._owner_id, ttl_seconds=40, time_source=lambda: now[0])
+    peer = MemoryOwnershipStore(owner_id="peer", ttl_seconds=40, time_source=lambda: now[0])
+    # Exercise real expiry and peer claims against one shared lease table.
+    peer._leases = owner._leases
+    peer._lock = owner._lock
+    provider._ownership = owner
+    provider._ownership_config.renewal_interval_seconds = 10
+    for sid in ("sb-slow", "sb-other"):
+        client = FakeClient(sandbox_id=sid)
+        provider._sandboxes[sid] = _make_sandbox(client, sandbox_id=sid)
+        provider._publish_ownership(sid)
+    writing, finish_write = threading.Event(), threading.Event()
+
+    def slow_timeout(seconds):
+        writing.set()
+        assert finish_write.wait(5)
+
+    monkeypatch.setattr(provider._sandboxes["sb-slow"].client, "set_timeout", slow_timeout)
+    now[0] = 10.0
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(provider._reconcile_remote_sandboxes)
+        try:
+            assert writing.wait(5)
+            # Renewal must finish before the control-plane request returns,
+            # for both this VM and the rest of the ownership renewal pass.
+            pool.submit(provider._refresh_owned_leases).result(timeout=1)
+            now[0] = 41.0
+            for sid in ("sb-slow", "sb-other"):
+                assert owner.owner(sid) == provider._owner_id
+                assert not peer.claim(sid, for_destroy=True)
+        finally:
+            finish_write.set()
+        writer.result(timeout=5)
     assert provider._lifecycle_locks == {}
 
 

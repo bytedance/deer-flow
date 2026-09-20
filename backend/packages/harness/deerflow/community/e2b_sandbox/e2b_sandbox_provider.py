@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
@@ -293,7 +293,7 @@ class E2BSandboxProvider(SandboxProvider):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._lifecycle_locks: dict[str, tuple[threading.RLock, int]] = {}
+        self._lifecycle_locks: dict[tuple[str, str], tuple[threading.RLock, int]] = {}
         # Active sandboxes, keyed by DeerFlow-side sandbox id (== e2b id).
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id, skills_root) -> sandbox id for fast in-process
@@ -1427,27 +1427,30 @@ class E2BSandboxProvider(SandboxProvider):
         return entries, exhausted, complete
 
     @contextmanager
-    def _sandbox_lifecycle(self, sandbox_id: str) -> Iterator[None]:
-        """Serialize one VM's remote writes without holding the metadata lock.
+    def _sandbox_lifecycle(self, sandbox_id: str, *, domain: Literal["ownership", "timeout"] = "ownership") -> Iterator[None]:
+        """Serialize one VM's writes within an independent lifecycle domain.
 
+        Timeout IO must not block ownership heartbeats. The two domains never
+        acquire each other's locks; each may briefly acquire the metadata lock.
         Holders and waiters share a refcounted lock; idle IDs are reclaimed.
         Reentrancy lets a sweep release ownership inside the same transition.
         Unlike acquire admission, cleanup must remain usable after shutdown.
         Lock order is lifecycle -> metadata; never wait while holding _lock.
         """
+        key = (domain, sandbox_id)
         with self._lock:
-            lock, users = self._lifecycle_locks.get(sandbox_id, (threading.RLock(), 0))
-            self._lifecycle_locks[sandbox_id] = (lock, users + 1)
+            lock, users = self._lifecycle_locks.get(key, (threading.RLock(), 0))
+            self._lifecycle_locks[key] = (lock, users + 1)
         try:
             with lock:
                 yield
         finally:
             with self._lock:
-                _, users = self._lifecycle_locks[sandbox_id]
+                _, users = self._lifecycle_locks[key]
                 if users == 1:
-                    del self._lifecycle_locks[sandbox_id]
+                    del self._lifecycle_locks[key]
                 else:
-                    self._lifecycle_locks[sandbox_id] = (lock, users - 1)
+                    self._lifecycle_locks[key] = (lock, users - 1)
 
     def _publish_ownership(self, sandbox_id: str) -> None:
         """Publish acquire-side ownership before exposing a sandbox locally."""
@@ -1620,7 +1623,7 @@ class E2BSandboxProvider(SandboxProvider):
             math.ceil(2 * (float(self._config["reconciliation_interval_seconds"]) + float(self._config["reconciliation_max_seconds"]))),
         )
         for sandbox_id, sandbox in active_sandboxes:
-            with self._sandbox_lifecycle(sandbox_id):
+            with self._sandbox_lifecycle(sandbox_id, domain="timeout"):
                 with self._lock:
                     if self._sandboxes.get(sandbox_id) is not sandbox or self._shutdown_called:
                         continue
@@ -2763,9 +2766,9 @@ class E2BSandboxProvider(SandboxProvider):
 
         # Drain any dispatched active renewal before removing the VM from
         # active state. Later renewal snapshots recheck under this same lock
-        # and skip it, so release owns the final TTL write. Do not hold this
-        # lock during output sync: ownership heartbeats must keep running.
-        with self._sandbox_lifecycle(sandbox_id):
+        # and skip it, so release owns the final TTL write. No timeout lock
+        # is needed during output sync once the active entry is removed.
+        with self._sandbox_lifecycle(sandbox_id, domain="timeout"):
             with self._lock:
                 sandbox = self._sandboxes.pop(sandbox_id, None)
                 if sandbox is None:

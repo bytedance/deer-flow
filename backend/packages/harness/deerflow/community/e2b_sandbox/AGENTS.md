@@ -8,12 +8,15 @@ may have renewed the VM. Leave shared removal to revision-checked remote
 inventory and its missing-entry grace period; partial/failed inventory cannot
 prove absence.
 
-Per-VM `_sandbox_lifecycle` locks serialize active TTL writes with removal from
-the active map, and ownership publication/claim/renewal/release with warm-entry cleanup.
+Per-VM `_sandbox_lifecycle` locks have independent `timeout` and `ownership`
+domains. Timeout locks serialize active TTL writes with removal from the active
+map. Ownership locks serialize publication/claim/renewal/release with warm-entry
+cleanup. Never hold both domains: slow E2B timeout requests must not block lease
+heartbeats for this VM or subsequent VMs in the renewal pass.
 Snapshot readers recheck sandbox identity, parked-entry identity and acquisition
 intent under that lock before acting. Lock order is thread key, lifecycle, then `_lock`;
 never wait for a lifecycle lock while holding the metadata lock or perform
-remote I/O under `_lock`. Holders and waiters retain one refcounted RLock per ID,
+remote I/O under `_lock`. Holders and waiters retain one refcounted RLock per domain/ID,
 reclaimed on the last exit. Cleanup remains available during shutdown without
 an executor or a permanent per-sandbox lock table.
 
