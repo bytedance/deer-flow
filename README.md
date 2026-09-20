@@ -1490,6 +1490,9 @@ configured cadence, even when `idle_timeout` is zero or shorter than that
 cadence. Warm VMs retain the configured idle-timeout behavior. Expired local
 warm entries do not directly free shared capacity: remote inventory must
 confirm disappearance through the existing grace period first.
+Active renewal completes before release sets the warm timeout, so a concurrent
+maintenance pass cannot extend an idle VM's lifetime. Warm-entry cleanup also
+preserves ownership acquired by a new request during the sweep.
 
 E2B snapshots `skills.container_path` when the provider starts and includes the
 canonical root in its thread identity, warm-pool seed, and remote metadata. A

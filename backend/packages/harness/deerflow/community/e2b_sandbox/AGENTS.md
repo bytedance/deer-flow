@@ -8,12 +8,17 @@ may have renewed the VM. Leave shared removal to revision-checked remote
 inventory and its missing-entry grace period; partial/failed inventory cannot
 prove absence.
 
-Use the existing AcquireSerializer's two-part ("sandbox", id) keys for active
-TTL writes, release, warm cleanup, and ownership publication/renewal. Recheck
-snapshots after taking that lock. Lock order is thread key, VM key, then the
-provider state lock; remote IO must not hold the provider state lock. Release
-must own the final idle-TTL write, and cleanup must finish before a new lease
-can be published. Do not renew ownership removed by a concurrent cleanup.
+Per-VM `_sandbox_lifecycle` locks serialize active TTL writes with removal from
+the active map, and ownership publication/claim/renewal/release with warm-entry cleanup.
+Snapshot readers recheck sandbox identity, parked-entry identity and acquisition
+intent under that lock before acting. Lock order is thread key, lifecycle, then `_lock`;
+never wait for a lifecycle lock while holding the metadata lock or perform
+remote I/O under `_lock`. Holders and waiters retain one refcounted RLock per ID,
+reclaimed on the last exit. Cleanup remains available during shutdown without
+an executor or a permanent per-sandbox lock table.
+
+Release must own the final idle-TTL write, and cleanup must finish before a new
+lease can be published. Do not renew ownership removed by a concurrent cleanup.
 Release only needs the VM lock while leaving active state; do not hold it
 during output sync, which must not prevent ownership heartbeats.
 Track that release in `_remote_ops_in_progress` until it completes so

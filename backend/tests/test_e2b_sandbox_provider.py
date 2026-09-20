@@ -13,6 +13,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,6 +264,7 @@ def _make_provider(
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
     provider._lock = threading.Lock()
+    provider._lifecycle_locks = {}
     provider._sandboxes = {}
     provider._thread_sandboxes = {}
     provider._acquire_serializer = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
@@ -5688,15 +5690,16 @@ def _signal_lifecycle_wait(monkeypatch, provider, worker_name, reached):
     The SDK callback signals on the unfixed implementation; the lock signals
     after serialization is added. This forces both interleavings without sleeps.
     """
-    checkout = provider._acquire_serializer._checkout
+    lifecycle = provider._sandbox_lifecycle
 
-    def observed(key):
-        entry = checkout(key)
-        if threading.current_thread().name == worker_name and len(key) == 2 and entry.lock.locked():
+    @contextmanager
+    def observed(sandbox_id):
+        if threading.current_thread().name == worker_name:
             reached.set()
-        return entry
+        with lifecycle(sandbox_id):
+            yield
 
-    monkeypatch.setattr(provider._acquire_serializer, "_checkout", observed)
+    monkeypatch.setattr(provider, "_sandbox_lifecycle", observed)
 
 
 @pytest.mark.parametrize("thread_bound", [True, False])
@@ -5762,15 +5765,17 @@ def test_reconcile_discards_active_snapshot_after_release(monkeypatch):
     provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-race"
     monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
     snapshot_taken, continue_renewal = threading.Event(), threading.Event()
-    checkout = provider._acquire_serializer._checkout
+    lifecycle = provider._sandbox_lifecycle
 
-    def pause_before_lock(key):
-        if threading.current_thread().name == "stale-active" and len(key) == 2:
+    @contextmanager
+    def pause_before_lock(sandbox_id):
+        if threading.current_thread().name == "stale-active":
             snapshot_taken.set()
             assert continue_renewal.wait(5)
-        return checkout(key)
+        with lifecycle(sandbox_id):
+            yield
 
-    monkeypatch.setattr(provider._acquire_serializer, "_checkout", pause_before_lock)
+    monkeypatch.setattr(provider, "_sandbox_lifecycle", pause_before_lock)
 
     def reconcile():
         threading.current_thread().name = "stale-active"
@@ -5804,15 +5809,17 @@ def test_warm_sweep_rechecks_entry_after_reclaim_and_release(monkeypatch, repark
     provider._owned_sandbox_ids.add("sb-race")
     monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
     snapshot_taken, continue_cleanup = threading.Event(), threading.Event()
-    checkout = provider._acquire_serializer._checkout
+    lifecycle = provider._sandbox_lifecycle
 
-    def pause_before_lock(key):
-        if threading.current_thread().name == "stale-warm" and len(key) == 2:
+    @contextmanager
+    def pause_before_lock(sandbox_id):
+        if threading.current_thread().name == "stale-warm":
             snapshot_taken.set()
             assert continue_cleanup.wait(5)
-        return checkout(key)
+        with lifecycle(sandbox_id):
+            yield
 
-    monkeypatch.setattr(provider._acquire_serializer, "_checkout", pause_before_lock)
+    monkeypatch.setattr(provider, "_sandbox_lifecycle", pause_before_lock)
 
     def sweep():
         threading.current_thread().name = "stale-warm"
@@ -6035,3 +6042,210 @@ def test_active_keepalive_does_not_change_warm_idle_timeout(monkeypatch):
     provider._reconcile_remote_sandboxes()
     assert client.timeouts_set == before
     assert sdk.connect_calls == []
+
+
+@pytest.mark.parametrize("thread_id", ["t1", None])
+def test_release_owns_final_timeout_after_inflight_active_renewal(monkeypatch, thread_id):
+    provider = _make_provider(idle_timeout=30)
+    _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-race")
+    provider._sandboxes["sb-race"] = _make_sandbox(client, sandbox_id="sb-race")
+    unrelated = FakeClient(sandbox_id="sb-other")
+    provider._sandboxes["sb-other"] = _make_sandbox(unrelated, sandbox_id="sb-other")
+    if thread_id:
+        provider._thread_sandboxes[provider._thread_key(thread_id, "u1")] = "sb-race"
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", lambda *args, **kwargs: None)
+    renewing = threading.Event()
+    finish_renewal = threading.Event()
+    release_started = threading.Event()
+    idle_written = threading.Event()
+
+    def set_timeout(seconds):
+        if seconds > 30:
+            renewing.set()
+            assert finish_renewal.wait(5)
+        else:
+            idle_written.set()
+        client.timeouts_set.append(seconds)
+
+    def release():
+        release_started.set()
+        provider.release("sb-race")
+
+    monkeypatch.setattr(client, "set_timeout", set_timeout)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        renewal = pool.submit(provider._reconcile_remote_sandboxes)
+        try:
+            assert renewing.wait(5)
+            provider.release("sb-other")
+            assert unrelated.timeouts_set == [30]
+            released = pool.submit(release)
+            assert release_started.wait(5)
+            # A warm timeout cannot be sent while an older active write is
+            # still in flight. The bounded wait gives the contender a turn.
+            wrote_idle_early = idle_written.wait(0.1)
+        finally:
+            finish_renewal.set()
+        renewal.result(timeout=5)
+        released.result(timeout=5)
+
+    assert not wrote_idle_early
+    assert client.timeouts_set == [300, 30]
+    assert "sb-race" in provider._warm_pool
+    assert "sb-race" not in provider._sandboxes
+    assert unrelated.timeouts_set == [30], "a stale active snapshot must not renew a released client"
+    assert provider._lifecycle_locks == {}
+
+
+@pytest.mark.parametrize("acquire_path", ["discover", "claim"])
+def test_warm_sweep_cannot_release_reacquired_ownership(monkeypatch, acquire_path):
+    provider = _make_provider(idle_timeout=30)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [_info("sb-race", "u1", "t1")]
+    provider._warm_pool["sb-race"] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._owned_sandbox_ids.add("sb-race")
+    provider._ownership.take("sb-race")
+    cleaning = threading.Event()
+    finish_cleanup = threading.Event()
+    acquiring = threading.Event()
+    acquired = threading.Event()
+    original_release = provider._ownership.release
+
+    def delayed_release(sandbox_id):
+        cleaning.set()
+        assert finish_cleanup.wait(5)
+        original_release(sandbox_id)
+
+    def acquire():
+        acquiring.set()
+        if acquire_path == "discover":
+            result = provider._discover_remote_sandbox("t1", user_id="u1")
+        else:
+            result = provider._claim_ownership("sb-race")
+        acquired.set()
+        return result
+
+    monkeypatch.setattr(provider._ownership, "release", delayed_release)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sweep = pool.submit(provider._sweep_expired_warm_entries)
+        try:
+            assert cleaning.wait(5)
+            acquisition = pool.submit(acquire)
+            assert acquiring.wait(5)
+            acquired_before_cleanup = acquired.wait(0.1)
+        finally:
+            finish_cleanup.set()
+        sweep.result(timeout=5)
+        result = acquisition.result(timeout=5)
+
+    assert not acquired_before_cleanup
+    assert provider._ownership.owner("sb-race") == provider._owner_id
+    assert "sb-race" in provider._owned_sandbox_ids
+    if acquire_path == "discover":
+        assert result == "sb-race"
+        assert "sb-race" in provider._sandboxes
+    else:
+        assert result is True
+    assert provider._lifecycle_locks == {}
+
+
+@pytest.mark.parametrize("transition", ["repark", "acquire"])
+def test_warm_sweep_rechecks_snapshot_after_lifecycle_wait(monkeypatch, transition):
+    provider = _make_provider(idle_timeout=30)
+    sid = "sb-stale-snapshot"
+    old_entry = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._warm_pool[sid] = old_entry
+    provider._owned_sandbox_ids.add(sid)
+    provider._ownership.take(sid)
+    mount_result = MagicMock()
+    provider._mount_results[sid] = mount_result
+    lifecycle = provider._sandbox_lifecycle
+    first = True
+
+    @contextmanager
+    def transition_before_lock(sandbox_id):
+        nonlocal first
+        if first:
+            first = False
+            # The sweep has already captured old_entry. A competing operation
+            # completes before it acquires the lifecycle lock.
+            if transition == "repark":
+                provider._warm_pool[sid] = (old_entry[0], time.time())
+            else:
+                provider._publish_ownership(sid)
+        with lifecycle(sandbox_id):
+            yield
+
+    monkeypatch.setattr(provider, "_sandbox_lifecycle", transition_before_lock)
+    provider._sweep_expired_warm_entries()
+
+    assert sid in provider._warm_pool
+    assert sid in provider._owned_sandbox_ids
+    assert provider._ownership.owner(sid) == provider._owner_id
+    assert provider._mount_results[sid] is mount_result
+    assert provider._lifecycle_locks == {}
+
+
+def test_lifecycle_lock_is_reclaimed_after_nested_failure():
+    provider = _make_provider()
+    with pytest.raises(RuntimeError, match="remote failure"):
+        with provider._sandbox_lifecycle("sb-failed"):
+            with provider._sandbox_lifecycle("sb-failed"):
+                raise RuntimeError("remote failure")
+    assert provider._lifecycle_locks == {}
+
+
+def test_cleanup_lifecycle_remains_available_after_acquire_shutdown(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-shutdown")
+    provider._sandboxes["sb-shutdown"] = _make_sandbox(client)
+    provider._publish_ownership("sb-shutdown")
+
+    provider.shutdown()
+    provider.release("sb-shutdown")
+
+    assert client.killed
+    assert provider._ownership.owner("sb-shutdown") is None
+    assert provider._lifecycle_locks == {}
+
+
+def test_warm_sweep_cannot_race_lapsed_lease_reclaim(monkeypatch):
+    from deerflow.community.aio_sandbox.ownership import RenewOutcome
+
+    provider = _make_provider(idle_timeout=30)
+    sid = "sb-lapsed"
+    provider._warm_pool[sid] = (provider._stable_seed("t1", "u1"), time.time() - 31)
+    provider._owned_sandbox_ids.add(sid)
+    renewing = threading.Event()
+    finish_renewal = threading.Event()
+    sweep_started = threading.Event()
+    swept = threading.Event()
+
+    def renew(_sandbox_id):
+        renewing.set()
+        assert finish_renewal.wait(5)
+        return RenewOutcome.LAPSED
+
+    def sweep():
+        sweep_started.set()
+        provider._sweep_expired_warm_entries()
+        swept.set()
+
+    monkeypatch.setattr(provider._ownership, "renew", renew)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        renewal = pool.submit(provider._refresh_owned_leases)
+        try:
+            assert renewing.wait(5)
+            cleanup = pool.submit(sweep)
+            assert sweep_started.wait(5)
+            swept_before_renewal = swept.wait(0.1)
+        finally:
+            finish_renewal.set()
+        renewal.result(timeout=5)
+        cleanup.result(timeout=5)
+
+    assert not swept_before_renewal
+    assert provider._ownership.owner(sid) is None
+    assert sid not in provider._owned_sandbox_ids
+    assert provider._lifecycle_locks == {}

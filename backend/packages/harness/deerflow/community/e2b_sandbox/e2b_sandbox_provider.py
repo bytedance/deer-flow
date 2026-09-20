@@ -49,8 +49,9 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -292,6 +293,7 @@ class E2BSandboxProvider(SandboxProvider):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._lifecycle_locks: dict[str, tuple[threading.RLock, int]] = {}
         # Active sandboxes, keyed by DeerFlow-side sandbox id (== e2b id).
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id, skills_root) -> sandbox id for fast in-process
@@ -300,9 +302,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._thread_sandboxes: dict[tuple[str, str, str], str] = {}
         # Per-(user,thread,skills_root) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
-        # Two-part ("sandbox", id) keys serialize VM lifecycle IO separately
-        # from the three-part thread keys. Lock order: thread, VM, _lock.
-        self._acquire_serializer: AcquireSerializer[tuple[str, ...]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
+        # VM lifecycle IO uses separate locks that remain usable at shutdown.
+        # Lock order: thread, VM, _lock.
+        self._acquire_serializer: AcquireSerializer[tuple[str, str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
         # Mount upload results keyed by sandbox id. Survives warm-pool
         # reclaim so the result is available after reconnect.
         self._mount_results: dict[str, MountUploadResult] = {}
@@ -1424,9 +1426,32 @@ class E2BSandboxProvider(SandboxProvider):
             complete = False
         return entries, exhausted, complete
 
+    @contextmanager
+    def _sandbox_lifecycle(self, sandbox_id: str) -> Iterator[None]:
+        """Serialize one VM's remote writes without holding the metadata lock.
+
+        Holders and waiters share a refcounted lock; idle IDs are reclaimed.
+        Reentrancy lets a sweep release ownership inside the same transition.
+        Unlike acquire admission, cleanup must remain usable after shutdown.
+        Lock order is lifecycle -> metadata; never wait while holding _lock.
+        """
+        with self._lock:
+            lock, users = self._lifecycle_locks.get(sandbox_id, (threading.RLock(), 0))
+            self._lifecycle_locks[sandbox_id] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._lock:
+                _, users = self._lifecycle_locks[sandbox_id]
+                if users == 1:
+                    del self._lifecycle_locks[sandbox_id]
+                else:
+                    self._lifecycle_locks[sandbox_id] = (lock, users - 1)
+
     def _publish_ownership(self, sandbox_id: str) -> None:
         """Publish acquire-side ownership before exposing a sandbox locally."""
-        with self._acquire_serializer.hold(("sandbox", sandbox_id)):
+        with self._sandbox_lifecycle(sandbox_id):
             with self._lock:
                 self._acquire_inflight.add(sandbox_id)
             try:
@@ -1441,24 +1466,26 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _claim_ownership(self, sandbox_id: str, *, for_destroy: bool = False) -> bool:
         """Exclusively claim an unowned sandbox, failing closed on store errors."""
-        try:
-            claimed = self._ownership.claim(sandbox_id, for_destroy=for_destroy)
-        except OwnershipBackendError as e:
-            logger.warning("E2B ownership claim failed for %s: %s", sandbox_id, e)
-            return False
-        if claimed:
-            with self._lock:
-                self._owned_sandbox_ids.add(sandbox_id)
-        return claimed
+        with self._sandbox_lifecycle(sandbox_id):
+            try:
+                claimed = self._ownership.claim(sandbox_id, for_destroy=for_destroy)
+            except OwnershipBackendError as e:
+                logger.warning("E2B ownership claim failed for %s: %s", sandbox_id, e)
+                return False
+            if claimed:
+                with self._lock:
+                    self._owned_sandbox_ids.add(sandbox_id)
+            return claimed
 
     def _release_ownership(self, sandbox_id: str) -> None:
-        try:
-            self._ownership.release(sandbox_id)
-        except OwnershipBackendError as e:
-            logger.warning("Failed to release E2B ownership for %s: %s", sandbox_id, e)
-        with self._lock:
-            self._owned_sandbox_ids.discard(sandbox_id)
-            self._acquire_inflight.discard(sandbox_id)
+        with self._sandbox_lifecycle(sandbox_id):
+            try:
+                self._ownership.release(sandbox_id)
+            except OwnershipBackendError as e:
+                logger.warning("Failed to release E2B ownership for %s: %s", sandbox_id, e)
+            with self._lock:
+                self._owned_sandbox_ids.discard(sandbox_id)
+                self._acquire_inflight.discard(sandbox_id)
 
     def _forget_local_sandbox(self, sandbox_id: str) -> None:
         """Forget a lease taken by a peer without touching the remote VM."""
@@ -1482,7 +1509,7 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             sandbox_ids = list(self._owned_sandbox_ids)
         for sandbox_id in sandbox_ids:
-            with self._acquire_serializer.hold(("sandbox", sandbox_id)):
+            with self._sandbox_lifecycle(sandbox_id):
                 with self._lock:
                     if sandbox_id not in self._owned_sandbox_ids:
                         continue
@@ -1562,14 +1589,13 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             expired = [(sandbox_id, entry) for sandbox_id, entry in self._warm_pool.items() if now_wall - entry[1] >= idle_timeout]
         for sandbox_id, entry in expired:
-            with self._acquire_serializer.hold(("sandbox", sandbox_id)):
+            with self._sandbox_lifecycle(sandbox_id):
                 with self._lock:
                     # A reclaim/release or ownership publication may have won
                     # while this sweep waited. Never clean up its newer lease.
-                    if self._warm_pool.get(sandbox_id) is not entry or sandbox_id in self._acquire_inflight:
+                    if self._warm_pool.get(sandbox_id) is not entry or sandbox_id in self._acquire_inflight or sandbox_id in self._sandboxes:
                         continue
                     self._warm_pool.pop(sandbox_id)
-                    self._owned_sandbox_ids.discard(sandbox_id)
                 logger.info("Dropping expired warm-pool e2b sandbox %s (parked longer than idle_timeout=%ss)", sandbox_id, idle_timeout)
                 self._forget_mount_result(sandbox_id)
                 self._release_ownership(sandbox_id)
@@ -1594,14 +1620,13 @@ class E2BSandboxProvider(SandboxProvider):
             math.ceil(2 * (float(self._config["reconciliation_interval_seconds"]) + float(self._config["reconciliation_max_seconds"]))),
         )
         for sandbox_id, sandbox in active_sandboxes:
-            with self._acquire_serializer.hold(("sandbox", sandbox_id)):
+            with self._sandbox_lifecycle(sandbox_id):
                 with self._lock:
-                    if self._sandboxes.get(sandbox_id) is not sandbox:
+                    if self._sandboxes.get(sandbox_id) is not sandbox or self._shutdown_called:
                         continue
-                    client = sandbox.client
                 # Hold the VM lock until the network write finishes. Release
                 # then owns the final idle-TTL write before publishing warm.
-                self._refresh_remote_timeout(client, minimum_timeout=active_timeout)
+                self._refresh_remote_timeout(sandbox.client, minimum_timeout=active_timeout)
         capacity_revision = None
         capacity_store = self._deployment_capacity
         if capacity_store is not None:
@@ -2740,7 +2765,7 @@ class E2BSandboxProvider(SandboxProvider):
         # active state. Later renewal snapshots recheck under this same lock
         # and skip it, so release owns the final TTL write. Do not hold this
         # lock during output sync: ownership heartbeats must keep running.
-        with self._acquire_serializer.hold(("sandbox", sandbox_id)):
+        with self._sandbox_lifecycle(sandbox_id):
             with self._lock:
                 sandbox = self._sandboxes.pop(sandbox_id, None)
                 if sandbox is None:
