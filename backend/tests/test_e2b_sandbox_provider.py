@@ -5450,6 +5450,21 @@ def test_remote_search_exactly_full_is_not_truncated(tmp_path, op, entries, trun
     assert reported is truncated
 
 
+@_RS_POSIX
+@pytest.mark.parametrize(("entries", "truncated"), [(50, False), (51, True)])
+def test_remote_grep_reports_single_file_overflow(tmp_path, entries, truncated) -> None:
+    # The shell command must retain one more match per file than the caller's
+    # cap. Otherwise 51 matches in this single file look complete at a cap of
+    # 50 because the raw-output cap is not reached.
+    source = tmp_path / "src.py"
+    source.write_text("needle\n" * entries, encoding="utf-8")
+
+    matches, reported = _rs_sandbox(tmp_path).grep(str(tmp_path), "needle", max_results=50)
+
+    assert len(matches) == 50
+    assert reported is truncated
+
+
 @pytest.mark.parametrize("op", ["grep", "glob"])
 def test_remote_search_raises_when_the_client_call_fails(op):
     sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE])))

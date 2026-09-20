@@ -639,7 +639,7 @@ def test_list_glob_and_grep_return_virtual_paths() -> None:
     assert truncated is False
     grep_tokens = shlex.split(remote.commands.calls[-1][0])
     assert "--include=*.py" in grep_tokens
-    assert "-m100" in grep_tokens
+    assert "-m101" in grep_tokens
 
     box.grep("/mnt/user-data/workspace", "needle", glob="src/*.py; echo injected", literal=True)
     unsafe_glob_tokens = shlex.split(remote.commands.calls[-1][0])
@@ -920,4 +920,19 @@ def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, 
         matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
 
     assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("entries", "truncated"), [(50, False), (51, True)])
+def test_remote_grep_reports_single_file_overflow(tmp_path, monkeypatch, entries, truncated) -> None:
+    # The shell command must retain one more match per file than the caller's
+    # cap. Otherwise 51 matches in this single file look complete at a cap of
+    # 50 because the raw-output cap is not reached.
+    source = tmp_path / "src.py"
+    source.write_text("needle\n" * entries, encoding="utf-8")
+
+    matches, reported = _rs_box(tmp_path, monkeypatch).grep(str(tmp_path), "needle", max_results=50)
+
+    assert len(matches) == 50
     assert reported is truncated

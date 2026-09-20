@@ -481,7 +481,7 @@ class E2BSandbox(Sandbox):
             include_pattern = glob.split("/")[-1] or glob
             flags.append(f"--include={include_pattern}")
 
-        per_file_cap = max(max_results, 50)
+        per_file_cap = max(max_results + 1, 50)
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 

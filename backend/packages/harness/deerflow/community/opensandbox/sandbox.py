@@ -391,7 +391,7 @@ class OpenSandboxSandbox(Sandbox):
         if glob is not None:
             include_pattern = glob.split("/")[-1] or glob
             flags.append(shlex.quote(f"--include={include_pattern}"))
-        per_file_cap = max(max_results, 50)
+        per_file_cap = max(max_results + 1, 50)
         flags.append(f"-m{per_file_cap}")
         hard_limit = max(max_results * 4, max_results + 50)
         arguments = f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
