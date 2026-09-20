@@ -59,6 +59,51 @@ const INITIAL_MESSAGES = [
   },
 ];
 
+for (const [opener, indent] of [
+  ["- ~~~xml", "  "],
+  ["10. ```xml", "    "],
+]) {
+  test(`separates literal and real reasoning after a list fence: ${opener}`, async ({
+    page,
+  }, testInfo) => {
+    const closer = opener!.includes("~~~") ? "~~~" : "```";
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "List-contained reasoning example",
+          messages: [
+            ...INITIAL_MESSAGES,
+            {
+              type: "ai",
+              id: "list-fence-ai",
+              content: `${opener}\n${indent}<think>literal example</think>\n${indent}${closer}\n\n<think>Actual model reasoning.</think>Visible answer after the list.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(
+      page
+        .locator("li pre")
+        .filter({ hasText: "<think>literal example</think>" }),
+    ).toBeVisible();
+    await expect(page.getByText("Reasoning", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Visible answer after the list.", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("<think>Actual model reasoning.</think>", {
+        exact: false,
+      }),
+    ).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("list-fence-reasoning.png"),
+    });
+  });
+}
+
 for (const block of ["# Result", "- Result", "```sh\necho hi\n```"]) {
   test(`extracts reasoning after a block interrupts inline code: ${block}`, async ({
     page,

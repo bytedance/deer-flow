@@ -582,6 +582,47 @@ interface InlineReasoningSplit {
   reasoning: string | null;
 }
 
+function markdownColumns(prefix: string): number {
+  let column = 0;
+  for (const char of prefix) {
+    column += char === "\t" ? 4 - (column % 4) : 1;
+  }
+  return column;
+}
+
+function skipListFence(
+  content: string,
+  start: number,
+  marker: string,
+  listIndent: number,
+): number {
+  let lineStart = start;
+  while (lineStart < content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? content.length : newline;
+    const line = content.slice(lineStart, lineEnd);
+    const whitespace = /^[ \t]*/.exec(line)![0];
+    const indent = markdownColumns(whitespace);
+    if (line.trim() !== "") {
+      // A fenced block cannot outlive its containing list item, even when
+      // the model has not supplied a closing fence yet.
+      if (indent < listIndent) return lineStart;
+      const closer = /^(`{3,}|~{3,})[ \t]*\r?$/.exec(
+        line.slice(whitespace.length),
+      )?.[1];
+      if (
+        indent <= listIndent + 3 &&
+        closer?.startsWith(marker[0]!) &&
+        closer.length >= marker.length
+      ) {
+        return lineEnd;
+      }
+    }
+    lineStart = lineEnd + 1;
+  }
+  return content.length;
+}
+
 function splitInlineReasoning(content: string): InlineReasoningSplit {
   if (!content.includes(THINK_OPEN_TAG)) {
     return { content: content.trim(), reasoning: null };
@@ -594,7 +635,7 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   // Thematic-break repetitions already consume trailing whitespace. Do not add
   // another whitespace repetition after them: near-matches then backtrack quadratically.
   const tokens =
-    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:(?:=+|-+)[ \t]*|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\r?$)|^ {0,3}((?:[-+*]|1[.)])[ \t]+)(?=\S)|`+|<think>/gm;
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:(?:=+|-+)[ \t]*|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\r?$)|^ {0,3}((?:[-+*]|\d{1,9}[.)])[ \t]+)(?=\S)|`+|<think>/gm;
   let fence: string | null = null;
   let inlineDelimiter: string | null = null;
   let headingEnd: number | null = null;
@@ -610,10 +651,41 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
       // Headings, thematic breaks and nonempty lists delimit inline spans
       // without a blank line. Ordered lists must start at 1 to interrupt.
       if (fence === null) {
+        if (match[6] && !/^(?:[-+*]|1[.)])/.test(match[6])) {
+          const previousLineStart =
+            content.lastIndexOf("\n", match.index - 2) + 1;
+          if (content.slice(previousLineStart, match.index).trim() !== "") {
+            continue;
+          }
+        }
         inlineDelimiter = null;
         if (match[4]) {
           const newline = content.indexOf("\n", tokens.lastIndex);
           headingEnd = newline === -1 ? content.length : newline;
+        }
+        if (match[6]) {
+          const newline = content.indexOf("\n", tokens.lastIndex);
+          const lineEnd = newline === -1 ? content.length : newline;
+          const line = content.slice(match.index, lineEnd);
+          const listFence =
+            /^ {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]{1,4})+(`{3,}|~{3,})/.exec(
+              line,
+            );
+          const marker = listFence?.[1];
+          if (
+            listFence &&
+            marker &&
+            (marker.startsWith("~") ||
+              !line.slice(listFence[0].length).includes("`"))
+          ) {
+            const prefix = listFence[0].slice(0, -marker.length);
+            tokens.lastIndex = skipListFence(
+              content,
+              lineEnd + 1,
+              marker,
+              markdownColumns(prefix),
+            );
+          }
         }
       }
       continue;

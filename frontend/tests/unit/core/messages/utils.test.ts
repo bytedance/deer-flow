@@ -517,6 +517,56 @@ test("keeps tool-call reasoning in the processing group while the final answer's
 
 describe("inline <think> tag splitting", () => {
   test.each([
+    "- ```sh\n  echo hi\n  ```",
+    "+ ~~~xml\n  <think>literal</think>\n  ~~~",
+    "* ```xml\n  <think>literal</think>\n  ```",
+    "1. ```xml\n   <think>literal</think>\n   ```",
+    "10) ```xml\n    <think>literal</think>\n    ```",
+    "- - ```xml\n    <think>literal</think>\n    ```",
+    "  - ```xml\n    <think>literal</think>\n    ```",
+    "-\t```xml\n\t<think>literal</think>\n\t```",
+    "- ````xml\n  ```\n  <think>literal</think>\n  `````",
+    "- ~~~xml\n  ```\n  <think>literal</think>\n  ~~~",
+    "- ```xml\r\n  <think>literal</think>\r\n  ```",
+  ])("extracts reasoning after a list-contained fence: %j", (code) => {
+    const prefix = `${code}\n\n`;
+    const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+    const expected = `${prefix}Answer.`.trim();
+    expect(extractContentFromMessage(message)).toBe(expected);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(expected);
+    expect(getAssistantTurnCopyData([message])).toBe(expected);
+  });
+
+  test.each([
+    "- ~~~xml\n  <think>literal",
+    "10. ```xml\n    <think>literal",
+    "- ```xml\n  first\n\n  <think>literal",
+  ])("preserves an unfinished list fence while streaming: %j", (code) => {
+    const message = aiMessage(code);
+    expect(extractContentFromMessage(message)).toBe(code);
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(getMessageCopyData(message)).toBe(code);
+    expect(getAssistantTurnCopyData([message])).toBe(code);
+  });
+
+  test("ends an unclosed list fence when its list item ends", () => {
+    const prefix = "- ~~~xml\n  <think>literal</think>\n\n";
+    const message = aiMessage(`${prefix}<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${prefix}Answer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+    expect(getMessageCopyData(message)).toBe(`${prefix}Answer.`);
+    expect(getAssistantTurnCopyData([message])).toBe(`${prefix}Answer.`);
+  });
+
+  test("does not turn a list-contained inline span into a fence", () => {
+    const code = "- ```prefix <think>literal</think>```";
+    const message = aiMessage(`${code}\n\n<think>real</think>Answer.`);
+    expect(extractContentFromMessage(message)).toBe(`${code}\n\nAnswer.`);
+    expect(extractReasoningContentFromMessage(message)).toBe("real");
+  });
+
+  test.each([
     [
       "fenced pair",
       "Example:\n```xml\n<think>sample</think>\n```\nExplanation.",
