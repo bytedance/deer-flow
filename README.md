@@ -1089,6 +1089,9 @@ empty list is forwarded and imposes no restriction of that kind. See the
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+Chat tool-step titles accept leading blank lines and up to three spaces before
+a page's first H1 heading. Indented code, including mixed spaces and tabs, is
+not used as a title; the tool step falls back to the URL.
 Tavily search and fetch each read `api_key` from their own tool entry in
 `config.yaml`, falling back to `TAVILY_API_KEY` when omitted. Fetch does not
 reuse the search entry's key, so search can use a different provider. If you

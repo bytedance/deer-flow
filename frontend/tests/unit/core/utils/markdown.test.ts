@@ -20,6 +20,27 @@ test("ignores an indented code block that starts with a hash", () => {
   expect(extractTitleFromMarkdown("\t# Not A Title")).toBeUndefined();
 });
 
+test.each([" \t", "  \t", "   \t"])(
+  "does not treat mixed indentation %j as a heading",
+  (indent) => {
+    expect(
+      extractTitleFromMarkdown(`${indent}# Code comment\n# Later heading`),
+    ).toBeUndefined();
+    expect(
+      extractTitleFromMarkdown(`\n  \n${indent}# Code comment`),
+    ).toBeUndefined();
+  },
+);
+
+test.each(["", " ", "  ", "   "])(
+  "accepts a heading with %j indentation and CRLF line endings",
+  (indent) => {
+    expect(extractTitleFromMarkdown(`\r\n${indent}# Real Title\r\nbody`)).toBe(
+      "Real Title",
+    );
+  },
+);
+
 test("ignores headings that are not level 1", () => {
   expect(extractTitleFromMarkdown("## Section")).toBeUndefined();
   expect(extractTitleFromMarkdown("#NoSpace")).toBeUndefined();

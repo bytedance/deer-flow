@@ -1,15 +1,13 @@
-import { INDENTED_CODE_RE } from "@/core/streamdown/fences";
-
 // Converter output can start with blank lines, and CommonMark allows up to three
-// spaces before an ATX heading; a leading tab or four-space indent is a code block.
+// literal spaces before an ATX heading. Do not trim code indentation into a title.
 export function extractTitleFromMarkdown(markdown: string) {
   const firstLine = markdown.split("\n").find((line) => line.trim() !== "");
-  if (firstLine === undefined || INDENTED_CODE_RE.test(firstLine)) {
+  if (firstLine === undefined) {
     return undefined;
   }
-  const heading = firstLine.trim();
-  if (!heading.startsWith("# ")) {
+  const headingPrefix = /^ {0,3}# /.exec(firstLine);
+  if (!headingPrefix) {
     return undefined;
   }
-  return heading.slice(2).trim() || undefined;
+  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
 }
