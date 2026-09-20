@@ -217,6 +217,9 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Stable MCP installation IDs. None inherits all; [] selects none.
+    # This is tool selection, not a replacement for host authorization.
+    mcp_plugins: list[str] | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to

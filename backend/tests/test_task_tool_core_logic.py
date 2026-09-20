@@ -1017,7 +1017,8 @@ def test_task_tool_context_mode_schema_rejects_unknown_mode():
         schema.model_validate({"runtime": None, "prompt": "Task", "subagent_type": "general-purpose", "tool_call_id": "tc", "context_mode": "shared"})
 
 
-def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
+@pytest.mark.parametrize("mcp_plugins", [None, [], ["stable-plugin"]])
+def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
     """Verify tool_groups from parent metadata are passed to get_available_tools(groups=...)."""
     config = _make_subagent_config()
     parent_tool_groups = ["file:read", "file:write", "bash"]
@@ -1030,7 +1031,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
             "uploaded_files": [],
         },
         context={"thread_id": "thread-1"},
-        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups}},
+        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups, "mcp_plugins": mcp_plugins}},
     )
     events = []
     captured = {}
@@ -1066,7 +1067,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     assert captured["uploaded_files"] == []
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True, **({"mcp_plugins": mcp_plugins} if mcp_plugins is not None else {}))
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -3276,3 +3277,21 @@ def test_task_tool_forwards_no_criteria_by_default(monkeypatch):
 
     assert executor_kwargs["acceptance_criteria"] is None
     assert "<acceptance_criteria>" not in delegated_prompt
+
+
+def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context["__knowledge_scope_execution"] = {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+        "display": {"datasets": [{"id": "dataset-1", "name": "Private label"}]},
+    }
+
+    executor_kwargs, _ = _capture_executor_call(monkeypatch, runtime=runtime)
+
+    assert executor_kwargs["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }

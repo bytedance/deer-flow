@@ -15,6 +15,9 @@ export interface FeaturesResponse {
     enabled?: boolean;
     max_references?: number;
   };
+  knowledge_base?: {
+    scope_selection_enabled?: boolean;
+  };
 }
 
 export interface ConversationReferencesCapability {
@@ -70,5 +73,14 @@ export async function fetchConversationReferencesCapability(): Promise<Conversat
       maxReferences > 0
         ? maxReferences
         : 0,
+  };
+}
+
+export async function fetchKnowledgeBaseFeature(): Promise<{
+  scopeSelectionEnabled: boolean;
+}> {
+  const feature = (await fetchFeatures()).knowledge_base;
+  return {
+    scopeSelectionEnabled: feature?.scope_selection_enabled ?? false,
   };
 }

@@ -18,6 +18,51 @@ export const zhCN: Translations = {
   },
 
   capabilities: {
+    icon: {
+      title: "插件图标",
+      upload: "上传插件图标",
+      change: "选择图片",
+      reset: "恢复默认",
+      hint: "支持 PNG、JPG、WebP，最大 2 MB。点击保存后生效。",
+      singleServer: "上传图标时，请每次只添加一个插件。",
+      errors: {
+        type: "请选择 PNG、JPG 或 WebP 图片。",
+        size: "图片不能超过 2 MB。",
+        invalid: "无法读取图片，请选择有效且不超过 1600 万像素的图片。",
+      },
+    },
+    directory: {
+      categories: {
+        office: "办公协作",
+        knowledge: "文档与知识",
+        research: "搜索与研究",
+        business: "业务与数据",
+        development: "研发与运维",
+        custom: "自定义插件",
+      },
+      hints: {
+        office: "让信息流转，让团队协同",
+        knowledge: "连接分散资料，沉淀团队知识",
+        research: "从信息搜索到研究洞察",
+        business: "用业务数据支持决策",
+        development: "贯通需求、代码与交付",
+        custom: "管理你添加的 MCP 服务",
+      },
+      connected: "已连接",
+      native: "内置支持",
+      guide: "接入指南",
+      candidate: "推荐接入",
+      view: "查看",
+      allCategories: "全部分类",
+      source: "查看接入文档",
+      setup: "接入方式",
+      notice: "按工作场景发现插件，需要时再连接账号、配置权限。",
+      configured: "已配置",
+      nativeHint: "DeerFlow 已支持 · 需按部署配置",
+      guideHint: "接入参考 · 尚未连接",
+      unknownStatus: "状态不可用",
+      notConnected: "未连接",
+    },
     integrationSkills: "来自插件",
     sharedSkills: "共享技能",
     title: "能力中心",
@@ -207,6 +252,13 @@ export const zhCN: Translations = {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => `查看来源：${title}`,
+    sourcePages: (pages: string) => `第 ${pages} 页`,
+    retrievedExcerpt:
+      "这是回答生成时检索到的证据片段，源文档此后可能已发生变化。",
+    excerptTruncated: "该片段已按检索长度限制截短。",
+    sourceUnavailable: "当前加载的对话中没有这条引用的来源记录。",
+    knowledgeSourcesSummary: (count: number) => `${count} 个知识库来源`,
     sourcesSummary: (count) => `使用了 ${count} 个来源`,
     citeCount: (count) => `${count} 次引用`,
     copyReference: (title) => `复制 ${title} 引用`,
@@ -376,6 +428,41 @@ export const zhCN: Translations = {
     agents: "智能体",
     scheduledTasks: "定时任务",
     agentsDisabledTooltip: "功能未启用",
+  },
+
+  // 自定义智能体聊天中的知识库范围
+  knowledge: {
+    scope: {
+      title: "知识库范围",
+      description: "选择该智能体本轮可以检索的知识库和文件。",
+      buttonAll: "知识库 · 全部",
+      buttonDisabled: "知识库 · 关闭",
+      buttonDatasets: (datasets) => `知识库 · ${datasets}库`,
+      buttonDatasetsAndDocuments: (datasets, documents) =>
+        `知识库 · ${datasets}库 · ${documents}文件`,
+      allDatasets: "全部允许知识库",
+      selectedDatasets: "指定知识库",
+      disabled: "关闭",
+      allDocuments: "全部可检索文件",
+      selectedDocuments: "指定文件",
+      searchDatasets: "搜索知识库",
+      searchDocuments: "搜索文件",
+      selectedCount: (count) => `已选择 ${count} 个知识库`,
+      files: "文件",
+      notSearchable: "不可检索",
+      loadFailed: "目录加载失败，当前选择未改变。",
+      selectionInvalid: "当前选择超出支持的数量或大小限制。",
+      previous: "上一页",
+      next: "下一页",
+      agentUnavailable: "当前智能体未允许 knowledge 工具组。",
+      apply: "应用",
+      historyAll: "知识库：全部允许库",
+      historyDisabled: "知识库：关闭",
+      historySelected: (datasets, documents) =>
+        documents > 0
+          ? `知识库：${datasets}库 · ${documents}文件`
+          : `知识库：${datasets}库`,
+    },
   },
   // Sidebar projects section
   projects: {

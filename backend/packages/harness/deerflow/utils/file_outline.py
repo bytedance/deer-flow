@@ -210,7 +210,7 @@ def extract_outline(md_path: Path) -> list[dict]:
     fence_char = ""
     fence_length = 0
     try:
-        with md_path.open(encoding="utf-8") as f:
+        with md_path.open(encoding="utf-8-sig") as f:
             for lineno, line in enumerate(f, 1):
                 fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
                 if fence_char:
@@ -304,7 +304,7 @@ def extract_outline_for_file(
     preview: list[str] = []
     remaining_chars = _OUTLINE_PREVIEW_MAX_CHARS
     try:
-        with md_path.open(encoding="utf-8") as f:
+        with md_path.open(encoding="utf-8-sig") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped:

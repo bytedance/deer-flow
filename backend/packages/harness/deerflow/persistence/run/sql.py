@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -358,6 +358,44 @@ class RunRepository(RunStore):
             await session.delete(row)
             await session.commit()
 
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete a thread's historical runs, keeping internal operation rows.
+
+        Only ``operation_kind == "run"`` rows are removed. The same table holds
+        durable thread-operation reservations (checkpoint writes, artifact
+        writes, branches and thread deletions) that their own release path owns
+        through ``delete_thread_operation``; deleting the reservation currently
+        protecting a thread deletion would drop the cross-worker exclusion in
+        the middle of that request.
+
+        The bulk delete deliberately does not bump the run-change clock, matching
+        the single-row :meth:`delete` and keeping thread cleanup away from
+        ``run_change_clock`` (#5516). ``user_id`` follows the same three-state
+        convention as the rest of this repository: ``AUTO`` reads the request
+        context (raising when there is none), an explicit id scopes the delete,
+        and ``None`` skips the owner filter for migration/CLI callers.
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.delete_by_thread")
+
+        conditions = [
+            RunRow.thread_id == thread_id,
+            RunRow.operation_kind == "run",
+        ]
+        if resolved_user_id is not None:
+            conditions.append(RunRow.user_id == resolved_user_id)
+
+        async with self._sf() as session:
+            count = await session.scalar(select(func.count()).select_from(RunRow).where(*conditions)) or 0
+            if count:
+                await session.execute(delete(RunRow).where(*conditions))
+            await session.commit()
+            return count
+
     async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
         """Release a reservation using its captured owner, not request context."""
         await self.delete(run_id, user_id=user_id)
@@ -495,7 +533,13 @@ class RunRepository(RunStore):
             await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(
+        self,
+        thread_id: str,
+        *,
+        include_active: bool = False,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, Any]:
         """Aggregate token usage for a thread.
 
         ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
@@ -513,6 +557,7 @@ class RunRepository(RunStore):
         _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
         _run_operation = RunRow.operation_kind == "run"
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.aggregate_tokens_by_thread")
 
         stmt = select(
             RunRow.model_name,
@@ -524,6 +569,8 @@ class RunRepository(RunStore):
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
         ).where(_thread, _run_operation, _completed)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()

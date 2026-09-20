@@ -227,7 +227,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     """Load credential from Codex CLI (~/.codex/auth.json)."""
     cred_path = _resolve_credential_path("CODEX_AUTH_PATH", ".codex/auth.json")
     data = _load_json_file(cred_path, "Codex CLI credentials")
-    if data is None:
+    if not isinstance(data, dict):
+        logger.debug("Codex CLI credentials file is not a JSON object; skipping")
         return None
     tokens = data.get("tokens", {})
     if not isinstance(tokens, dict):

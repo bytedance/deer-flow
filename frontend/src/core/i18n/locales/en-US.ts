@@ -18,6 +18,53 @@ export const enUS: Translations = {
   },
 
   capabilities: {
+    icon: {
+      title: "Plugin icon",
+      upload: "Upload plugin icon",
+      change: "Choose image",
+      reset: "Restore default",
+      hint: "PNG, JPG or WebP · up to 2 MB. Changes take effect when you save.",
+      singleServer: "Upload an icon when adding one plugin at a time.",
+      errors: {
+        type: "Choose a PNG, JPG or WebP image.",
+        size: "The image must be 2 MB or smaller.",
+        invalid:
+          "Cannot read this image. Choose a valid image up to 16 megapixels.",
+      },
+    },
+    directory: {
+      categories: {
+        office: "Office & collaboration",
+        knowledge: "Documents & knowledge",
+        research: "Search & research",
+        business: "Business & data",
+        development: "Development & operations",
+        custom: "Custom plugins",
+      },
+      hints: {
+        office: "Keep your team in sync",
+        knowledge: "Make company knowledge accessible",
+        research: "Find sources and turn them into insights",
+        business: "Bring business context to every decision",
+        development: "Connect the tools your team builds with",
+        custom: "Your configured MCP servers",
+      },
+      connected: "Connected",
+      native: "Built-in support",
+      guide: "Setup guide",
+      candidate: "Suggested",
+      view: "View",
+      allCategories: "All categories",
+      source: "Open setup documentation",
+      setup: "How to connect",
+      notice:
+        "Discover integrations for your team. Connect accounts and configure access when you need them.",
+      configured: "Configured",
+      nativeHint: "Supported by DeerFlow · requires deployment configuration",
+      guideHint: "Setup reference · not connected",
+      unknownStatus: "Status unavailable",
+      notConnected: "Not connected",
+    },
     integrationSkills: "From plugins",
     sharedSkills: "Shared skills",
     title: "Capability Center",
@@ -218,6 +265,14 @@ export const enUS: Translations = {
 
   // Citations
   citations: {
+    viewKnowledgeSource: (title: string) => `View source: ${title}`,
+    sourcePages: (pages: string) => `Pages ${pages}`,
+    retrievedExcerpt:
+      "Evidence captured when this answer was researched. The source document may have changed since retrieval.",
+    excerptTruncated: "This excerpt was shortened to fit the retrieval limit.",
+    sourceUnavailable:
+      "Source evidence is unavailable in the loaded conversation.",
+    knowledgeSourcesSummary: (count: number) => `${count} knowledge sources`,
     sourcesSummary: (count) =>
       `Used ${count} ${count === 1 ? "source" : "sources"}`,
     citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
@@ -402,6 +457,44 @@ export const enUS: Translations = {
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
+  },
+
+  // Knowledge scope for custom-agent chat
+  knowledge: {
+    scope: {
+      title: "Knowledge scope",
+      description:
+        "Choose which allowed knowledge bases and documents this agent may search.",
+      buttonAll: "Knowledge · All",
+      buttonDisabled: "Knowledge · Off",
+      buttonDatasets: (datasets) =>
+        `Knowledge · ${datasets} ${datasets === 1 ? "base" : "bases"}`,
+      buttonDatasetsAndDocuments: (datasets, documents) =>
+        `Knowledge · ${datasets} ${datasets === 1 ? "base" : "bases"} · ${documents} ${documents === 1 ? "file" : "files"}`,
+      allDatasets: "All allowed knowledge bases",
+      selectedDatasets: "Selected knowledge bases",
+      disabled: "Off",
+      allDocuments: "All searchable files",
+      selectedDocuments: "Selected files",
+      searchDatasets: "Search knowledge bases",
+      searchDocuments: "Search files",
+      selectedCount: (count) => `${count} selected`,
+      files: "Files",
+      notSearchable: "Not searchable",
+      loadFailed:
+        "The catalog could not be loaded. Your current selection is unchanged.",
+      selectionInvalid: "This selection exceeds the supported size limits.",
+      previous: "Previous",
+      next: "Next",
+      agentUnavailable: "This agent does not allow the knowledge tool group.",
+      apply: "Apply",
+      historyAll: "Knowledge: all allowed bases",
+      historyDisabled: "Knowledge: off",
+      historySelected: (datasets, documents) =>
+        documents > 0
+          ? `Knowledge: ${datasets} ${datasets === 1 ? "base" : "bases"}, ${documents} ${documents === 1 ? "file" : "files"}`
+          : `Knowledge: ${datasets} ${datasets === 1 ? "base" : "bases"}`,
+    },
   },
   // Sidebar projects section
   projects: {

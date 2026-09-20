@@ -1056,6 +1056,24 @@ def test_cleanup_uploaded_paths_leaves_unpaired_entries_alone(tmp_path):
     assert has_companion_entry(uploads_dir, "other.pdf"), "Unrelated entry must survive rollback even though the request uploaded a file sharing its companion name"
 
 
+def test_delete_uploaded_file_rejects_symlink_to_sibling_upload(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    victim = thread_uploads_dir / "victim.pdf"
+    victim.write_bytes(b"pdf-bytes")
+    (thread_uploads_dir / "victim.md").write_text("converted", encoding="utf-8")
+    _symlink_to_or_skip(thread_uploads_dir / "alias.pdf", victim)
+
+    with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-local", "alias.pdf", request=MagicMock()))
+
+    assert exc_info.value.status_code == 404
+    assert victim.read_bytes() == b"pdf-bytes"
+    assert (thread_uploads_dir / "victim.md").exists()
+    assert (thread_uploads_dir / "alias.pdf").is_symlink()
+
+
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():
     class BrokenConfig:
         def __getattribute__(self, name):

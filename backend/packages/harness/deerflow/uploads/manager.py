@@ -394,6 +394,11 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     Without any sidecar evidence the legacy ``<stem>.md`` heuristic applies.
     Evicted originals and the sticky overflow flag also skip that heuristic.
 
+    Only regular files are deleted. Upload directories may be mounted into
+    local sandboxes, so a sandbox process can plant a symlink under an upload
+    name; following it would delete the upload it aliases instead. Such
+    entries are reported as not found, matching ``list_files_in_dir``.
+
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
@@ -408,12 +413,12 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         PathTraversalError: If path traversal is detected.
     """
     safe_name = Path(filename).name
-    file_path = (base_dir / filename).resolve()
+    file_path = base_dir / filename
     validate_path_traversal(file_path, base_dir)
     if is_upload_hidden_file(safe_name):
         raise FileNotFoundError(f"File not found: {filename}")
 
-    if not file_path.is_file():
+    if file_path.is_symlink() or not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
     state = load_companion_state(base_dir)

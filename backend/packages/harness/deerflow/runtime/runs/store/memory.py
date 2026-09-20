@@ -215,6 +215,25 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
+    async def delete_by_thread(self, thread_id: str, *, user_id=None) -> int:
+        """Delete a thread's historical runs, keeping internal operation rows.
+
+        Mirrors ``RunRepository.delete_by_thread``: only ``operation_kind ==
+        "run"`` rows are removed, so durable thread-operation reservations keep
+        protecting the thread until their own release path drops them.
+        """
+        removed = 0
+        for run_id in list(self._runs_by_thread.get(thread_id, {})):
+            run = self._runs.get(run_id)
+            if run is None or run.get("operation_kind", "run") != "run":
+                continue
+            if user_id is not None and run.get("user_id") != user_id:
+                continue
+            self._runs.pop(run_id, None)
+            self._unindex_run(run_id, run["thread_id"])
+            removed += 1
+        return removed
+
     async def update_run_completion(self, run_id, *, status, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
@@ -252,12 +271,12 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, user_id: str | None = None) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run in the process (mirrors ``list_by_thread``).
         run_ids = self._runs_by_thread.get(thread_id) or ()
-        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses]
+        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses and (user_id is None or run.get("user_id") == user_id)]
         by_model: dict[str, dict] = {}
         for r in completed:
             usage_by_model = r.get("token_usage_by_model") or {}

@@ -145,6 +145,20 @@ def test_text_shapes_are_searchable_and_readable_before_and_after_capture(scoped
     assert json.loads(history_read.func(scoped, source_id))["text"] == "Approved code ZX-731\nKeep backups"
 
 
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+def test_capture_skips_contentless_messages_but_keeps_literal_none(scoped, message_type):
+    empty = message_type(content="", id="empty", **({"tool_call_id": "call"} if message_type is ToolMessage else {})).model_copy(update={"content": None})
+    literal = HumanMessage(content="None", id="literal")
+
+    history = archive.capture({}, scoped, [empty, literal], TaskContinuityConfig(enabled=True))
+    assert history["status"] == "available"
+    assert history["omitted_records"] == 0
+    result = archive.lookup({"task_history": history, "messages": []}, scoped, query="None")
+
+    assert result["status"] == "available"
+    assert [(row["message_id"], row["text"]) for row in result["results"]] == [("literal", "None")]
+
+
 @pytest.mark.parametrize("query", ["Citrine", "保留备份", 'Citrine" OR "x', '" OR * NOT NEAR( x )'])
 def test_keywords_and_fts_syntax_are_data(scoped, query):
     state = {"task_history": archive.capture({}, scoped, conversation(), TaskContinuityConfig(enabled=True))}

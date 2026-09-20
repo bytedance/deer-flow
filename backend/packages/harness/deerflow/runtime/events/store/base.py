@@ -269,9 +269,30 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
-        """Delete all events for a thread. Return the number of deleted events."""
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a thread. Return the number of deleted events.
+
+        ``user_id`` follows the same three-state convention as the read methods:
+        ``AUTO`` resolves the caller's context, an explicit id scopes the delete
+        to that owner, and ``None`` removes every owner's rows. Backends whose
+        storage is not user-scoped (memory, JSONL) accept the parameter for
+        interface parity and ignore it, so callers can delete uniformly.
+        """
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
-        """Delete all events for a specific run. Return the number of deleted events."""
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a specific run. Return the number of deleted events.
+
+        ``user_id`` follows the same convention as :meth:`delete_by_thread`.
+        """
