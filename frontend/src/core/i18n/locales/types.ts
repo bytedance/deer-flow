@@ -1022,7 +1022,45 @@ export interface Translations {
   settings: {
     title: string;
     description: string;
+    models: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      add: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      yaml: string;
+      enabled: string;
+      disabled: string;
+      conflict: string;
+      edit: string;
+      enable: string;
+      disable: string;
+      formDescription: string;
+      provider: string;
+      name: string;
+      displayName: string;
+      endpoint: string;
+      modelId: string;
+      keepKey: string;
+      optionalKey: string;
+      clearKey: string;
+      contextWindow: string;
+      maxTokens: string;
+      vision: string;
+      cancel: string;
+      test: string;
+      working: string;
+      save: string;
+      saved: string;
+      success: string;
+      tool_call_missing: string;
+      connection_failed: string;
+    };
     sections: {
+      models: string;
       account: string;
       appearance: string;
       channels: string;

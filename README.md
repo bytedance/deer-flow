@@ -155,6 +155,31 @@ It is disabled by default; see the linked guide to enable it.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
+   Administrators can also open **Settings → Models** to add, edit, test, and
+   enable/disable shared OpenAI-compatible Chat Completions models without editing
+   `config.yaml`. Enter a unique name, base URL, model ID, and optional API key;
+   saving refreshes the chat model list. Connection testing sends a short streaming
+   tool-call request and may incur provider charges. It does not save the draft or
+   verify image support; set image support and token limits from provider documentation.
+   Native provider adapters and advanced reasoning settings remain YAML-configured.
+
+   YAML models remain read-only in this page and take precedence on name conflicts.
+   Managed models are appended after YAML models; edits apply to new configuration
+   snapshots, while active runs retain their existing snapshot. Disabling a model
+   removes it from future selection/resolution, so update any custom-agent or scheduled
+   task definitions that explicitly reference it before disabling it.
+   Managed models are shared by the deployment, not personal API-key profiles, and
+   remain subject to the existing model authorization policy.
+
+   The encrypted catalog and a generated local encryption key are stored in
+   `$DEER_FLOW_HOME/managed-models/` (default `.deer-flow/managed-models/`). Persist
+   and back up the **whole directory**, restrict filesystem access, and share it
+   across Gateway workers/replicas that should use the same catalog. The local key
+   is protected by filesystem permissions; encryption does not protect against
+   someone who can read both files. Losing the key requires restoring the backup.
+   Reads and writes fail if the catalog cannot be decrypted, rather than replacing it.
+   This storage is independent of the SQL backend and works with read-only YAML mounts.
+
    When several models are configured, open either model picker and use the
    star beside a model to favorite it. Favorites appear first in both the main
    chat and Side Chat pickers without changing either chat's selected or

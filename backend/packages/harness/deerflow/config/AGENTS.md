@@ -107,3 +107,9 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
 Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.
+
+The file-backed singleton entrypoints additionally merge administrator-managed shared
+models from the encrypted runtime-home catalog. YAML entries win name conflicts;
+managed changes create new effective snapshots and do not alter an active runtime
+or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and reload
+boundaries. `AppConfig.from_file()` remains YAML-only.
