@@ -20,7 +20,9 @@ import {
   installationQuery,
   useCapabilityCatalog,
 } from "@/core/capabilities/hooks";
+import type { CapabilityInstallation } from "@/core/capabilities/types";
 import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +39,37 @@ import {
   type PluginDirectoryEntry,
 } from "./plugin-directory";
 import { PluginIcon } from "./plugin-icon";
+
+function getPluginStatusLabel(
+  adapter: string,
+  status: CapabilityInstallation | undefined,
+  unavailable: boolean | undefined,
+  t: Translations,
+  labels: ReturnType<typeof capabilityCopy>,
+) {
+  if (unavailable) return labels.adapterError;
+  if (status) {
+    if (status.auth_status === "connected") return labels.connected;
+    if (status.auth_status === "required") return labels.required;
+    if (status.auth_status === "configured") return labels.configured;
+    return labels.installed;
+  }
+  if (adapter === "guide") return t.capabilities.directory.candidate;
+  if (adapter === "lark") return t.capabilities.notInstalled;
+  return labels.notConfigured;
+}
+
+function getPluginActionLabel(
+  adapter: string,
+  installed: boolean,
+  canManage: boolean,
+  t: Translations,
+) {
+  if (installed) return t.capabilities.manage;
+  if (adapter === "guide" || !canManage) return t.capabilities.directory.view;
+  if (adapter === "lark") return t.common.install;
+  return t.capabilities.configure;
+}
 
 export function PluginGallery({ query }: { query: string }) {
   const { t, locale } = useI18n();
@@ -109,23 +142,13 @@ export function PluginGallery({ query }: { query: string }) {
                 capabilityId={plugin.id}
               />
             }
-            label={
-              unavailable
-                ? labels.adapterError
-                : status
-                  ? status.auth_status === "connected"
-                    ? labels.connected
-                    : status.auth_status === "required"
-                      ? labels.required
-                      : status.auth_status === "configured"
-                        ? labels.configured
-                        : labels.installed
-                  : plugin.adapter === "guide"
-                    ? copy.candidate
-                    : plugin.adapter === "lark"
-                      ? t.capabilities.notInstalled
-                      : labels.notConfigured
-            }
+            label={getPluginStatusLabel(
+              plugin.adapter,
+              status,
+              unavailable,
+              t,
+              labels,
+            )}
             onDetails={() => setSelectedId(plugin.id)}
             detailsLabel={`${t.capabilities.details} ${catalogText(plugin.name, locale)}`}
           >
@@ -136,15 +159,7 @@ export function PluginGallery({ query }: { query: string }) {
               aria-label={`${plugin.adapter === "guide" ? copy.guide : t.capabilities.configure} ${catalogText(plugin.name, locale)}`}
               onClick={() => setSelectedId(plugin.id)}
             >
-              {status
-                ? t.capabilities.manage
-                : plugin.adapter === "guide"
-                  ? copy.view
-                  : canManage
-                    ? plugin.adapter === "lark"
-                      ? t.common.install
-                      : t.capabilities.configure
-                    : copy.view}
+              {getPluginActionLabel(plugin.adapter, !!status, canManage, t)}
             </Button>
           </PluginRow>
         ),

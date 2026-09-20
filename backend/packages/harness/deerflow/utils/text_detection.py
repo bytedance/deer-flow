@@ -16,11 +16,12 @@ def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
         return False
 
 
-# Exact matches only; ``_is_active_content_mime_type`` also treats every
+# Exact matches include platform MIME aliases; the helper also treats every
 # ``+xml`` subtype as active content.
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
     "application/xhtml+xml",
+    "image/svg",
     "image/svg+xml",
     "text/xml",
     "application/xml",
@@ -32,10 +33,10 @@ def _is_active_content_mime_type(mime_type: str | None) -> bool:
     """Return whether a browser can run script when rendering *mime_type* inline.
 
     Beyond HTML, this covers every WHATWG XML MIME type (``text/xml``,
-    ``application/xml``, or a ``+xml`` subtype) plus ``text/xsl``, which Blink
-    also renders as XML: any XML document can carry an XHTML-namespaced
-    ``<script>``, so ``report.xml`` or ``feed.rss`` is as dangerous as
-    ``page.html`` when opened in the application origin.
+    ``application/xml``, or a ``+xml`` subtype), Windows' ``image/svg`` alias,
+    and ``text/xsl``, which Blink also renders as XML: any XML document can
+    carry an XHTML-namespaced ``<script>``, so ``report.xml`` or ``feed.rss``
+    is as dangerous as ``page.html`` when opened in the application origin.
     """
     if mime_type is None:
         return False

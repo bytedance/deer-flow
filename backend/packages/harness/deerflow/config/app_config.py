@@ -358,6 +358,7 @@ class AppConfig(BaseModel):
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
     # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
     # call. Private attrs are excluded from serialization.
+    _managed_model_names: set[str] = PrivateAttr(default_factory=set)
     _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
@@ -717,7 +718,9 @@ def get_app_config() -> AppConfig:
         elif _app_config_path == resolved_path and _app_config_signature != current_signature:
             logger.info("Config file content signature changed, reloading AppConfig")
         _load_and_cache_app_config(str(resolved_path))
-    return _app_config
+    from deerflow.config.managed_models import merge_managed_models
+
+    return merge_managed_models(_app_config)
 
 
 def reload_app_config(config_path: str | None = None) -> AppConfig:
@@ -733,7 +736,9 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
     Returns:
         The newly loaded AppConfig instance.
     """
-    return _load_and_cache_app_config(config_path)
+    from deerflow.config.managed_models import merge_managed_models
+
+    return merge_managed_models(_load_and_cache_app_config(config_path))
 
 
 def reset_app_config() -> None:

@@ -6,6 +6,7 @@ from langgraph.types import Command
 
 from deerflow.config.agents_config import SOUL_FILENAME, validate_agent_name
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_scope import canonicalize_knowledge_scope
 from deerflow.persistence.agents import get_agent_store
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
@@ -64,6 +65,8 @@ def setup_agent(
             except FileNotFoundError:
                 pass  # First bootstrap has no user-authored label to preserve.
             else:
+                if existing.knowledge_scope is not None:
+                    config_data["knowledge_scope"] = canonicalize_knowledge_scope(existing.knowledge_scope)
                 if existing.display_name is not None:
                     config_data["display_name"] = existing.display_name
             if description:

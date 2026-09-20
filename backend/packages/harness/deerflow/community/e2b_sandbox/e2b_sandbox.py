@@ -438,8 +438,12 @@ class E2BSandbox(Sandbox):
                 continue
             if path_matches(pattern, rel_path):
                 matches.append(entry)
-                if len(matches) >= max_results:
-                    return matches, True
+                # Look one match past the cap before deciding: returning on the
+                # max-th match cannot tell a search that held exactly
+                # ``max_results`` from one that held more, so an exhausted tree
+                # was reported as truncated.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, output.truncated
 
     def grep(
@@ -477,7 +481,7 @@ class E2BSandbox(Sandbox):
             include_pattern = glob.split("/")[-1] or glob
             flags.append(f"--include={include_pattern}")
 
-        per_file_cap = max(max_results, 50)
+        per_file_cap = max(max_results + 1, 50)
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
@@ -526,7 +530,7 @@ class E2BSandbox(Sandbox):
                     line=truncate_line(line_text),
                 )
             )
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Same one-match-past-the-cap rule as glob() above.
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, truncated
