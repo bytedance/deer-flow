@@ -1636,8 +1636,12 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
-unapprovable. Denied hostnames are rejected before DNS resolution, and
-scheduled or otherwise non-interactive runs auto-deny without opening a card.
+unapprovable. Denied hostnames are rejected before DNS resolution.
+Runs in `scheduled`, `webhook`, or `autonomous` interaction mode auto-deny
+without opening a card. These unattended runs proceed with minimal assumptions
+only for low-risk, reversible work; high-risk or irreversible work without
+sufficient authorization returns a structured `BLOCKED` result naming the
+missing decision, even if the model attempts to ask for clarification.
 The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
 Docker's shared default bridge, and rejects ambiguous HTTP field names before
 forwarding. See
