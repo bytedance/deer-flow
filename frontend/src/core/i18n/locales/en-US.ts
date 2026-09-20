@@ -445,6 +445,7 @@ export const enUS: Translations = {
     pleaseWaitStreaming: "Please wait for the current response to finish.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
+    startTurnUnavailable: "Starting a new turn is not permitted for your role.",
   },
 
   // Sidebar
@@ -918,6 +919,10 @@ export const enUS: Translations = {
       "Supports Unicode. Leave blank to use the agent identifier",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
+    settingsKnowledge: "Default knowledge",
+    settingsKnowledgeHint:
+      "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
+    settingsKnowledgeReset: "Use all knowledge bases",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -1046,6 +1051,71 @@ export const enUS: Translations = {
     unavailableShort: "Unavailable",
     setupTitle: (name: string) => `Connect ${name}`,
     setupEditTitle: (name: string) => `Modify ${name}`,
+    wechatQr: {
+      restart: "Scan again",
+      restartHint:
+        "Left the bot screen in WeChat? Start again with a new QR code.",
+      restartKeepCommand:
+        "The command you already copied stays valid until it expires.",
+      autoSave: "Your token will be saved automatically after confirmation.",
+      verifyTitle: "Enter the code shown in WeChat",
+      verifyDescription: "Enter the digits on your phone to finish connecting.",
+      verifyLabel: "Pairing code",
+      verifySubmit: "Continue connecting",
+      verifying: "Verifying…",
+      network: "WeChat is temporarily unreachable. Retrying automatically…",
+      invalid_response:
+        "WeChat returned an unexpected response. Refresh the QR code and try again.",
+      verification_rejected:
+        "The code did not match. Check the digits on your phone and try again.",
+      verification_blocked:
+        "Too many incorrect attempts. Wait a moment, then refresh the QR code.",
+      already_bound:
+        "WeChat says this bot is already linked. Close this dialog and check its connection, or choose a different bot on your phone.",
+      saved: "Token saved securely",
+      savedDescription:
+        "DeerFlow has saved your token on the server and started the WeChat channel.",
+      bindTitle: "One more step: link your account",
+      bindDescription:
+        "Send this command to the bot in WeChat to link it to your DeerFlow account.",
+      bindWaiting: "Waiting for your message in WeChat…",
+      bindLoading: "Preparing your account connection…",
+      bindFailed:
+        "Your token is saved, but account binding could not start. Try again.",
+      bindExpired:
+        "This binding code has expired. Generate a new one; no need to scan again.",
+      bindRetry: "Generate binding code",
+      copyCommand: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      connectedTitle: "WeChat is connected",
+      connectedDescription: "You can now send a message to your bot in WeChat.",
+      done: "Done",
+
+      login: "Scan QR code",
+      manual: "Use token",
+      description: "Connect WeChat to your DeerFlow workspace.",
+      loading: "Generating QR code…",
+      imageTitle: "WeChat login QR code",
+      scan: "Scan this code with WeChat, then confirm on your phone.",
+      scanned: "Code scanned. Confirm the login on your phone.",
+      expired: "This QR code has expired. Generate a new one.",
+      failed: "WeChat login failed or was cancelled. Try again.",
+      confirmed: "WeChat login confirmed.",
+      retry: "Refresh QR code",
+      methodLabel: "Connection method",
+      tokenTitle: "Connect with a bot token",
+      tokenDescription:
+        "Paste your existing WeChat iLink bot token to connect.",
+      tokenPlaceholder: "Paste your bot token",
+      tokenHint:
+        "Don’t have a token? Choose Scan QR code to connect with your phone.",
+      privacy: "Credentials are saved only on your server.",
+      waiting: "Waiting for scan",
+      scannedTitle: "Scan complete",
+      expiredTitle: "QR code expired",
+      failedTitle: "Unable to connect",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
@@ -1209,7 +1279,50 @@ export const enUS: Translations = {
   settings: {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
+    models: {
+      title: "Models",
+      description:
+        "Manage shared models available to users. Models from the server configuration are read-only.",
+      adminOnly:
+        "Only administrators can manage shared models. This feature is unavailable in demos.",
+      add: "Add model",
+      loading: "Loading models…",
+      failed: "Could not complete the request.",
+      reload: "Reload",
+      empty: "No models configured.",
+      yaml: "Server configuration · read-only",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      conflict: "This name is reserved by the server configuration.",
+      edit: "Edit model",
+      enable: "Enable",
+      disable: "Disable",
+      formDescription:
+        "Connect an OpenAI-compatible endpoint. Testing sends a short streaming tool-call request and may incur provider charges.",
+      provider: "Provider",
+      name: "Unique name",
+      displayName: "Display name",
+      endpoint: "Base URL",
+      modelId: "Model ID",
+      keepKey: "Leave blank to keep the saved key",
+      optionalKey: "Optional for endpoints without authentication",
+      clearKey: "Remove the saved API key",
+      contextWindow: "Context window (optional)",
+      maxTokens: "Maximum output tokens (optional)",
+      vision: "Supports image input",
+      cancel: "Cancel",
+      test: "Test connection",
+      working: "Working…",
+      save: "Save",
+      saved: "Model saved",
+      success: "Streaming and tool-call test passed.",
+      tool_call_missing:
+        "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
+      connection_failed:
+        "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+    },
     sections: {
+      models: "Models",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",

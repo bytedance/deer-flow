@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.authz.sandbox_authz import (
     authorize_sandbox_execution,
@@ -38,7 +39,7 @@ _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox
 
 
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
-    return bool(context.get("disable_clarification") or context.get("non_interactive"))
+    return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
 
 class SandboxMiddlewareState(AgentState):

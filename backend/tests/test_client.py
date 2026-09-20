@@ -3,6 +3,9 @@
 import asyncio
 import concurrent.futures
 import json
+import os
+import shutil
+import stat
 import tempfile
 import zipfile
 from enum import Enum
@@ -2709,6 +2712,51 @@ class TestUploads:
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
             assert not (uploads_dir / "a_1.md").exists()
 
+    def test_upload_files_rejects_reuploading_a_file_already_in_the_thread(self, client):
+        """Uploading an existing upload onto itself must not destroy its bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+            existing = uploads_dir / "existing.txt"
+            existing.write_text("IMPORTANT BYTES")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(shutil.SameFileError):
+                    client.upload_files("thread-1", [existing])
+
+            assert existing.read_text() == "IMPORTANT BYTES"
+
+    def test_upload_files_markdown_companion_keeps_converted_permissions(self, client):
+        """The companion stays as readable as the converter wrote it (sandbox reads it)."""
+        if os.chmod not in os.supports_fd:
+            pytest.skip("descriptor-based chmod is unavailable on this platform")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("converted", encoding="utf-8")
+                os.chmod(md_path, 0o644)
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["files"][0]["markdown_file"] == "report.md"
+            companion = uploads_dir / "report.md"
+            assert companion.read_text(encoding="utf-8") == "converted"
+            assert stat.S_IMODE(companion.stat().st_mode) == 0o644
+
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
@@ -4364,6 +4412,80 @@ class TestUploadDeleteSymlink:
 
             assert victim.read_text() == "keep me"
             assert link.is_symlink()
+
+    def test_upload_files_skips_symlinked_destination(self, client):
+        """A symlink planted at an upload name is skipped, not written through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.txt"
+            outside.write_text("original")
+            link = uploads_dir / "note.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            src_dir = tmp_path / "src"
+            src_dir.mkdir()
+            (src_dir / "note.txt").write_text("uploaded")
+            (src_dir / "other.txt").write_text("other")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("thread-1", [src_dir / "note.txt", src_dir / "other.txt"])
+
+            parsed = UploadResponse(**result)
+            assert parsed.success is False
+            assert parsed.skipped_files == ["note.txt"]
+            assert [f.filename for f in parsed.files] == ["other.txt"]
+            assert parsed.message == "Successfully uploaded 1 file(s); skipped 1 unsafe file(s)"
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "other.txt").read_text() == "other"
+
+    def test_upload_files_does_not_write_markdown_companion_through_symlink(self, client):
+        """A symlink planted at the companion name does not receive converted text."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.md"
+            outside.write_text("original")
+            link = uploads_dir / "report.md"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert [f["filename"] for f in result["files"]] == ["report.pdf"]
+            assert "markdown_file" not in result["files"][0]
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "report.pdf").read_bytes() == b"PDF"
 
     def test_upload_filename_with_spaces_and_unicode(self, client):
         """Files with spaces and unicode characters in names upload correctly."""

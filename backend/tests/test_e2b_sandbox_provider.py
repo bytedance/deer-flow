@@ -5429,6 +5429,42 @@ def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tm
     assert result == ([], truncated)
 
 
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    sb = _rs_sandbox(tmp_path)
+
+    if op == "grep":
+        matches, reported = sb.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = sb.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("entries", "truncated"), [(50, False), (51, True)])
+def test_remote_grep_reports_single_file_overflow(tmp_path, entries, truncated) -> None:
+    # The shell command must retain one more match per file than the caller's
+    # cap. Otherwise 51 matches in this single file look complete at a cap of
+    # 50 because the raw-output cap is not reached.
+    source = tmp_path / "src.py"
+    source.write_text("needle\n" * entries, encoding="utf-8")
+
+    matches, reported = _rs_sandbox(tmp_path).grep(str(tmp_path), "needle", max_results=50)
+
+    assert len(matches) == 50
+    assert reported is truncated
+
+
 @pytest.mark.parametrize("op", ["grep", "glob"])
 def test_remote_search_raises_when_the_client_call_fails(op):
     sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE])))

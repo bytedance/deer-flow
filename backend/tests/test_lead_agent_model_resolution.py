@@ -7,7 +7,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec
 
 import pytest
 from langchain.agents import create_agent
@@ -663,7 +663,8 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch):
+@pytest.mark.parametrize("is_bootstrap", [False, True])
+def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch, is_bootstrap):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -679,7 +680,18 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
         "get_available_tools",
         lambda **kwargs: [_named_tool("ask_clarification"), _named_tool("bash")],
     )
-    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    captured_prompt_policy = {}
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", create_autospec(lead_agent_module.build_middlewares, return_value=[]))
+
+    def _capture_prompt_policy(**kwargs):
+        captured_prompt_policy["policy"] = kwargs["interaction_policy"]
+        return "prompt"
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        _capture_prompt_policy,
+    )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
 
@@ -690,11 +702,13 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
                 "thinking_enabled": False,
                 "subagent_enabled": False,
                 "non_interactive": True,
+                "is_bootstrap": is_bootstrap,
             }
         }
     )
 
-    assert [tool.name for tool in result["tools"]] == ["bash"]
+    assert [tool.name for tool in result["tools"]] == (["bash", "setup_agent"] if is_bootstrap else ["bash"])
+    assert captured_prompt_policy["policy"].mode.value == "scheduled"
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):

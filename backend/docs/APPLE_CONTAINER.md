@@ -7,6 +7,8 @@ DeerFlow now supports Apple Container as the preferred container runtime on macO
 Starting with this version, DeerFlow automatically detects and uses Apple Container on macOS when available, falling back to Docker when:
 - Apple Container is not installed
 - Running on non-macOS platforms
+- A restricted sandbox network mode is configured
+- Managed Docker sandboxes need startup reconciliation
 
 This provides better performance on Apple Silicon Macs while maintaining compatibility across all platforms.
 
@@ -48,13 +50,14 @@ container system start
 
 ### Automatic Detection
 
-The `AioSandboxProvider` automatically detects the available container runtime:
+The `LocalContainerBackend` automatically detects the available container runtime:
 
-1. On macOS: Try `container --version`
-   - Success → Use Apple Container
+1. On macOS with open sandbox networking: Try `container --version`
+   - Success and no managed Docker sandboxes → Use Apple Container
+   - Managed Docker sandboxes found → Keep Docker so they remain visible to startup reconciliation
    - Failure → Fall back to Docker
 
-2. On other platforms: Use Docker directly
+2. With restricted sandbox networking or on other platforms: Use Docker directly
 
 ### Runtime Differences
 
@@ -80,9 +83,9 @@ docker stop <id>     # Auto-removes due to --rm
 
 ### Implementation Details
 
-The implementation is in `backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py`:
+The implementation is in `backend/packages/harness/deerflow/community/aio_sandbox/local_backend.py`:
 
-- `_detect_container_runtime()`: Detects available runtime at startup
+- `_detect_runtime()`: Detects available runtime at startup
 - `_start_container()`: Uses detected runtime, skips Docker-specific options for Apple Container
 - `_stop_container()`: Uses appropriate stop command for the runtime
 
@@ -93,14 +96,14 @@ No configuration changes are needed! The system works automatically.
 However, you can verify the runtime in use by checking the logs:
 
 ```
-INFO:deerflow.community.aio_sandbox.aio_sandbox_provider:Detected Apple Container: container version 0.1.0
-INFO:deerflow.community.aio_sandbox.aio_sandbox_provider:Starting sandbox container using container: ...
+INFO:deerflow.community.aio_sandbox.local_backend:Detected Apple Container: container version 0.1.0
+INFO:deerflow.community.aio_sandbox.local_backend:Starting container using container: ...
 ```
 
 Or for Docker:
 ```
-INFO:deerflow.community.aio_sandbox.aio_sandbox_provider:Apple Container not available, falling back to Docker
-INFO:deerflow.community.aio_sandbox.aio_sandbox_provider:Starting sandbox container using docker: ...
+INFO:deerflow.community.aio_sandbox.local_backend:Apple Container not available, falling back to Docker
+INFO:deerflow.community.aio_sandbox.local_backend:Starting container using docker: ...
 ```
 
 ## Container Images
@@ -172,18 +175,17 @@ make clean  # Full cleanup including logs
 
 ## Testing
 
-Test the container runtime detection:
+Test the macOS runtime selection logic:
 
 ```bash
 cd backend
-python test_container_runtime.py
+uv run python -m pytest \
+  tests/test_aio_sandbox_local_backend.py::test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox \
+  tests/test_aio_sandbox_local_backend.py::test_darwin_open_uses_apple_container_without_managed_docker_sandboxes \
+  -q
 ```
 
-This will:
-1. Detect the available runtime
-2. Optionally start a test container
-3. Verify connectivity
-4. Clean up
+These tests mock the runtime commands and require neither Docker nor the Apple Container service.
 
 ## Troubleshooting
 

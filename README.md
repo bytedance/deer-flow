@@ -155,6 +155,31 @@ It is disabled by default; see the linked guide to enable it.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
+   Administrators can also open **Settings → Models** to add, edit, test, and
+   enable/disable shared OpenAI-compatible Chat Completions models without editing
+   `config.yaml`. Enter a unique name, base URL, model ID, and optional API key;
+   saving refreshes the chat model list. Connection testing sends a short streaming
+   tool-call request and may incur provider charges. It does not save the draft or
+   verify image support; set image support and token limits from provider documentation.
+   Native provider adapters and advanced reasoning settings remain YAML-configured.
+
+   YAML models remain read-only in this page and take precedence on name conflicts.
+   Managed models are appended after YAML models; edits apply to new configuration
+   snapshots, while active runs retain their existing snapshot. Disabling a model
+   removes it from future selection/resolution, so update any custom-agent or scheduled
+   task definitions that explicitly reference it before disabling it.
+   Managed models are shared by the deployment, not personal API-key profiles, and
+   remain subject to the existing model authorization policy.
+
+   The encrypted catalog and a generated local encryption key are stored in
+   `$DEER_FLOW_HOME/managed-models/` (default `.deer-flow/managed-models/`). Persist
+   and back up the **whole directory**, restrict filesystem access, and share it
+   across Gateway workers/replicas that should use the same catalog. The local key
+   is protected by filesystem permissions; encryption does not protect against
+   someone who can read both files. Losing the key requires restoring the backup.
+   Reads and writes fail if the catalog cannot be decrypted, rather than replacing it.
+   This storage is independent of the SQL backend and works with read-only YAML mounts.
+
    When several models are configured, open either model picker and use the
    star beside a model to favorite it. Favorites appear first in both the main
    chat and Side Chat pickers without changing either chat's selected or
@@ -1141,8 +1166,8 @@ is off. Set `knowledge_base.scope_selection_enabled: true` in `config.yaml`
 while using the built-in RAGFlow `knowledge_search` provider to allow all
 permitted datasets, selected datasets/files, or no retrieval for a turn. The
 same config flag controls both chat types; when disabled, neither composer
-shows the selector or submits a scope. The choice resets to all when the page
-is refreshed or another conversation is opened; each sent human message keeps
+shows the selector or submits a scope. The choice resets to the custom agent’s saved default (or all when unbound)
+when the page is refreshed or another conversation is opened; each sent human message keeps
 an immutable scope snapshot for replay and history. The Gateway validates
 every snapshot, intersects it with the operator's dataset allowlist, propagates
 the execution-only scope to native and durable subagents, and removes it from
@@ -1150,6 +1175,22 @@ model inputs and external traces. Client-supplied internal runtime controls
 and credentials are also stripped from run context before execution or
 checkpoint persistence. Idempotent retries accept both canonical snapshots and
 legacy raw run inputs, preserving retry compatibility across upgrades.
+Custom agents can save a **Default knowledge** selection from **Agents → Agent
+settings**, including optional file filters or retrieval off. Selecting all
+knowledge bases clears the binding. The same `knowledge_scope` field is available
+on agent create/update APIs and in the agent's stored configuration; omitted
+updates preserve it and `null` clears it. It is a default, not an authorization
+boundary: an explicit per-message selection overrides it, and the operator's
+allowlist still applies at retrieval time. Gateway runs without a message scope
+(including scheduled and channel turns) use and snapshot the saved default even
+when the composer selector is hidden. Regenerate/resume retain the original
+turn's scope, including legacy unscoped turns, rather than picking up later
+configuration changes. Unknown or unavailable selections never broaden retrieval.
+Idempotent retries keep the original run and scope when a default is added,
+changed, or cleared, including unscoped runs accepted before this feature.
+This default applies to Gateway-hosted custom-agent turns; direct harness/client
+integrations continue to supply their own execution scope.
+
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
@@ -1329,6 +1370,8 @@ The Web UI reports completed task time once per run. This is total wall-clock ti
 
 While a response streams, reasoning-only messages stay in the processing panel, including Anthropic thinking blocks. Once answer content arrives alongside reasoning, it appears in an assistant bubble.
 
+Literal `<think>` tags in fenced, indented, or inline code remain part of the answer and its copied text, rather than being moved into the reasoning disclosure. This includes fences opened on list-item lines: real reasoning after the code is still extracted. Unfinished inline code spans are preserved while streaming within a paragraph, but end at a blank line or an interrupting heading, list, thematic break or fence. Indented paragraph continuations do not start a code block.
+
 In the Web UI, the latest completed user turn can also be edited and rerun from the message toolbar. DeerFlow restores the conversation checkpoint before that user message, submits the edited text as a new user message, and hides the superseded turn once the replay is in progress or succeeds. This is a conversation-state replay only: files, memory updates, and external tool side effects are not undone.
 
 Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
@@ -1415,6 +1458,8 @@ Supported commands:
 After each Gateway-backed run, DeerFlow evaluates the visible conversation against the active goal with a non-thinking evaluator model. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the goal is satisfied, DeerFlow clears it automatically and publishes the updated thread state.
 
 The Web UI shows the active goal above the composer. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
+
+When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <completion condition>` before preparing the thread or saving the goal, and keeps your draft for retry. Goal status, goal clearing, and `/compact` remain governed by their own endpoint permissions.
 
 ### Manual Context Compaction
 
@@ -1593,8 +1638,12 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
-unapprovable. Denied hostnames are rejected before DNS resolution, and
-scheduled or otherwise non-interactive runs auto-deny without opening a card.
+unapprovable. Denied hostnames are rejected before DNS resolution.
+Runs in `scheduled`, `webhook`, or `autonomous` interaction mode auto-deny
+without opening a card. These unattended runs proceed with minimal assumptions
+only for low-risk, reversible work; high-risk or irreversible work without
+sufficient authorization returns a structured `BLOCKED` result naming the
+missing decision, even if the model attempts to ask for clarification.
 The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
 Docker's shared default bridge, and rejects ambiguous HTTP field names before
 forwarding. See

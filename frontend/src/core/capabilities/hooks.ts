@@ -30,11 +30,7 @@ export function useCapabilityCatalog() {
   });
 }
 export function useCapabilityInstallations(adapter: string) {
-  return useQuery({
-    queryKey: ["capabilities", "installations", adapter],
-    queryFn: () =>
-      request<InstallationList>(`installations/${encodeURIComponent(adapter)}`),
-  });
+  return useQuery(installationQuery(adapter));
 }
 export function useInstallCapability() {
   const client = useQueryClient();

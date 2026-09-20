@@ -1,21 +1,14 @@
 ### Middleware Chain
 
-Compaction preserves all state-level `SystemMessage`s as framework instructions,
-including untagged legacy reminders. Transient instructions belong in request
-wrappers. A fully rescued partition skips compaction.
+Compaction keeps state `SystemMessage`s; transient instructions use request
+wrappers, and fully rescued partitions skip compaction. If latest-user rescue
+empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;
+mixed windows keep normal anchoring and final-message fallback. Budget raw text
+before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
+LangChain default.
 
-After latest-user rescue, if the inherited trimmer empties an AI/Tool-only
-window, format it and use `_build_summary_input_text(strategy="last")`.
-Keep normal human-anchored trimming and the final-message fallback for mixed
-windows whose human anchor falls outside the token-limited tail; head-first
-restoration can lose recent tool results. Tail truncation prefixes `\n...\n`
-only when marker and content fit. Budget raw sections before HTML escaping,
-wrappers, and prompt (not the final request); escape after trimming to preserve
-entities. Pass `trim_tokens_to_summarize=None` explicitly through the factory;
-omission restores LangChain's 4000-token default.
-
-Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
-Completed is not accepted; retain useful work and address acceptance gaps.
+Delegation verdicts are untrusted: revalidate persisted values, ignore malformed
+ones, and treat completed work as reusable evidence rather than acceptance.
 
 On new user turns, DurableContext cancels earlier-run unanswered delegations.
 It preserves resumes, same-run continuations, and entries without `run_id`.
@@ -79,7 +72,7 @@ strict providers reject.
    their narrower discovery allowlists never rebuild the shared thread view or
    force eager sandbox acquisition.
 8. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request
-9. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Async cancellation at admission, provider execution, retry events, or backoff releases only the call's own half-open probe (ownership assigned under the circuit lock), then propagates unchanged, without retry or failure accounting.
+9. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Sync and async calls carry circuit-generation ownership; only the current owner may settle or release a half-open probe, so stale completions cannot affect a newer recovery attempt. Cancellation propagates unchanged without retry or failure accounting.
 10. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](../../../../../docs/GUARDRAILS.md).
 
    Every guardrail decision path publishes a neutral
