@@ -224,10 +224,13 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
 
     # HTTP auth middleware does not run for WebSockets. Live is bidirectional,
     # so even a viewer must have the same write permission as REST navigation.
+    # _authenticate_ws accepts session cookies or the auth-disabled user, not
+    # internal-auth tokens. Both sources are non-internal, including the
+    # synthetic admin used when authentication is disabled.
     try:
         permissions = await resolve_route_permissions(user, is_internal=False)
     except Exception:
-        logger.warning("Failed to resolve browser stream permissions")
+        logger.warning("Failed to resolve browser stream permissions", exc_info=True)
         await websocket.close(code=4501)
         return
     if Permissions.THREADS_WRITE not in permissions:

@@ -172,7 +172,7 @@ async def test_browser_stream_uses_shared_authorization_failure_policy(monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error", [ValueError("synthetic config error"), asyncio.CancelledError()])
-async def test_browser_stream_authorization_setup_error_or_cancellation_never_accepts(monkeypatch, error):
+async def test_browser_stream_authorization_setup_error_or_cancellation_never_accepts(monkeypatch, caplog, error):
     monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=get_auth_disabled_user()))
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", MagicMock(side_effect=error))
     websocket = MagicMock()
@@ -188,6 +188,14 @@ async def test_browser_stream_authorization_setup_error_or_cancellation_never_ac
     else:
         await browser.browser_stream(websocket, "test-thread")
         websocket.close.assert_awaited_once_with(code=4501)
+    records = [record for record in caplog.records if record.name == browser.logger.name and record.getMessage() == "Failed to resolve browser stream permissions"]
+    if isinstance(error, asyncio.CancelledError):
+        assert records == []
+    else:
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[1] is error
+        assert records[0].exc_info[2] is not None
     negotiate.assert_not_awaited()
     websocket.app.state.thread_store.get.assert_not_called()
 
