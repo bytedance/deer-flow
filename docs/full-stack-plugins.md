@@ -42,6 +42,12 @@ Tool names are namespace-derived and collision-checked. Tool inputs are bounded 
 inputs up to 256 KiB and have a 30-second timeout. Cancellation does not guarantee
 rollback of external effects or already-running worker-thread operations.
 
+Durable `batch_task` workers pin the Gateway app's extension snapshot at startup
+and use it for both plugin tools and subagent execution. Recovered items use the
+new worker's snapshot after restart; no Python snapshot is stored in the durable
+`execution_spec`. Standalone batch services without an explicit snapshot capture
+the process default once at construction.
+
 ## Browser API
 
 The authenticated host exposes:

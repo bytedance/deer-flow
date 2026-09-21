@@ -554,6 +554,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 repository=batch_repo,
                 config=subagent_batches_config,
                 runtime_config=subagent_runtime_config,
+                extensions=getattr(app.state, "extensions", None),
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:
