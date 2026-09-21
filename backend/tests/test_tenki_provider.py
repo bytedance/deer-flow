@@ -522,6 +522,12 @@ def test_read_file_supports_bounded_ranges() -> None:
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising: the tool layer's
+    # "(start_line exceeds file length)" message and the truncated-read
+    # continuation path both depend on that contract.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    # A negative start clamps to the first line instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == ("line 1\nline 2\nline 3\nline 4\nline 5")
 
 
 def test_download_missing_file_raises_oserror() -> None:
