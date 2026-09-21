@@ -32,7 +32,8 @@ _POLICY_DECISION_VERSION = 2
 _POLICY_SOURCE_PASSIVE = "passive"
 _POLICY_SOURCE_SLASH = "slash"
 _POLICY_SOURCE_SKILL_CONTEXT = "skill_context"
-_POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLICY_SOURCE_SKILL_CONTEXT})
+_POLICY_SOURCE_MANDATORY = "mandatory"
+_POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLICY_SOURCE_SKILL_CONTEXT, _POLICY_SOURCE_MANDATORY})
 _MISSING_POLICY_DECISION = object()
 _TOOL_SEARCH_NAME = "tool_search"
 
@@ -53,6 +54,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self,
         *,
         available_skills: set[str] | None = None,
+        mandatory_skill_paths: tuple[str, ...] = (),
         app_config: AppConfig | None = None,
         user_id: str | None = None,
         slash_source_owner_token: str,
@@ -61,6 +63,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
             raise ValueError("slash_source_owner_token must be a non-empty string")
         self._available_skills = set(available_skills) if available_skills is not None else None
+        self._mandatory_skill_paths = tuple(mandatory_skill_paths)
         self._app_config = app_config
         self._user_id = user_id
         self._slash_source_owner_token = slash_source_owner_token
@@ -74,6 +77,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         return get_or_new_skill_storage()
 
     def _active_policy(self, request: ModelRequest | ToolCallRequest) -> _PolicySignature:
+        if self._mandatory_skill_paths:
+            return _POLICY_SOURCE_MANDATORY, self._mandatory_skill_paths
         context = getattr(getattr(request, "runtime", None), "context", None)
         slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
         if slash_path is not None:
@@ -137,13 +142,17 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return [], True
         return active, False
 
-    def _allowed_names_for_paths(self, paths: tuple[str, ...]) -> set[str] | None:
+    def _allowed_names_for_paths(self, paths: tuple[str, ...], *, strict: bool = False) -> set[str] | None:
         active_skills, policy_failed = self._active_skills_for_paths(paths)
         if policy_failed:
+            if strict:
+                return set()
             return set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
         allowed = allowed_tool_names_for_skills(active_skills)
         if allowed is None:
             return None
+        if strict:
+            return allowed
         return allowed | set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
 
     @staticmethod
@@ -194,12 +203,12 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         policy: _PolicySignature | None = None,
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
-        _, paths = resolved_policy
+        source, paths = resolved_policy
         context = self._runtime_context(request)
         decision = self._read_policy_decision(context, resolved_policy)
         if decision is not _MISSING_POLICY_DECISION:
             return decision
-        return self._allowed_names_for_paths(paths)
+        return self._allowed_names_for_paths(paths, strict=source == _POLICY_SOURCE_MANDATORY)
 
     def _filter_model_request(
         self,
@@ -209,8 +218,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         refresh_decision: bool = False,
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
-        _, paths = resolved_policy
-        allowed = self._allowed_names_for_paths(paths) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
+        source, paths = resolved_policy
+        allowed = self._allowed_names_for_paths(paths, strict=source == _POLICY_SOURCE_MANDATORY) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
         if refresh_decision:
             self._store_policy_decision(request, resolved_policy, allowed)
         if allowed is None:

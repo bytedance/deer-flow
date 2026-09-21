@@ -19,6 +19,7 @@ from deerflow.agents.middlewares import summarization_middleware as summarizatio
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
@@ -385,6 +386,37 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
     )
 
     assert [tool.name for tool in result["tools"]] == ["bash"]
+
+
+def test_custom_agent_tool_names_is_a_hard_assembly_allowlist(monkeypatch):
+    """Configured, built-in, and MCP-shaped tools are filtered before binding."""
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    def _named_tool(name: str):
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    agent_config = AgentConfig(name="isolated", tool_names=["search_llm_wiki"])
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name: agent_config)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **kwargs: [_named_tool("search_llm_wiki"), _named_tool("read_file"), _named_tool("mcp_sensitive_tool")],
+    )
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"agent_name": "isolated", "model_name": "safe-model", "thinking_enabled": False}},
+        app_config=app_config,
+    )
+
+    assert [tool.name for tool in result["tools"]] == ["search_llm_wiki"]
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):

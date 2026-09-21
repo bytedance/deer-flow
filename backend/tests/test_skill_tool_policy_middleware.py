@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import ToolRuntime
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
@@ -73,11 +73,12 @@ def _skill(name: str, allowed_tools, *, enabled=True):
     )
 
 
-def _middleware(skills, *, available_skills=None):
+def _middleware(skills, *, available_skills=None, mandatory_skill_paths=()):
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
     middleware = SkillToolPolicyMiddleware(
         available_skills=available_skills,
+        mandatory_skill_paths=mandatory_skill_paths,
         slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN,
     )
     middleware._storage = lambda: StorageStub(skills)
@@ -167,6 +168,22 @@ def test_slash_activated_skill_filters_first_model_call_and_task():
     filtered = middleware._filter_model_request(request)
 
     assert _tool_names(filtered) == ["read_file", "review_skill_package"]
+
+
+def test_mandatory_skill_filters_tools_before_any_skill_activation():
+    skill = _skill("regional-llm-wiki-qa", ["search_llm_wiki", "read_llm_wiki_page"])
+    middleware = _middleware(
+        [skill],
+        mandatory_skill_paths=(skill.get_container_file_path(),),
+    )
+    request = ModelRequestStub([NamedTool("search_llm_wiki"), NamedTool("read_llm_wiki_page"), NamedTool("read_file"), NamedTool("bash")])
+
+    filtered = middleware._filter_model_request(request)
+
+    assert _tool_names(filtered) == ["search_llm_wiki", "read_llm_wiki_page"]
+    blocked = middleware.wrap_tool_call(ToolRequestStub("read_file"), lambda _: "must not run")
+    assert isinstance(blocked, ToolMessage)
+    assert blocked.status == "error"
 
 
 @pytest.mark.parametrize("active_source", ["slash", "skill_context"])

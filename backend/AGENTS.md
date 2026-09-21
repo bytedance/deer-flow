@@ -422,6 +422,8 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
+**Hard custom-Agent capability boundary:** `AgentConfig.tool_names` is an optional operator-authored exact allowlist applied after all configured, built-in, MCP, and deferred tools are assembled and before model binding. A non-null list must also gate deferred `tool_search`, `describe_skill`, memory tools, and Agent self-management tools; it is not equivalent to `tool_groups`, which only filters configured tools. `mandatory_skills` is a subset of the Agent's explicit `skills` allowlist and must consist of enabled public Skills without required secrets. Their validated instructions are injected before the first model call and their `allowed-tools` declaration is continuously enforced by `SkillToolPolicyMiddleware`. Do not expose either field through self-service Agent mutation APIs. The Regional LLM Wiki Agent uses this mechanism together with manifest-gated Gateway-local tools; its published-release mount must never be configured in `sandbox.mounts`.
+
 Scheduled-task runtime note:
 - Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
 

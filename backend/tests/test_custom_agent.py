@@ -104,6 +104,24 @@ class TestAgentConfig:
         assert cfg.model == "gpt-4"
         assert cfg.tool_groups is None
 
+    def test_isolated_agent_tool_and_mandatory_skill_fields(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        cfg = AgentConfig(
+            name="regional-llm-wiki",
+            tool_names=["search_llm_wiki", "read_llm_wiki_page"],
+            skills=["regional-llm-wiki-qa"],
+            mandatory_skills=["regional-llm-wiki-qa"],
+        )
+        assert cfg.tool_names == ["search_llm_wiki", "read_llm_wiki_page"]
+        assert cfg.mandatory_skills == ["regional-llm-wiki-qa"]
+
+    def test_mandatory_skill_requires_explicit_agent_skill_allowlist(self):
+        from deerflow.config.agents_config import AgentConfig
+
+        with pytest.raises(ValueError, match="explicit skills allowlist"):
+            AgentConfig(name="regional-llm-wiki", mandatory_skills=["regional-llm-wiki-qa"])
+
 
 # ===========================================================================
 # 3. load_agent_config

@@ -163,16 +163,49 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
+    # ``None`` preserves the legacy capability model.  A configured list is
+    # an assembly-time allowlist applied after configured, built-in, and MCP
+    # tools have been collected, before any tool schema reaches the model.
+    # This is deliberately operator-authored rather than exposed by the
+    # self-service Agent editing API.
+    tool_names: list[str] | None = None
     # skills controls which skills are discoverable and may be activated by the
     # agent. It does not activate their allowed-tools policies at construction:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Skills whose complete, validated public package instructions are injected
+    # before the first model call.  This avoids requiring generic ``read_file``
+    # authority merely to load a security-critical workflow.
+    mandatory_skills: list[str] | None = None
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
     github: GitHubAgentConfig | None = None
+
+    @field_validator("tool_names", "skills", "mandatory_skills")
+    @classmethod
+    def _validate_unique_names(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError("Agent tool and skill names must be non-empty strings.")
+        normalized = [value.strip() for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Agent tool and skill names must not contain duplicates.")
+        return normalized
+
+    @model_validator(mode="after")
+    def _mandatory_skills_must_be_available(self) -> "AgentConfig":
+        if not self.mandatory_skills:
+            return self
+        if self.skills is None:
+            raise ValueError("mandatory_skills requires an explicit skills allowlist.")
+        missing = sorted(set(self.mandatory_skills) - set(self.skills))
+        if missing:
+            raise ValueError(f"mandatory_skills must also be present in skills: {missing}")
+        return self
 
 
 # Fields explicitly managed by the agent-update surfaces (the

@@ -25,6 +25,7 @@ from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+from deerflow.config.regional_llm_wiki_config import RegionalLlmWikiConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -158,6 +159,7 @@ class AppConfig(BaseModel):
     )
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
+    regional_llm_wiki: RegionalLlmWikiConfig = Field(default_factory=RegionalLlmWikiConfig, description="Gateway-local read-only Regional LLM Wiki release reader configuration")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
     skill_scan: SkillScanConfig = Field(default_factory=SkillScanConfig, description="Native deterministic skill safety scanning configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")

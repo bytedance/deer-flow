@@ -631,6 +631,9 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  # Dedicated Gateway-local release reader. Do not add its runtime root to
+  # sandbox.mounts: only the regional-llm-wiki Agent should receive these tools.
+  - name: regional-llm-wiki
 
 # ============================================================================
 # Tools Configuration
@@ -912,6 +915,37 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # Dedicated, manifest-gated LLM Wiki tools. They receive IDs only and read
+  # the Gateway's read-only published-release bind mount; they never expose
+  # arbitrary filesystem paths to the model.
+  - name: search_llm_wiki
+    group: regional-llm-wiki
+    use: deerflow.tools.builtins.regional_llm_wiki_tool:search_llm_wiki
+
+  - name: read_llm_wiki_page
+    group: regional-llm-wiki
+    use: deerflow.tools.builtins.regional_llm_wiki_tool:read_llm_wiki_page
+
+  - name: read_llm_wiki_evidence
+    group: regional-llm-wiki
+    use: deerflow.tools.builtins.regional_llm_wiki_tool:read_llm_wiki_evidence
+
+  - name: get_llm_wiki_release_state
+    group: regional-llm-wiki
+    use: deerflow.tools.builtins.regional_llm_wiki_tool:get_llm_wiki_release_state
+
+# ============================================================================
+# Regional LLM Wiki release reader (disabled by default)
+# ============================================================================
+# The runtime root is mounted into the Gateway container only.  Do NOT repeat
+# this path under sandbox.mounts, otherwise generic file tools could read it.
+regional_llm_wiki:
+  enabled: false
+  runtime_root: /mnt/regional-llm-wiki-runtime
+  max_search_results: 5
+  max_page_chars: 24000
+  max_evidence_chars: 16000
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)

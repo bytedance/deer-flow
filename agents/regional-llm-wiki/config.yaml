@@ -1,0 +1,14 @@
+name: regional-llm-wiki
+description: 基于已发布区域 LLM Wiki 的只读、可追溯知识问答
+tool_groups:
+  - regional-llm-wiki
+tool_names:
+  - search_llm_wiki
+  - read_llm_wiki_page
+  - read_llm_wiki_evidence
+  - get_llm_wiki_release_state
+  - ask_clarification
+skills:
+  - regional-llm-wiki-qa
+mandatory_skills:
+  - regional-llm-wiki-qa

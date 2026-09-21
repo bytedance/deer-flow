@@ -24,6 +24,8 @@ while its standalone callers keep the default). Any new in-graph
 
 from __future__ import annotations
 
+import hashlib
+import html
 import logging
 import secrets
 
@@ -50,7 +52,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
 from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
-from deerflow.skills.types import Skill
+from deerflow.skills.types import Skill, SkillCategory
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,97 @@ def _append_memory_tools_without_name_conflicts(tools: list) -> None:
             continue
         tools.append(memory_tool)
         existing_names.add(memory_tool.name)
+
+
+def _filter_tools_by_agent_allowlist(tools: list, tool_names: list[str] | None) -> list:
+    """Apply an operator-authored custom-Agent tool allowlist.
+
+    The filter deliberately runs over the fully assembled configured catalog,
+    including built-ins and MCP tools.  It is therefore a capability boundary,
+    unlike an instruction in SOUL.md or a group filter that only sees ordinary
+    configured tools.
+    """
+    if tool_names is None:
+        return tools
+    allowed = set(tool_names)
+    return [tool for tool in tools if getattr(tool, "name", None) in allowed]
+
+
+def _load_mandatory_skills(
+    agent_config,
+    enabled_skills: list[Skill],
+    *,
+    app_config: AppConfig,
+    user_id: str | None,
+) -> tuple[str, ...]:
+    """Return canonical container paths for an Agent's mandatory public skills.
+
+    The complete content is rendered separately into the system prompt.  Keeping
+    canonical paths here lets ``SkillToolPolicyMiddleware`` apply the same
+    allowed-tools declaration before the first model call.
+    """
+    names = getattr(agent_config, "mandatory_skills", None) if agent_config else None
+    if not names:
+        return ()
+    by_name = {skill.name: skill for skill in enabled_skills}
+    missing = [name for name in names if name not in by_name]
+    if missing:
+        raise ValueError(f"Mandatory skills are not enabled: {missing}")
+    selected = [by_name[name] for name in names]
+    non_public = [skill.name for skill in selected if skill.category != SkillCategory.PUBLIC]
+    if non_public:
+        raise ValueError(f"Mandatory skills must be public skills: {non_public}")
+    with_secrets = [skill.name for skill in selected if skill.required_secrets]
+    if with_secrets:
+        raise ValueError(f"Mandatory skills may not require secrets: {with_secrets}")
+
+    if user_id:
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+    else:
+        from deerflow.skills.storage import get_or_new_skill_storage
+
+        storage = get_or_new_skill_storage(app_config=app_config)
+    root = storage.get_container_root()
+    return tuple(skill.get_container_file_path(root) for skill in selected)
+
+
+def _render_mandatory_skills_prompt(
+    paths: tuple[str, ...],
+    enabled_skills: list[Skill],
+    *,
+    app_config: AppConfig,
+    user_id: str | None,
+) -> str:
+    """Safely inject validated mandatory public-Skill instructions into the prompt."""
+    if not paths:
+        return ""
+    by_path = {skill.get_container_file_path(app_config.skills.container_path): skill for skill in enabled_skills}
+    if user_id:
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+    else:
+        from deerflow.skills.storage import get_or_new_skill_storage
+
+        storage = get_or_new_skill_storage(app_config=app_config)
+
+    rendered: list[str] = []
+    for path in paths:
+        skill = by_path.get(path)
+        if skill is None:
+            raise ValueError("Mandatory skill path could not be resolved from enabled skills.")
+        safe_file = storage.validate_skill_file_path(skill.skill_file)
+        content = safe_file.read_text(encoding="utf-8")
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        rendered.append(
+            f'<mandatory_skill name="{html.escape(skill.name, quote=True)}" '
+            f'path="{html.escape(path, quote=True)}" sha256="{digest}">\n'
+            f'<skill_content encoding="xml-escaped">\n{html.escape(content, quote=False)}\n</skill_content>\n'
+            "</mandatory_skill>"
+        )
+    return "\n<mandatory_skills>\n" + "\n".join(rendered) + "\n</mandatory_skills>\n"
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -246,6 +339,7 @@ def build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     available_skills: set[str] | None = None,
+    mandatory_skill_paths: tuple[str, ...] = (),
     app_config: AppConfig | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
@@ -305,6 +399,7 @@ def build_middlewares(
     middlewares.append(
         SkillToolPolicyMiddleware(
             available_skills=available_skills,
+            mandatory_skill_paths=mandatory_skill_paths,
             app_config=resolved_app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
@@ -538,6 +633,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         config["callbacks"] = [*existing, *tracing_callbacks]
 
     enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    mandatory_skill_paths = _load_mandatory_skills(
+        agent_config,
+        enabled_skills,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+    )
+    mandatory_skills_prompt = _render_mandatory_skills_prompt(
+        mandatory_skill_paths,
+        enabled_skills,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+    )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -623,20 +730,23 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
-    configured_tools = raw_tools + extra_tools
+    tool_names = agent_config.tool_names if agent_config else None
+    configured_tools = _filter_tools_by_agent_allowlist(raw_tools + extra_tools, tool_names)
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
-    final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+    allow_tool_search = tool_names is None or "tool_search" in tool_names
+    final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled and allow_tool_search)
     mcp_routing_middleware = build_mcp_routing_middleware(
         final_tools,
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(configured_tools, deferred_names=setup.deferred_names)
-    if skill_setup.describe_skill_tool:
+    if skill_setup.describe_skill_tool and (tool_names is None or skill_setup.describe_skill_tool.name in tool_names):
         final_tools.append(skill_setup.describe_skill_tool)
     if should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(final_tools)
+    final_tools = _filter_tools_by_agent_allowlist(final_tools, tool_names)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
@@ -645,6 +755,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             model_name=model_name,
             agent_name=agent_name,
             available_skills=available_skills,
+            mandatory_skill_paths=mandatory_skill_paths,
             app_config=resolved_app_config,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
@@ -661,6 +772,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
-        ),
+        )
+        + mandatory_skills_prompt,
         state_schema=ThreadState,
     )
