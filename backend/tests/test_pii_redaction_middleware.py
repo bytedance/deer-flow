@@ -574,7 +574,7 @@ class _RecordingPiiModel(FakeToolCallingModel):
         self.seen.append(text)
         if self.echo_summary:
             # Preserve the exact placeholder received, rather than inventing one.
-            token = re.search(r"\[EMAIL_[0-9a-f]{6}\]", text).group(0)
+            token = re.search(r"\[EMAIL_[0-9a-f]{32}\]", text).group(0)
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"Alice's email is {token}"))])
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 

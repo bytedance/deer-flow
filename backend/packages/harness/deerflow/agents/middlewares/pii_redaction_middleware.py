@@ -18,7 +18,7 @@ Scope model (mirrors the structural guardrails):
 * the user-message rewrite is request-scoped — thread state keeps the raw text,
   so the UI still shows the original message and the whole conversation is
   re-redacted on every model call. Placeholders are value-derived
-  (``[EMAIL_1a2b3c]``): the same raw value always renders the same token, so
+  (a 128-bit digest of the value): the same raw value always renders the same token, so
   identities stay stable across turns, compaction, enqueues, and downstream
   content-signature deduplication — without any stored mapping;
 * tool-result redaction runs at the tool boundary (``wrap_tool_call``) with the
@@ -213,19 +213,20 @@ def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> lis
 
 
 def _placeholder_token(category: str, value: str) -> str:
-    """Value-derived, deterministic placeholder: ``[EMAIL_1a2b3c]``.
+    """Value-derived, deterministic placeholder: ``[EMAIL_<32 hex chars>]`` (128-bit digest).
 
     Sequential allocation is order-dependent: the same unchanged message
     re-redacted in a later batch can get a different token, which breaks
     downstream content-signature deduplication (e.g. OpenViking capture) and
     cross-turn identity. A pure function of the matched value keeps the token
     stable across batches, seams, and enqueues — with no shared state and no
-    stored mapping. The short unkeyed hash is an egress-hygiene trade, not an
+    stored mapping. The unkeyed hash is an egress-hygiene trade, not an
     adversarial control: a known-format value can be confirmed by guessing,
-    which masking does not claim to prevent.
+    which masking does not claim to prevent. The 128-bit truncation keeps
+    distinct identities collision-free at any realistic volume.
     """
     digest = hashlib.sha256(f"{category}\x00{value}".encode()).hexdigest()
-    return f"[{category.upper()}_{digest[:6]}]"
+    return f"[{category.upper()}_{digest[:32]}]"
 
 
 class _Redactor:

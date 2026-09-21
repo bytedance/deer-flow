@@ -165,3 +165,30 @@ def test_non_text_block_text_field_redacted(monkeypatch):
     call = _run(mw, manager, monkeypatch, [HumanMessage([{"type": "custom_card", "text": "alice@example.com"}])])
     block = call.args[1][0].content[0]
     assert block["text"] == EMAIL_TOKEN
+
+
+def test_tool_argument_keys_redacted(monkeypatch):
+    # Review round 6: tool arguments can carry user data in mapping keys.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "memory_search", "args": {"contacts": {"alice@example.com": "manager"}}, "id": "call_1"},
+        ],
+    )
+    call = _run(mw, manager, monkeypatch, [HumanMessage("hi"), ai])
+    args = call.args[1][1].tool_calls[0]["args"]
+    assert args["contacts"] == {EMAIL_TOKEN: "manager"}
+    assert "alice@example.com" not in str(args)
+
+
+def test_distinct_identities_keep_distinct_tokens():
+    # Review round 6: a 24-bit truncation collided distinct identities; at
+    # 128 bits the review's collision pair stays distinct, including when
+    # both appear together in one message.
+    cfg = PiiRedactionConfig(enabled=True)
+    a = redact_text("contact3513@example.com", cfg)
+    b = redact_text("contact3727@example.com", cfg)
+    assert a != b
+    both = redact_text("contact3513@example.com and contact3727@example.com", cfg)
+    assert a in both and b in both

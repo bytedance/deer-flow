@@ -75,13 +75,25 @@ def _redact_tool_call(call: dict, redactor: _Redactor) -> dict:
 
 
 def _redact_strings(value: object, redactor: _Redactor) -> object:
-    """Redact every string leaf in a JSON-like *value* tree."""
+    """Redact every string leaf in a JSON-like *value* tree, keys included.
+
+    Tool arguments can carry user data in mapping keys (e.g.
+    ``{"contacts": {"alice@example.com": "manager"}}``), so string keys are
+    redacted along with values. Two distinct raw keys redacting to the same
+    token would require a sha256 collision; if a redacted key does equal
+    another key already present in the rebuilt dict, the entries merge —
+    accepted, since at 128 bits that only happens for identical identities.
+    """
     if isinstance(value, str):
         return redactor.redact(value)
     if isinstance(value, list):
         return [_redact_strings(item, redactor) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_strings(item, redactor) for key, item in value.items()}
+        rebuilt = {}
+        for key, item in value.items():
+            new_key = redactor.redact(key) if isinstance(key, str) else key
+            rebuilt[new_key] = _redact_strings(item, redactor)
+        return rebuilt
     return value
 
 
