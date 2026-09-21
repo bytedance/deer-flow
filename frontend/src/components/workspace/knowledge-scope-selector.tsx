@@ -241,12 +241,16 @@ export function KnowledgeScopeSelector({
   selection,
   disabled = false,
   unavailableReason,
+  description,
+  showLabel = false,
   onChange,
 }: {
   agentName: string;
   selection: KnowledgeScopeSelection;
   disabled?: boolean;
   unavailableReason?: string;
+  description?: string;
+  showLabel?: boolean;
   onChange: (selection: KnowledgeScopeSelection) => void;
 }) {
   const { t } = useI18n();
@@ -340,12 +344,13 @@ export function KnowledgeScopeSelector({
       )}
       data-testid="knowledge-scope-trigger"
       disabled={disabled || Boolean(unavailableReason)}
-      size="icon-sm"
+      size={showLabel ? "sm" : "icon-sm"}
       type="button"
       variant="ghost"
       onClick={() => setOpen(true)}
     >
       <DatabaseIcon className="size-4" />
+      {showLabel && label}
     </Button>
   );
 
@@ -355,7 +360,9 @@ export function KnowledgeScopeSelector({
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t.knowledge.scope.title}</DialogTitle>
-          <DialogDescription>{t.knowledge.scope.description}</DialogDescription>
+          <DialogDescription>
+            {description ?? t.knowledge.scope.description}
+          </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap gap-4 text-sm">
           {(["all", "selected", "disabled"] as const).map((mode) => (

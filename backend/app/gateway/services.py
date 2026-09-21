@@ -8,6 +8,7 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -542,9 +543,9 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 )
 
 # Keys honored only for internally-authenticated callers (the scheduler path).
-# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
+# ``interaction_mode`` and ``non_interactive`` control clarification availability;
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
-_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
+_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "non_interactive"})
 
 # Server-owned authorization and sandbox lifecycle identity fields. These must
 # never be accepted from client-supplied ``body.config.context`` or
@@ -596,11 +597,13 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
 #
-# Both are produced server-side by the channel run policies
+#   ``channel_name``        — trusted channel identity used by interaction policy.
+#
+# These are produced server-side by the channel run policies
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
 
 # Every run-context key an external client may never supply, in either section.
 # The two sets differ only in *where* a legitimate internal caller's value lands
@@ -1744,11 +1747,19 @@ async def start_run(
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
+        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
+        # The ``context`` field is a custom extension for the langgraph-compat layer
+        # that carries agent configuration (model_name, thinking_enabled, etc.).
+        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        if not is_internal_caller:
+            # ``body.config`` is free-form and copied verbatim by
+            # ``build_run_config``; scrub internal-only keys smuggled there.
+            strip_internal_context_keys(config)
+
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
-        scope_messages = scope_graph_input.get("messages")
-        candidate_has_scope = isinstance(scope_messages, list) and any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_messages)
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
         replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
@@ -1768,17 +1779,32 @@ async def start_run(
             if is_scope_recovery
             else None
         )
+        # Match lead-agent assembly: runtime context overrides configurable.
+        # Older API/channel callers may name an agent through context while
+        # retaining lead_agent as their routing assistant ID.
+        scope_runtime_config = dict(config.get("configurable") or {})
+        if isinstance(config.get("context"), dict):
+            scope_runtime_config.update(config["context"])
+        scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
+        # Bootstrap assembly intentionally does not load an agent config: the
+        # new agent may not exist yet and setup_agent creates its definition.
         agent_config = (
             await _load_scope_agent_config(
-                assistant_id=body.assistant_id,
+                assistant_id=scope_assistant_id,
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
             )
-            if candidate_has_scope or recovery_scope is not None
+            if not scope_runtime_config.get("is_bootstrap")
             else None
         )
+        # Keep the pre-default identity even when the agent is initially
+        # unbound: adding a default must not reject an already-accepted retry.
+        # The durable input still exposes the original accepted scope.
+        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
+        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
         admitted_knowledge_scope = admit_message_knowledge_scope(
             scope_graph_input,
-            assistant_id=body.assistant_id,
+            assistant_id=scope_assistant_id,
             app_config=run_ctx.app_config or get_app_config(),
             agent_config=agent_config,
             recovery_scope=recovery_scope,
@@ -1792,15 +1818,6 @@ async def start_run(
             )
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
-        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
-        # The ``context`` field is a custom extension for the langgraph-compat layer
-        # that carries agent configuration (model_name, thinking_enabled, etc.).
-        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
-        if not is_internal_caller:
-            # ``body.config`` is free-form and copied verbatim by
-            # ``build_run_config``; scrub internal-only keys smuggled there.
-            strip_internal_context_keys(config)
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(
             config,
@@ -1960,6 +1977,7 @@ async def start_run(
                     # config built above keeps the secrets for the actual run.
                     kwargs={
                         "input": run_record_input,
+                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                         "config": redact_config_secrets(body.config),
                         **({"conversation_references": conversation_references} if conversation_references else {}),
                     },
@@ -1977,7 +1995,14 @@ async def start_run(
                     # record. Accept the raw request as well for records written
                     # by older Gateway versions, while comparing canonical
                     # retries to the same representation as the stored record.
-                    if (stored_input != body.input and stored_input != run_record_input) or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                    matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
+                    # Pre-feature unscoped records may already contain normalized
+                    # messages, but have no digest. Compare them before injecting
+                    # today's default; explicit scopes and recovery do not use
+                    # this compatibility path.
+                    matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
+                    matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                    if not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",

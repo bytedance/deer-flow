@@ -27,7 +27,10 @@ async function captureThreadStreamOptions(assistantId?: string) {
       isLoading: false,
     }),
     useMutation: rs.fn(),
-    useQuery: rs.fn(),
+    useQuery: () => ({
+      data: [],
+      refetch: rs.fn(),
+    }),
     useQueryClient: () => ({
       invalidateQueries: rs.fn(),
       setQueriesData: rs.fn(),

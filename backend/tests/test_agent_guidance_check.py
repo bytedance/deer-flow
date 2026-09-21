@@ -20,12 +20,14 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/agents/memory/AGENTS.md",
     "backend/packages/harness/deerflow/community/ragflow/AGENTS.md",
     "backend/packages/harness/deerflow/community/tavily/AGENTS.md",
+    "backend/packages/harness/deerflow/community/e2b_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/config/AGENTS.md",
     "backend/packages/harness/deerflow/extensions/AGENTS.md",
     "backend/packages/harness/deerflow/runtime/AGENTS.md",
     "backend/packages/harness/deerflow/sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/mcp/AGENTS.md",
     "backend/packages/harness/deerflow/models/AGENTS.md",
+    "backend/packages/harness/deerflow/persistence/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/migrations/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/user/AGENTS.md",
     "backend/packages/harness/deerflow/reflection/AGENTS.md",
@@ -171,6 +173,18 @@ def test_local_guidance_files_contain_the_split_original_sections() -> None:
         text = (REPO_ROOT / relative_text).read_text(encoding="utf-8")
         assert heading in text, relative_text
         assert "Before changing files in this directory" not in text, relative_text
+
+
+def test_mcp_task_lease_token_migration_is_documented() -> None:
+    guidance = (REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "AGENTS.md").read_text(encoding="utf-8")
+
+    for required in (
+        "0026_mcp_task_lease_tokens.py",
+        "0016_subagent_batches",
+        "lease_token",
+        "notification_lease_token",
+    ):
+        assert required in guidance
 
 
 def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:

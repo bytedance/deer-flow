@@ -941,6 +941,10 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
+  acceptance checks. Readable empty files now satisfy `exists` and
+  `file_written` and deterministically fail `non-empty`, instead of remaining
+  UNVERIFIED. ([#5559])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -1018,6 +1022,15 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
+- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
+  reporting an exactly-full result as truncated. They hold the whole listing —
+  the raw stream is capped above `max_results` and reports its own cut-off — but
+  they returned as soon as they had collected `max_results` filtered matches, so
+  a tree holding exactly that many — and no more — came back flagged as cut off
+  and the tool told the model the result was incomplete. They now look one match
+  past the cap before deciding, the rule AIO's `glob` branches already apply.
+  This concerns the filtered-match cap only; the raw-output cap
+  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2772,6 +2785,20 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Document conversion no longer re-opens the upload by name. The
+  Gateway converted the committed file and the embedded client converted the
+  copy it had just placed in the thread's uploads directory, so a sandbox that
+  replaced that name with a symlink in between had a host file converted into
+  the thread as the `.md` companion. The Gateway now converts a private copy of
+  the staged bytes, read through the descriptor it wrote, and the client
+  converts the caller's own source file. ([#5611])
+- **client:** `DeerFlowClient.upload_files` no longer writes through a
+  symlink. A symlink planted in the sandbox-writable uploads directory, at an
+  upload's name or its Markdown companion's name, made the embedded client
+  overwrite the host file it pointed to while reporting success. The file is
+  now skipped and listed in `skipped_files` with `success: false`, matching
+  the Gateway; an unsafe companion is left out and the upload kept. Copies
+  keep the source's permission bits and timestamps. ([#5578])
 - **uploads:** Deleting an upload no longer follows a symlink to delete a
   different file. A symlink planted in the sandbox-writable uploads directory
   made `DELETE /api/threads/{id}/uploads/{filename}` (and
@@ -4298,5 +4325,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611
