@@ -2271,6 +2271,7 @@ async def sse_consumer(
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    terminal_emitted = True
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
