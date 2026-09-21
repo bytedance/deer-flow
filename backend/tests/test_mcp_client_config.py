@@ -26,6 +26,17 @@ def test_build_server_params_stdio_success():
     }
 
 
+@pytest.mark.parametrize("cwd", [None, ""], ids=["null", "empty"])
+def test_build_server_params_omits_empty_stdio_cwd(cwd: str | None):
+    config = McpServerConfig(command="python", args=["server.py"], cwd=cwd)
+
+    assert build_server_params("local", config) == {
+        "transport": "stdio",
+        "command": "python",
+        "args": ["server.py"],
+    }
+
+
 def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
     monkeypatch.setenv("MCP_TOKEN", "secret")
     monkeypatch.delenv("MISSING_TOKEN", raising=False)

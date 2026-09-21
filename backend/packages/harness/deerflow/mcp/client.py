@@ -27,7 +27,7 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             raise ValueError(f"MCP server '{server_name}' with stdio transport requires 'command' field")
         params["command"] = config.command
         params["args"] = config.args
-        if config.cwd is not None:
+        if config.cwd:
             params["cwd"] = config.cwd
         # Add environment variables if present
         if config.env:

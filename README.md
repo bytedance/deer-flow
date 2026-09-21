@@ -1121,6 +1121,7 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
 both discovery and tool calls; see [MCP configuration](backend/docs/MCP_SERVER.md#stdio-working-directory).
+Omitted, `null`, or empty values keep the default working directories.
 
 Tavily `web_search` also accepts optional `include_domains` and `exclude_domains`
 lists in its `config.yaml` tool entry to control search sources. Non-empty

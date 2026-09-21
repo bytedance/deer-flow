@@ -36,8 +36,9 @@ The directory must exist on the Gateway host (inside the container for Docker).
 Use an absolute path for consistent behavior across launch locations; a
 whole-string environment reference such as `"$MCP_SERVER_CWD"` is also supported.
 The configured directory applies to discovery and subsequent tool calls.
-When `cwd` is omitted or `null`, discovery inherits the Gateway's working
-directory and pooled calls use the thread workspace. HTTP/SSE servers ignore it.
+When `cwd` is omitted, `null`, or an empty string (including an unset environment
+reference), discovery inherits the Gateway's working directory and pooled calls
+use the thread workspace. HTTP/SSE servers ignore it.
 Files created outside the thread's user-data tree are not exposed through the
 sandbox/artifact API.
 
