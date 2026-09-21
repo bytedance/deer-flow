@@ -724,6 +724,20 @@ def test_external_single_system_message_is_not_a_validation_bypass(boundary):
 
 
 @pytest.mark.parametrize("boundary", ["run", "state"])
+def test_external_single_user_message_shorthand_is_preserved(boundary):
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    messages = transform({"messages": {"role": "user", "content": "ordinary"}})["messages"]
+
+    assert len(messages) == 1
+    assert isinstance(messages[0], HumanMessage)
+    assert messages[0].content == "ordinary"
+
+
+@pytest.mark.parametrize("boundary", ["run", "state"])
 @pytest.mark.parametrize("messages", [False, 5, {"oops": "invalid"}, [["system"]], [{"role": ["system"], "content": "private fixture"}]])
 def test_external_malformed_message_shapes_fail_closed(boundary, messages):
     from fastapi import HTTPException

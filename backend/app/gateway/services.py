@@ -359,13 +359,13 @@ def _strip_external_message_metadata(message: Any) -> Any:
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
-    """Strip server-owned keys from a message, in object or raw-dict form, and
-    stamp ``untrusted_input`` where a caller's markers would skip the guardrail.
+    """Strip server-owned keys from message-like values outside ``messages``.
 
-    Callers reach the checkpoint by two different routes and the message is a
-    ``BaseMessage`` on one and a plain dict on the other, so both shapes have
-    to be handled here rather than coercing — coercion would change what the
-    caller asked to be written.
+    The top-level ``messages`` channel is canonicalized and role-checked by
+    ``_normalize_input_messages``. Other middleware-contributed channels may
+    still carry either ``BaseMessage`` objects or raw dictionaries, so this
+    helper preserves those shapes while stripping metadata and stamping
+    ``untrusted_input`` where caller-owned markers would skip the guardrail.
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
@@ -445,18 +445,18 @@ def _normalize_input_messages(
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove server-owned message metadata from caller-supplied state values,
-    and mark messages whose caller-owned markers would skip the input guardrail.
+    """Validate and sanitize caller-supplied state values before checkpointing.
 
-    ``normalize_input`` does this for the run path. The thread-state mutation
-    route writes its values straight into a checkpoint, so without the same
-    treatment an authenticated client can persist forged provenance and
-    transform trails — and those keys exist precisely so a later reader can
-    treat them as facts about what the host did.
+    The ``messages`` channel is canonicalized to a list of ``BaseMessage``
+    objects, rejects external system/developer roles with HTTP 400, and strips
+    server-owned metadata. Other channels keep their existing shapes while
+    forged metadata and delegation verdicts are removed. ``normalize_input``
+    applies the same message boundary to run input.
 
-    Every channel is walked, not just ``messages``: middleware-contributed
-    channels can carry messages too, and popping a key that was never there
-    costs nothing.
+    The thread-state mutation route writes values straight into a checkpoint,
+    so an authenticated client must not be able to persist forged provenance,
+    transform trails, or privileged message roles. Every channel is walked
+    because middleware-contributed channels can also carry message-like values.
     """
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
@@ -1876,8 +1876,8 @@ async def start_run(
                 reference_messages = graph_input.get("messages")
                 if reference_messages is None:
                     reference_messages = []
-                if not isinstance(reference_messages, list):
-                    raise HTTPException(status_code=422, detail="input.messages must be a list")
+                # ``normalize_input`` guarantees a list here. The raw-input
+                # check above is the authoritative list-only wire validation.
                 # Reference IDs are user-selected data. Keep them out of the
                 # system prompt and grant no authority from this persisted hint.
                 graph_input = {

@@ -2,6 +2,7 @@
 
 import copy
 import io
+import json
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
@@ -11,7 +12,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
-    for name in ("DEERFLOW_PAT", "DEERFLOW_ACCESS_TOKEN", "DEERFLOW_CSRF_TOKEN", "DEERFLOW_BASE_URL", "DEERFLOW_THREAD_ID", "DEERFLOW_TIMEOUT_SECONDS", "DEERFLOW_CONFIRM_APPEND"):
+    for name in ("DEERFLOW_PAT", "DEERFLOW_ACCESS_TOKEN", "DEERFLOW_CSRF_TOKEN", "DEERFLOW_BASE_URL", "DEERFLOW_THREAD_ID", "DEERFLOW_ASSISTANT_ID", "DEERFLOW_TIMEOUT_SECONDS", "DEERFLOW_CONFIRM_APPEND"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DEERFLOW_THREAD_ID", "synthetic-poc-thread")
     monkeypatch.setenv("DEERFLOW_CONFIRM_APPEND", "YES")
@@ -38,6 +39,7 @@ def test_pat_takes_precedence_and_session_requires_both_cookies(monkeypatch):
         ("DEERFLOW_THREAD_ID", "http://localhost:2026/workspace/chats/id"),
         ("DEERFLOW_BASE_URL", "https://example.com"),
         ("DEERFLOW_BASE_URL", "http://user:secret@localhost:2026"),
+        ("DEERFLOW_ASSISTANT_ID", ""),
         ("DEERFLOW_TIMEOUT_SECONDS", "nan"),
         ("DEERFLOW_TIMEOUT_SECONDS", "-1"),
         ("DEERFLOW_CONFIRM_APPEND", "NO"),
@@ -62,7 +64,7 @@ class FakeGateway:
     def state(self, *_):
         return {"checkpoint_id": str(self.checkpoint), "values": {"messages": copy.deepcopy(self.messages)}}
 
-    def run(self, _url, _headers, messages, _timeout):
+    def run(self, _url, _headers, messages, _timeout, _assistant_id=None):
         self.calls.append(copy.deepcopy(messages))
         if self.blocked and any(m["role"] == "system" for m in messages):
             if self.mutate_on_reject:
@@ -123,10 +125,10 @@ def test_other_errors_are_not_reported_as_fixed(monkeypatch, status, detail):
     gateway = install_gateway(monkeypatch, blocked=False)
     original_run = gateway.run
 
-    def run(url, headers, messages, timeout):
+    def run(url, headers, messages, timeout, assistant_id=None):
         if any(m["role"] == "system" for m in messages):
             raise poc.PocHTTPError(status, detail)
-        return original_run(url, headers, messages, timeout)
+        return original_run(url, headers, messages, timeout, assistant_id)
 
     monkeypatch.setattr(poc, "stream_run", run)
     with pytest.raises(poc.PocHTTPError):
@@ -153,6 +155,26 @@ def test_sse_errors_and_missing_end_are_not_success(monkeypatch, events, ok):
     else:
         with pytest.raises(poc.PocError):
             poc.stream_run("http://localhost:2026/api/test", {}, [], 10)
+
+
+def test_stream_run_uses_configured_assistant_id(monkeypatch):
+    response = io.BytesIO(b"event: end\ndata: {}\n\n")
+    response.status = 200
+    captured = []
+
+    class _Opener:
+        def open(self, request, *, timeout):
+            captured.append((request, timeout))
+            return response
+
+    monkeypatch.setenv("DEERFLOW_ASSISTANT_ID", "custom-agent")
+    monkeypatch.setattr(poc, "_HTTP", _Opener())
+
+    result = poc.stream_run("http://localhost:2026/api/test", {}, [], 10)
+
+    assert result["saw_end"] is True
+    assert captured[0][1] == 10
+    assert json.loads(captured[0][0].data)["assistant_id"] == "custom-agent"
 
 
 def test_http_errors_do_not_echo_response_secrets():
