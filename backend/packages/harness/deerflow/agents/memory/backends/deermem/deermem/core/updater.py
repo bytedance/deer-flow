@@ -6,6 +6,7 @@ import concurrent.futures
 import copy
 import enum
 import html
+import inspect
 import json
 import logging
 import math
@@ -13,7 +14,9 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -912,6 +915,14 @@ class MemoryUpdater:
         # ``MemoryUpdateQueue._lock``) so this class has no lock-ordering
         # dependency on the queue and cannot deadlock against it.
         self._watermark_lock = threading.Lock()
+        # Per-user publish lock: ``peek_clear_generation`` and a successful
+        # clear share it so an enqueue cannot observe the bumped generation
+        # while clear-exclusions are still unpublished. Re-entrant so the
+        # clear thread's own post-commit hooks can peek. Weak values so a
+        # long-lived process does not retain a lock for every user that ever
+        # peeked or cleared.
+        self._clear_publish_guard = threading.Lock()
+        self._clear_publish_locks: weakref.WeakValueDictionary[str | None, threading.RLock] = weakref.WeakValueDictionary()
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, tuple[str, ...] | None]] = OrderedDict()
         # Identities of every message successfully extracted for a key,
         # including emergency (bypass) flushes that must not advance
@@ -949,9 +960,29 @@ class MemoryUpdater:
         """Get the current memory data via the injected storage."""
         return self._storage.load(agent_name, user_id=user_id)
 
+    def _clear_publish_lock(self, user_id: str | None) -> threading.RLock:
+        """Return the per-user lock that pairs a clear publish with enqueue peeks."""
+        with self._clear_publish_guard:
+            return self._clear_publish_locks.setdefault(user_id, threading.RLock())
+
+    @staticmethod
+    def _storage_accepts_after_commit(method: Any) -> bool:
+        """Return True when ``method`` can receive ``after_commit_locked``."""
+        try:
+            params = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        return "after_commit_locked" in params or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in params.values())
+
     def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
-        """Read the scope clear-generation fence without loading fact files."""
-        return self._storage.peek_clear_generation(agent_name, user_id=user_id)
+        """Read the scope clear-generation fence without loading fact files.
+
+        Shares ``_clear_publish_lock`` with a successful clear's generation
+        write so the caller cannot observe a bumped fence before exclusions
+        are published. File storage's JSON peek does not take the write lock.
+        """
+        with self._clear_publish_lock(user_id):
+            return self._storage.peek_clear_generation(agent_name, user_id=user_id)
 
     def mark_feed_consumed(
         self,
@@ -1135,38 +1166,66 @@ class MemoryUpdater:
         )
         return self._storage.load(agent_name, user_id=user_id)
 
-    def clear_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear one selected agent's facts without resetting shared summaries."""
+    def clear_memory_data(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        after_commit: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """Clear one selected agent's facts without resetting shared summaries.
+
+        ``after_commit`` publishes process-local watermark/exclusion coverage
+        after the durable generation bump and before sidecar metadata cleanup.
+        The publish lock is held across the generation write so a concurrent
+        peek cannot observe the new fence while exclusions are still empty.
+        """
+
+        def publish() -> None:
+            if after_commit is not None:
+                after_commit()
+
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
-            for attempt in range(3):
-                current = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
-                facts = [fact for fact in current.get("facts", []) if isinstance(fact, dict)]
-                try:
-                    self._storage.apply_changes(
-                        {
-                            "deletes": [str(fact.get("id")) for fact in facts],
-                            "deleteRevisions": {str(fact.get("id")): int(fact.get("revision") or 1) for fact in facts},
-                        },
-                        agent_name=agent_name,
-                        user_id=user_id,
-                        expected_manifest_revision=int(current.get("revision") or 0),
-                        bump_clear_generation="agent",
-                    )
-                    self._storage.clear_fact_metadata(
-                        agent_name=agent_name,
-                        user_id=user_id,
-                    )
-                    return self.reload_memory_data(agent_name, user_id=user_id)
-                except MemoryManifestRevisionConflict:
-                    if attempt == 2:
-                        raise
-                    logger.info("Retrying scoped memory clear from a fresh snapshot after a revision conflict")
-            raise AssertionError("bounded scoped-clear retry did not return or raise")
+            with self._clear_publish_lock(user_id):
+                for attempt in range(3):
+                    current = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                    facts = [fact for fact in current.get("facts", []) if isinstance(fact, dict)]
+                    apply_kwargs: dict[str, Any] = {
+                        "agent_name": agent_name,
+                        "user_id": user_id,
+                        "expected_manifest_revision": int(current.get("revision") or 0),
+                        "bump_clear_generation": "agent",
+                    }
+                    if after_commit is not None and self._storage_accepts_after_commit(self._storage.apply_changes):
+                        apply_kwargs["after_commit_locked"] = publish
+                    try:
+                        self._storage.apply_changes(
+                            {
+                                "deletes": [str(fact.get("id")) for fact in facts],
+                                "deleteRevisions": {str(fact.get("id")): int(fact.get("revision") or 1) for fact in facts},
+                            },
+                            **apply_kwargs,
+                        )
+                        publish()
+                        break
+                    except MemoryManifestRevisionConflict:
+                        if attempt == 2:
+                            raise
+                        logger.info("Retrying scoped memory clear from a fresh snapshot after a revision conflict")
+                else:
+                    raise AssertionError("bounded scoped-clear retry did not return or raise")
+            self._storage.clear_fact_metadata(
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+            return self.reload_memory_data(agent_name, user_id=user_id)
         current = self.get_memory_data(agent_name, user_id=user_id)
         cleared_memory = copy.deepcopy(current)
         cleared_memory["facts"] = []
-        if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id, expected_revision=int(current.get("revision") or 0)):
-            raise OSError("Failed to save cleared memory data")
+        with self._clear_publish_lock(user_id):
+            if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id, expected_revision=int(current.get("revision") or 0)):
+                raise OSError("Failed to save cleared memory data")
+            publish()
         if agent_name is not None:
             self._storage.clear_fact_metadata(
                 agent_name=agent_name,
@@ -1174,18 +1233,54 @@ class MemoryUpdater:
             )
         return cleared_memory
 
-    def clear_all_memory_data(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear global summaries and every agent fact bucket for one user."""
+    def clear_all_memory_data(self, *, user_id: str | None = None, after_commit: Callable[[], None] | None = None) -> dict[str, Any]:
+        """Clear global summaries and every agent fact bucket for one user.
+
+        ``after_commit`` has the same publish-before-metadata contract as
+        :meth:`clear_memory_data`. When storage accepts
+        ``after_commit_locked``, the publish lock is released in that
+        callback so sidecar metadata inside ``clear_all`` cannot pin peek.
+        """
+
+        def publish() -> None:
+            if after_commit is not None:
+                after_commit()
+
         if getattr(type(self._storage), "clear_all", None) is not MemoryStorage.clear_all:
-            return self._storage.clear_all(user_id=user_id)
+            lock = self._clear_publish_lock(user_id)
+            lock.acquire()
+            released = False
+
+            def publish_and_release() -> None:
+                nonlocal released
+                try:
+                    publish()
+                finally:
+                    if not released:
+                        released = True
+                        lock.release()
+
+            try:
+                if after_commit is not None and self._storage_accepts_after_commit(self._storage.clear_all):
+                    result = self._storage.clear_all(user_id=user_id, after_commit_locked=publish_and_release)
+                else:
+                    result = self._storage.clear_all(user_id=user_id)
+                if not released:
+                    publish_and_release()
+                return result
+            finally:
+                if not released:
+                    lock.release()
         current = self.get_memory_data(user_id=user_id)
         cleared_memory = create_empty_memory()
-        if not self._save_memory_to_file(
-            cleared_memory,
-            user_id=user_id,
-            expected_revision=int(current.get("revision") or 0),
-        ):
-            raise OSError("Failed to save cleared memory data")
+        with self._clear_publish_lock(user_id):
+            if not self._save_memory_to_file(
+                cleared_memory,
+                user_id=user_id,
+                expected_revision=int(current.get("revision") or 0),
+            ):
+                raise OSError("Failed to save cleared memory data")
+            publish()
         return cleared_memory
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[dict[str, Any], str | None]:

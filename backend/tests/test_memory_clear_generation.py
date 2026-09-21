@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import sys
 import threading
 import types
+import weakref
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -480,6 +482,415 @@ def test_same_manager_clear_does_not_restore_cancelled_pending_on_next_turn(tmp_
 
     host_llm.invoke.assert_not_called()
     assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_failed_clear_keeps_queued_extraction_retryable(tmp_path: Path) -> None:
+    """A clear that fails before committing must not consume the pending feed.
+
+    ``clear_memory`` used to cancel the debounce queue first, which advanced
+    the watermark and clear-exclusion set even when storage then raised
+    (lock timeout, exhausted retries). The leftover job and a later resend
+    both saw an empty feed, so facts were never retried despite no durable
+    clear. #5125 review 2026-09-20.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+    watermark_key = ("thread-1", "alice", "researcher")
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+
+    def fail_before_commit(**kwargs: Any) -> dict:
+        raise TimeoutError("memory file lock timed out")
+
+    with patch.object(manager._updater, "clear_memory_data", side_effect=fail_before_commit):
+        with pytest.raises(TimeoutError, match="memory file lock timed out"):
+            manager.clear_memory(agent_name="researcher", user_id="alice")
+
+    assert manager._queue.pending_count == 1
+    assert manager._updater._watermarks.get(watermark_key) is None
+    assert manager._updater._clear_exclusions.get(watermark_key) is None
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    manager._queue.flush()
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" in facts
+
+
+def test_failed_clear_does_not_block_resend_or_emergency_flush(tmp_path: Path) -> None:
+    """Even if the debounce item is later dropped without consume, a failed
+    clear must leave a full resend and an emergency flush able to extract.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+
+    with patch.object(manager._updater, "clear_memory_data", side_effect=TimeoutError("memory file lock timed out")):
+        with pytest.raises(TimeoutError, match="memory file lock timed out"):
+            manager.clear_memory(agent_name="researcher", user_id="alice")
+
+    manager._queue.clear()
+    assert manager._queue.pending_count == 0
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" in facts
+
+    manager = _manager(tmp_path / "emergency", host_llm)
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    with patch.object(manager._updater, "clear_all_memory_data", side_effect=TimeoutError("memory file lock timed out")):
+        with pytest.raises(TimeoutError, match="memory file lock timed out"):
+            manager.clear_memory(user_id="alice")
+    manager._queue.clear()
+    host_llm.invoke.reset_mock()
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+    host_llm.invoke.assert_called()
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" in facts
+
+
+def test_extraction_failure_during_clear_does_not_restore_on_resend(tmp_path: Path) -> None:
+    """A debounce worker can dequeue and fail the LLM before the durable clear
+    commits. Post-clear cancel then finds an empty queue, and the failed
+    extraction did not record watermark/exclusions because the generation
+    had not bumped yet. The next full resend would restore the cleared
+    facts unless the start-of-clear snapshot is consumed after commit.
+    #5125 review follow-up.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+    _stop_debounce(manager)
+
+    original_clear = manager._updater.clear_memory_data
+
+    def clear_after_failed_dequeue(*args: Any, **kwargs: Any) -> dict:
+        host_llm.invoke.side_effect = TimeoutError("memory LLM timed out")
+        manager._queue.flush()
+        assert manager._queue.pending_count == 0
+        host_llm.invoke.side_effect = None
+        return original_clear(*args, **kwargs)
+
+    with patch.object(manager._updater, "clear_memory_data", side_effect=clear_after_failed_dequeue):
+        manager.clear_memory(agent_name="researcher", user_id="alice")
+
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    assert manager._queue.pending_count == 0
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Python"))
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_resend_during_post_commit_metadata_cleanup_does_not_restore(tmp_path: Path) -> None:
+    """Storage commit must publish exclusions before sidecar metadata cleanup.
+
+    A debounce worker can dequeue and fail the LLM before the durable clear
+    commits. After the wipe and generation bump -- but before
+    ``consume_pre_clear_feeds`` -- a full-session ``add_nowait`` would peek
+    the new generation with empty exclusions and rewrite the cleared facts.
+    The reviewer reproduced that window on two threads at
+    ``clear_fact_metadata`` (the first I/O after the real commit).
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+    manager.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+    _stop_debounce(manager)
+
+    original_clear = manager._updater.clear_memory_data
+    original_meta = manager._storage.clear_fact_metadata
+    committed = threading.Event()
+    resend_done = threading.Event()
+    observed: dict[str, Any] = {}
+
+    def clear_after_failed_dequeue(*args: Any, **kwargs: Any) -> dict:
+        host_llm.invoke.side_effect = TimeoutError("memory LLM timed out")
+        manager._queue.flush()
+        assert manager._queue.pending_count == 0
+        host_llm.invoke.side_effect = None
+        host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Python"))
+        return original_clear(*args, **kwargs)
+
+    def metadata_hook(*args: Any, **kwargs: Any) -> None:
+        original_meta(*args, **kwargs)
+        if observed.get("hooked"):
+            return
+        observed["hooked"] = True
+        observed["generation"] = manager._updater.peek_clear_generation("researcher", user_id="alice")
+        observed["exclusions"] = {key: frozenset(value[1]) for key, value in manager._updater._clear_exclusions.items()}
+        committed.set()
+        assert resend_done.wait(timeout=5), "resend thread did not finish during metadata cleanup"
+        observed["facts_after_resend"] = [fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]]
+
+    def resend() -> None:
+        assert committed.wait(timeout=5), "clear never reached post-commit metadata cleanup"
+        host_llm.invoke.reset_mock()
+        with patch.object(manager._queue, "_schedule_timer"):
+            manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+        if manager._queue._items:
+            observed["resend_generation"] = manager._queue._items[0].clear_generation
+        manager._queue.flush()
+        resend_done.set()
+
+    worker = threading.Thread(target=resend, name="memory-clear-resend")
+    worker.start()
+    try:
+        with (
+            patch.object(manager._updater, "clear_memory_data", side_effect=clear_after_failed_dequeue),
+            patch.object(manager._storage, "clear_fact_metadata", side_effect=metadata_hook),
+        ):
+            manager.clear_memory(agent_name="researcher", user_id="alice")
+    finally:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert observed["generation"] == (0, 1)
+    assert observed.get("resend_generation") == (0, 1)
+    assert observed.get("facts_after_resend") == []
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_resend_between_generation_bump_and_publish_does_not_restore(tmp_path: Path) -> None:
+    """The publish lock must cover the generation write, not only the callback.
+
+    ``_commit_changes_locked`` can persist the new generation before
+    ``after_commit_locked`` publishes exclusions. ``peek_clear_generation``
+    used to read that JSON without the publish lock, so a concurrent
+    ``add_nowait`` could finish feed filtering with empty exclusions and
+    later persist under the matching new generation. Two threads + Event at
+    this earlier commit boundary.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+    manager.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+    _stop_debounce(manager)
+
+    original_clear = manager._updater.clear_memory_data
+    original_commit = manager._storage._commit_changes_locked
+    original_peek = manager._updater.peek_clear_generation
+    window_open = threading.Event()
+    peek_attempted = threading.Event()
+    resend_done = threading.Event()
+    observed: dict[str, Any] = {}
+
+    def clear_after_failed_dequeue(*args: Any, **kwargs: Any) -> dict:
+        host_llm.invoke.side_effect = TimeoutError("memory LLM timed out")
+        manager._queue.flush()
+        assert manager._queue.pending_count == 0
+        host_llm.invoke.side_effect = None
+        host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Python"))
+        return original_clear(*args, **kwargs)
+
+    def commit_then_open_window(*args: Any, **kwargs: Any) -> Any:
+        result = original_commit(*args, **kwargs)
+        if observed.get("committed"):
+            return result
+        observed["committed"] = True
+        path = manager._storage._get_memory_file_path("researcher", user_id="alice")
+        observed["generation_at_commit"] = scope_clear_generation(manager._storage._load_memory_file(path), "researcher")
+        observed["exclusions_at_commit"] = {key: frozenset(value[1]) for key, value in manager._updater._clear_exclusions.items()}
+        window_open.set()
+        assert peek_attempted.wait(timeout=5), "resend never reached peek after the generation write"
+        return result
+
+    def peek_after_window(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if window_open.is_set():
+            peek_attempted.set()
+            value = original_peek(agent_name, user_id=user_id)
+            observed.setdefault("peeked_generation", value)
+            observed.setdefault("exclusions_after_peek", {key: frozenset(stored[1]) for key, stored in manager._updater._clear_exclusions.items()})
+            return value
+        return original_peek(agent_name, user_id=user_id)
+
+    def resend() -> None:
+        assert window_open.wait(timeout=5), "clear never reached the post-commit publish window"
+        host_llm.invoke.reset_mock()
+        with patch.object(manager._queue, "_schedule_timer"):
+            manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+        if manager._queue._items:
+            observed["resend_generation"] = manager._queue._items[0].clear_generation
+        manager._queue.flush()
+        resend_done.set()
+
+    worker = threading.Thread(target=resend, name="memory-clear-resend-before-publish")
+    worker.start()
+    try:
+        with (
+            patch.object(manager._updater, "clear_memory_data", side_effect=clear_after_failed_dequeue),
+            patch.object(manager._storage, "_commit_changes_locked", side_effect=commit_then_open_window),
+            patch.object(manager._updater, "peek_clear_generation", side_effect=peek_after_window),
+        ):
+            manager.clear_memory(agent_name="researcher", user_id="alice")
+    finally:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert observed["generation_at_commit"] == (0, 1)
+    assert observed["exclusions_at_commit"] == {}
+    assert observed.get("peeked_generation") == (0, 1)
+    assert observed.get("exclusions_after_peek"), "peek must not return until exclusions are published"
+    # The resend waited on the publish lock, so clear may consume it as an
+    # in-flight admit (not queued) or enqueue it under the new generation
+    # after exclusions exist. Neither path may restore the cleared facts.
+    if "resend_generation" in observed:
+        assert observed["resend_generation"] == (0, 1)
+    assert resend_done.is_set()
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_clear_publish_lock_cache_releases_unused_entries(tmp_path: Path) -> None:
+    """Idle per-user publish locks must not stay in the updater forever."""
+    manager = _manager(tmp_path)
+    first = manager._updater._clear_publish_lock("alice")
+    assert manager._updater._clear_publish_lock("alice") is first
+    lock_ref = weakref.ref(first)
+    del first
+    gc.collect()
+
+    assert lock_ref() is None
+    assert "alice" not in manager._updater._clear_publish_locks
+
+
+def test_enqueue_waiting_for_publish_lock_does_not_revive_uncovered_thread(tmp_path: Path) -> None:
+    """A call that arrived before clear, but peeked after, must not become a new-generation job.
+
+    ``peek_clear_generation`` shares the publish lock with clear. An ``add_nowait``
+    that already assigned its arrival sequence can wait on that lock while
+    ``clear_memory`` snapshots an empty queue, publishes exclusions, and
+    releases. The resumed peek then observes the new generation. If that
+    thread never had exclusion coverage, the pre-clear messages would be
+    queued as post-clear work and rewritten on flush.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+    arrived = threading.Event()
+    release_peek = threading.Event()
+    original_peek = manager._updater.peek_clear_generation
+    observed: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def peek_after_clear(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        arrived.set()
+        assert release_peek.wait(timeout=5), "clear never released the late enqueue"
+        return original_peek(agent_name, user_id=user_id)
+
+    def enqueue() -> None:
+        try:
+            with patch.object(manager._queue, "_schedule_timer"):
+                manager.add_nowait(thread_id="thread-uncovered", messages=conversation, agent_name="researcher", user_id="alice")
+            observed["pending"] = manager._queue.pending_count
+            if manager._queue._items:
+                observed["generation"] = manager._queue._items[0].clear_generation
+        except BaseException as exc:  # noqa: BLE001 - surfaced via errors
+            errors.append(exc)
+
+    manager._updater.peek_clear_generation = peek_after_clear
+
+    worker = threading.Thread(target=enqueue, name="memory-clear-uncovered-enqueue")
+    worker.start()
+    try:
+        assert arrived.wait(timeout=5), "add_nowait never reached the generation peek"
+        manager.clear_memory(agent_name="researcher", user_id="alice")
+        release_peek.set()
+    finally:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert errors == []
+    manager._queue.flush()
+
+    assert observed.get("pending", 0) == 0
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_clear_all_releases_publish_lock_before_metadata_cleanup(tmp_path: Path) -> None:
+    """User-wide clear must not pin peek across sidecar metadata cleanup.
+
+    Single-agent clear already releases the publish lock before
+    ``clear_fact_metadata``. ``clear_all`` used to hold it for the whole
+    ``storage.clear_all()`` return, including retrieval notifications and
+    per-agent metadata I/O, so a concurrent same-user peek could not finish
+    even after generation and exclusions were published.
+    """
+    manager = _manager(tmp_path)
+    manager.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+    manager.create_fact("User likes Rust", category="preference", confidence=0.9, agent_name="planner", user_id="alice")
+
+    original_meta = manager._storage.clear_fact_metadata
+    in_metadata = threading.Event()
+    peeked = threading.Event()
+    observed: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def metadata_hook(*args: Any, **kwargs: Any) -> None:
+        if not observed.get("hooked"):
+            observed["hooked"] = True
+            in_metadata.set()
+            observed["peeked_during_meta"] = peeked.wait(timeout=5)
+        original_meta(*args, **kwargs)
+
+    def peek_during_metadata() -> None:
+        try:
+            assert in_metadata.wait(timeout=5), "clear_all never reached metadata cleanup"
+            observed["peek"] = manager._updater.peek_clear_generation("researcher", user_id="alice")
+            peeked.set()
+        except BaseException as exc:  # noqa: BLE001 - surfaced via errors
+            errors.append(exc)
+
+    worker = threading.Thread(target=peek_during_metadata, name="memory-clear-all-peek")
+    worker.start()
+    try:
+        with patch.object(manager._storage, "clear_fact_metadata", side_effect=metadata_hook):
+            manager.clear_memory(user_id="alice")
+    finally:
+        peeked.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert errors == []
+    assert observed.get("hooked") is True
+    assert observed.get("peeked_during_meta") is True
+    assert observed.get("peek", (0, 0))[0] >= 1
 
 
 def test_late_in_flight_completion_does_not_regress_watermark_past_a_cancelled_newer_turn(tmp_path: Path) -> None:

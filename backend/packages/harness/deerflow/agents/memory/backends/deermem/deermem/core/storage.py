@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -534,6 +534,7 @@ class MemoryStorage(abc.ABC):
         allow_manifest_rebase: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         bump_clear_generation: str | None = None,
+        after_commit_locked: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Apply one repository change set atomically with the clear-generation fence.
 
@@ -542,16 +543,26 @@ class MemoryStorage(abc.ABC):
         the matching counter when ``bump_clear_generation`` is ``user`` or
         ``agent``. A ``**scope`` sink that ignores these values is not a valid
         implementation.
+
+        ``after_commit_locked`` runs after the durable write succeeds and
+        before sidecar metadata cleanup. A clear uses it to publish
+        watermark/exclusion coverage in the same window as the generation
+        bump so a concurrent enqueue cannot observe the new fence with empty
+        exclusions. Providers that cannot invoke it under their write lock
+        must still call it before returning from a successful commit.
         """
         raise NotImplementedError
 
-    def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
+    def clear_all(self, *, user_id: str | None = None, after_commit_locked: Callable[[], None] | None = None) -> dict[str, Any]:
         """Clear global summaries and every agent fact bucket for one user.
 
         Implementations must raise the user-wide clear generation before or
         with the first per-scope wipe so in-flight writers cannot restore
         facts onto an emptied bucket while the rest of the clear is still
         running.
+
+        ``after_commit_locked`` has the same publish-before-metadata contract
+        as :meth:`apply_changes`.
         """
         raise NotImplementedError
 
@@ -1577,7 +1588,7 @@ class FileMemoryStorage(MemoryStorage):
             )
         return True
 
-    def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
+    def clear_all(self, *, user_id: str | None = None, after_commit_locked: Callable[[], None] | None = None) -> dict[str, Any]:
         """Clear one user's summaries and all agent facts, preserving agent configs.
 
         Raise the user clear-generation fence before per-agent wipes so an
@@ -1640,6 +1651,8 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions={str(fact["id"]): int(fact.get("revision") or 1) for fact in facts},
                     )
                     notifications_by_agent.append((agent_name, notifications))
+            if after_commit_locked is not None:
+                after_commit_locked()
 
         for agent_name, notifications in notifications_by_agent:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
@@ -1703,6 +1716,7 @@ class FileMemoryStorage(MemoryStorage):
         allow_manifest_rebase: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         bump_clear_generation: str | None = None,
+        after_commit_locked: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Commit an incremental change set and return only the applied delta.
 
@@ -1764,6 +1778,8 @@ class FileMemoryStorage(MemoryStorage):
                         expected_clear_generation=expected_clear_generation,
                         bump_clear_generation=bump_clear_generation,
                     )
+                    if after_commit_locked is not None:
+                        after_commit_locked()
                 break
             except MemoryManifestRevisionConflict as exc:
                 can_rebase = allow_manifest_rebase and has_fact_changes and summaries is None and safe_delete_rebase and safe_upsert_rebase and attempt < 2
@@ -1776,7 +1792,10 @@ class FileMemoryStorage(MemoryStorage):
         if memory_file is None:  # defensive: the bounded loop either commits or raises
             raise MemoryStorageError("Memory repository change did not produce a result")
         deleted_fact_ids = [str(value) for action, value, _ in notifications if action == "remove"]
-        if agent_name is not None and deleted_fact_ids:
+        # When a clear published coverage under after_commit_locked, the caller
+        # releases its publish lock before sidecar cleanup so a concurrent peek
+        # is not pinned across metadata I/O.
+        if after_commit_locked is None and agent_name is not None and deleted_fact_ids:
             self.clear_fact_metadata(
                 agent_name=agent_name,
                 user_id=user_id,

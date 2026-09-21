@@ -679,6 +679,66 @@ def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
     )
 
 
+def test_clear_consumes_inflight_enqueue_that_has_not_peeked_yet() -> None:
+    """An add that assigned a sequence but is still waiting to peek is part of clear."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 1)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    inflight = queue._begin_inflight(
+        thread_id="thread-uncovered",
+        messages=["Remember that I like Python."],
+        agent_name="researcher",
+        user_id="alice",
+        trace_id=None,
+        signals=frozenset(),
+        bypass_watermark=True,
+    )
+    assert inflight.sequence == 1
+    assert inflight.consumed_by_clear is False
+
+    consumed = queue.consume_inflight_enqueues("researcher", user_id="alice")
+
+    assert consumed == 1
+    assert inflight.consumed_by_clear is True
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["Remember that I like Python."],
+        thread_id="thread-uncovered",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=True,
+        sequence=1,
+    )
+    assert queue._end_inflight(inflight) is True
+
+
+def test_snapshot_by_agent_copies_matching_items_without_consume() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = _queue(mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other-user"], agent_name="bob", user_id="u2")
+
+    snapped = queue.snapshot_by_agent("bob", user_id="u1")
+
+    assert [c.messages for c in snapped] == [["drop"]]
+    assert snapped[0].thread_id == "t2"
+    assert queue.pending_count == 3
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+    queue.consume_pre_clear_feeds(snapped)
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["drop"],
+        thread_id="t2",
+        user_id="u1",
+        agent_name="bob",
+        bypass_watermark=False,
+        sequence=2,
+    )
+    assert queue.pending_count == 3
+
+
 def test_cancel_by_agent_all_agents_for_user_cancels_timer_when_empty() -> None:
     queue = _queue()
     with patch.object(queue, "_schedule_timer"):

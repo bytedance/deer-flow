@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -102,6 +102,10 @@ class ConversationContext:
     # contexts still order relative to each other and to real queue-assigned
     # sequences (which start at ``1``), never regressing the latter.
     sequence: int = 0
+    # Set when a successful clear consumed this snapshot while it was still
+    # waiting to peek. The call must not enqueue those pre-clear messages
+    # under the new generation.
+    consumed_by_clear: bool = False
 
 
 class MemoryUpdateQueue:
@@ -139,6 +143,12 @@ class MemoryUpdateQueue:
         # already advanced past it.
         self._sequence_lock = threading.Lock()
         self._sequence_counter = 0
+        # Calls that have an arrival sequence but have not yet finished the
+        # generation peek. ``clear_memory`` consumes matching entries so a
+        # waiter that later observes the new generation cannot enqueue the
+        # pre-clear snapshot as post-clear work. Guarded by
+        # ``_sequence_lock`` so sequence assignment and this list stay atomic.
+        self._inflight_enqueues: list[ConversationContext] = []
 
     def _next_sequence(self) -> int:
         """Return a fresh, strictly increasing call-arrival sequence number.
@@ -146,8 +156,104 @@ class MemoryUpdateQueue:
         Must be read before ``self._lock`` is acquired (see ``__init__``).
         """
         with self._sequence_lock:
-            self._sequence_counter += 1
-            return self._sequence_counter
+            return self._allocate_sequence_locked()
+
+    def _allocate_sequence_locked(self) -> int:
+        self._sequence_counter += 1
+        return self._sequence_counter
+
+    def _begin_inflight(
+        self,
+        *,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        signals: frozenset[str],
+        bypass_watermark: bool,
+    ) -> ConversationContext:
+        """Record a call that has an arrival sequence but has not peeked yet.
+
+        Sequence assignment and this list share ``_sequence_lock`` so a clear
+        that consumes inflight entries cannot miss a call that already started.
+        The queue lock is not held: peek is uncached manifest I/O.
+        """
+        context = ConversationContext(
+            thread_id=thread_id,
+            messages=list(messages),
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+            signals=signals,
+            bypass_watermark=bypass_watermark,
+        )
+        with self._sequence_lock:
+            context.sequence = self._allocate_sequence_locked()
+            self._inflight_enqueues.append(context)
+        return context
+
+    def _end_inflight(self, context: ConversationContext) -> bool:
+        """Drop an inflight registration. Return True when a clear already consumed it."""
+        with self._sequence_lock:
+            try:
+                self._inflight_enqueues.remove(context)
+            except ValueError:
+                pass
+            return context.consumed_by_clear
+
+    def _admit(
+        self,
+        *,
+        thread_id: str,
+        messages: list[Any],
+        agent_name: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        signals: frozenset[str],
+        bypass_watermark: bool,
+        start_immediately: bool,
+    ) -> None:
+        """Sequence, peek, then enqueue. Skip if a clear consumed this snapshot first."""
+        # Sequence + inflight registration + peek before the queue lock: every
+        # conversation turn enqueues here, and the file-backed peek is uncached
+        # manifest I/O. Holding ``_lock`` across that read would serialize all
+        # memory admits behind disk. A token that misses a clear landing
+        # afterwards is still dropped by the pre-LLM and commit-time checks.
+        # The sequence must be stamped here too (not inside ``_enqueue_locked``)
+        # so a caller that blocks on the lock is not mistaken for arriving later
+        # than callers that acquire it first -- see ``_next_sequence``.
+        inflight = self._begin_inflight(
+            thread_id=thread_id,
+            messages=messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+            signals=signals,
+            bypass_watermark=bypass_watermark,
+        )
+        try:
+            captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
+            with self._lock:
+                if self._end_inflight(inflight):
+                    return
+                self._enqueue_locked(
+                    thread_id=thread_id,
+                    messages=messages,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    signals=signals,
+                    bypass_watermark=bypass_watermark,
+                    captured_clear_generation=captured_clear_generation,
+                    call_sequence=inflight.sequence,
+                )
+                if start_immediately:
+                    self._schedule_timer(0)
+                else:
+                    self._reset_timer()
+        finally:
+            self._end_inflight(inflight)
 
     def add(
         self,
@@ -173,29 +279,16 @@ class MemoryUpdateQueue:
                 reinforcement / preference / ...), used as extraction hints. Any
                 signal is admitted under backpressure.
         """
-        # Sequence + peek before the queue lock: every conversation turn
-        # enqueues here, and the file-backed peek is uncached manifest I/O.
-        # Holding ``_lock`` across that read would serialize all memory admits
-        # behind disk. A token that misses a clear landing afterwards is still
-        # dropped by the pre-LLM and commit-time checks. The sequence must be
-        # stamped here too (not inside ``_enqueue_locked``) so a caller that
-        # blocks on the lock is not mistaken for arriving later than callers
-        # that acquire it first -- see ``_next_sequence``.
-        call_sequence = self._next_sequence()
-        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
-        with self._lock:
-            self._enqueue_locked(
-                thread_id=thread_id,
-                messages=messages,
-                agent_name=agent_name,
-                user_id=user_id,
-                trace_id=trace_id,
-                signals=frozenset(signals) if signals else frozenset(),
-                bypass_watermark=False,
-                captured_clear_generation=captured_clear_generation,
-                call_sequence=call_sequence,
-            )
-            self._reset_timer()
+        self._admit(
+            thread_id=thread_id,
+            messages=messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+            signals=frozenset(signals) if signals else frozenset(),
+            bypass_watermark=False,
+            start_immediately=False,
+        )
 
         logger.info("Memory update queued for thread %s, queue size: %d", thread_id, len(self._items))
 
@@ -209,21 +302,16 @@ class MemoryUpdateQueue:
         signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
-        call_sequence = self._next_sequence()
-        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
-        with self._lock:
-            self._enqueue_locked(
-                thread_id=thread_id,
-                messages=messages,
-                agent_name=agent_name,
-                user_id=user_id,
-                trace_id=trace_id,
-                signals=frozenset(signals) if signals else frozenset(),
-                bypass_watermark=True,
-                captured_clear_generation=captured_clear_generation,
-                call_sequence=call_sequence,
-            )
-            self._schedule_timer(0)
+        self._admit(
+            thread_id=thread_id,
+            messages=messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+            signals=frozenset(signals) if signals else frozenset(),
+            bypass_watermark=True,
+            start_immediately=True,
+        )
 
         logger.info("Memory update queued for immediate processing on thread %s, queue size: %d", thread_id, len(self._items))
 
@@ -584,6 +672,63 @@ class MemoryUpdateQueue:
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
 
+    @staticmethod
+    def _matches_scope(
+        context: ConversationContext,
+        *,
+        agent_name: str | None,
+        user_id: str | None,
+        all_agents: bool,
+    ) -> bool:
+        # Scope matches storage: user_id=None is the legacy no-user root
+        # only (None == None), never "every user".
+        if not all_agents and context.agent_name != agent_name:
+            return False
+        return context.user_id == user_id
+
+    def snapshot_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        all_agents: bool = False,
+    ) -> tuple[ConversationContext, ...]:
+        """Copy matching pending contexts without removing or consuming them.
+
+        ``clear_memory`` captures this before the durable write so a successful
+        commit can still consume jobs a debounce worker dequeued (and failed)
+        while storage was in flight. A failed clear must not consume these.
+        """
+        with self._lock:
+            return tuple(replace(context, messages=list(context.messages), signals=frozenset(context.signals)) for context in self._items if self._matches_scope(context, agent_name=agent_name, user_id=user_id, all_agents=all_agents))
+
+    def consume_pre_clear_feeds(self, contexts: tuple[ConversationContext, ...] | list[ConversationContext]) -> None:
+        """Mark previously snapshotted feeds consumed after a successful clear."""
+        for context in contexts:
+            self._consume_pre_clear_feed(context)
+
+    def consume_inflight_enqueues(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        all_agents: bool = False,
+    ) -> int:
+        """Consume matching in-flight admits that have not finished peeking.
+
+        ``clear_memory`` calls this in the locked publish so a waiter that
+        later observes the new generation cannot enqueue pre-clear messages
+        as post-clear work. The live objects are marked so ``_admit`` skips
+        enqueue after peek returns.
+        """
+        with self._sequence_lock:
+            matching = [context for context in self._inflight_enqueues if self._matches_scope(context, agent_name=agent_name, user_id=user_id, all_agents=all_agents) and not context.consumed_by_clear]
+            for context in matching:
+                context.consumed_by_clear = True
+        for context in matching:
+            self._consume_pre_clear_feed(context)
+        return len(matching)
+
     def cancel_by_agent(
         self,
         agent_name: str | None = None,
@@ -616,16 +761,8 @@ class MemoryUpdateQueue:
         """
         with self._lock:
             before = len(self._items)
-
-            def _keep(context: ConversationContext) -> bool:
-                # Scope matches storage: user_id=None is the legacy no-user root
-                # only (None == None), never "every user".
-                if not all_agents and context.agent_name != agent_name:
-                    return True
-                return context.user_id != user_id
-
-            dropped = [context for context in self._items if not _keep(context)]
-            self._items = [context for context in self._items if _keep(context)]
+            dropped = [context for context in self._items if self._matches_scope(context, agent_name=agent_name, user_id=user_id, all_agents=all_agents)]
+            self._items = [context for context in self._items if not self._matches_scope(context, agent_name=agent_name, user_id=user_id, all_agents=all_agents)]
             removed = before - len(self._items)
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
@@ -649,6 +786,8 @@ class MemoryUpdateQueue:
             self._processing = False
             self._processing_thread = None
             self._reprocess_pending = False
+        with self._sequence_lock:
+            self._inflight_enqueues = []
 
     @property
     def pending_count(self) -> int:

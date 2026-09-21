@@ -22,6 +22,26 @@ sequence it would get by lock-acquisition order), and a watermark write with a l
 than what is already recorded is refused rather than rewinding it. This covers a delayed
 in-flight extraction that finishes after a newer snapshot for the same key was already queued
 and cancelled.
+`clear_memory` snapshots matching pending contexts before the durable write and
+consumes that snapshot only after the commit succeeds. The consume, queue
+cancel, and exclusion promote run in the same locked publish as the generation
+bump -- before sidecar metadata cleanup -- and `peek_clear_generation` takes
+that publish lock for the whole write, not only the post-commit callback. A
+concurrent same-scope `add` / `add_nowait` therefore cannot observe the new
+generation while exclusions are still empty, even if file storage's JSON peek
+does not take the write lock. An admit that already has an arrival sequence
+but has not finished that peek is registered as in-flight; the locked publish
+consumes those snapshots too, so waiting on the publish lock cannot turn a
+pre-clear feed into a new-generation job on a thread that had no exclusion
+coverage. A debounce
+worker may dequeue and fail the LLM while storage is still in flight; that
+failure does not record watermark or clear-exclusions until a newer generation
+exists, so post-clear `cancel_by_agent` would miss the already-dequeued job.
+Consuming the start-of-clear snapshot closes that window. A failed clear (lock
+timeout, exhausted retries) must leave the feed retryable: it must not consume
+the snapshot, empty the debounce queue, advance the watermark, or write
+clear-exclusions. In-flight extraction during a successful clear is still dropped
+by the durable generation fence.
 The sequence counter and the watermark are both process-local, in-memory state on one
 `MemoryUpdateQueue`/`MemoryUpdater` pair -- they do not span Gateway workers. A turn sitting only
 in one worker's debounce queue (not yet flushed, cancelled, or fenced anywhere) is invisible to
@@ -174,6 +194,12 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 A clear bumps `clearGeneration` / `agentClearGenerations` in the same locked commit as the wipe.
+The updater holds its per-user publish lock across that write and
+`after_commit_locked`, then releases it before sidecar metadata cleanup.
+User-wide `clear_all` uses the same split: when storage accepts
+`after_commit_locked`, the updater releases the publish lock in that callback
+so retrieval notifications and per-agent metadata I/O cannot pin same-user
+`add` / `add_nowait` peeks.
 User-wide `clear_all` raises the user generation before per-agent wipes.
 `apply_changes` and `clear_all` must honor `expected_clear_generation` atomically.
 Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`, and `peek_clear_generation` so enqueue does not load fact files.
@@ -181,6 +207,8 @@ Custom `storage_class` providers must override `capabilities()` to advertise `cl
 Snapshot-derived writes never rebase extracted facts onto an emptied document.
 
 The weak lock cache must not retain inactive user scopes.
+The clear-publish lock cache is the same pattern: a guard-protected
+`WeakValueDictionary` so unused per-user locks can be collected.
 Cache validation uses the manifest metadata and persisted revision.
 Out-of-band Markdown edits require `reload()`.
 POSIX atomic replacement must sync the parent directory.
