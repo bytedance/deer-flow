@@ -1539,7 +1539,7 @@ def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten
 
 
 def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_path):
-    """A conversion that writes nothing must not reserve stem.md against later uploads."""
+    """A conversion that writes nothing must not rename a later upload holding that name."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 
@@ -1557,7 +1557,7 @@ def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_p
                 request=MagicMock(),
                 files=[
                     UploadFile(filename="notes.docx", file=BytesIO(b"DOCX")),
-                    UploadFile(filename="notes.md", file=BytesIO(b"USER_MARKDOWN")),
+                    UploadFile(filename="notes.docx.md", file=BytesIO(b"USER_MARKDOWN")),
                 ],
                 config=SimpleNamespace(),
             )
@@ -1565,14 +1565,14 @@ def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_p
 
     assert result.success is True
     assert result.files[0].markdown_file is None
-    assert result.files[1].filename == "notes.md"
+    assert result.files[1].filename == "notes.docx.md"
     assert result.files[1].original_filename is None
-    assert (thread_uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
-    assert not (thread_uploads_dir / "notes_1.md").exists()
+    assert (thread_uploads_dir / "notes.docx.md").read_bytes() == b"USER_MARKDOWN"
+    assert not (thread_uploads_dir / "notes.docx_1.md").exists()
 
 
-def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suffix(tmp_path):
-    """A failed conversion cannot affect another document's companion name."""
+def test_upload_files_failed_conversion_writes_no_companion_for_that_document(tmp_path):
+    """A failed conversion writes no companion and leaves another document's alone."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 

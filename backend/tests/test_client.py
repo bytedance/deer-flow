@@ -2674,12 +2674,14 @@ class TestUploads:
             assert (uploads_dir / "a.docx.md").read_text(encoding="utf-8") == "FROM:a.docx"
             assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "FROM:a.pdf"
 
-    def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
-        """A conversion that writes nothing must not reserve stem.md against a later companion.
+    def test_upload_files_failed_conversion_writes_no_companion_for_that_document(self, client):
+        """A conversion that writes nothing leaves the other document's companion alone.
 
-        Destination names are claimed upfront, so a same-stem ``.md`` upload
-        always wins ``a.md``; the only reachable victim of a stale claim is the
-        next convertible's companion.
+        Each companion is named after its own document, so a failure here
+        cannot reach ``a.pdf``'s. The claim released on this arm is what keeps
+        a later upload named ``a.docx.md`` from being renamed for a companion
+        that never appeared — that release is pinned by
+        ``test_upload_files_failed_conversion_leaves_a_same_named_upload_alone``.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
