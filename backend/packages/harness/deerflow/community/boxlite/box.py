@@ -231,7 +231,9 @@ class BoxliteBox(Sandbox):
         if start_line is None and end_line is None:
             return content
         lines = content.splitlines()
-        start = start_line or 1
+        # Clamp like LocalSandbox.read_file: a negative start would otherwise
+        # wrap around through Python's negative-index slicing.
+        start = max(start_line or 1, 1)
         end = end_line if end_line is not None else len(lines)
         return "\n".join(lines[start - 1 : end])
 
