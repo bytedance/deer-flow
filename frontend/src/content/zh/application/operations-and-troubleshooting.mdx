@@ -44,15 +44,21 @@ curl http://localhost:8001/health
 curl http://localhost:2026/api/models
 ```
 
-## 配置升级
+## 升级已有的代码仓库
 
-当 `config.yaml` schema 更新时（由 `config_version` 字段标识），运行：
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`，不要再次运行
+`make config`。先停止当前使用的运行模式，拉取更新，再用原模式启动：
 
-```bash
-make config-upgrade
-```
+| 当前模式 | 停止命令 | 拉取更新并重启 |
+| --- | --- | --- |
+| 本地开发 | `make stop` | `git pull --ff-only && make dev` |
+| 本地生产 | `make stop` | `git pull --ff-only && make start` |
+| Docker 开发 | `make docker-stop` | `git pull --ff-only && make docker-start` |
+| Docker 生产 | `make down` | `git pull --ff-only && make up` |
 
-这将 `config.example.yaml` 中的新字段合并到你现有的 `config.yaml` 中，而不覆盖你的自定义内容。
+不需要在每次 `git pull` 后运行 `make docker-init`，它只用于首次准备 sandbox 镜像。
+如果新版本需要新增配置字段，请在重启前运行 `make config-upgrade`；该命令会保留已有值，
+并在修改前生成 `config.yaml.bak`。
 
 ## 常见问题
 
