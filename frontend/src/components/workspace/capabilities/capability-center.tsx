@@ -13,6 +13,9 @@ import { useI18n } from "@/core/i18n/hooks";
 const PluginGallery = dynamic(() =>
   import("./plugin-gallery").then((module) => module.PluginGallery),
 );
+const ExtensionGallery = dynamic(() =>
+  import("./extension-gallery").then((module) => module.ExtensionGallery),
+);
 const SkillGallery = dynamic(() =>
   import("./skill-gallery").then((module) => module.SkillGallery),
 );
@@ -29,11 +32,17 @@ export function CapabilityCenter() {
     clientHydrated,
     serverHydrated,
   );
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const tab = params.get("tab") === "skills" ? "skills" : "plugins";
+  const requestedTab = params.get("tab");
+  const tab =
+    requestedTab === "skills"
+      ? "skills"
+      : requestedTab === "extensions"
+        ? "extensions"
+        : "plugins";
   const [query, setQuery] = useState("");
   function changeTab(value: string) {
     setQuery("");
@@ -64,12 +73,12 @@ export function CapabilityCenter() {
                 disabled={!hydrated}
                 className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
                 aria-label={
-                  tab === "plugins"
+                  tab !== "skills"
                     ? t.capabilities.searchPlugins
                     : t.capabilities.searchSkills
                 }
                 placeholder={
-                  tab === "plugins"
+                  tab !== "skills"
                     ? t.capabilities.searchPlugins
                     : t.capabilities.searchSkills
                 }
@@ -82,15 +91,25 @@ export function CapabilityCenter() {
             <TabsList variant="line" className="h-12 gap-7">
               <TabsTrigger value="plugins" className="gap-2 px-1 pb-4 text-sm">
                 <BlocksIcon className="size-4" />
-                {t.capabilities.plugins}
+                {locale.startsWith("zh")
+                  ? "工具与集成"
+                  : "Tools & integrations"}
               </TabsTrigger>
               <TabsTrigger value="skills" className="gap-2 px-1 pb-4 text-sm">
                 <SparklesIcon className="size-4" />
                 {t.capabilities.skills}
               </TabsTrigger>
+              <TabsTrigger
+                value="extensions"
+                className="gap-2 px-1 pb-4 text-sm"
+              >
+                {locale.startsWith("zh") ? "扩展插件" : "Extensions"}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
-          {tab === "plugins" ? (
+          {tab === "extensions" ? (
+            <ExtensionGallery query={query} />
+          ) : tab !== "skills" ? (
             <PluginGallery query={query} />
           ) : (
             <SkillGallery query={query} />

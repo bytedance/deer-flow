@@ -377,3 +377,14 @@ that the current host silently ignores.
 `test_extension_manager.py` creates temporary Git repositories for local extension sources.
 Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
 Tests for hook behavior must create and invoke their own hook fixtures.
+
+## Full-stack contributions
+
+`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
+and model tools under one deployment-owned namespace. The public method defaults to False
+for older hosts; accepted contributions share source attribution and positional rollback.
+`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
+No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
+the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
+public-field projection is an allowlist. Package code is trusted, not sandboxed. See
+`docs/full-stack-plugins.md` and the independently packaged bookmark example.

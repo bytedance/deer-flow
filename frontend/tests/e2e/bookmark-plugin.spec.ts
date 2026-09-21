@@ -1,0 +1,253 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { createServer } from "node:net";
+import path from "node:path";
+
+import { expect, test } from "@playwright/test";
+
+import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
+
+let gateway: ChildProcess;
+let gatewayURL: string;
+test.beforeAll(async ({ request }) => {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  if (!address || typeof address === "string")
+    throw new Error("Missing test port");
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  gatewayURL = `http://127.0.0.1:${address.port}`;
+  const backend = path.resolve(process.cwd(), "../backend");
+  gateway = spawn(
+    path.join(backend, ".venv/bin/python"),
+    [
+      "-m",
+      "extension_test_fixtures.bookmark_plugin_gateway",
+      String(address.port),
+    ],
+    { cwd: backend, stdio: "pipe" },
+  );
+  let diagnostics = "";
+  gateway.stderr?.on("data", (chunk) => {
+    diagnostics += String(chunk);
+  });
+  await expect
+    .poll(
+      async () => {
+        if (gateway.exitCode !== null) throw new Error(diagnostics);
+        return request
+          .get(`${gatewayURL}/api/plugins`)
+          .then((r) => r.status())
+          .catch(() => 0);
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(200);
+});
+test.afterAll(async () => {
+  if (gateway?.exitCode === null) {
+    const exited = new Promise<void>((resolve) =>
+      gateway.once("exit", () => resolve()),
+    );
+    gateway.kill("SIGTERM");
+    await exited;
+  }
+});
+
+test("bookmark package: save visible answer, custom page, tool lookup, isolation and delete", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1360, height: 1050 });
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: "Plugin architecture",
+        messages: [
+          {
+            id: "u",
+            type: "human",
+            content: "What should the plugin host provide?",
+          },
+          {
+            id: "a",
+            type: "ai",
+            content:
+              "ORCHID plugin design: one package provides a custom page, backend actions and model tools. Deployment owns installation and activation.",
+            additional_kwargs: { reasoning_content: "PRIVATE REASONING" },
+          },
+          {
+            id: "hidden",
+            type: "ai",
+            content: "HIDDEN ANSWER",
+            additional_kwargs: { hide_from_ui: true },
+          },
+        ],
+      },
+    ],
+  });
+  let savedPayload: Record<string, unknown> | undefined;
+  await page.route("**/api/plugins**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/actions/save"))
+      savedPayload = route.request().postDataJSON();
+    const response = await route.fetch({
+      url: gatewayURL + url.pathname,
+      headers: {
+        ...route.request().headers(),
+        "x-test-user": "alice",
+        "x-test-role": "admin",
+      },
+    });
+    await route.fulfill({ response });
+  });
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  const libraryURL = "/workspace/extensions/community.bookmarks/library";
+  const libraryLink = page.getByRole("link", {
+    name: "My bookmarks",
+    exact: true,
+  });
+  await expect(libraryLink).toHaveAttribute("href", libraryURL);
+  await page.getByRole("button", { name: "Bookmarks", exact: true }).click();
+  await page
+    .getByRole("menuitem", { name: "Save last answer", exact: true })
+    .click();
+  await expect(
+    page.getByText("Saved. Open My bookmarks in the sidebar.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(savedPayload?.message_id).toBe("a");
+  expect(JSON.stringify(savedPayload)).not.toContain("PRIVATE");
+  expect(JSON.stringify(savedPayload)).not.toContain("HIDDEN");
+  await page.goto("/workspace/capabilities?tab=extensions");
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  if (process.env.EXTENSION_SCREENSHOT_DIR) {
+    await mkdir(process.env.EXTENSION_SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({
+      path: path.join(
+        process.env.EXTENSION_SCREENSHOT_DIR,
+        "bookmarks-directory.png",
+      ),
+      fullPage: true,
+    });
+  }
+  await page
+    .getByRole("button", { name: "View 会话书签 / Bookmarks", exact: true })
+    .click();
+  await expect(
+    page.getByRole("searchbox", { name: "Search bookmarks" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Enabled · Managed by your administrator", { exact: true }),
+  ).toBeVisible();
+  await libraryLink.click();
+  await expect(page).toHaveURL(new RegExp(`${libraryURL}$`));
+  await expect(
+    page.getByRole("heading", { name: "My bookmarks", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Keep answers worth returning to", { exact: true }),
+  ).toBeVisible();
+  const name = page.getByRole("textbox", {
+    name: "Bookmark name",
+    exact: true,
+  });
+  await expect(name).toBeVisible();
+  await name.fill("Plugin interface decisions");
+  await page.getByRole("button", { name: "Save name", exact: true }).click();
+  await page.reload();
+  await expect(name).toHaveValue("Plugin interface decisions");
+  await page
+    .getByRole("searchbox", { name: "Search bookmarks", exact: true })
+    .fill("ORCHID");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText(/1 saved/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Search", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("link", { name: "Open conversation", exact: true }),
+  ).toHaveAttribute("href", `/workspace/chats/${MOCK_THREAD_ID}`);
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Save plugin settings" }),
+  ).toHaveCount(0);
+  const modelResponse = await request.post(`${gatewayURL}/test/model-search`, {
+    headers: { "x-test-user": "alice" },
+    data: { query: "ORCHID" },
+  });
+  const modelResult = await modelResponse.json();
+  expect(modelResult.tool).toContain("search_bookmarks");
+  const items = JSON.parse(modelResult.content).items;
+  expect(items).toHaveLength(1);
+  expect(items[0].label).toBe("Plugin interface decisions");
+  const bob = await request.post(`${gatewayURL}/test/model-search`, {
+    headers: { "x-test-user": "bob" },
+    data: { query: "ORCHID" },
+  });
+  expect(JSON.parse((await bob.json()).content).items).toEqual([]);
+  expect(
+    (
+      await request.post(
+        `${gatewayURL}/api/plugins/community.bookmarks/actions/delete`,
+        { headers: { "x-test-user": "bob" }, data: { id: items[0].id } },
+      )
+    ).status(),
+  ).toBe(422);
+  expect(
+    (
+      await request.patch(`${gatewayURL}/api/plugins/community.bookmarks`, {
+        headers: { "x-test-role": "admin" },
+        data: { revision: "fake", changes: { enabled: false } },
+      })
+    ).status(),
+  ).toBe(404);
+  if (process.env.EXTENSION_SCREENSHOT_DIR)
+    await page.screenshot({
+      path: path.join(
+        process.env.EXTENSION_SCREENSHOT_DIR,
+        "bookmarks-detail.png",
+      ),
+      fullPage: true,
+    });
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Confirm delete", exact: true })
+    .click();
+  await expect(
+    page.getByText("No matching bookmarks", { exact: true }),
+  ).toBeVisible();
+  // A refreshed deployment snapshot removes both the entry and direct-page access.
+  await page.route("**/api/plugins", async (route) => {
+    const response = await request.get(`${gatewayURL}/api/plugins`);
+    const entries = await response.json();
+    await route.fulfill({
+      json: entries.map((entry: { settings: Record<string, unknown> }) => ({
+        ...entry,
+        settings: { ...entry.settings, enabled: false },
+      })),
+    });
+  });
+  await page.reload();
+  await expect(libraryLink).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Extension page unavailable" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Search bookmarks" }),
+  ).toHaveCount(0);
+});
+
+test("unregistered plugin pages stay unavailable", async ({ page }) => {
+  mockLangGraphAPI(page);
+  await page.goto("/workspace/extensions/missing.plugin/library");
+  await expect(
+    page.getByRole("heading", { name: "Extension page unavailable" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("searchbox", { name: "Search bookmarks" }),
+  ).toHaveCount(0);
+});
