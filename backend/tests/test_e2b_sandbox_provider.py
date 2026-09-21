@@ -5632,7 +5632,7 @@ def _rs_search(sb, op: str, root: str):
 @_RS_POSIX
 @pytest.mark.parametrize(
     ("pattern", "non_match"),
-    [("alpha.beta", "alphaXbeta"), ("hello world", "helloworld"), ("x[0]", "x0"), (r"path\file", "pathfile"), ("[", "plain"), ("plain", "other")],
+    [("alpha.beta", "alphaXbeta"), ("hello world", "helloworld"), ("x[0]", "x0"), (r"path\file", "pathfile"), ("[", "plain"), ("plain", "other"), ("-n", "plain")],
 )
 def test_remote_grep_literal_matches_original_text(tmp_path, pattern, non_match):
     target = tmp_path / "sample.txt"
