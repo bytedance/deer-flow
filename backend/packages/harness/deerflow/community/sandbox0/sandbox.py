@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import math
 import posixpath
 import re
 import shlex
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -117,11 +117,17 @@ class Sandbox0Sandbox(Sandbox):
         if not append:
             self.update_file(path, content.encode("utf-8"))
             return
-        # O_APPEND avoids a read/modify/write race with concurrent tool calls.
-        data = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        # Upload the payload through the SDK, then use O_APPEND on the guest.
+        # Keeping content out of argv avoids platform argument-size limits.
+        temporary = f"/tmp/deerflow-append-{uuid.uuid4().hex}"
         self._touch()
         self.remote.mkdir(posixpath.dirname(path), recursive=True)
-        self._checked(f"printf %s {shlex.quote(data)} | base64 -d >> {shlex.quote(path)}")
+        script = "import shutil,sys\nwith open(sys.argv[1],'rb') as src, open(sys.argv[2],'ab') as dst:\n    shutil.copyfileobj(src,dst)"
+        try:
+            self.update_file(temporary, content.encode("utf-8"))
+            self._checked(f"python3 -c {shlex.quote(script)} {shlex.quote(temporary)} {shlex.quote(path)}")
+        finally:
+            self.remote.delete_file(temporary)
 
     def download_file(self, path: str) -> bytes:
         path = self._path(path)
@@ -165,8 +171,8 @@ class Sandbox0Sandbox(Sandbox):
             relative = entry[len(root) :].lstrip("/")
             if relative and path_matches(pattern, relative):
                 matches.append(entry)
-                if len(matches) >= max_results:
-                    return matches, True
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, output.truncated
 
     def grep(
@@ -192,7 +198,7 @@ class Sandbox0Sandbox(Sandbox):
         if glob is not None:
             include_pattern = glob.split("/")[-1] or glob
             flags.append(shlex.quote(f"--include={include_pattern}"))
-        per_file_cap = max(max_results, 50)
+        per_file_cap = max_results + 1
         flags.append(f"-m{per_file_cap}")
         hard_limit = max(max_results * 4, max_results + 50)
         arguments = f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
@@ -228,6 +234,6 @@ class Sandbox0Sandbox(Sandbox):
                 continue
             seen_positions.add(position)
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line)))
-            if len(matches) >= max_results:
-                return matches, True
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, output.truncated

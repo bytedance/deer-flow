@@ -19,3 +19,12 @@ preserves identities and bindings; destroy is explicit deletion.
 Tests: `backend/tests/test_sandbox0_provider.py` and `test_sandbox0_transfer.py`.
 Keep sync/async execution-lease and provider-restart failure regressions. The
 real agent validation entry is `backend/examples/sandbox0/demo.py`.
+
+Treat archive names as untrusted across host path dialects. Reject Windows
+drive/root/stream syntax and reserved names before any filesystem operations,
+then enforce canonical containment and reject symlinks. Guest append payloads
+travel via SDK file upload, not argv; preserve append semantics and clean up
+staging files. Search results are truncated only when an extra eligible match
+or remote truncation proves incompleteness. Probe the documented guest tools,
+including absolute stat/realpath paths required by subagent acceptance checks.
+Guest command and result-boundary regressions live in `test_sandbox0_io.py`.

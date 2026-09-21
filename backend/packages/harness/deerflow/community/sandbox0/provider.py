@@ -242,7 +242,10 @@ class Sandbox0Provider(SandboxProvider):
         return await self._serializer.run_on_executor(partial(self.acquire, thread_id, user_id=user_id))
 
     def _bootstrap(self, sandbox: Sandbox0Sandbox):
-        sandbox._checked("command -v python3 && command -v bash && command -v find && command -v grep && mkdir -p /mnt/user-data/{workspace,uploads,outputs} /mnt/acp-workspace", timeout=30)
+        sandbox._checked(
+            "command -v python3 && command -v bash && command -v find && command -v grep && command -v base64 && test -x /usr/bin/stat && test -x /usr/bin/realpath && mkdir -p /mnt/user-data/{workspace,uploads,outputs} /mnt/acp-workspace",
+            timeout=30,
+        )
 
     def _sync_skills(self, sandbox: Sandbox0Sandbox, user_id: str, thread_id: str):
         from deerflow.skills.projection import ensure_skill_projections, get_thread_skill_projection_paths

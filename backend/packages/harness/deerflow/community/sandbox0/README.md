@@ -37,10 +37,13 @@ skills:
   container_path: /mnt/skills
 ```
 
-Use a Linux template containing `bash`, `python3`, `find`, `grep`, and `base64`,
+Use a Linux template containing `bash`, `python3`, `find`, `grep`, `base64`,
+`/usr/bin/stat`, and `/usr/bin/realpath`,
 with permission to create `/mnt/user-data`, `/mnt/skills`, and
 `/mnt/acp-workspace`. Select any additional language/document dependencies in the
 Sandbox0 template. Host bind mounts are unsupported.
+Acquire verifies these utilities before publishing the client. The absolute
+`stat` and `realpath` paths are required by DeerFlow's delegated file checks.
 
 `replicas` caps active environments; paused workspaces do not consume this
 provider's active slots. The server's quotas still apply. `ttl` is the runtime
@@ -82,6 +85,14 @@ bindings; it does not delete conversation data.
   bounded to 2,000 files, 20 MiB per file and 100 MiB total. A mirror failure is
   surfaced, but the remote workspace is still checkpointed. The durable source
   remains Sandbox0.
+- Artifact names must be portable between POSIX and Windows: backslashes,
+  colons (including drive letters and NTFS streams), reserved Windows device
+  names, and components ending in a dot or space are rejected before host I/O.
+  The resolved destination must stay within the thread directory.
+- Append uploads content through the SDK and copies it from a temporary guest
+  file in append mode; large sections do not enter shell arguments. The staging
+  file is removed after the operation. As with ordinary filesystem append,
+  failures can leave a partial append; retries are not automatically deduplicated.
 - Configure egress controls on the Sandbox0 template. DeerFlow's AIO-specific
   network approval hooks and host mounts are rejected rather than ignored.
 

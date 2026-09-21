@@ -62,3 +62,65 @@ def test_skill_symlink_cannot_exfiltrate_host_file(tmp_path):
     with pytest.raises(PermissionError):
         upload_skills(sandbox, SimpleNamespace(**roots))
     sandbox.update_file.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        r"outputs/C:\outside\owned.txt",
+        "outputs/C:/outside/owned.txt",
+        "outputs/C:owned.txt",
+        r"outputs/\outside\owned.txt",
+        r"outputs/\\server\share\owned.txt",
+        r"outputs/..\outside\owned.txt",
+        r"outputs/\\?\C:\outside\owned.txt",
+        "outputs/report.txt:stream",
+        "outputs/NUL",
+        "outputs/CON.txt",
+        "outputs/.. /owned.txt",
+        "outputs/report.",
+        "outputs/zero\x00name",
+    ],
+)
+def test_artifact_windows_names_rejected_before_host_io(name):
+    from pathlib import PureWindowsPath
+
+    # This pure Windows root has no filesystem methods. Validation must reject
+    # the member before either touching the filesystem or joining host paths.
+    with pytest.raises(PermissionError):
+        _write_host_file(PureWindowsPath("C:/threads/owned"), name, b"untrusted")
+
+
+def test_artifact_resolved_destination_must_remain_under_root(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    root = tmp_path / "thread"
+    target = root / "outputs/report.txt"
+    outside = tmp_path / "outside/report.txt"
+    real_resolve = Path.resolve
+
+    def resolve(path, **kwargs):
+        return outside if path == target else real_resolve(path, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    with pytest.raises(PermissionError, match="escapes"):
+        _write_host_file(root, "outputs/report.txt", b"untrusted")
+    assert not root.exists()
+    assert not outside.exists()
+
+
+def test_artifact_archive_windows_escape_cannot_write_host_file(tmp_path):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr(r"outputs/C:\outside\owned.txt", b"untrusted")
+    sandbox = Mock()
+    sandbox.remote.read_file.return_value = data.getvalue()
+    with pytest.raises(PermissionError):
+        download_artifacts(sandbox, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    sandbox.remote.delete_file.assert_called_once()
+
+
+def test_artifact_safe_unicode_and_spaces_preserved(tmp_path):
+    _write_host_file(tmp_path, "outputs/报告 final.txt", b"result")
+    assert (tmp_path / "outputs/报告 final.txt").read_bytes() == b"result"

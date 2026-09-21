@@ -8,7 +8,7 @@ import shlex
 import stat
 import uuid
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 MAX_FILES = 2000
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -93,9 +93,18 @@ def upload_skills(sandbox, projection):
 
 
 def _write_host_file(root: Path, name: str, data: bytes):
+    # Linux guest filenames are untrusted on every host: a Windows drive part
+    # resets Path.joinpath(), and ':' can address an NTFS alternate data stream.
+    if "\x00" in name or "\\" in name or ":" in name:
+        raise PermissionError("artifact path contains Windows-unsafe separators")
     relative = PurePosixPath(name)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] not in {"workspace", "outputs"}:
         raise PermissionError("artifact path escapes the thread workspace")
+    if any(part.endswith((".", " ")) or PureWindowsPath(part).is_reserved() for part in relative.parts):
+        raise PermissionError("artifact path contains Windows-unsafe components")
+    if any(path.is_symlink() for path in (root, *root.parents)):
+        raise PermissionError("artifact root contains a symlink")
+    root_resolved = root.resolve(strict=False)
     # Do not follow links left by a previous local provider into host files.
     current = root
     for part in relative.parts:
@@ -103,6 +112,8 @@ def _write_host_file(root: Path, name: str, data: bytes):
         if current.is_symlink():
             raise PermissionError("artifact destination is a symlink")
     destination = root.joinpath(*relative.parts)
+    if not destination.resolve(strict=False).is_relative_to(root_resolved):
+        raise PermissionError("artifact destination escapes the thread workspace")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".sandbox0-{uuid.uuid4().hex}.part")
     try:

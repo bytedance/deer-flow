@@ -553,6 +553,8 @@ pauses are reconciled before a later turn can reuse the workspace, including
 after a Gateway restart. See the
 [real Agent demo](backend/examples/sandbox0/README.md) for upload, tools, skills,
 subagents, artifact download and cross-turn persistence validation.
+Artifact downloads enforce portable host paths, and large document appends use
+SDK uploads without putting their content into shell arguments.
 
 DeerFlow supports multiple sandbox execution modes:
 - **Local Execution** (runs sandbox code directly on the host machine)
