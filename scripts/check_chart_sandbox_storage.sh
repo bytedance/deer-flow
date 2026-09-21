@@ -5,8 +5,9 @@
 # The Gateway sends provisioner extra_mount host paths rooted at
 # DEER_FLOW_HOST_BASE_DIR. In USERDATA_PVC mode the provisioner validates those
 # paths against its own DEER_FLOW_HOST_BASE_DIR, then converts the relative
-# suffix to a deer-flow/<suffix> PVC subPath. A mismatched root makes otherwise
-# valid skill projection mounts fail with HTTP 400 before sandbox creation.
+# suffix to a deer-flow/<suffix> PVC subPath. The Gateway must mount that same
+# PVC subtree at the logical state root. Drift in any leg of this contract can
+# either reject valid mounts with HTTP 400 or resolve them to the wrong subtree.
 #
 # When persistence.home.enabled=false the provisioner does not receive the
 # Gateway's home PVC, so this check intentionally leaves its state-root env
@@ -54,6 +55,11 @@ env_value() {
 
 has_env() { grep -qE "^[[:space:]]*- name: $1$" "$2"; }
 
+has_gateway_home_mount_contract() {
+  grep -A1 -E '^[[:space:]]*mountPath: /app/backend/\.deer-flow$' "$1" |
+    grep -qE '^[[:space:]]*subPath: deer-flow$'
+}
+
 errors=0
 check() {
   if [ "$1" -eq 0 ]; then
@@ -73,6 +79,7 @@ echo "## Shared home PVC render"
 [ "$gateway_root" = "$provisioner_root" ]; check $? "Gateway and provisioner state roots match"
 [ "$gateway_root" = "/app/backend/.deer-flow" ]; check $? "Shared logical state root is /app/backend/.deer-flow"
 has_env USERDATA_PVC_NAME "$TMP/provisioner.yaml"; check $? "Provisioner USERDATA_PVC_NAME is present"
+has_gateway_home_mount_contract "$TMP/gateway.yaml"; check $? "Gateway home mount keeps subPath deer-flow at the shared logical root"
 
 echo "## persistence.home.enabled=false render"
 if has_env DEER_FLOW_HOST_BASE_DIR "$TMP/provisioner-ephemeral.yaml"; then
