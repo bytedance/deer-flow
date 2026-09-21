@@ -2640,8 +2640,8 @@ class TestUploads:
             assert len(created_executors) == 1
             assert created_executors[0].max_workers == 1
             assert created_executors[0].shutdown_calls == [True]
-            assert result["files"][0]["markdown_file"] == "first.md"
-            assert result["files"][1]["markdown_file"] == "second.md"
+            assert result["files"][0]["markdown_file"] == "first.pdf.md"
+            assert result["files"][1]["markdown_file"] == "second.pdf.md"
 
     def test_upload_files_converted_markdown_uses_unique_names_on_stem_collision(self, client):
         """Companion .md from convert must not clobber another same-stem companion."""
@@ -2669,10 +2669,10 @@ class TestUploads:
                 result = client.upload_files("thread-1", [docx, pdf])
 
             assert result["success"] is True
-            assert result["files"][0]["markdown_file"] == "a.md"
-            assert result["files"][1]["markdown_file"] == "a_1.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
-            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert result["files"][0]["markdown_file"] == "a.docx.md"
+            assert result["files"][1]["markdown_file"] == "a.pdf.md"
+            assert (uploads_dir / "a.docx.md").read_text(encoding="utf-8") == "FROM:a.docx"
+            assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "FROM:a.pdf"
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -2708,9 +2708,9 @@ class TestUploads:
 
             assert result["success"] is True
             assert result["files"][0].get("markdown_file") is None
-            assert result["files"][1]["markdown_file"] == "a.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
-            assert not (uploads_dir / "a_1.md").exists()
+            assert result["files"][1]["markdown_file"] == "a.pdf.md"
+            assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert not (uploads_dir / "a.docx.md").exists()
 
     def test_upload_files_converts_the_source_not_the_landed_copy(self, client):
         """A sandbox swapping the landed upload must not redirect conversion at a host file."""
@@ -2829,8 +2829,8 @@ class TestUploads:
             ):
                 result = client.upload_files("thread-1", [pdf])
 
-            assert result["files"][0]["markdown_file"] == "report.md"
-            companion = uploads_dir / "report.md"
+            assert result["files"][0]["markdown_file"] == "report.pdf.md"
+            companion = uploads_dir / "report.pdf.md"
             assert companion.read_text(encoding="utf-8") == "converted"
             assert stat.S_IMODE(companion.stat().st_mode) == 0o644
 
@@ -4533,7 +4533,7 @@ class TestUploadDeleteSymlink:
 
             outside = tmp_path / "outside.md"
             outside.write_text("original")
-            link = uploads_dir / "report.md"
+            link = uploads_dir / "report.pdf.md"
             try:
                 link.symlink_to(outside)
             except OSError as exc:

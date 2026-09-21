@@ -307,14 +307,30 @@ class ThreadUploadIngestionService:
             file_info["original_filename"] = original_filename
         logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
+        companion_name: str | None = None
         if convert_source_fd is not None:
-            # The companion gets the same atomic no-overwrite commit as the
-            # original: staged under the hidden .part pattern, link-committed
-            # with next-suffix retry — conversion can never silently truncate
-            # another uploaded or derived file, in this session or a
-            # concurrent one.
-            provisional_md_name = Path(safe_filename).with_suffix(".md").name
-            unique_md_name = uploads.claim_unique_filename(provisional_md_name, self._seen_filenames)
+            # Claim the companion's name now that the commit has settled the
+            # document's final one (a collision retry may have moved it), and
+            # before the next file of this request claims anything. A name
+            # already taken yields no companion rather than one under a name
+            # the delete and outline paths cannot derive.
+            candidate = uploads.companion_markdown_name(safe_filename)
+            if candidate in self._seen_filenames:
+                logger.warning("Skipping markdown companion for %s: %s is already taken", safe_filename, candidate)
+                _close_fd(convert_source_fd)
+                convert_source_fd = None
+            else:
+                self._seen_filenames.add(candidate)
+                companion_name = candidate
+
+        if convert_source_fd is not None:
+            # The companion is staged under the hidden .part pattern and
+            # link-committed, so conversion can never truncate another
+            # uploaded or derived file. Unlike the document, it is not
+            # retried under a next suffix: its name is the one this document
+            # owns, and a concurrent writer that already took it wrote the
+            # companion for this same name.
+            unique_md_name = companion_name
             md_staging = self._uploads_dir / f"{uploads.UPLOAD_STAGING_PREFIX}{uuid.uuid4().hex}{uploads.UPLOAD_STAGING_SUFFIX}"
             # The staged bytes are copied out of the sandbox-writable tree and
             # converted there; the uploads dir only ever receives the result.
@@ -353,7 +369,12 @@ class ThreadUploadIngestionService:
                 self._seen_filenames.discard(unique_md_name)
                 await run_file_io(md_staging.unlink, True)
             else:
-                unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name)
+                try:
+                    md_path = await run_file_io(uploads._link_staged_no_overwrite, Path(md_staged), self._uploads_dir, unique_md_name)
+                except FileExistsError:
+                    logger.warning("Markdown companion %s already exists; keeping it", unique_md_name)
+                    await run_file_io(md_staging.unlink, True)
+                    return file_info
                 self._written_paths.append(md_path)
                 md_virtual_path = uploads.upload_virtual_path(md_path.name)
                 if self._sync_to_sandbox:

@@ -71,6 +71,7 @@ from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
+    companion_markdown_name,
     copy_upload_file_no_symlink,
     delete_file_safe,
     enrich_file_listing,
@@ -1638,8 +1639,12 @@ class DeerFlowClient:
                 raise ValueError(f"Path is not a file: {f}")
             dest_name = claim_unique_filename(p.name, seen_names)
             resolved_files.append((p, dest_name))
-            if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+            if p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
+                # Reserve the companion's name alongside the document's, so
+                # another file in this request cannot take the name this
+                # document owns.
+                seen_names.add(companion_markdown_name(dest_name))
 
         uploads_dir = ensure_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
@@ -1681,11 +1686,10 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    # Reserve companion .md name before convert so two stems
-                    # that collapse to the same .md (or a prior .md upload)
-                    # cannot silently overwrite each other.
-                    provisional_md_name = Path(dest_name).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                    # The companion is named after the whole document
+                    # (report.pdf → report.pdf.md), the name reserved above,
+                    # so the delete and outline paths can derive it.
+                    unique_md_name = companion_markdown_name(dest_name)
                     try:
                         # Convert the caller's own file, not the copy that just
                         # landed in the sandbox-writable uploads dir: a sandbox
@@ -1721,11 +1725,6 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    else:
-                        # No companion was written, so release the claim;
-                        # holding it would rename a later same-stem upload
-                        # against a name this request never filled.
-                        seen_names.discard(unique_md_name)
 
                 uploaded_files.append(info)
         finally:

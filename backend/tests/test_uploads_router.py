@@ -227,7 +227,7 @@ def test_upload_files_does_not_auto_convert_documents_by_default(tmp_path):
     assert result.files[0].filename == "report.pdf"
     assert result.files[0].markdown_file is None
     convert_mock.assert_not_called()
-    assert not (thread_uploads_dir / "report.md").exists()
+    assert not (thread_uploads_dir / "report.pdf.md").exists()
 
 
 def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
@@ -260,13 +260,13 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
     assert len(result.files) == 1
     file_info = result.files[0]
     assert file_info.filename == "report.pdf"
-    assert file_info.markdown_file == "report.md"
+    assert file_info.markdown_file == "report.pdf.md"
 
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
-    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert (thread_uploads_dir / "report.pdf.md").read_text(encoding="utf-8") == "converted"
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
-    sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
+    sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf.md", b"converted")
 
 
 def test_upload_sync_holds_non_releasing_lease_while_active_agent_finishes(tmp_path):
@@ -369,7 +369,7 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
 
     assert result.success is True
     make_writable.assert_any_call(thread_uploads_dir / "report.pdf")
-    make_writable.assert_any_call(thread_uploads_dir / "report.md")
+    make_writable.assert_any_call(thread_uploads_dir / "report.pdf.md")
 
 
 def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
@@ -1246,18 +1246,45 @@ def test_upload_files_closes_conversion_descriptor_when_cancelled_while_copy_is_
     assert duplicated[0] in closed, "the descriptor handed to the queued copy was never closed"
 
 
+def test_upload_files_skips_the_companion_when_its_name_is_already_taken(tmp_path):
+    """A pre-existing upload owning that name keeps it; no underivable companion is written."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    (thread_uploads_dir / "report.pdf.md").write_bytes(b"USER MARKDOWN")
+
+    async def fake_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-taken", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.files[0].filename == "report.pdf"
+    assert result.files[0].markdown_file is None
+    assert (thread_uploads_dir / "report.pdf.md").read_bytes() == b"USER MARKDOWN"
+    assert sorted(p.name for p in thread_uploads_dir.iterdir()) == ["report.pdf", "report.pdf.md"]
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     (thread_uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
-    (thread_uploads_dir / "report.md").write_text("converted", encoding="utf-8")
+    (thread_uploads_dir / "report.pdf.md").write_text("converted", encoding="utf-8")
 
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
         result = asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-aio", "report.pdf", request=MagicMock()))
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     assert not (thread_uploads_dir / "report.pdf").exists()
-    assert not (thread_uploads_dir / "report.md").exists()
+    assert not (thread_uploads_dir / "report.pdf.md").exists()
 
 
 def test_delete_uploaded_file_rejects_symlink_to_sibling_upload(tmp_path):
@@ -1393,11 +1420,11 @@ def _fake_convert_honoring_output_path(content_by_source: dict[str, str] | None 
 
 
 def test_upload_files_converted_markdown_does_not_overwrite_user_markdown(tmp_path):
-    """Companion .md from auto-convert must not clobber a same-request .md upload.
+    """A companion cannot collide with a same-request .md upload.
 
-    Declared invariant (upload_files): filenames within one request must not
-    silently truncate each other. convert_file_to_markdown used to write
-    stem.md unconditionally, bypassing claim_unique_filename.
+    The companion is named after the whole document (notes.docx →
+    notes.docx.md), so it no longer competes for the stem the user's own
+    notes.md occupies.
     """
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -1428,16 +1455,14 @@ def test_upload_files_converted_markdown_does_not_overwrite_user_markdown(tmp_pa
 
     assert result.success is True
     assert [f.filename for f in result.files] == ["notes.md", "notes.docx"]
-    # User upload preserved
+    # User upload preserved; the companion took the name its document owns.
     assert (thread_uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
-    # Converted companion got a unique name instead of overwriting
-    assert result.files[1].markdown_file == "notes_1.md"
-    assert (thread_uploads_dir / "notes_1.md").read_text(encoding="utf-8") == "FROM_DOCX"
-    assert not (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM_DOCX"
+    assert result.files[1].markdown_file == "notes.docx.md"
+    assert (thread_uploads_dir / "notes.docx.md").read_text(encoding="utf-8") == "FROM_DOCX"
 
 
 def test_upload_files_two_convertibles_get_distinct_markdown_companions(tmp_path):
-    """Two convertible files sharing a stem must not share one .md path."""
+    """Two convertible files sharing a stem get companions named after each."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 
@@ -1466,17 +1491,17 @@ def test_upload_files_two_convertibles_get_distinct_markdown_companions(tmp_path
         )
 
     assert result.success is True
-    assert result.files[0].markdown_file == "a.md"
-    assert result.files[1].markdown_file == "a_1.md"
-    assert (thread_uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_DOCX"
-    assert (thread_uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM_PDF"
+    assert result.files[0].markdown_file == "a.docx.md"
+    assert result.files[1].markdown_file == "a.pdf.md"
+    assert (thread_uploads_dir / "a.docx.md").read_text(encoding="utf-8") == "FROM_DOCX"
+    assert (thread_uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "FROM_PDF"
     # Each response entry points at content that belongs to that source
     assert (thread_uploads_dir / result.files[0].markdown_file).read_text(encoding="utf-8") == "FROM_DOCX"
     assert (thread_uploads_dir / result.files[1].markdown_file).read_text(encoding="utf-8") == "FROM_PDF"
 
 
 def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten(tmp_path):
-    """If convert claims stem.md first, a later same-request .md is renamed."""
+    """An upload named like a companion is renamed; the companion keeps its name."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 
@@ -1498,7 +1523,7 @@ def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten
                 request=MagicMock(),
                 files=[
                     UploadFile(filename="notes.docx", file=BytesIO(b"DOCX")),
-                    UploadFile(filename="notes.md", file=BytesIO(b"USER_MARKDOWN")),
+                    UploadFile(filename="notes.docx.md", file=BytesIO(b"USER_MARKDOWN")),
                 ],
                 config=SimpleNamespace(),
             )
@@ -1506,11 +1531,11 @@ def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten
 
     assert result.success is True
     assert result.files[0].filename == "notes.docx"
-    assert result.files[0].markdown_file == "notes.md"
-    assert result.files[1].filename == "notes_1.md"
-    assert result.files[1].original_filename == "notes.md"
-    assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM_DOCX"
-    assert (thread_uploads_dir / "notes_1.md").read_bytes() == b"USER_MARKDOWN"
+    assert result.files[0].markdown_file == "notes.docx.md"
+    assert result.files[1].filename == "notes.docx_1.md"
+    assert result.files[1].original_filename == "notes.docx.md"
+    assert (thread_uploads_dir / "notes.docx.md").read_text(encoding="utf-8") == "FROM_DOCX"
+    assert (thread_uploads_dir / "notes.docx_1.md").read_bytes() == b"USER_MARKDOWN"
 
 
 def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_path):
@@ -1547,7 +1572,7 @@ def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_p
 
 
 def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suffix(tmp_path):
-    """The second victim of a stale claim: a later convertible's companion."""
+    """A failed conversion cannot affect another document's companion name."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 
@@ -1580,6 +1605,6 @@ def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suff
 
     assert result.success is True
     assert result.files[0].markdown_file is None
-    assert result.files[1].markdown_file == "notes.md"
-    assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
-    assert not (thread_uploads_dir / "notes_1.md").exists()
+    assert result.files[1].markdown_file == "notes.pdf.md"
+    assert (thread_uploads_dir / "notes.pdf.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
+    assert not (thread_uploads_dir / "notes.docx.md").exists()

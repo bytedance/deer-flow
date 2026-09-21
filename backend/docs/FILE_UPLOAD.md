@@ -110,7 +110,9 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名（`report.pdf` → `report.pdf.md`）。该名称由原文件名唯一确定，因此共用主干名的两个文档（如 `a.docx` 与 `a.pdf`）不会争抢同一个 `.md`，删除与大纲提取也能准确找到各自的配套文件。
+
+> 早期版本改写扩展名（`report.pdf` → `report.md`）。升级前生成的旧配套文件不会被自动清理，删除原文件时也不会被删除（无法确定它属于哪个文档）；如不需要，可在上传列表中手动删除。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 

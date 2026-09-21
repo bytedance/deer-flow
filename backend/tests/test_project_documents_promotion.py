@@ -370,9 +370,9 @@ class TestAttach:
             assert response.status_code == 200
             assert response.json()["filename"] == "report.pdf"
             assert (_thread_uploads("thread-1") / "report.pdf").read_bytes() == b"pdf-bytes"
-            assert (_thread_uploads("thread-1") / "report.md").read_text(encoding="utf-8") == "converted"
+            assert (_thread_uploads("thread-1") / "report.pdf.md").read_text(encoding="utf-8") == "converted"
             sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
-            sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
+            sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf.md", b"converted")
 
     def test_attach_makes_files_sandbox_readable(self, tmp_path):
         app = _build_app(tmp_path)
@@ -857,11 +857,11 @@ class TestAttachAtomicReservation:
             assert all(not thread.is_alive() for thread in threads)
             assert {r.status_code for r in responses.values()} == {200}
             contents = {path.name: path.read_bytes() for path in _thread_uploads("thread-1").iterdir()}
-            assert sorted(contents) == ["report.md", "report.pdf", "report_1.md", "report_1.pdf"]
+            assert sorted(contents) == ["report.pdf", "report.pdf.md", "report_1.pdf", "report_1.pdf.md"]
             assert sorted(contents[name] for name in ("report.pdf", "report_1.pdf")) == sorted([b"first-pdf", b"second-pdf"])
             # Each companion carries its own source's conversion — neither
             # companion overwrote the other.
-            companions = sorted((contents["report.md"], contents["report_1.md"]))
+            companions = sorted((contents["report.pdf.md"], contents["report_1.pdf.md"]))
             assert companions == sorted([b"converted:first-pdf", b"converted:second-pdf"])
 
 

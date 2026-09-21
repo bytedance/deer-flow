@@ -25,6 +25,7 @@ from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
     claim_unique_filename,
+    companion_markdown_name,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -52,6 +53,7 @@ router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 __all__ = [
     "UnsafeUploadPathError",
     "claim_unique_filename",
+    "companion_markdown_name",
     "convert_file_to_markdown",
     "ensure_uploads_dir",
     "get_sandbox_provider",

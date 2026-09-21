@@ -150,8 +150,8 @@ async def test_ingestion_open_and_link_commit_dispatch_off_the_loop(tmp_path, mo
 
         calls.clear()
         info = await service.ingest_chunks(_pdf_chunks(), display_name="doc.pdf")
-        assert info["markdown_file"] == "doc.md"
-        assert (uploads_dir / "doc.md").read_text(encoding="utf-8") == "md"
+        assert info["markdown_file"] == "doc.pdf.md"
+        assert (uploads_dir / "doc.pdf.md").read_text(encoding="utf-8") == "md"
         assert "_link_staged_no_overwrite" in calls
         await service.aclose()
     finally:

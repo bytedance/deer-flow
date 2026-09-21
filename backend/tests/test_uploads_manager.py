@@ -13,6 +13,7 @@ from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    companion_markdown_name,
     copy_upload_file_no_symlink,
     delete_file_safe,
     list_files_in_dir,
@@ -109,6 +110,19 @@ class TestDeduplicateFilename:
     def test_short_names_keep_existing_dedupe_shape(self):
         seen = {"data.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
+
+
+# ---------------------------------------------------------------------------
+# companion_markdown_name
+# ---------------------------------------------------------------------------
+
+
+class TestCompanionMarkdownName:
+    def test_keeps_the_whole_name(self):
+        assert companion_markdown_name("report.pdf") == "report.pdf.md"
+
+    def test_distinguishes_documents_sharing_a_stem(self):
+        assert companion_markdown_name("a.docx") != companion_markdown_name("a.pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +397,30 @@ class TestDeleteFileSafe:
     def test_delete_traversal_raises(self, tmp_path):
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
+
+    def test_delete_removes_only_the_companion_named_after_the_file(self, tmp_path):
+        """a.pdf owns a.pdf.md; a.docx's companion must survive."""
+        (tmp_path / "a.docx").write_bytes(b"DOCX")
+        (tmp_path / "a.docx.md").write_text("from docx", encoding="utf-8")
+        (tmp_path / "a.pdf").write_bytes(b"PDF")
+        (tmp_path / "a.pdf.md").write_text("from pdf", encoding="utf-8")
+
+        delete_file_safe(tmp_path, "a.pdf", convertible_extensions={".pdf", ".docx"})
+
+        assert not (tmp_path / "a.pdf").exists()
+        assert not (tmp_path / "a.pdf.md").exists()
+        assert (tmp_path / "a.docx").read_bytes() == b"DOCX"
+        assert (tmp_path / "a.docx.md").read_text(encoding="utf-8") == "from docx"
+
+    def test_delete_leaves_a_companion_written_under_the_old_name(self, tmp_path):
+        """Pre-existing stem.md companions are not guessed at."""
+        (tmp_path / "a.pdf").write_bytes(b"PDF")
+        (tmp_path / "a.md").write_text("could belong to anything", encoding="utf-8")
+
+        delete_file_safe(tmp_path, "a.pdf", convertible_extensions={".pdf"})
+
+        assert not (tmp_path / "a.pdf").exists()
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "could belong to anything"
 
     def test_delete_symlink_to_sibling_upload_keeps_target(self, tmp_path):
         """A symlink planted in the uploads dir must not delete the upload it aliases."""

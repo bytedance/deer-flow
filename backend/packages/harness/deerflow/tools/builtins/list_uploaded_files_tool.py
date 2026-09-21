@@ -20,6 +20,7 @@ from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 from deerflow.uploads.manager import is_upload_staging_file
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 from deerflow.utils.file_outline import extract_outline_for_file
 
 logger = logging.getLogger(__name__)
@@ -168,15 +169,14 @@ def _list_uploaded_files_impl(
         for entry in entries:
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
+            # Skip .md files that are conversion artifacts of another file. A
+            # companion is named after its whole document (report.pdf →
+            # report.pdf.md), so the owner is exactly the name minus ".md" —
+            # a user's own report.md is no longer hidden by an unrelated
+            # report.pdf.
             if entry.name.endswith(".md"):
-                stem = entry.name[:-3]  # remove ".md"
-                non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
-                if non_md_siblings:
+                owner = entry.name[:-3]
+                if owner in all_names and Path(owner).suffix.lower() in CONVERTIBLE_EXTENSIONS:
                     continue
             stat = entry.stat()
             candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))

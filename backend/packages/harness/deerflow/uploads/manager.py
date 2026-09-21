@@ -122,6 +122,20 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     return candidate
 
 
+def companion_markdown_name(filename: str) -> str:
+    """Return the name of the Markdown companion derived from *filename*.
+
+    The companion keeps the whole original name and appends ``.md``
+    (``report.pdf`` → ``report.pdf.md``), which is the rule
+    ``docs/FILE_UPLOAD.md`` documents. The name therefore identifies its
+    owner, so every site can derive it instead of guessing: replacing the
+    suffix (``report.md``) collides whenever two uploads share a stem, and the
+    collision is then resolved at upload time by a ``_N`` suffix that the
+    delete and outline paths cannot reconstruct.
+    """
+    return f"{filename}.md"
+
+
 def is_upload_staging_file(filename: str) -> bool:
     """Return whether *filename* is a transient Gateway upload staging file."""
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
@@ -399,9 +413,11 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
 
     file_path.unlink()
 
-    # Clean up companion markdown generated during upload conversion.
+    # Clean up companion markdown generated during upload conversion. Only
+    # the name this file owns is removed; a companion written under the old
+    # suffix-replacing name may belong to another upload, so it is left alone.
     if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-        file_path.with_suffix(".md").unlink(missing_ok=True)
+        file_path.with_name(companion_markdown_name(file_path.name)).unlink(missing_ok=True)
 
     return {"success": True, "message": f"Deleted {filename}"}
 
