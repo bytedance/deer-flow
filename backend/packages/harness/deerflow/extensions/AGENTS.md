@@ -275,28 +275,8 @@ containment. There is no live task to attach at that call site, so observers rec
 detached task store, the same fallback `notify_system_model_call` uses when its caller
 supplies none.
 
-P0 skill evolution adds restart-bound `host_access` grants and optional
-`completed_run_evidence` / `skill_mutations` dependencies (public API 0.2.2).
-`host_access.bind_host_access()` binds unique name + entry point to a durable
-plugin identity; source attribution comes from the host registry. Ungranted
-legacy extensions keep their old dependency identity and reader behavior.
-`host_capabilities.HostCapabilities` owns the bounded mutation workers, dedicated
-durable sync DB pool, topology lease, and startup/periodic recovery. Register its
-cleanup before startup; stop extension services before draining its scans and
-workers, and dispose its pool only after that drain. Persisted owner enrollment
-outlives plugin removal. Do not make recovery depend on importing a plugin.
-
-Mutation code is in `skills/mutations/`; models/migration are host-owned in
-`persistence/skill_mutations/` and revisions 0027/0028. Owner guards precede DB
-transactions; synchronous locks never span an `await`. The public projection
-rebuild wrappers acquire global then owner locks, so publication must release
-its owner guard before calling them. Scanner diagnostics must not log candidate
-bytes or model exception payloads. Administration lives in the host Gateway
-router, not an extension contribution. See `docs/skill-evolution-host.md` for the
-supported topology, grants, limits, and coordinated restart/downgrade procedure.
-
 Gateway services start in registration order after the persistence engine and session
-factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
+factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
 app store, projected host policy, session factory, and optional read-only
 `RunEvidenceReader`. The Gateway constructs the configured run and event stores before
 services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
