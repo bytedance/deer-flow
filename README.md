@@ -62,6 +62,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Running the Application](#running-the-application)
       - [Deployment Sizing](#deployment-sizing)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
+      - [Upgrading an existing checkout](#upgrading-an-existing-checkout)
       - [Option 2: Local Development](#option-2-local-development)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
@@ -323,15 +324,6 @@ make docker-logs    # View logs
 
 Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
 
-#### Upgrading an existing checkout
-
-Keep `config.yaml`, `.env`, and `extensions_config.json`. Stop the services you
-currently use, run `git pull --ff-only`, then start the same mode again. Do not run
-`make config` or `make docker-init` again for a routine source upgrade. If the new
-version requires configuration changes, run `make config-upgrade` before restarting.
-See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
-for the commands for each mode.
-
 Local AIO sandbox control traffic is always direct: loopback/private addresses,
 single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
 `HTTP_PROXY` or `HTTPS_PROXY`. External sandbox FQDNs and public IPs still
@@ -412,6 +404,15 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
+
+#### Upgrading an existing checkout
+
+Keep `config.yaml`, `.env`, and `extensions_config.json`. Stop the services you
+currently use, run `git pull --ff-only`, then start the same mode again. Do not run
+`make config` or `make docker-init` again for a routine source upgrade. If the new
+version requires configuration changes, run `make config-upgrade` before restarting.
+See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
+for the commands for each mode.
 
 #### Option 2: Local Development
 

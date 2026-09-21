@@ -55,6 +55,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [运行应用](#运行应用)
       - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
+      - [升级已有的代码仓库](#升级已有的代码仓库)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
       - [Sandbox 模式](#sandbox-模式)
@@ -264,13 +265,6 @@ make docker-start   # 启动服务（会根据 config.yaml 自动判断 sandbox 
 
 如果 `config.yaml` 使用的是 provisioner 模式（`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` 且配置了 `provisioner_url`），`make docker-start` 才会启动 `provisioner`。
 
-#### 升级已有的代码仓库
-
-保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`。停止当前运行的服务后，
-执行 `git pull --ff-only`，再按原运行方式启动。日常源码升级不需要再次运行 `make config`
-或 `make docker-init`；如果新版本需要变更配置，请在重启前运行 `make config-upgrade`。
-各运行方式的命令见[运维与排障](frontend/src/content/zh/application/operations-and-troubleshooting.mdx#升级已有的代码仓库)。
-
 **生产模式**（本地构建镜像，并挂载运行期配置与数据）：
 
 ```bash
@@ -284,6 +278,13 @@ make down   # 停止并移除容器
 访问地址：http://localhost:2026
 
 更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+#### 升级已有的代码仓库
+
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`。停止当前运行的服务后，
+执行 `git pull --ff-only`，再按原运行方式启动。日常源码升级不需要再次运行 `make config`
+或 `make docker-init`；如果新版本需要变更配置，请在重启前运行 `make config-upgrade`。
+各运行方式的命令见[运维与排障](frontend/src/content/zh/application/operations-and-troubleshooting.mdx#升级已有的代码仓库)。
 
 #### 方式二：本地开发
 
