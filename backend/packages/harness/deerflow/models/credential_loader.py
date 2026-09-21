@@ -92,10 +92,24 @@ def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(path.read_text())
+        parsed = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Failed to read {label}: {e}")
         return None
+
+    # The declared return type is dict[str, Any] | None. json.loads accepts any
+    # top-level JSON value, so a credentials file that parses to a non-object
+    # (e.g. [], "token", 5, true) would otherwise be handed back to the caller
+    # and blow up with a raw AttributeError when it reads keys off a non-dict
+    # (see #5552). Such a shape is not a usable credential container, so treat
+    # it as "not found" and let the caller fall back -- matching the sibling
+    # Claude Code loader contract (_extract_claude_code_credential guards
+    # `if not isinstance(data, dict)`).
+    if parsed is not None and not isinstance(parsed, dict):
+        logger.warning(f"{label} is not a JSON object; ignoring: {path}")
+        return None
+
+    return parsed
 
 
 def _read_secret_from_file_descriptor(env_var: str) -> str | None:
