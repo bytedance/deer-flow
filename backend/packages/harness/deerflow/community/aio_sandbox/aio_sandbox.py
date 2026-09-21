@@ -66,6 +66,7 @@ class AioSandbox(Sandbox):
         base_url: str,
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
+        default_command_timeout: float | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -75,8 +76,20 @@ class AioSandbox(Sandbox):
             home_dir: Home directory inside the sandbox. If None, will be fetched from the sandbox.
             request_headers: Trusted control-plane headers required by a local
                 relay. These are never injected into sandbox commands.
+            default_command_timeout: Provider-configured command deadline used
+                when a command does not provide an explicit timeout.
         """
         super().__init__(id)
+        if default_command_timeout is None:
+            self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
+        else:
+            try:
+                resolved_default_timeout = float(default_command_timeout)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("default_command_timeout must be positive") from exc
+            if not math.isfinite(resolved_default_timeout) or resolved_default_timeout <= 0:
+                raise ValueError("default_command_timeout must be positive")
+            self._default_command_timeout = resolved_default_timeout
         self._base_url = base_url
         client_kwargs = {
             "base_url": base_url,
@@ -528,9 +541,8 @@ class AioSandbox(Sandbox):
     _REQUEST_TIMEOUT_GRACE_SECONDS = 5.0
     _CLEANUP_REQUEST_TIMEOUT_SECONDS = 5
 
-    @classmethod
-    def _effective_command_timeout(cls, timeout: float | None) -> float:
-        return cls._DEFAULT_HARD_TIMEOUT if timeout is None else timeout
+    def _effective_command_timeout(self, timeout: float | None) -> float:
+        return timeout if timeout is not None else (getattr(self, "_default_command_timeout", None) or self._DEFAULT_HARD_TIMEOUT)
 
     @classmethod
     def _effective_no_change_timeout(cls, timeout: float) -> int:

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
+from pydantic import ValidationError
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
@@ -66,6 +67,61 @@ def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
     assert provider._load_config()["skills_container_path"] == "/custom-skills"
+
+
+def test_load_config_wires_bash_command_timeout_to_aio_default(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        bash_command_timeout=42.5,
+    )
+    app_config = SimpleNamespace(sandbox=sandbox_config, stream_bridge=None)
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    assert provider._load_config()["command_timeout"] == 42.5
+
+
+@pytest.mark.parametrize("invalid_timeout", [float("nan"), float("inf"), float("-inf"), 0, -1])
+def test_positive_float_rejects_non_positive_or_non_finite_values(invalid_timeout):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    with pytest.raises(ValueError, match="sandbox.bash_command_timeout must be positive"):
+        aio_mod.AioSandboxProvider._positive_float("bash_command_timeout", invalid_timeout, 600)
+
+
+def test_positive_float_accepts_fractional_value():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    assert aio_mod.AioSandboxProvider._positive_float("bash_command_timeout", 42.5, 600) == 42.5
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_bash_command_timeout_rejects_non_finite_values(value):
+    with pytest.raises(ValidationError):
+        SandboxConfig(bash_command_timeout=value)
+
+
+def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._config["command_timeout"] = 42
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._publish_ownership = MagicMock()
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-timeout", sandbox_url="http://sandbox")
+
+    with patch.object(aio_mod, "AioSandbox") as sandbox_cls:
+        provider._register_created_sandbox("thread-timeout", "sandbox-timeout", info, user_id="user-timeout")
+
+    sandbox_cls.assert_called_once_with(
+        id="sandbox-timeout",
+        base_url="http://sandbox",
+        request_headers=info.request_headers,
+        default_command_timeout=42,
+    )
 
 
 def test_load_config_sizes_aio_shell_capacity_for_subagent_runtime(monkeypatch):
@@ -231,7 +287,7 @@ def _make_provider(tmp_path):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
-        provider._config = {"idle_timeout": 600, "replicas": 3}
+        provider._config = {"command_timeout": 600.0, "idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
         provider._active_sandbox_identity = {}
         provider._warm_pool_identity = {}
@@ -575,6 +631,7 @@ def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
 
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/mnt/skills",
     }
@@ -631,6 +688,7 @@ def test_remote_create_forwards_configured_skills_container_path(
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/custom-skills",
     }
@@ -693,6 +751,7 @@ async def test_remote_create_async_forwards_configured_skills_container_path(
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/custom-skills",
     }
@@ -811,7 +870,7 @@ async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
     """AioSandboxProvider async creation must not use sync readiness polling."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(None)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1110,7 +1169,7 @@ def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypat
     """The provider must request lark-cli runtime provisioning when Lark is installed."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1140,7 +1199,7 @@ def test_create_sandbox_requests_broker_when_active(tmp_path, monkeypatch):
     """Broker mode (Pattern B) is requested when the provisioner reports it."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1170,7 +1229,7 @@ def test_create_sandbox_skips_runtime_when_lark_absent(tmp_path, monkeypatch):
     """No runtime provisioning request when the Lark skill pack is not installed."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1305,7 +1364,7 @@ def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
     provider._thread_sandboxes = {("default", "thread-dead"): "sandbox-dead"}
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._backend.is_alive = MagicMock(return_value=False)
     provider._backend.discover = MagicMock(return_value=None)
     provider._backend.create = MagicMock(
@@ -1389,7 +1448,7 @@ def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):
             0.0,
         )
     }
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._backend = SimpleNamespace(
         is_alive=MagicMock(return_value=False),
         destroy=MagicMock(),
@@ -1472,7 +1531,7 @@ def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._lock = aio_mod.threading.Lock()
-    provider._config = {"replicas": 2}
+    provider._config = {"command_timeout": 600.0, "replicas": 2}
     provider._sandboxes = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1513,7 +1572,7 @@ def _make_tenant_isolation_provider(tmp_path, monkeypatch):
     provider._active_sandbox_identity = {}
     provider._warm_pool_identity = {}
     provider._shutdown_called = False
-    provider._config = {"replicas": 3, "idle_timeout": 0}
+    provider._config = {"command_timeout": 600.0, "replicas": 3, "idle_timeout": 0}
 
     create_calls = []
 
@@ -1610,7 +1669,7 @@ def _make_unready_destroy_provider(tmp_path, *, sandbox_id, base_url, monkeypatc
     """
     provider = _make_provider(tmp_path)
     provider._lock = aio_mod.threading.Lock()
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}

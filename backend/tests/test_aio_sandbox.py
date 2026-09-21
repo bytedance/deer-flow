@@ -1462,6 +1462,64 @@ class TestNoChangeTimeout:
             }
         ]
 
+    @pytest.mark.parametrize(
+        ("configured_timeout", "explicit_timeout", "expected_hard_timeout", "expected_request_timeout"),
+        [
+            (42, None, 42, 47),
+            (42.5, None, 42.5, 48),
+            (42, 10, 10, 15),
+        ],
+    )
+    def test_execute_command_uses_configured_default_or_explicit_timeout(
+        self,
+        configured_timeout,
+        explicit_timeout,
+        expected_hard_timeout,
+        expected_request_timeout,
+    ):
+        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+        with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+            configured_sandbox = AioSandbox(
+                id="configured-timeout-sandbox",
+                base_url="http://localhost:8080",
+                default_command_timeout=configured_timeout,
+            )
+        configured_sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0, status="completed")))
+
+        configured_sandbox.execute_command("echo ok", timeout=explicit_timeout)
+
+        kwargs = configured_sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["hard_timeout"] == expected_hard_timeout
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": expected_request_timeout,
+            "max_retries": 0,
+        }
+
+    @pytest.mark.parametrize("invalid_timeout", [float("nan"), float("inf"), float("-inf"), 0, -1])
+    def test_default_command_timeout_must_be_positive_and_finite(self, invalid_timeout):
+        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+        with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+            with pytest.raises(ValueError, match="default_command_timeout must be positive"):
+                AioSandbox(
+                    id="invalid-timeout-sandbox",
+                    base_url="http://localhost:8080",
+                    default_command_timeout=invalid_timeout,
+                )
+
+    def test_execute_command_without_injected_default_preserves_default_timeout(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0, status="completed")))
+
+        sandbox.execute_command("echo ok")
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["hard_timeout"] == sandbox._DEFAULT_HARD_TIMEOUT
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 605,
+            "max_retries": 0,
+        }
+
     def test_execute_command_uses_default_hard_timeout_when_timeout_is_none(self, sandbox):
         sandbox._client.shell.exec_command = MagicMock(
             return_value=SimpleNamespace(
@@ -1502,6 +1560,59 @@ class TestNoChangeTimeout:
         assert "partial" in out
         assert "Command timed out after 3 seconds and was terminated." in out
         assert out.endswith("Exit Code: 124")
+
+    def test_hard_timeout_keeps_default_recovery_session(self, sandbox):
+        calls = []
+        sandbox._default_shell_corrupted = False
+        sandbox._recovery_session_id = "recovery-session"
+        sandbox._client.shell.exec_command = lambda command, **kwargs: (
+            calls.append(kwargs)
+            or SimpleNamespace(
+                data=SimpleNamespace(
+                    output="partial" if len(calls) == 1 else "ok",
+                    exit_code=None if len(calls) == 1 else 0,
+                    status="hard_timeout" if len(calls) == 1 else "completed",
+                )
+            )
+        )
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        first = sandbox.execute_command("sleep 30", timeout=3)
+        second = sandbox.execute_command("echo ok", timeout=3)
+
+        assert "Command timed out after 3 seconds" in first
+        assert second == "ok"
+        assert [call["id"] for call in calls] == ["recovery-session", "recovery-session"]
+        assert sandbox._recovery_session_id == "recovery-session"
+        assert sandbox._default_shell_corrupted is False
+        sandbox._client.shell.cleanup_session.assert_not_called()
+
+    def test_hard_timeout_keeps_scoped_session(self, sandbox):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ScopedShellSession
+
+        calls = []
+        sandbox._scoped_shell_sessions["scope"] = _ScopedShellSession(session_id="scoped-session")
+        sandbox._client.shell.exec_command = lambda command, **kwargs: (
+            calls.append(kwargs)
+            or SimpleNamespace(
+                data=SimpleNamespace(
+                    output="partial" if len(calls) == 1 else "ok",
+                    exit_code=None if len(calls) == 1 else 0,
+                    status="hard_timeout" if len(calls) == 1 else "completed",
+                )
+            )
+        )
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        first = sandbox.execute_command_in_scope("sleep 30", scope_id="scope", timeout=3)
+        second = sandbox.execute_command_in_scope("echo ok", scope_id="scope", timeout=3)
+
+        assert "Command timed out after 3 seconds" in first
+        assert second == "ok"
+        assert [call["id"] for call in calls] == ["scoped-session", "scoped-session"]
+        assert sandbox._scoped_shell_sessions["scope"].session_id == "scoped-session"
+        assert sandbox._default_shell_corrupted is False
+        sandbox._client.shell.cleanup_session.assert_not_called()
 
     @pytest.mark.parametrize("status", [None, "completed"])
     def test_terminal_statuses_keep_ordinary_exit_code_rendering(self, sandbox, status):

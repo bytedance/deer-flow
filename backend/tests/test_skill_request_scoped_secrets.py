@@ -1333,6 +1333,55 @@ class TestBashToolInjectsActiveSecrets:
         assert captured["env"] == {"ERP_TOKEN": "tok-456"}
         assert captured["timeout"] == 42
 
+    def test_remote_bash_does_not_forward_shared_timeout(self):
+        from deerflow.sandbox import tools as tools_mod
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                captured["timeout"] = timeout
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={},
+            state={"sandbox": {"sandbox_id": "aio:1"}},
+        )
+        fake_cfg = SimpleNamespace(
+            sandbox=SimpleNamespace(
+                bash_output_max_chars=321,
+                bash_command_timeout=42,
+            )
+        )
+
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=FakeSandbox(),
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+            patch(
+                "deerflow.config.app_config.get_app_config",
+                return_value=fake_cfg,
+            ),
+        ):
+            out = tools_mod.bash_tool.func(
+                runtime=runtime,
+                command="echo hi",
+                description="run remote",
+            )
+
+        assert out == "done"
+        assert captured["timeout"] is None
+
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"
 
