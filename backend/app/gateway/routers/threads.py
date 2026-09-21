@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -72,6 +71,12 @@ from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.uploads.companion_map import (
+    copied_upload_identities,
+    copy_user_data_tree,
+    rebind_cloned_companion_identities,
+    release_copied_identities,
+)
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
@@ -330,8 +335,30 @@ def _copy_branch_user_data_sync(paths: Paths, source_thread_id: str, target_thre
     if not source.exists():
         return "not_found"
 
-    shutil.copytree(source, target, ignore=_ignore_branch_user_data, dirs_exist_ok=True)
-    return "current_thread_best_effort"
+    copied = copy_user_data_tree(source, target, ignore=_ignore_branch_user_data)
+    try:
+        source_uploads = source / "uploads"
+        target_uploads = target / "uploads"
+        if source_uploads.is_dir() and target_uploads.is_dir():
+            try:
+                rebound = rebind_cloned_companion_identities(
+                    source_uploads,
+                    target_uploads,
+                    copied_from=copied_upload_identities(copied),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to rebind companion identities for branch %s -> %s",
+                    sanitize_log_param(source_thread_id),
+                    sanitize_log_param(target_thread_id),
+                    exc_info=True,
+                )
+                rebound = False
+            if not rebound:
+                return "current_thread_best_effort_companion_rebind_failed"
+        return "current_thread_best_effort"
+    finally:
+        release_copied_identities(copied)
 
 
 async def _copy_branch_user_data(source_thread_id: str, target_thread_id: str) -> str:
@@ -601,6 +628,8 @@ class ThreadBranchResponse(BaseModel):
     parent_checkpoint_id: str
     branched_from_message_id: str
     workspace_clone_mode: str
+    # "current_thread_best_effort" | "current_thread_best_effort_companion_rebind_failed"
+    # | "skipped_historical_turn" | "not_found" | "failed"
     # "seeded" | "skipped_empty" | "failed" — whether the parent history was
     # copied into the branch's run-event feed (see branch_thread).
     history_seed_mode: str

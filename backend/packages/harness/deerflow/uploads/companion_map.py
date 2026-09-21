@@ -21,7 +21,22 @@ a sticky ``no_legacy_fallback`` flag) so collision-renamed companions are
 not mistaken for pre-sidecar ``<stem>.md`` uploads. Companion deletion
 renames the directory entry to a quarantine name, then verifies the moved
 inode against the pin before unlinking, so a sandbox replacement of the
-basename is restored instead of deleted. The lock file lives *outside*
+basename is restored instead of deleted. Thread branch copies only
+``user-data``, so destination companions are new inodes; callers must
+copy with :func:`copy_user_data_tree` (which records the source inode
+actually opened) and :func:`rebind_cloned_companion_identities` instead of
+copying the pin directory or comparing post-copy bytes. The copy restores
+source file and directory permission bits, finishes each short ``os.write``, refuses a
+companion identity when the source size/mtime/ctime change while it is
+being read, and keeps that source inode alive with a temporary hard link
+or a bounded number of open fds until :func:`release_copied_identities` so Linux cannot
+reuse the number before rebind. A file copied without a live hold is omitted from the
+identity map so rebind tombstones that companion instead of trusting inode numbers.
+Fd fallback is capped against ``RLIMIT_NOFILE`` so a
+tree whose filesystem cannot hard-link cannot exhaust the process fd table. Destination
+directories stay writable until their children are copied, then the source mode is
+applied. Unpinned sidecar rows still have to pass
+the legacy size/mtime check; inode numbers alone cannot revive them. The lock file lives *outside*
 sandbox-visible directories (beside ``user-data``, not inside ``uploads``),
 is opened with no-follow semantics, and is acquired with a bounded
 non-blocking flock so a held lock cannot pin the shared Gateway file-IO
@@ -39,7 +54,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +77,11 @@ if hasattr(errno, "EWOULDBLOCK"):
 _LOCK_BUSY_ERRNOS = {errno.EAGAIN, errno.EACCES}
 if hasattr(errno, "EWOULDBLOCK"):
     _LOCK_BUSY_ERRNOS.add(errno.EWOULDBLOCK)
+_SKIP_COPY_ERRNOS = set(_UNSAFE_LOCK_OPEN_ERRNOS) | {errno.ENOENT, errno.EPERM, errno.EACCES}
+_COPY_CHUNK_SIZE = 1024 * 1024
+_COPY_HOLD_DIR_PREFIX = ".deer-flow-copy-holds."
+_MAX_HELD_COPY_FDS = 16
+_COPY_FD_HEADROOM = 8
 
 
 class CompanionMapLockError(OSError):
@@ -101,6 +121,80 @@ class CompanionEntry:
     dev: int | None = None
     ino: int | None = None
     id: str | None = None
+
+
+class _SourceIdentityHold:
+    """Keep a copied source inode allocated until rebind finishes.
+
+    Linux may reuse an inode number as soon as the last name and last fd are
+    gone. A temporary hard link is preferred so a large tree does not exhaust
+    the process fd table; an open fd is a bounded fallback when linking is
+    unsupported. When the fd budget is exhausted the copy still succeeds, but
+    no rebind identity is recorded so inode numbers alone cannot revive a
+    mapping. ``release`` is idempotent.
+    """
+
+    __slots__ = ("fd", "path")
+
+    def __init__(self, *, fd: int = -1, path: Path | None = None) -> None:
+        self.fd = fd
+        self.path = path
+
+    def is_live(self) -> bool:
+        """Return whether this hold still keeps the source inode allocated."""
+        return self.path is not None or self.fd >= 0
+
+    def release(self) -> None:
+        fd, self.fd = self.fd, -1
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        path, self.path = self.path, None
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Failed to remove copy identity hold %s", path, exc_info=True)
+
+    def __del__(self) -> None:
+        self.release()
+
+
+class _CopyFdBudget:
+    """Cap how many source fds one copy tree may keep open after each file."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = max(0, int(limit))
+
+    def try_take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+
+@dataclass(frozen=True)
+class CopiedFileIdentity:
+    """Inode pair recorded while copying one regular file from a no-follow fd.
+
+    Branch rebind treats this as the only proof that the destination file came
+    from a particular source inode. Byte equality after the copy is not used.
+    The optional hold keeps that source inode from being reused until
+    :func:`release_copied_identities`. Identities without a live hold are not
+    accepted by branch rebind.
+    """
+
+    source_dev: int
+    source_ino: int
+    dest_dev: int
+    dest_ino: int
+    _hold: _SourceIdentityHold | None = field(default=None, compare=False, hash=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -192,6 +286,12 @@ if hasattr(errno, "EOPNOTSUPP"):
 
 def _pin_companion(uploads_dir: Path, companion_path: Path) -> str | None:
     """Hard-link *companion_path* to a private pin. Return the token, or None."""
+    try:
+        info = os.lstat(companion_path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
     token = secrets.token_hex(_IDENTITY_TOKEN_LENGTH // 2)
     pin = companion_identity_path(uploads_dir, token)
     pin.parent.mkdir(parents=True, exist_ok=True)
@@ -901,6 +1001,548 @@ def mapped_companion_names(
         if companion_entry_matches(uploads_dir, entry):
             names.add(entry.name)
     return names
+
+
+def _same_mapping_generation(copied: CompanionEntry, current: CompanionEntry) -> bool:
+    """Return whether *current* is still the sidecar generation *copied* described.
+
+    Branch rebind must not treat a later same-name convert as the copied row.
+    Pinned rows compare identity tokens; unpinned rows compare convert-time
+    fingerprints. Name is part of the generation (``report.md`` vs ``report_1.md``).
+    """
+    if copied.name != current.name:
+        return False
+    if copied.id or current.id:
+        return copied.id is not None and copied.id == current.id
+    return copied.size == current.size and copied.mtime_ns == current.mtime_ns and copied.dev == current.dev and copied.ino == current.ino
+
+
+def _open_regular_nofollow(path: Path, flags: int, *, mode: int = 0o644) -> int:
+    """Open *path* no-follow and nonblocking, then fstat the fd as a regular file."""
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
+    open_flags = flags
+    if has_nofollow:
+        open_flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        open_flags |= os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        open_flags |= os.O_CLOEXEC
+    if hasattr(os, "O_BINARY"):
+        open_flags |= os.O_BINARY
+
+    creating = bool(flags & os.O_CREAT)
+    if not has_nofollow:
+        try:
+            pre_open = os.lstat(path)
+        except FileNotFoundError:
+            if not creating:
+                raise
+            pre_open = None
+        if pre_open is not None and (stat.S_ISLNK(pre_open.st_mode) or not stat.S_ISREG(pre_open.st_mode)):
+            raise OSError(errno.ELOOP, "not a regular file", str(path))
+
+    try:
+        fd = os.open(path, open_flags, mode) if creating else os.open(path, open_flags)
+    except OSError as exc:
+        if exc.errno in _UNSAFE_LOCK_OPEN_ERRNOS:
+            raise OSError(errno.ELOOP, "cannot open without following a link", str(path)) from exc
+        raise
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.ELOOP, "not a regular file", str(path))
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _source_copy_fingerprint(st: os.stat_result) -> tuple[int, int, int]:
+    """Size/mtime/ctime snapshot used to detect edits during a copy."""
+    ctime_ns = getattr(st, "st_ctime_ns", None)
+    if ctime_ns is None:
+        ctime_ns = int(st.st_ctime * 1_000_000_000)
+    return (st.st_size, st.st_mtime_ns, int(ctime_ns))
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write *data* completely; ``os.write`` may return a short count."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(errno.EIO, "short write")
+        view = view[written:]
+
+
+def _apply_copied_mode(dst_fd: int, dst: Path, mode: int) -> None:
+    """Restore permission bits on the destination fd, bypassing umask."""
+    if hasattr(os, "fchmod"):
+        os.fchmod(dst_fd, mode)
+        return
+    os.chmod(dst, mode)
+
+
+def _stamp_copied_times(dst_fd: int, dst: Path, src_st: os.stat_result) -> None:
+    try:
+        os.utime(dst_fd, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+    except (OSError, AttributeError, TypeError):
+        try:
+            os.utime(dst, ns=(src_st.st_atime_ns, src_st.st_mtime_ns))
+        except OSError:
+            pass
+
+
+def _chmod_unfollowed(path: Path, mode: int) -> None:
+    """Set permission bits on *path* without following a symlink."""
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(path, mode, **chmod_kwargs)
+
+
+def _writable_dir_mode(src_mode: int) -> int:
+    """Permission bits used while filling a copied directory.
+
+    The destination must stay owner-writable until its children are copied.
+    A source mode of ``0555`` would otherwise lock the directory before
+    ``data.txt`` can be created, and ``EACCES`` is treated as a skippable copy
+    error.
+    """
+    return stat.S_IMODE(src_mode) | stat.S_IWUSR
+
+
+def _mkdir_copied_dir(dest_path: Path, src_mode: int) -> None:
+    """Create *dest_path* and keep it owner-writable for child copies."""
+    dest_path.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_info = os.lstat(dest_path)
+    except OSError:
+        return
+    if stat.S_ISLNK(dest_info.st_mode) or not stat.S_ISDIR(dest_info.st_mode):
+        return
+    _chmod_unfollowed(dest_path, _writable_dir_mode(src_mode))
+
+
+def _finalize_copied_dir_mode(dest_path: Path, src_mode: int) -> None:
+    """Restore the source directory's permission bits after children are copied."""
+    try:
+        dest_info = os.lstat(dest_path)
+    except OSError:
+        return
+    if stat.S_ISLNK(dest_info.st_mode) or not stat.S_ISDIR(dest_info.st_mode):
+        return
+    _chmod_unfollowed(dest_path, stat.S_IMODE(src_mode))
+
+
+def _open_fd_count() -> int | None:
+    """Return the number of open fds, or None when it cannot be counted."""
+    for path in (Path("/dev/fd"), Path("/proc/self/fd")):
+        try:
+            return max(0, sum(1 for _ in os.scandir(path)) - 1)
+        except OSError:
+            continue
+    return None
+
+
+def _nofile_soft_limit() -> int | None:
+    """Return a finite RLIMIT_NOFILE soft limit, or None when unbounded."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    try:
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+    infinity = getattr(resource, "RLIM_INFINITY", -1)
+    if soft == infinity or soft < 0 or soft > 1_000_000:
+        return None
+    return int(soft)
+
+
+def _copy_fd_hold_limit() -> int:
+    """How many source fds this copy may keep, leaving headroom to open more files."""
+    soft = _nofile_soft_limit()
+    if soft is None:
+        return _MAX_HELD_COPY_FDS
+    open_count = _open_fd_count() or 0
+    remaining = soft - open_count - _COPY_FD_HEADROOM
+    return max(0, min(_MAX_HELD_COPY_FDS, remaining))
+
+
+def _make_copy_hold_root(anchor: Path) -> Path | None:
+    """Create a unique hold directory beside *anchor*, outside sandbox mounts."""
+    try:
+        parent = Path(anchor).resolve().parent
+    except OSError:
+        parent = Path(anchor).parent
+    path = parent / f"{_COPY_HOLD_DIR_PREFIX}{secrets.token_hex(8)}"
+    try:
+        path.mkdir(parents=True, exist_ok=False)
+    except OSError:
+        return None
+    return path
+
+
+def _hold_copied_source(
+    src: Path,
+    src_fd: int,
+    src_st: os.stat_result,
+    hold_root: Path | None,
+    fd_budget: _CopyFdBudget,
+) -> _SourceIdentityHold | None:
+    """Keep *src_fd*'s inode alive until rebind; prefer a hard link over the fd.
+
+    Returns ``None`` when neither a hard link nor an fd hold is available so
+    the caller can copy the file without recording a rebind identity.
+    """
+    if hold_root is not None:
+        path = hold_root / secrets.token_hex(16)
+        try:
+            os.link(src, path)
+            held = os.lstat(path)
+            if not stat.S_ISLNK(held.st_mode) and stat.S_ISREG(held.st_mode) and held.st_dev == src_st.st_dev and held.st_ino == src_st.st_ino:
+                return _SourceIdentityHold(path=path)
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if fd_budget.try_take():
+        return _SourceIdentityHold(fd=src_fd)
+    return None
+
+
+def release_copied_identities(copied: Mapping[str, CopiedFileIdentity]) -> None:
+    """Drop hard-link / fd holds recorded by :func:`copy_user_data_tree`."""
+    parents: set[Path] = set()
+    for identity in copied.values():
+        hold = identity._hold
+        if hold is None:
+            continue
+        if hold.path is not None:
+            parents.add(hold.path.parent)
+        hold.release()
+    for parent in parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def _copy_regular_file_nofollow(
+    src: Path,
+    dst: Path,
+    *,
+    hold_root: Path | None = None,
+    fd_budget: _CopyFdBudget | None = None,
+) -> CopiedFileIdentity | None:
+    """Copy *src* to *dst* from a no-follow fd. Skip FIFOs and other non-files.
+
+    Permission bits are restored from the source fd. Each chunk is written to
+    completion. A source size/mtime/ctime change while the contents are read
+    leaves the destination file but does not return a companion identity. A
+    failed write unlinks the partial destination so it cannot be treated as a
+    successful copy.
+    """
+    src_fd = dst_fd = -1
+    content_copied = False
+    budget = fd_budget if fd_budget is not None else _CopyFdBudget(_copy_fd_hold_limit())
+    try:
+        src_fd = _open_regular_nofollow(src, os.O_RDONLY)
+        src_st = os.fstat(src_fd)
+        src_mode = stat.S_IMODE(src_st.st_mode)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst_fd = _open_regular_nofollow(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode=src_mode)
+        while True:
+            chunk = os.read(src_fd, _COPY_CHUNK_SIZE)
+            if not chunk:
+                break
+            _write_all(dst_fd, chunk)
+        _apply_copied_mode(dst_fd, dst, src_mode)
+        src_after = os.fstat(src_fd)
+        content_copied = True
+        if _source_copy_fingerprint(src_st) != _source_copy_fingerprint(src_after):
+            return None
+        _stamp_copied_times(dst_fd, dst, src_after)
+        dst_st = os.fstat(dst_fd)
+        hold = _hold_copied_source(src, src_fd, src_st, hold_root, budget)
+        if hold is None or not hold.is_live():
+            return None
+        if hold.fd == src_fd:
+            src_fd = -1
+        return CopiedFileIdentity(
+            source_dev=src_st.st_dev,
+            source_ino=src_st.st_ino,
+            dest_dev=dst_st.st_dev,
+            dest_ino=dst_st.st_ino,
+            _hold=hold,
+        )
+    except OSError as exc:
+        if exc.errno in _SKIP_COPY_ERRNOS:
+            return None
+        raise
+    finally:
+        if src_fd >= 0:
+            os.close(src_fd)
+        if dst_fd >= 0:
+            os.close(dst_fd)
+        if not content_copied:
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+
+
+def copy_user_data_tree(
+    src: Path,
+    dst: Path,
+    *,
+    ignore: Callable[[str, list[str]], Iterable[str]] | None = None,
+) -> dict[str, CopiedFileIdentity]:
+    """Copy *src* to *dst*, recording the source inode actually opened for each file.
+
+    Opens each source file no-follow and nonblocking, then ``fstat``s the fd
+    so a FIFO cannot stall the Gateway file-IO thread. Symlinks and non-regular
+    files are skipped. Keys are posix paths relative to *dst*. Directory and
+    file permission bits are restored from the source. Destination directories
+    stay owner-writable until their children are copied, then the source mode
+    is applied so a read-only tree still receives its files.
+
+    Returned identities keep the source inode allocated until
+    :func:`release_copied_identities`. Call that after
+    :func:`rebind_cloned_companion_identities` (or on any path that will not
+    rebind) so hard links and fds do not leak. Fd holds are capped so a
+    hard-link failure cannot exhaust ``RLIMIT_NOFILE``; files copied without a
+    live hold are omitted from the identity map so rebind tombstones them.
+    """
+    src_root = Path(src)
+    dst_root = Path(dst)
+    try:
+        src_root_st = os.lstat(src_root)
+    except OSError:
+        src_root_st = None
+    src_root_mode = src_root_st.st_mode if src_root_st is not None else 0o755
+    _mkdir_copied_dir(dst_root, src_root_mode)
+    hold_root = _make_copy_hold_root(src_root)
+    fd_budget = _CopyFdBudget(_copy_fd_hold_limit())
+    copied: dict[str, CopiedFileIdentity] = {}
+
+    def _walk(src_dir: Path, dst_dir: Path, rel: Path) -> None:
+        try:
+            names = [entry.name for entry in os.scandir(src_dir)]
+        except OSError:
+            return
+        ignored = set(ignore(str(src_dir), names)) if ignore else set()
+        for name in names:
+            if name in ignored:
+                continue
+            source_path = src_dir / name
+            dest_path = dst_dir / name
+            child_rel = rel / name
+            try:
+                info = os.lstat(source_path)
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                _mkdir_copied_dir(dest_path, info.st_mode)
+                _walk(source_path, dest_path, child_rel)
+                _finalize_copied_dir_mode(dest_path, info.st_mode)
+                continue
+            identity = _copy_regular_file_nofollow(source_path, dest_path, hold_root=hold_root, fd_budget=fd_budget)
+            if identity is not None:
+                copied[child_rel.as_posix()] = identity
+
+    try:
+        _walk(src_root, dst_root, Path())
+        _finalize_copied_dir_mode(dst_root, src_root_mode)
+    except Exception:
+        release_copied_identities(copied)
+        raise
+    finally:
+        if hold_root is not None:
+            try:
+                hold_root.rmdir()
+            except OSError:
+                pass
+    return copied
+
+
+def copied_upload_identities(copied: Mapping[str, CopiedFileIdentity]) -> dict[str, CopiedFileIdentity]:
+    """Return copy identities keyed by uploads basename.
+
+    A copy of ``user-data`` records ``uploads/<name>``. A copy whose root is
+    the uploads directory itself records ``<name>`` at the top level. The
+    ``uploads/`` key always wins, so a sibling ``user-data/notes.md`` cannot
+    replace the identity of ``user-data/uploads/notes.md`` and cause rebind
+    to tombstone a still-valid companion.
+    """
+    out: dict[str, CopiedFileIdentity] = {}
+    root_level: dict[str, CopiedFileIdentity] = {}
+    for rel, identity in copied.items():
+        posix = rel.replace("\\", "/")
+        parts = posix.split("/")
+        if len(parts) == 2 and parts[0] == "uploads":
+            out[parts[1]] = identity
+        elif len(parts) == 1:
+            root_level[parts[0]] = identity
+    for name, identity in root_level.items():
+        out.setdefault(name, identity)
+    return out
+
+
+def _claimed_mapping_inode(uploads_dir: Path, entry: CompanionEntry) -> tuple[int, int] | None:
+    """Return the inode the mapping still claims, from the pin or live file.
+
+    A pin is conclusive. Unpinned legacy rows must still pass the size/mtime
+    check used by :func:`companion_entry_matches`; sidecar ``dev``/``ino``
+    numbers alone cannot revive a mapping that an in-place edit already
+    invalidated.
+    """
+    if entry.id:
+        pin = companion_identity_path(uploads_dir, entry.id)
+        try:
+            pin_st = os.lstat(pin)
+        except OSError:
+            return None
+        if stat.S_ISLNK(pin_st.st_mode) or not stat.S_ISREG(pin_st.st_mode):
+            return None
+        return pin_st.st_dev, pin_st.st_ino
+    if not companion_entry_matches(uploads_dir, entry):
+        return None
+    current = _stat_regular_companion(uploads_dir, entry)
+    if current is None:
+        return None
+    return current.st_dev, current.st_ino
+
+
+def _copied_dest_still_present(path: Path, identity: CopiedFileIdentity) -> bool:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+        return False
+    return current.st_dev == identity.dest_dev and current.st_ino == identity.dest_ino
+
+
+def rebind_cloned_companion_identities(
+    source_uploads: Path,
+    dest_uploads: Path,
+    *,
+    copied_from: Mapping[str, CopiedFileIdentity],
+) -> bool:
+    """Rebuild destination pins after a :func:`copy_user_data_tree` copy.
+
+    Branch copy clones ``user-data`` (sidecar JSON + Markdown files) but not
+    ``.deer-flow-companion-ids`` beside it. Copied companions are new inodes,
+    so a copied ``id`` cannot match. Copying the pin files independently also
+    fails: those copies are yet more inodes, not hard links to the destination
+    Markdown.
+
+    ``copied_from`` is the uploads-basename map from the copy that opened each
+    source file. Rebind pins a destination row only when that recorded source
+    inode is still the inode the source mapping claims (the pin, or the live
+    companion file after the legacy size/mtime check when unpinned), the copy
+    identity still holds that source inode, and the
+    destination file is still the
+    copied inode. Same bytes after the copy are not identity: an independent
+    restore can match a later convert. Post-copy path opens are not used, so a
+    FIFO planted at the source basename cannot stall the file-IO thread.
+
+    A still-valid dest row gets a new pin and dest inode fields; convert-time
+    size/mtime stay as recorded so an in-place edit is still "modified" and a
+    later re-upload will not unlink it. Rows whose sidecar generation no longer
+    matches, whose copy record is missing, or whose copied source inode is not
+    the claimed mapping inode, are moved to ``evicted``. Lock timeout skips
+    the rewrite and returns ``False``. Unexpected errors raise.
+    """
+    try:
+        source_resolved = source_uploads.resolve()
+        dest_resolved = dest_uploads.resolve()
+    except OSError:
+        return True
+    if source_resolved == dest_resolved or not dest_uploads.is_dir():
+        return True
+    source_state = load_companion_state(source_uploads)
+    if not source_state.companions:
+        return True
+
+    try:
+        with _map_write_lock(dest_uploads):
+            dest_state = _load_state_unlocked(dest_uploads)
+            mapping = dict(dest_state.companions)
+            if not mapping:
+                return True
+            new_pins: list[str] = []
+            previous_ids: list[str] = []
+            stale_originals: list[str] = []
+
+            def _tombstone(name: str) -> None:
+                mapping.pop(name, None)
+                stale_originals.append(name)
+
+            try:
+                for original, dest_entry in list(mapping.items()):
+                    source_entry = source_state.companions.get(original)
+                    if source_entry is None:
+                        if not companion_entry_matches(dest_uploads, dest_entry):
+                            _tombstone(original)
+                        continue
+                    if not _same_mapping_generation(dest_entry, source_entry):
+                        _tombstone(original)
+                        continue
+                    identity = copied_from.get(dest_entry.name)
+                    claimed = _claimed_mapping_inode(source_uploads, source_entry)
+                    dest_path = dest_uploads / dest_entry.name
+                    if identity is None or identity._hold is None or not identity._hold.is_live() or claimed is None or (identity.source_dev, identity.source_ino) != claimed or not _copied_dest_still_present(dest_path, identity):
+                        _tombstone(original)
+                        continue
+                    token = _pin_companion(dest_uploads, dest_path)
+                    if token:
+                        new_pins.append(token)
+                    try:
+                        dest_stat = os.lstat(dest_path)
+                    except OSError:
+                        _unpin_companion(dest_uploads, token)
+                        _tombstone(original)
+                        continue
+                    if dest_stat.st_dev != identity.dest_dev or dest_stat.st_ino != identity.dest_ino:
+                        _unpin_companion(dest_uploads, token)
+                        _tombstone(original)
+                        continue
+                    mapping[original] = CompanionEntry(
+                        name=dest_entry.name,
+                        size=source_entry.size,
+                        mtime_ns=source_entry.mtime_ns,
+                        dev=dest_stat.st_dev,
+                        ino=dest_stat.st_ino,
+                        id=token,
+                    )
+                    if dest_entry.id and dest_entry.id != token:
+                        previous_ids.append(dest_entry.id)
+                _persist_unlocked(
+                    dest_uploads,
+                    mapping,
+                    evicted=_dedupe_evicted([*dest_state.evicted, *stale_originals], occupied=mapping),
+                    no_legacy_fallback=dest_state.no_legacy_fallback,
+                )
+            except Exception:
+                for token in new_pins:
+                    _unpin_companion(dest_uploads, token)
+                raise
+            for token in previous_ids:
+                _unpin_companion(dest_uploads, token)
+    except CompanionMapLockTimeout:
+        logger.warning(
+            "Skipping companion-identity rebind; lock busy at %s",
+            companion_map_lock_path(dest_uploads),
+        )
+        return False
+    return True
 
 
 def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -> None:
