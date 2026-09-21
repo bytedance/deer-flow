@@ -773,6 +773,182 @@ class TestFinalToolMessageReconciliation:
         assert len(tool_results) == 1
         assert tool_results[0]["content"]["name"] == "write_file"
 
+    @pytest.mark.anyio
+    async def test_root_chain_end_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        old_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        old = ToolMessage(content="Old", tool_call_id="call_shared", name="write_file")
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        current = ToolMessage(content="Current", tool_call_id="call_shared", name="write_file")
+
+        j.on_chain_end({"messages": [old_ai, old, current_ai, current]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["content"] == "Current"
+
+    @pytest.mark.anyio
+    async def test_model_start_persists_consumed_short_circuited_tool_result_before_later_run_error(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {"path": "/tmp/a", "content": "x"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        blocked = ToolMessage(
+            id="blocked-write",
+            content="Read the file before modifying it.",
+            tool_call_id="call_write",
+            name="write_file",
+            status="error",
+        )
+
+        j.on_chat_model_start({}, [[current_ai, blocked]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chain_error(RuntimeError("provider failed"), run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["id"] == "blocked-write"
+
+    @pytest.mark.anyio
+    async def test_model_start_does_not_duplicate_tool_result_captured_by_on_tool_end(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        blocked = ToolMessage(content="Blocked", tool_call_id="call_write", name="write_file")
+
+        j.on_tool_end(blocked, run_id=uuid4())
+        j.on_chat_model_start({}, [[current_ai, blocked]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len([event for event in messages if event["event_type"] == "llm.tool.result"]) == 1
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_retained_old_run_tool_result(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        retained = ToolMessage(content="Old result", tool_call_id="call_old", name="write_file")
+
+        j.on_chat_model_start({}, [[retained]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_reused_tool_call_id_without_current_run_boundary(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        unrelated_ai = AIMessage(content="Old response")
+        retained = ToolMessage(content="Old result", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[unrelated_ai, retained]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_ignores_hidden_tool_result(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_hidden", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        hidden = ToolMessage(
+            content="Hidden result",
+            tool_call_id="call_hidden",
+            name="write_file",
+            additional_kwargs={"hide_from_ui": True},
+        )
+
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_hidden", "name": "write_file", "args": {}}])
+        j.on_chat_model_start({}, [[current_ai, hidden]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_subagent_model_start_ignores_tool_result_with_colliding_call_id(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        subagent_result = ToolMessage(content="Subagent result", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[current_ai, subagent_result]], run_id=uuid4(), tags=["subagent:general-purpose"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(event["event_type"] == "llm.tool.result" for event in messages)
+
+    @pytest.mark.anyio
+    async def test_model_start_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        old_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        old = ToolMessage(content="Old", tool_call_id="call_shared", name="write_file")
+        current_ai = AIMessage(content="", tool_calls=[{"id": "call_shared", "name": "write_file", "args": {}}])
+        current = ToolMessage(content="Current blocked", tool_call_id="call_shared", name="write_file")
+
+        j.on_chat_model_start({}, [[old_ai, old, current_ai, current]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [event for event in messages if event["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["content"] == "Current blocked"
+
 
 class TestCustomEvents:
     @pytest.mark.anyio
