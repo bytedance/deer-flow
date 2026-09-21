@@ -278,3 +278,8 @@ normal/custom-agent toolbars and sidebar menus without replacing native export o
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
 namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
+
+Plugin page `openConversation(threadId)` resolves authenticated thread metadata
+with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
+abort signal fences late navigation after unmount/account changes. Synchronous
+conversation-action callbacks reject Promise returns while consuming rejections.

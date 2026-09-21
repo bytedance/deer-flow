@@ -3,6 +3,7 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { formatThreadAsJSON } from "@/core/threads/export";
 import type { AgentThreadState } from "@/core/threads/types";
+import { pathOfThread } from "@/core/threads/utils";
 
 import type {
   ConversationActionContext,
@@ -70,4 +71,16 @@ export async function latestVisibleAnswer(context: ConversationActionContext) {
     .reverse()
     .find((message) => message.type === "ai" && !!message.id);
   return answer ? { id: answer.id!, text: answer.content } : null;
+}
+
+/** Resolve live routing metadata through the authenticated host API, including legacy bookmarks. */
+export async function openConversation(
+  threadId: string,
+  navigate: (path: string) => void,
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  const thread = await getAPIClient().threads.get(threadId, { signal });
+  signal?.throwIfAborted();
+  navigate(pathOfThread(thread));
 }

@@ -126,11 +126,19 @@ function mountBookmarks(root, context) {
         row.append(label, rename);
         const content = make("pre", item.text);
         const actions = make("div", "", { class: "actions" });
-        // This is navigation metadata, never an authorization grant to a thread.
-        const link = make("a", words.open, {
-          href: `/workspace/chats/${encodeURIComponent(item.thread_id)}`,
-        });
-        actions.append(link);
+        // The host resolves current routing metadata, including for old bookmarks.
+        const open = make("button", words.open, { type: "button" });
+        open.addEventListener(
+          "click",
+          () =>
+            void run(open, async () => {
+              if (!context.openConversation)
+                throw new Error("Host conversation navigation is unavailable");
+              await context.openConversation(item.thread_id);
+            }),
+          { signal: context.signal },
+        );
+        actions.append(open);
         if (item.truncated) {
           const expand = make("button", words.expand, { type: "button" });
           expand.addEventListener(

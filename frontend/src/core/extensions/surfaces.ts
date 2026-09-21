@@ -4,7 +4,9 @@ import type { PluginSurface, SurfaceContext } from "./contracts";
 export function mountSurface(
   container: HTMLElement,
   surface: PluginSurface,
-  context: Omit<SurfaceContext, "signal">,
+  context: Omit<SurfaceContext, "signal" | "openConversation"> & {
+    openConversation?: (threadId: string, signal: AbortSignal) => Promise<void>;
+  },
   onError: () => void,
 ) {
   const abort = new AbortController();
@@ -27,6 +29,12 @@ export function mountSurface(
     controller = surface.mount(root, {
       ...context,
       signal: abort.signal,
+      openConversation: context.openConversation
+        ? async (threadId) => {
+            abort.signal.throwIfAborted();
+            await context.openConversation!(threadId, abort.signal);
+          }
+        : undefined,
       async callBackend(action, payload) {
         abort.signal.throwIfAborted();
         const result = await context.callBackend(action, payload);

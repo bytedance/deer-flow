@@ -14,6 +14,8 @@ export type SurfaceContext = {
   threadId?: string;
   signal: AbortSignal;
   callBackend: FrontendServices["callBackend"];
+  /** Host resolves current thread ownership before navigating; unavailable on older hosts. */
+  openConversation?: (threadId: string) => Promise<void>;
 };
 export type PluginSurface = {
   id: string;

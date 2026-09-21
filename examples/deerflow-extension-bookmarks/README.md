@@ -93,3 +93,10 @@ Automated coverage: `backend/tests/test_bookmark_plugin.py`,
 Browser E2E uses a real Python plugin/router and SQLite with synthetic authentication;
 its model-call fixture uses real LangGraph ToolNode dispatch with a scripted call,
 not a live language model or the complete production Gateway.
+
+Returning to a conversation uses the host's `openConversation(threadId)` helper,
+which resolves its current agent from authenticated thread metadata. This also
+repairs navigation for existing bookmarks without migrating the SQLite schema.
+A missing/inaccessible conversation shows an error instead of opening the default
+agent. Hosts without this optional navigation helper cannot reopen conversations
+from this version of the example.

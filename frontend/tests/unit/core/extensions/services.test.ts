@@ -5,17 +5,19 @@ import {
   bindFrontendServices,
   conversationText,
   latestVisibleAnswer,
+  openConversation,
 } from "@/core/extensions/services";
 import type { AgentThread } from "@/core/threads/types";
 
-const { request, getState } = rs.hoisted(() => ({
+const { request, getState, getThread } = rs.hoisted(() => ({
   request: rs.fn(),
   getState: rs.fn(),
+  getThread: rs.fn(),
 }));
 rs.mock("@/core/api/fetcher", () => ({ fetch: request }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 rs.mock("@/core/api", () => ({
-  getAPIClient: () => ({ threads: { getState } }),
+  getAPIClient: () => ({ threads: { getState, get: getThread } }),
 }));
 
 beforeEach(() => {
@@ -114,4 +116,50 @@ test("plugin transcript service shares visible-only sanitizer and authenticated 
   expect(getState).toHaveBeenCalledWith("test");
   getState.mockRejectedValue(new Error("403"));
   await expect(conversationText({ thread })).rejects.toThrow("403");
+});
+
+for (const agent of [undefined, "researcher", "研究 / agent?#"]) {
+  test(`plugin navigation resolves the current owner for ${agent ?? "default"} conversations`, async () => {
+    getThread.mockResolvedValue({
+      thread_id: "thread / 1",
+      metadata: agent ? { agent_name: agent } : {},
+    });
+    const navigate = rs.fn();
+    const signal = new AbortController().signal;
+    await openConversation("thread / 1", navigate, signal);
+    expect(getThread).toHaveBeenCalledWith("thread / 1", { signal });
+    expect(navigate).toHaveBeenCalledWith(
+      agent
+        ? `/workspace/agents/${encodeURIComponent(agent)}/chats/thread%20%2F%201`
+        : "/workspace/chats/thread%20%2F%201",
+    );
+  });
+}
+
+test("inaccessible conversations never fall back to the default agent route", async () => {
+  const navigate = rs.fn();
+  getThread.mockRejectedValue(new Error("403"));
+  await expect(openConversation("thread", navigate)).rejects.toThrow("403");
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+test("unmounted or switched-account plugin pages cannot navigate after a late metadata read", async () => {
+  const navigate = rs.fn();
+  const abort = new AbortController();
+  let finish!: (value: unknown) => void;
+  getThread.mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const pending = openConversation("thread", navigate, abort.signal);
+  abort.abort();
+  finish({ thread_id: "thread", metadata: { agent_name: "researcher" } });
+  await expect(pending).rejects.toThrow();
+  expect(navigate).not.toHaveBeenCalled();
+  getThread.mockClear();
+  await expect(
+    openConversation("thread", navigate, abort.signal),
+  ).rejects.toThrow();
+  expect(getThread).not.toHaveBeenCalled();
 });

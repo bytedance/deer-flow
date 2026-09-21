@@ -69,3 +69,47 @@ test("a failed mount is isolated and cannot leave its partial UI behind", () => 
   expect(error).toHaveBeenCalledTimes(1);
   expect(container.shadowRoot?.textContent).toBe("");
 });
+
+for (const failMount of [false, true]) {
+  test(`surface ${failMount ? "mount failure" : "cleanup"} aborts navigation and rejects stale callbacks`, async () => {
+    let openLater!: (id: string) => Promise<void>;
+    let pending!: Promise<void>;
+    let finish!: () => void;
+    const navigate = rs.fn();
+    const open = rs.fn(async (_id: string, signal: AbortSignal) => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      signal.throwIfAborted();
+      navigate();
+    });
+    const cleanup = mountSurface(
+      document.createElement("div"),
+      {
+        id: "library",
+        slot: "page",
+        title: "Library",
+        mount(_root, context) {
+          openLater = context.openConversation!;
+          pending = openLater("thread");
+          if (failMount) throw new Error("mount failed");
+          return { dispose: rs.fn() };
+        },
+      },
+      {
+        namespace: "bookmarks",
+        locale: "en",
+        settings: {},
+        callBackend: rs.fn(),
+        openConversation: open,
+      },
+      rs.fn(),
+    );
+    if (!failMount) cleanup();
+    finish();
+    await expect(pending).rejects.toThrow();
+    await expect(openLater("thread")).rejects.toThrow();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+}

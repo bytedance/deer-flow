@@ -1276,6 +1276,8 @@ authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent
 [bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
 one package with persistent user data, its own sidebar page and a read-only search tool.
+Reopening a bookmark resolves the conversation's current agent through the host, so
+custom-agent conversations retain their original chat entry point, including older bookmarks.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
 The browser API and inline `BrowserModule.code` transport are experimental. The

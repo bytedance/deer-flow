@@ -23,8 +23,11 @@ export function resolveConversationActions(
       !label.trim() ||
       typeof icon !== "string" ||
       !Array.isArray(actions)
-    )
+    ) {
+      // A misdeclared async factory must not leak a rejected Promise.
+      void Promise.resolve(group).catch(() => undefined);
       throw new Error("Invalid conversation action group");
+    }
     const ids = new Set<string>();
     const visible: ConversationAction[] = [];
     for (const action of actions) {
@@ -42,8 +45,11 @@ export function resolveConversationActions(
         throw new Error("Invalid conversation action");
       ids.add(id);
       const enabled = available.call(action, contribution.settings);
-      if (typeof enabled !== "boolean")
+      if (typeof enabled !== "boolean") {
+        // Reject async availability while observing any eventual rejection.
+        void Promise.resolve(enabled).catch(() => undefined);
         throw new Error("Invalid action availability");
+      }
       if (enabled)
         visible.push({
           id,

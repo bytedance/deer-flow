@@ -70,7 +70,11 @@ A page surface declares `id`, `slot: "page"`, `title`, `mount(root, context)` an
 optional `navigation: { label, labelZh?, icon? }`. The host generates the URL
 `/workspace/extensions/{namespace}/{id}` and mounts only that registered page.
 `mount` returns a synchronous `dispose()` callback. The context includes locale,
-public settings, an abort signal and a namespace-bound `callBackend` helper. Cleanup
+public settings, an abort signal and a namespace-bound `callBackend` helper.
+The optional `openConversation(threadId)` host helper reads current conversation
+metadata through the authenticated API and uses the host's normal/custom-agent
+routing rules. Missing or inaccessible conversations reject without navigating;
+unmount/account changes abort pending reads and prevent late navigation. Cleanup
 aborts outstanding work and fences late callbacks. Plugin async work should observe
 the signal and release resources in `dispose()`.
 
@@ -78,7 +82,8 @@ Conversation actions receive a conversation context and host services. The
 `latestVisibleAnswer` and `conversationText` services reuse the existing export
 sanitizer; sidebar reads go through the authenticated conversation API. Plugin code
 must still escape user/model text when rendering it.
-The host validates each locale-dependent action group and evaluates availability
+Factories and availability callbacks must be synchronous; invalid Promise returns
+are rejected and their rejections consumed. The host validates each locale-dependent action group and evaluates availability
 inside a per-plugin error boundary. A malformed or throwing contribution is omitted
 without removing healthy plugin actions or failing the conversation page. Plugin tool
 names that collide with ordinary tools follow the host's ordinary-first deduplication;

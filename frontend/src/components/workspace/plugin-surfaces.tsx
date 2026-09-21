@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -12,7 +13,10 @@ import {
   activeFrontendExtensions,
   type LoadedContribution,
 } from "@/core/extensions/registry";
-import { bindFrontendServices } from "@/core/extensions/services";
+import {
+  bindFrontendServices,
+  openConversation,
+} from "@/core/extensions/services";
 import { mountSurface } from "@/core/extensions/surfaces";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -26,6 +30,7 @@ function Surface({
   threadId?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const router = useRouter();
   const { locale, t } = useI18n();
   const { user } = useAuth();
   const services = useFrontendServices();
@@ -43,6 +48,8 @@ function Surface({
         locale,
         settings: entry.settings,
         threadId,
+        openConversation: (id, signal) =>
+          openConversation(id, (path) => router.push(path), signal),
         callBackend: bindFrontendServices(
           currentServices.current,
           entry,
@@ -55,7 +62,7 @@ function Surface({
       abort.abort();
       cleanup();
     };
-  }, [entry, surface, locale, threadId, user?.id]);
+  }, [entry, surface, locale, threadId, user?.id, router]);
   return (
     <section aria-label={surface.title}>
       {failed && <p role="alert">{t.extensions.viewFailed}</p>}
