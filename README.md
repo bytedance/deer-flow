@@ -62,6 +62,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Running the Application](#running-the-application)
       - [Deployment Sizing](#deployment-sizing)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
+      - [Upgrading an existing checkout](#upgrading-an-existing-checkout)
       - [Option 2: Local Development](#option-2-local-development)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
@@ -403,6 +404,15 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
+
+#### Upgrading an existing checkout
+
+Keep `config.yaml`, `.env`, and `extensions_config.json`. Stop the services you
+currently use, run `git pull --ff-only`, then start the same mode again. Do not run
+`make config` or `make docker-init` again for a routine source upgrade. If the new
+version requires configuration changes, run `make config-upgrade` before restarting.
+See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
+for the commands for each mode.
 
 #### Option 2: Local Development
 
@@ -1847,6 +1857,12 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Strong tool-use** for reliable function calling and structured outputs
 
 ## Embedded Python Client
+
+For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`
+selection applies to both the lead agent and its `task` / `batch_task`
+delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
+installation IDs select only those plugins. Call `client.reset_agent()` after
+editing the saved agent configuration to refresh the selection.
 
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
