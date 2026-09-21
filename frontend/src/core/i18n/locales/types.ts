@@ -1407,6 +1407,7 @@ export interface Translations {
       exportOptional: string;
       exportRequired: string;
       exportUndeclared: string;
+      exportNone: string;
       exportScope: string;
       exportWarnings: string;
       exportWarningDescription: string;
