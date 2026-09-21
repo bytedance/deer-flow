@@ -180,9 +180,18 @@ class AioSandbox(Sandbox):
             logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
 
     @staticmethod
-    def _cleanup_session_best_effort(client, session_id: str, *, context: str) -> None:
+    def _cleanup_session_best_effort(
+        client,
+        session_id: str,
+        *,
+        context: str,
+        request_options: dict[str, int] | None = None,
+    ) -> None:
         try:
-            client.shell.cleanup_session(session_id)
+            client.shell.cleanup_session(
+                session_id,
+                **({"request_options": request_options} if request_options is not None else {}),
+            )
         except Exception as cleanup_error:
             logger.warning(
                 "Failed to release shell session %s (%s): %s",
@@ -207,10 +216,12 @@ class AioSandbox(Sandbox):
         message = body.get("message")
         return isinstance(message, str) and "session not found" in message.casefold()
 
-    @staticmethod
-    def _cleanup_bash_session_best_effort(client, session_id: str) -> None:
+    def _cleanup_bash_session_best_effort(self, client, session_id: str) -> None:
         try:
-            client.bash.close_session(session_id)
+            client.bash.close_session(
+                session_id,
+                request_options=self._bounded_cleanup_request_options(),
+            )
         except Exception as cleanup_error:
             logger.warning(
                 "Failed to release transient bash session %s: %s",
@@ -250,11 +261,13 @@ class AioSandbox(Sandbox):
         context: str,
         timeout: float,
     ) -> tuple[str, int | None, str | None, str | None]:
+        cleanup_options = self._bounded_cleanup_request_options()
         if corrupted_session_id is not None:
             self._cleanup_session_best_effort(
                 client,
                 corrupted_session_id,
                 context=f"corrupted {context}",
+                request_options=cleanup_options,
             )
         replacement_id = self._create_shell_session(client)
         try:
@@ -269,13 +282,29 @@ class AioSandbox(Sandbox):
                 client,
                 replacement_id,
                 context=f"abandoned replacement for {context}",
+                request_options=cleanup_options,
             )
             raise
+        if self._is_session_invalidating_shell_status(status):
+            if status == "terminated":
+                cleanup_context = f"terminated replacement for {context}"
+            elif status == "no_change_timeout":
+                cleanup_context = f"ambiguous replacement for {context}"
+            else:
+                cleanup_context = f"unexpected replacement status for {context}"
+            self._cleanup_session_best_effort(
+                client,
+                replacement_id,
+                context=cleanup_context,
+                request_options=cleanup_options,
+            )
+            return output, exit_code, status, None
         if status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
             self._cleanup_session_best_effort(
                 client,
                 replacement_id,
                 context=f"failed replacement for {context}",
+                request_options=cleanup_options,
             )
             return output, exit_code, status, None
         return output, exit_code, status, replacement_id
@@ -321,38 +350,74 @@ class AioSandbox(Sandbox):
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
+                    effective_timeout = self._effective_command_timeout(timeout)
                     output, exit_code, status = self._exec_shell(
                         client,
                         command,
                         session_id=scoped.session_id,
-                        timeout=self._effective_command_timeout(timeout),
+                        timeout=effective_timeout,
                     )
+                except httpx.TimeoutException:
+                    session_id = scoped.session_id
+                    scoped.session_id = None
+                    if session_id is not None:
+                        self._cleanup_session_best_effort(
+                            client,
+                            session_id,
+                            context="execution scope after transport timeout",
+                            request_options=self._bounded_cleanup_request_options(),
+                        )
+                    return self._transport_timeout_error(effective_timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
                     logger.warning("Execution-scoped sandbox shell session is missing; recreating it once")
                     scoped.session_id = None
-                    output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
-                        client,
-                        command,
-                        corrupted_session_id=None,
-                        context="execution scope after missing session",
-                        timeout=self._effective_command_timeout(timeout),
-                    )
+                    try:
+                        output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
+                            client,
+                            command,
+                            corrupted_session_id=None,
+                            context="execution scope after missing session",
+                            timeout=effective_timeout,
+                        )
+                    except httpx.TimeoutException:
+                        return self._transport_timeout_error(effective_timeout)
+                if self._is_session_invalidating_shell_status(status):
+                    session_id = scoped.session_id
+                    scoped.session_id = None
+                    if session_id is not None:
+                        if status == "terminated":
+                            cleanup_context = "execution scope after terminal session loss"
+                        elif status == "no_change_timeout":
+                            cleanup_context = "execution scope after ambiguous no-change timeout"
+                        else:
+                            cleanup_context = "execution scope after unexpected status"
+                        self._cleanup_session_best_effort(
+                            client,
+                            session_id,
+                            context=cleanup_context,
+                            request_options=self._bounded_cleanup_request_options(),
+                        )
                 if scoped.session_id is not None and status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
-                    output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
-                        client,
-                        command,
-                        corrupted_session_id=scoped.session_id,
-                        context="execution scope",
-                        timeout=self._effective_command_timeout(timeout),
-                    )
+                    corrupted_session_id = scoped.session_id
+                    scoped.session_id = None
+                    try:
+                        output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
+                            client,
+                            command,
+                            corrupted_session_id=corrupted_session_id,
+                            context="execution scope",
+                            timeout=effective_timeout,
+                        )
+                    except httpx.TimeoutException:
+                        return self._transport_timeout_error(effective_timeout)
                 return self._render_shell_output(
                     output,
                     exit_code,
                     status=status,
-                    timeout=self._effective_command_timeout(timeout),
+                    timeout=effective_timeout,
                 )
         except Exception as e:
             logger.error(f"Failed to execute command in sandbox: {e}")
@@ -383,6 +448,30 @@ class AioSandbox(Sandbox):
         return f"Command timed out after {cls._format_timeout_duration(timeout)} seconds and was terminated."
 
     @classmethod
+    def _bounded_cleanup_request_options(cls) -> dict[str, int]:
+        return {
+            "timeout_in_seconds": cls._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+    @classmethod
+    def _transport_timeout_error(cls, timeout: float) -> str:
+        request_timeout = cls._command_request_options(timeout)["timeout_in_seconds"]
+        return f"Error: Sandbox command response timed out after {request_timeout} seconds; command outcome is unknown and the command was not retried."
+
+    @staticmethod
+    def _is_unexpected_shell_status(status: str | None) -> bool:
+        return status not in (None, "completed", "hard_timeout", "no_change_timeout", "terminated")
+
+    @classmethod
+    def _is_session_invalidating_shell_status(cls, status: str | None) -> bool:
+        return status in ("terminated", "no_change_timeout") or cls._is_unexpected_shell_status(status)
+
+    @classmethod
+    def _unexpected_status_notice(cls, status: str) -> str:
+        return f"Error: Sandbox command returned an unexpected status '{status}'; command outcome is unknown and the command was not retried."
+
+    @classmethod
     def _render_shell_output(
         cls,
         output: str,
@@ -401,6 +490,14 @@ class AioSandbox(Sandbox):
             notice = f"Command produced no output change for {effective_no_change_timeout} seconds; it may still be running. Command outcome is unknown and was not retried."
             return f"{output}\n{notice}" if output else notice
 
+        if status == "terminated":
+            notice = "Command was terminated because its shell session ended."
+            return f"{output}\n{notice}" if output else notice
+
+        if cls._is_unexpected_shell_status(status):
+            notice = cls._unexpected_status_notice(status)
+            return f"{output}\n{notice}" if output else notice
+
         if exit_code not in (0, None):
             output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
         return output if output else "(no output)"
@@ -413,13 +510,13 @@ class AioSandbox(Sandbox):
             self._home_dir = context.home_dir
         return self._home_dir
 
-    # Default no_change_timeout for exec_command (seconds).  Matches the
-    # client-level timeout so that long-running commands which produce no
-    # output are not prematurely terminated by the sandbox's built-in 120 s
-    # default.
+    # Default no_change_timeout base idle guard for exec_command (seconds).
+    # The per-command effective value is max(600, ceil(T + 5)); at the default
+    # T=600, the value sent to the sandbox is therefore 605, not 600.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    # Wall-clock hard timeout for env-bearing commands routed through bash.exec.
+    # Provider-wide default command hard timeout for both the legacy shell path
+    # and env-bearing commands routed through bash.exec.
     # The bash.exec API exposes no idle/no-change timeout (unlike
     # shell.exec_command's ``no_change_timeout`` on the legacy path), so
     # env-bearing commands are bounded by total elapsed wall-clock time, not
@@ -474,8 +571,10 @@ class AioSandbox(Sandbox):
                 API (which supports per-command env) on a fresh explicitly released
                 session, so the secrets are scoped to this single command and never
                 persist; secret values travel in the structured ``env`` field, never
-                in the command string. When ``None`` the legacy persistent-shell path
-                runs unchanged.
+                in the command string. When ``None``, the legacy persistent-shell
+                path still uses the provider-wide command timeout via
+                ``hard_timeout``, bounded request options, and returned-status
+                interpretation.
             timeout: Optional per-call command timeout. The legacy shell path
                 enforces it server-side and gives the request a small additional
                 response-path grace period.
@@ -489,8 +588,9 @@ class AioSandbox(Sandbox):
         # consistent with the local and e2b sandboxes and catches unsafe keys
         # early. ``_validate_extra_env`` is a no-op when ``env`` is None or empty.
         _validate_extra_env(env)
+        effective_timeout = self._effective_command_timeout(timeout)
         if env:
-            return self._execute_with_env(command, env)
+            return self._execute_with_env(command, env, effective_timeout)
         with self._lock:
             try:
                 client = self._client
@@ -503,13 +603,24 @@ class AioSandbox(Sandbox):
                     self._recovery_session_id = self._create_shell_session(client)
                 recovered_missing_session = False
                 try:
-                    effective_timeout = self._effective_command_timeout(timeout)
                     output, exit_code, status = self._exec_shell(
                         client,
                         command,
                         session_id=self._recovery_session_id,
                         timeout=effective_timeout,
                     )
+                except httpx.TimeoutException:
+                    session_id = self._recovery_session_id
+                    self._recovery_session_id = None
+                    self._default_shell_corrupted = True
+                    if session_id is not None:
+                        self._cleanup_session_best_effort(
+                            client,
+                            session_id,
+                            context="default shell after transport timeout",
+                            request_options=self._bounded_cleanup_request_options(),
+                        )
+                    return self._transport_timeout_error(effective_timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
@@ -517,24 +628,50 @@ class AioSandbox(Sandbox):
                     self._default_shell_corrupted = True
                     self._recovery_session_id = None
                     recovered_missing_session = True
-                    output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
-                        client,
-                        command,
-                        corrupted_session_id=None,
-                        context="default shell after missing session",
-                        timeout=effective_timeout,
-                    )
+                    try:
+                        output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
+                            client,
+                            command,
+                            corrupted_session_id=None,
+                            context="default shell after missing session",
+                            timeout=effective_timeout,
+                        )
+                    except httpx.TimeoutException:
+                        return self._transport_timeout_error(effective_timeout)
 
                 if not recovered_missing_session and status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     self._default_shell_corrupted = True
                     logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
-                    output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
-                        client,
-                        command,
-                        corrupted_session_id=self._recovery_session_id,
-                        context="default shell",
-                        timeout=effective_timeout,
-                    )
+                    corrupted_session_id = self._recovery_session_id
+                    self._recovery_session_id = None
+                    try:
+                        output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
+                            client,
+                            command,
+                            corrupted_session_id=corrupted_session_id,
+                            context="default shell",
+                            timeout=effective_timeout,
+                        )
+                    except httpx.TimeoutException:
+                        return self._transport_timeout_error(effective_timeout)
+
+                if self._is_session_invalidating_shell_status(status):
+                    session_id = self._recovery_session_id
+                    self._recovery_session_id = None
+                    self._default_shell_corrupted = True
+                    if session_id is not None:
+                        if status == "terminated":
+                            cleanup_context = "default shell after terminal session loss"
+                        elif status == "no_change_timeout":
+                            cleanup_context = "default shell after ambiguous no-change timeout"
+                        else:
+                            cleanup_context = "default shell after unexpected status"
+                        self._cleanup_session_best_effort(
+                            client,
+                            session_id,
+                            context=cleanup_context,
+                            request_options=self._bounded_cleanup_request_options(),
+                        )
 
                 return self._render_shell_output(
                     output,
@@ -546,7 +683,12 @@ class AioSandbox(Sandbox):
                 logger.error(f"Failed to execute command in sandbox: {e}")
                 return f"Error: {e}"
 
-    def _execute_with_env(self, command: str, env: dict[str, str]) -> str:
+    def _execute_with_env(
+        self,
+        command: str,
+        env: dict[str, str],
+        timeout: float,
+    ) -> str:
         """Execute a command with per-call environment variables injected.
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
@@ -577,15 +719,22 @@ class AioSandbox(Sandbox):
         """
         if self._bash_exec_unsupported:
             return _BASH_EXEC_UNSUPPORTED_ERROR
-        output = self._run_bash_exec(command, env)
-        if output and _ERROR_OBSERVATION_SIGNATURE in output:
+        output, status = self._run_bash_exec(command, env, timeout)
+        if status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
-            retried = self._run_bash_exec(command, env)
+            retried, retry_status = self._run_bash_exec(command, env, timeout)
+            if retry_status not in (None, "completed"):
+                return retried
             if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
                 return retried
         return output
 
-    def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
+    def _run_bash_exec(
+        self,
+        command: str,
+        env: dict[str, str],
+        timeout: float,
+    ) -> tuple[str, str | None]:
         """Single bash.exec invocation in an explicitly released fresh session."""
         with self._lock:
             for attempt in range(2):
@@ -598,40 +747,65 @@ class AioSandbox(Sandbox):
                         command=command,
                         session_id=session_id,
                         env=env,
-                        hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                        hard_timeout=timeout,
+                        request_options=self._command_request_options(timeout),
                     )
                     data = result.data if result else None
                     stdout = (data.stdout or "") if data else ""
                     stderr = (data.stderr or "") if data else ""
                     exit_code = getattr(data, "exit_code", None) if data else None
+                    status = getattr(data, "status", None) if data else None
                     output = stdout
                     if stderr:
                         output += f"\nStd Error:\n{stderr}" if output else stderr
+
+                    if status == "timed_out":
+                        notice = self._format_timeout_notice(timeout)
+                        output = f"{output}\n{notice}" if output else notice
+                        return f"{output}\nExit Code: 124", status
+
+                    if status == "killed":
+                        notice = "Command was killed before completion."
+                        output = f"{output}\n{notice}" if output else notice
+                        return output, status
+
+                    if status == "running":
+                        notice = "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried."
+                        output = f"{output}\n{notice}" if output else notice
+                        return output, status
+
+                    if status not in (None, "completed"):
+                        notice = self._unexpected_status_notice(status)
+                        output = f"{output}\n{notice}" if output else notice
+                        return output, status
+
                     if exit_code not in (0, None):
                         # Mirror LocalSandbox: keep the actual shell status in the
                         # output text (acceptance-checklist evidence).
                         output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                    return output if output else "(no output)"
+                    return output if output else "(no output)", status
+                except httpx.TimeoutException:
+                    return self._transport_timeout_error(timeout), "transport_timeout"
                 except ApiError as e:
                     if self._is_missing_shell_session_error(e):
                         if attempt == 0:
                             logger.warning("Transient bash.exec session disappeared; retrying once")
                             continue
                         logger.error("Failed to execute command with injected env: bash.exec session disappeared after retry")
-                        return "Error: bash.exec session disappeared after retry"
+                        return "Error: bash.exec session disappeared after retry", None
                     if e.status_code == 404:
                         self._bash_exec_unsupported = True
                         logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
-                        return _BASH_EXEC_UNSUPPORTED_ERROR
+                        return _BASH_EXEC_UNSUPPORTED_ERROR, None
                     logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                    return f"Error: {e}"
+                    return f"Error: {e}", None
                 except Exception as e:
                     logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                    return f"Error: {e}"
+                    return f"Error: {e}", None
                 finally:
                     if session_created:
                         self._cleanup_bash_session_best_effort(self._client, session_id)
-            return "Error: bash.exec session disappeared after retry"
+            return "Error: bash.exec session disappeared after retry", None
 
     def read_file(
         self,
