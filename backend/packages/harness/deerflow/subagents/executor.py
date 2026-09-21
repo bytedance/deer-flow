@@ -1970,10 +1970,10 @@ class SubagentExecutor:
             _background_futures[execution_id] = execution_future
 
         def forget_future(_future: Future[SubagentResult]) -> None:
-            # The future completing is the same moment ``run_with_timeout``
-            # has returned; keep the sticky event set if the wrapper's
-            # ``finally`` was skipped by an unexpected submit/callback path.
-            result.mark_execution_teardown_complete()
+            # Cancelling this cross-thread Future invokes callbacks before
+            # the isolated-loop task has drained. Only run_with_timeout's
+            # finally can confirm execution teardown; this callback merely
+            # removes the completed/cancelled submission handle.
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
