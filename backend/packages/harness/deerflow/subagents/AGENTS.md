@@ -1,5 +1,10 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
+`regular file` and `regular empty file` as regular files. Empty files satisfy
+`exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and
+FIFOs remain rejected.
+
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
 **Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until the owned service stop task terminates, then propagates the first caller cancellation with any service failure/cancellation as its cause. The drain is intentionally unbounded: repository awaits and child cleanup must terminate; a timeout must not detach still-owned work. Keep terminal-outcome and repeated-cancellation coverage in `tests/test_subagent_runtime.py`.

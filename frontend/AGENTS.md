@@ -83,6 +83,11 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 ## Code Style
 
+`core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
+Match zero to three literal spaces before `# ` without trimming indentation;
+mixed space/tab code blocks must fall back to the URL. Keep this local to title
+extraction rather than changing the shared streamdown fence parser.
+
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.

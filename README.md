@@ -615,7 +615,7 @@ OpenViking memory backend; it does not replace automatic turn capture or recall.
 
 The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` tools into durable background tasks. The Agent sees only the configured submit tool and a DeerFlow-local task ID; remote IDs are persisted before the submit call returns, while status and cancel stay internal to the runtime. Polling uses cross-worker leases, exponential retry backoff, scoped MCP sessions, bounded result storage, and restart recovery. A status-tool `isError` is retained as a bounded diagnostic and retried; servers report a permanent remote-task outcome through a normal structured result with `status: "failed"`. Remote poll hints are finite positive numbers capped at 24 hours, artifact-reference JSON is limited to 64 KiB, and task/server identifiers are validated against their durable SQL column limits before persistence. Input-required and terminal updates wake the current chat through idempotent Agent runs, while `list_background_tasks` and `cancel_background_task` let the Agent manage tasks without asking users for remote handles. Current-thread tasks are available through `GET /api/threads/{thread_id}/mcp-tasks`, its detail endpoint, and `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel`; when the task runtime actually starts, the Web UI exposes the same safe local view from the chat header with live status refresh, cancellation, and on-demand result, artifact, input-request, status-error, and cancellation-retry details. Default-disabled and memory-backend deployments hide that UI and do not poll the task endpoints. A failed remote cancellation remains queued with backoff, and its latest bounded error and attempt count stay visible in the expanded task card. Enable `mcp_tasks` in `config.yaml`, configure `task_toolsets` with exact raw tool names in `extensions_config.json`, and use a SQL database backend (`sqlite` or `postgres`). Task-enabled server connection, authentication, interceptor, timeout, or binding changes require a Gateway restart so Agent tool discovery and background calls cannot use different configuration versions. `input_required` is notification-only for now: DeerFlow can display the request but cannot yet submit the user's answer back to the remote task.
 
-Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
+Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. When a bounded ordinary release exceeds its drain deadline, the service retains ownership until it settles. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
 
 Notification runs keep their trusted delivery instruction separate from the framed, untrusted remote event payload. The process-started task runtime—not a hot config read—controls whether the task-management tools are exposed, so changing `mcp_tasks` requires a Gateway restart. When a skill's `allowed-tools` policy is active, `list_background_tasks` and `cancel_background_task` must be declared explicitly like other business tools.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
@@ -1134,6 +1134,9 @@ empty list is forwarded and imposes no restriction of that kind. See the
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+Chat tool-step titles accept leading blank lines and up to three spaces before
+a page's first H1 heading. Indented code, including mixed spaces and tabs, is
+not used as a title; the tool step falls back to the URL.
 Tavily search and fetch each read `api_key` from their own tool entry in
 `config.yaml`, falling back to `TAVILY_API_KEY` when omitted. Fetch does not
 reuse the search entry's key, so search can use a different provider. If you
@@ -1533,6 +1536,8 @@ may still appear in progress; their outcome is not inferred from their text.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
+For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+
 Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
@@ -1583,6 +1588,17 @@ Hash, and restart; mismatched workers fail closed.
 The Hash counts remote VMs and in-flight creates, repairs interrupted creates
 from E2B metadata, grace-protects stale inventory omissions, and blocks new
 creates while Redis or initial inventory is unavailable. Run Redis with persistence, non-evicting memory, and HA.
+
+E2B reconciliation renews active VMs with a positive timeout covering its
+configured cadence, even when `idle_timeout` is zero or shorter than that
+cadence. Warm VMs retain the configured idle-timeout behavior. Expired local
+warm entries do not directly free shared capacity: remote inventory must
+confirm disappearance through the existing grace period first.
+Active renewal completes before release sets the warm timeout, so a concurrent
+maintenance pass cannot extend an idle VM's lifetime. Warm-entry cleanup also
+preserves ownership acquired by a new request during the sweep.
+Ownership heartbeats remain independent of slow E2B timeout requests, preventing
+control-plane delays from making active sandbox leases expire.
 
 E2B snapshots `skills.container_path` when the provider starts and includes the
 canonical root in its thread identity, warm-pool seed, and remote metadata. A
@@ -1635,6 +1651,8 @@ an explicit **Load full file** action before fetching the remainder or mounting
 the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
 downloads at the Gateway boundary.
 
+The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
+
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
 
 Docker AIO sandboxes default to their existing open egress behavior for
@@ -1642,8 +1660,12 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
-unapprovable. Denied hostnames are rejected before DNS resolution, and
-scheduled or otherwise non-interactive runs auto-deny without opening a card.
+unapprovable. Denied hostnames are rejected before DNS resolution.
+Runs in `scheduled`, `webhook`, or `autonomous` interaction mode auto-deny
+without opening a card. These unattended runs proceed with minimal assumptions
+only for low-risk, reversible work; high-risk or irreversible work without
+sufficient authorization returns a structured `BLOCKED` result naming the
+missing decision, even if the model attempts to ask for clarification.
 The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
 Docker's shared default bridge, and rejects ambiguous HTTP field names before
 forwarding. See
@@ -1722,6 +1744,10 @@ in the composer and in the transcript. There is no automatic history search. See
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
+
+The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
+checks semantic safety across facts and summaries, and fact routing across users
+and agents. Failed extraction attempts are retryable execution errors, not safety passes.
 
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited

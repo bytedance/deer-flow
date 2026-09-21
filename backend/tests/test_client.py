@@ -2712,6 +2712,83 @@ class TestUploads:
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
             assert not (uploads_dir / "a_1.md").exists()
 
+    def test_upload_files_converts_the_source_not_the_landed_copy(self, client):
+        """A sandbox swapping the landed upload must not redirect conversion at a host file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            host_file = tmp_path / "host-secret.pdf"
+            host_file.write_bytes(b"HOST SECRET")
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"pdf-bytes")
+
+            async def racing_convert(path: Path, output_path: Path | None = None) -> Path:
+                # The sandbox wins the race: the landed upload now points outside uploads.
+                landed = uploads_dir / "report.pdf"
+                if landed.exists() and not landed.is_symlink():
+                    landed.unlink()
+                    try:
+                        landed.symlink_to(host_file)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) == 1314:
+                            pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                        raise
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=racing_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            companion = uploads_dir / result["files"][0]["markdown_file"]
+            assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+            assert b"HOST SECRET" not in companion.read_bytes()
+
+    def test_upload_files_converts_the_source_inside_an_event_loop_too(self, client):
+        """The pooled conversion branch reads the source file as well."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            host_file = tmp_path / "host-secret.pdf"
+            host_file.write_bytes(b"HOST SECRET")
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"pdf-bytes")
+
+            async def racing_convert(path: Path, output_path: Path | None = None) -> Path:
+                landed = uploads_dir / "report.pdf"
+                if landed.exists() and not landed.is_symlink():
+                    landed.unlink()
+                    try:
+                        landed.symlink_to(host_file)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) == 1314:
+                            pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                        raise
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                return md_path
+
+            async def call_upload() -> dict:
+                return client.upload_files("thread-async", [pdf])
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=racing_convert),
+            ):
+                result = asyncio.run(call_upload())
+
+            companion = uploads_dir / result["files"][0]["markdown_file"]
+            assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+
     def test_upload_files_rejects_reuploading_a_file_already_in_the_thread(self, client):
         """Uploading an existing upload onto itself must not destroy its bytes."""
         with tempfile.TemporaryDirectory() as tmp:

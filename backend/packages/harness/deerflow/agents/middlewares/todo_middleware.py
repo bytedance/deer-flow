@@ -11,6 +11,10 @@ there are still incomplete todo items. When the model produces a final response
 for the next model request and jumps back to the model node to force continued
 engagement. The completion reminder is injected via ``wrap_model_call`` instead
 of being persisted into graph state as a normal user-visible message.
+
+The completion guard defers to ``model_length_termination``: when a length-capped
+turn has already been terminalized by ``ModelLengthFinishReasonMiddleware``,
+re-engaging would only re-emit the same oversized tool call into the same cap.
 """
 
 from __future__ import annotations
@@ -119,6 +123,7 @@ class TodoMiddleware(TodoListMiddleware):
             "system_prompt_hash": canonical_hash(self.system_prompt),
             "tool_description_hash": canonical_hash(self.tool_description),
             "state_channel": "todos",
+            "skip_completion_reminder_on_length_cap": True,
         }
 
     @override
@@ -298,6 +303,13 @@ class TodoMiddleware(TodoListMiddleware):
             return None
 
         if (last_ai.additional_kwargs or {}).get("deerflow_error_fallback"):
+            return None
+
+        # A length-capped turn was already terminalized by
+        # ModelLengthFinishReasonMiddleware (tool calls suppressed, notice
+        # appended); re-engaging would only re-emit the same oversized tool
+        # call into the same cap.
+        if (last_ai.additional_kwargs or {}).get("model_length_termination"):
             return None
 
         # 3. Allow exit when all todos are completed or there are no todos.

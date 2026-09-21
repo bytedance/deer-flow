@@ -2091,6 +2091,10 @@
 
 ### 安全
 
+- **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
+  客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
+  宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
+  描述符，转换 uploads 之外的私有副本；客户端则转换调用方提供的源文件。([#5611])
 - **客户端：** `DeerFlowClient.upload_files` 不再写穿符号链接。沙箱可写的 uploads 目录中，
   若在上传文件名或其 Markdown 配套文件名处放置符号链接，嵌入式客户端此前会覆盖链接指向的宿主
   文件并报告成功。现在该文件会被跳过并列入 `skipped_files`，`success` 为 `false`，与 Gateway
@@ -3517,3 +3521,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611

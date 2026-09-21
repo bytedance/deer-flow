@@ -543,9 +543,9 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 )
 
 # Keys honored only for internally-authenticated callers (the scheduler path).
-# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
+# ``interaction_mode`` and ``non_interactive`` control clarification availability;
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
-_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
+_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "non_interactive"})
 
 # Server-owned authorization and sandbox lifecycle identity fields. These must
 # never be accepted from client-supplied ``body.config.context`` or
@@ -597,11 +597,13 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
 #
-# Both are produced server-side by the channel run policies
+#   ``channel_name``        — trusted channel identity used by interaction policy.
+#
+# These are produced server-side by the channel run policies
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
 
 # Every run-context key an external client may never supply, in either section.
 # The two sets differ only in *where* a legitimate internal caller's value lands
