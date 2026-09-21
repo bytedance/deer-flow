@@ -247,6 +247,19 @@ class AioSandbox(Sandbox):
         client.shell.create_session(id=session_id)
         return session_id
 
+    def _ensure_default_shell_session_id(self, client) -> str | None:
+        """Return the session id that may safely receive default-shell work.
+
+        A healthy implicit shell is represented by ``None``. Once that generation
+        is fenced, all later shell-backed operations must target an explicit
+        recovery session instead of re-entering the implicit shell.
+
+        Caller must hold ``self._lock``.
+        """
+        if self._default_shell_corrupted and self._recovery_session_id is None:
+            self._recovery_session_id = self._create_shell_session(client)
+        return self._recovery_session_id
+
     def _exec_shell(
         self,
         client,
@@ -608,17 +621,13 @@ class AioSandbox(Sandbox):
                 client = self._client
                 if getattr(self, "_closed", False) or client is None:
                     raise RuntimeError("sandbox client is closed")
-                if self._default_shell_corrupted and self._recovery_session_id is None:
-                    # Once the implicit session emits ErrorObservation, never
-                    # target it again. A failed replacement is cleaned up and
-                    # the next call starts another explicit session.
-                    self._recovery_session_id = self._create_shell_session(client)
+                session_id = self._ensure_default_shell_session_id(client)
                 recovered_missing_session = False
                 try:
                     output, exit_code, status = self._exec_shell(
                         client,
                         command,
-                        session_id=self._recovery_session_id,
+                        session_id=session_id,
                         timeout=effective_timeout,
                     )
                 except httpx.TimeoutException:
@@ -901,10 +910,17 @@ class AioSandbox(Sandbox):
         resolved = path
         with self._lock:
             try:
-                result = self._client.shell.exec_command(
-                    command=remote_list_dir_command(resolved, max_depth),
-                    no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT,
-                )
+                client = self._client
+                session_id = self._ensure_default_shell_session_id(client)
+
+                kwargs = {
+                    "command": remote_list_dir_command(resolved, max_depth),
+                    "no_change_timeout": self._DEFAULT_NO_CHANGE_TIMEOUT,
+                }
+                if session_id is not None:
+                    kwargs["id"] = session_id
+
+                result = client.shell.exec_command(**kwargs)
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
                 raise OSError(f"Failed to list directory '{resolved}' in sandbox: {e}") from e

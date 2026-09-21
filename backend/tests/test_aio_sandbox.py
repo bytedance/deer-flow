@@ -1430,6 +1430,133 @@ class TestListDirSerialization:
         assert "find -H " in command
         assert "\\( -type f -o -type d \\)" in command
 
+    def test_list_dir_uses_recovery_session_after_ambiguous_command(self, sandbox):
+        created_ids = []
+        exec_calls = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_calls.append(kwargs)
+            if len(exec_calls) == 1:
+                return SimpleNamespace(
+                    data=SimpleNamespace(
+                        output="partial",
+                        exit_code=None,
+                        status="no_change_timeout",
+                    )
+                )
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        command_result = sandbox.execute_command("quiet-command", timeout=3)
+        listing = sandbox.list_dir("/test")
+
+        assert "may still be running" in command_result
+        assert sandbox._default_shell_corrupted is True
+        assert listing == ["/a"]
+        assert len(created_ids) == 1
+        assert exec_calls[0].get("id") is None
+        assert exec_calls[1]["id"] == created_ids[0]
+        assert sandbox._recovery_session_id == created_ids[0]
+
+    def test_list_dir_reuses_existing_recovery_session(self, sandbox):
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = "recovery-session"
+        sandbox._client.shell.create_session = MagicMock()
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.list_dir("/test") == ["/a"]
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["id"] == "recovery-session"
+        sandbox._client.shell.create_session.assert_not_called()
+
+    def test_list_dir_keeps_healthy_implicit_shell(self, sandbox):
+        sandbox._client.shell.create_session = MagicMock()
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.list_dir("/test") == ["/a"]
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert "id" not in kwargs
+        sandbox._client.shell.create_session.assert_not_called()
+
+    def test_list_dir_keeps_implicit_shell_after_hard_timeout(self, sandbox):
+        calls = []
+
+        def exec_command(command, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    data=SimpleNamespace(
+                        output="partial",
+                        exit_code=None,
+                        status="hard_timeout",
+                    )
+                )
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+        sandbox._client.shell.create_session = MagicMock()
+
+        command_result = sandbox.execute_command("sleep 30", timeout=3)
+        listing = sandbox.list_dir("/test")
+
+        assert "Exit Code: 124" in command_result
+        assert listing == ["/a"]
+        assert sandbox._default_shell_corrupted is False
+        assert "id" not in calls[1]
+        sandbox._client.shell.create_session.assert_not_called()
+
+    def test_list_dir_does_not_fall_back_to_implicit_shell_when_recovery_creation_fails(
+        self,
+        sandbox,
+    ):
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = None
+        sandbox._client.shell.create_session = MagicMock(side_effect=RuntimeError("session creation failed"))
+        sandbox._client.shell.exec_command = MagicMock()
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+        assert sandbox._default_shell_corrupted is True
+        assert sandbox._recovery_session_id is None
+        sandbox._client.shell.exec_command.assert_not_called()
+
 
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""
