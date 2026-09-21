@@ -141,9 +141,26 @@ class SlackChannel(Channel):
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
-        # Start socket mode in background thread
-        asyncio.get_event_loop().run_in_executor(None, self._socket_client.connect)
+        # Start socket mode in background thread. Go through
+        # ``_connect_socket_mode`` so a connect failure gets logged: nothing
+        # awaits the future ``run_in_executor`` returns, so an exception stored
+        # on it would never surface.
+        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode)
         logger.info("Slack channel started")
+
+    def _connect_socket_mode(self) -> None:
+        """Executor thread body: open the Socket Mode connection, logging a failure.
+
+        Mirrors the Telegram and Discord channels, whose background threads log
+        their errors instead of letting them vanish with the thread.
+        """
+        socket_client = self._socket_client
+        if socket_client is None:
+            return
+        try:
+            socket_client.connect()
+        except Exception:
+            logger.exception("[Slack] Socket Mode connection failed; the channel will not receive events")
 
     async def stop(self) -> None:
         self._running = False
