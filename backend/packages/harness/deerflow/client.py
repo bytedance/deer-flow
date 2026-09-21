@@ -21,7 +21,7 @@ import copy
 import logging
 import mimetypes
 import os
-import shutil
+import tempfile
 import uuid
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -70,7 +70,9 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, e
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.companion_map import record_companion_mapping
 from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
     claim_unique_filename,
+    copy_upload_file_no_symlink,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -1606,13 +1608,20 @@ class DeerFlowClient:
 
         For PDF, PPT, Excel, and Word files, they are also converted to Markdown.
 
+        The uploads directory is writable from inside the sandbox, so neither
+        the upload nor its Markdown companion is ever written through an
+        existing symlink. As in the Gateway, a file whose destination name is
+        a symlink or other non-regular file is skipped and listed in
+        ``skipped_files``. An occupied companion name — leftover file or
+        planted symlink — is written under the next unique suffix.
+
         Args:
             thread_id: Target thread ID.
             files: List of local file paths to upload.
 
         Returns:
-            Dict with success, files, message — matching the Gateway API
-            ``UploadResponse`` schema.
+            Dict with success, files, message, skipped_files — matching the
+            Gateway API ``UploadResponse`` schema.
 
         Raises:
             FileNotFoundError: If any file does not exist.
@@ -1638,6 +1647,7 @@ class DeerFlowClient:
 
         uploads_dir = ensure_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
+        skipped_files: list[str] = []
 
         conversion_pool = None
         if has_convertible_file:
@@ -1657,8 +1667,12 @@ class DeerFlowClient:
 
         try:
             for src_path, dest_name in resolved_files:
-                dest = uploads_dir / dest_name
-                shutil.copy2(src_path, dest)
+                try:
+                    dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                except UnsafeUploadPathError:
+                    logger.warning("Skipping upload with unsafe destination: %s", dest_name)
+                    skipped_files.append(dest_name)
+                    continue
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
@@ -1676,14 +1690,29 @@ class DeerFlowClient:
                     # upload_files call — cannot silently overwrite each other.
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = reserve_unique_filename(uploads_dir, provisional_md_name, seen_names)
-                    md_output = dest.with_name(unique_md_name)
                     md_path = None
                     try:
                         try:
-                            if conversion_pool is not None:
-                                md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
-                            else:
-                                md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                            # Convert the caller's own file, not the copy that just
+                            # landed in the sandbox-writable uploads dir: a sandbox
+                            # that swaps that name for a symlink would otherwise have
+                            # a host file converted into this thread's uploads. Write
+                            # the result outside uploads too, then publish it without
+                            # following a symlink at the companion name.
+                            with tempfile.TemporaryDirectory() as md_dir:
+                                md_output = Path(md_dir) / unique_md_name
+                                if conversion_pool is not None:
+                                    converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
+                                else:
+                                    converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
+                                if converted is not None:
+                                    # copy, not write_bytes: the companion keeps the
+                                    # converter's permissions, so a sandbox running as
+                                    # another uid can still read it.
+                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                        except UnsafeUploadPathError:
+                            logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
+                            md_path = None
                         except Exception:
                             logger.warning(
                                 "Failed to convert %s to markdown",
@@ -1720,10 +1749,15 @@ class DeerFlowClient:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
 
+        message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+        if skipped_files:
+            message += f"; skipped {len(skipped_files)} unsafe file(s)"
+
         return {
-            "success": True,
+            "success": not skipped_files,
             "files": uploaded_files,
-            "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
+            "message": message,
+            "skipped_files": skipped_files,
         }
 
     def list_uploads(self, thread_id: str) -> dict:

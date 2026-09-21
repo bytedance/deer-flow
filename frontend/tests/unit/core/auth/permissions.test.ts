@@ -41,6 +41,16 @@ describe("hasPermission", () => {
     expect(hasPermission(null, PERMISSIONS.THREADS_DELETE)).toBe(true);
     expect(hasPermission(undefined, PERMISSIONS.THREADS_DELETE)).toBe(true);
   });
+
+  it("maps the runs:create composer gate onto the /me permission list", () => {
+    expect(PERMISSIONS.RUNS_CREATE).toBe("runs:create");
+    expect(
+      hasPermission({ permissions: ["runs:create"] }, PERMISSIONS.RUNS_CREATE),
+    ).toBe(true);
+    expect(
+      hasPermission({ permissions: ["runs:read"] }, PERMISSIONS.RUNS_CREATE),
+    ).toBe(false);
+  });
 });
 
 describe("userSchema permissions field", () => {
