@@ -1625,6 +1625,7 @@ async def start_run(
     *,
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
+    evidence_origin: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1639,6 +1640,9 @@ async def start_run(
     require_existing_thread : bool
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
+    evidence_origin : str | None
+        Trusted Python entry-point provenance, never copied from request data.
+        Internal launches without an explicit origin remain unknown.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -1728,6 +1732,9 @@ async def start_run(
     try:
         agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+        admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
+        if admitted_origin not in {"interactive", "scheduled", "extension_evaluation", "unknown"}:
+            raise ValueError("Unsupported host evidence origin")
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
@@ -1985,6 +1992,10 @@ async def start_run(
                     model_name=model_name,
                     user_id=owner_user_id,
                     idempotency_key=idempotency_key,
+                    evidence_origin=admitted_origin,
+                    # Canonical agent keys, not routing aliases or display names.
+                    # Bootstrap and unresolved legacy identities stay read-only.
+                    evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
                 )
 
                 if record.idempotency_reused:
@@ -2101,6 +2112,7 @@ async def launch_scheduled_thread_run(
             thread_id,
             request,
             idempotency_key=idempotency_key,
+            evidence_origin="scheduled",
         )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 

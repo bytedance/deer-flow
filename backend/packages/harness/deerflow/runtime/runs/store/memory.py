@@ -63,6 +63,8 @@ class MemoryRunStore(RunStore):
         owner_worker_id=None,
         lease_expires_at=None,
         idempotency_key=None,
+        evidence_origin="unknown",
+        evidence_agent_id=None,
     ):
         now = datetime.now(UTC).isoformat()
         existing = self._runs.get(run_id)
@@ -70,6 +72,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": status,
@@ -477,6 +481,8 @@ class MemoryRunStore(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
@@ -545,6 +551,8 @@ class MemoryRunStore(RunStore):
             "run_id": run_id,
             "thread_id": thread_id,
             "assistant_id": assistant_id,
+            "evidence_origin": evidence_origin,
+            "evidence_agent_id": evidence_agent_id,
             "user_id": user_id,
             "model_name": model_name,
             "status": "pending",

@@ -3052,6 +3052,19 @@ authorization:
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
 #     enabled: true                       # false skips import and registration
+#     # Optional, restart-required host grants. Omit for legacy behavior.
+#     # Requires durable database + run_events.backend: db for automatic updates.
+#     # Only enable on one POSIX host with local disk and ALL writers upgraded.
+#     # SQLite additionally requires exactly one Gateway process.
+#     # host_access:
+#     #   evidence:
+#     #     owners: ["exact-user-id"]
+#     #   skill_mutations:
+#     #     owners: ["exact-user-id"]     # subset of evidence.owners
+#     #     operations: [stage, check, commit, revert]
+#     #     trigger_agents: [lead_agent]  # canonical agent name, not display name
+#     #     target_skills: [example-skill]
+#     #     topology: single_host_local   # operator assertion; excludes NFS/CSI
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
 #     table_prefix: example_ext_          # optional: table-name prefix this extension
