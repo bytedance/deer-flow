@@ -2789,6 +2789,85 @@ class TestUploads:
             companion = uploads_dir / result["files"][0]["markdown_file"]
             assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
 
+    def test_upload_files_failed_conversion_leaves_a_same_named_upload_alone(self, client):
+        """No companion was written, so the user's own a.pdf.md keeps its name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            (tmp_path / "a.pdf").write_bytes(b"PDF")
+            (tmp_path / "a.pdf.md").write_text("MY OWN NOTES", encoding="utf-8")
+
+            async def convert_always_fails(path: Path, output_path: Path | None = None) -> Path | None:
+                return None
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=convert_always_fails),
+            ):
+                result = client.upload_files("thread-1", [tmp_path / "a.pdf", tmp_path / "a.pdf.md"])
+
+            assert [f["filename"] for f in result["files"]] == ["a.pdf", "a.pdf.md"]
+            assert result["files"][0].get("markdown_file") is None
+            assert "original_filename" not in result["files"][1]
+            assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "MY OWN NOTES"
+
+    def test_upload_files_companion_wins_the_name_it_owns_over_a_later_upload(self, client):
+        """When the companion is written, a same-named upload is renamed, not overwritten."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            (tmp_path / "a.pdf").write_bytes(b"PDF")
+            (tmp_path / "a.pdf.md").write_text("MY OWN NOTES", encoding="utf-8")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("CONVERTED", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [tmp_path / "a.pdf", tmp_path / "a.pdf.md"])
+
+            assert result["files"][0]["markdown_file"] == "a.pdf.md"
+            assert result["files"][1]["filename"] == "a.pdf_1.md"
+            assert result["files"][1]["original_filename"] == "a.pdf.md"
+            assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "CONVERTED"
+            assert (uploads_dir / "a.pdf_1.md").read_text(encoding="utf-8") == "MY OWN NOTES"
+
+    def test_upload_files_skips_the_companion_when_an_earlier_upload_owns_the_name(self, client):
+        """An upload that already took the name keeps its bytes; no companion overwrites it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            (tmp_path / "a.pdf.md").write_text("MY OWN NOTES", encoding="utf-8")
+            (tmp_path / "a.pdf").write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("CONVERTED", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [tmp_path / "a.pdf.md", tmp_path / "a.pdf"])
+
+            assert [f["filename"] for f in result["files"]] == ["a.pdf.md", "a.pdf"]
+            assert result["files"][1].get("markdown_file") is None
+            assert (uploads_dir / "a.pdf.md").read_text(encoding="utf-8") == "MY OWN NOTES"
+
     def test_upload_files_rejects_reuploading_a_file_already_in_the_thread(self, client):
         """Uploading an existing upload onto itself must not destroy its bytes."""
         with tempfile.TemporaryDirectory() as tmp:

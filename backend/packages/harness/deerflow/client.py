@@ -1627,7 +1627,11 @@ class DeerFlowClient:
         validate_thread_id(thread_id)
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
-        # Validate all files upfront to avoid partial uploads.
+        # Validate all files upfront to avoid partial uploads. Names are
+        # claimed per file below, not here: a companion's name is reserved
+        # once its document is written and released again when no companion
+        # materializes, and only a name still held then may rename a later
+        # file of this request.
         resolved_files = []
         seen_names: set[str] = set()
         has_convertible_file = False
@@ -1637,14 +1641,9 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(p.name, seen_names)
-            resolved_files.append((p, dest_name))
+            resolved_files.append(p)
             if p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
-                # Reserve the companion's name alongside the document's, so
-                # another file in this request cannot take the name this
-                # document owns.
-                seen_names.add(companion_markdown_name(dest_name))
 
         uploads_dir = ensure_uploads_dir(thread_id)
         uploaded_files: list[dict] = []
@@ -1667,7 +1666,8 @@ class DeerFlowClient:
             return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
         try:
-            for src_path, dest_name in resolved_files:
+            for src_path in resolved_files:
+                dest_name = claim_unique_filename(src_path.name, seen_names)
                 try:
                     dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
                 except UnsafeUploadPathError:
@@ -1687,9 +1687,18 @@ class DeerFlowClient:
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                     # The companion is named after the whole document
-                    # (report.pdf → report.pdf.md), the name reserved above,
-                    # so the delete and outline paths can derive it.
+                    # (report.pdf → report.pdf.md) so the delete and outline
+                    # paths can derive it. Claiming it here keeps a later file
+                    # of this request from taking the name; a name already
+                    # taken yields no companion rather than one nothing can
+                    # derive, and the claim is released below when no
+                    # companion is written.
                     unique_md_name = companion_markdown_name(dest_name)
+                    if unique_md_name in seen_names:
+                        logger.warning("Skipping markdown companion for %s: %s is already taken", dest_name, unique_md_name)
+                        uploaded_files.append(info)
+                        continue
+                    seen_names.add(unique_md_name)
                     try:
                         # Convert the caller's own file, not the copy that just
                         # landed in the sandbox-writable uploads dir: a sandbox
@@ -1720,7 +1729,11 @@ class DeerFlowClient:
                         )
                         md_path = None
 
-                    if md_path is not None:
+                    if md_path is None:
+                        # No companion was written, so release the claim: it
+                        # must not rename a later file of this request.
+                        seen_names.discard(unique_md_name)
+                    else:
                         info["markdown_file"] = md_path.name
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)

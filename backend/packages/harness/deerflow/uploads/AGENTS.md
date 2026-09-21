@@ -35,10 +35,10 @@ share a stem collide, and the collision is then resolved at upload time by a
 came to remove `a.docx`'s companion and how `a.pdf` came to show `a.docx`'s
 outline.
 
-Four sites depend on that name; all four derive it, none guess:
-`upload_ingestion.ingest_chunks` and `DeerFlowClient.upload_files` write it,
-`delete_file_safe` removes it, `file_outline.extract_outline_for_file` reads it,
-and `list_uploaded_files_tool` hides it from listings. The Gateway claims the
+Five sites depend on that name; all five derive it, none guess: the two
+writers (`upload_ingestion.ingest_chunks`, `DeerFlowClient.upload_files`),
+`delete_file_safe`, `file_outline.extract_outline_for_file`, and
+`list_uploaded_files_tool`, which hides it from listings. The Gateway claims the
 name only after the commit settles the document's final name (a collision retry
 moves it) and skips the companion when that name is already taken, rather than
 writing one under a name the other three cannot derive. Companions written

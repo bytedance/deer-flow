@@ -205,26 +205,6 @@ class ThreadUploadIngestionService:
                 raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
         self._auto_convert = uploads._auto_convert_documents_enabled(self._config)
 
-    async def _link_commit_with_retry(self, uploads: Any, staged_path: Path, claimed_name: str) -> tuple[str, Path]:
-        """Publish a staged file under *claimed_name*, atomically and with no overwrite.
-
-        ``os.link`` (inside ``_commit_upload_temp_no_overwrite`` /
-        ``_link_staged_no_overwrite``) fails with :class:`FileExistsError`
-        when a concurrent session won the name after this session's seed —
-        the next suffix is claimed against the seeded set and the link
-        retried, so two concurrent ingestions of one name always land as
-        ``name.ext`` + ``name_1.ext`` with both byte streams intact. The
-        staged bytes stay hidden under the ``.upload-*.part`` pattern until
-        the link makes the final name visible, fully formed.
-        """
-        assert self._uploads_dir is not None, "open() must run before committing destinations"
-        name = claimed_name
-        while True:
-            try:
-                return name, await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
-            except FileExistsError:
-                name = uploads.claim_unique_filename(name, self._seen_filenames)
-
     async def ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str) -> dict[str, Any]:
         """Ingest one file from a chunk stream; return its wire metadata dict.
 
