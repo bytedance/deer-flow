@@ -424,7 +424,7 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     # mutation must finish before cancellation propagates; otherwise the caller
     # can observe cancellation while the worker commits state afterwards.
     worker = asyncio.to_thread(sync_method, *args, **kwargs)
-    result = await await_drained(worker) if sync_name == "put" else await worker
+    result = await await_drained(worker) if sync_name in {"put", "put_writes", "delete_thread"} else await worker
     return await result if inspect.isawaitable(result) else result
 
 
