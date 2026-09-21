@@ -18,7 +18,7 @@ import anyio
 import pytest
 
 from app.gateway.services import sse_consumer
-from deerflow.runtime import END_SENTINEL, DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, DisconnectMode, RunRecord, RunStatus
 
 
 def _running_record() -> RunRecord:
@@ -38,6 +38,25 @@ class _StubBridge:
         async def _gen():
             yield SimpleNamespace(event="message", data="{}", id="1")
             await asyncio.Event().wait()
+
+        return _gen()
+
+
+class _TwoEventBridge:
+    """Yields twice so the request can disconnect on the second poll."""
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield SimpleNamespace(event="message", data='{"step": 1}', id="1")
+            yield SimpleNamespace(event="message", data='{"step": 2}', id="2")
+
+        return _gen()
+
+
+class _HeartbeatBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield HEARTBEAT_SENTINEL
 
         return _gen()
 
@@ -110,6 +129,17 @@ class _StubRequest:
         return False
 
 
+class _PollingDisconnectRequest(_StubRequest):
+    def __init__(self, *, disconnect_after: int):
+        super().__init__()
+        self._disconnect_after = disconnect_after
+        self._polls = 0
+
+    async def is_disconnected(self) -> bool:
+        self._polls += 1
+        return self._polls > self._disconnect_after
+
+
 def _request() -> _StubRequest:
     return _StubRequest()
 
@@ -129,6 +159,23 @@ def test_creator_stream_disconnect_applies_cancel_policy():
         recorder = _CancelRecorder()
         consumer = sse_consumer(_StubBridge(), _running_record(), _request(), recorder)
         await _drive_disconnect(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == ["run-1"]
+
+
+def test_creator_stream_poll_disconnect_applies_cancel_policy():
+    """The primary request-poll arm must mark the disconnect before breaking."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        request = _PollingDisconnectRequest(disconnect_after=1)
+        consumer = sse_consumer(_TwoEventBridge(), _running_record(), request, recorder)
+        first_frame = await anext(consumer)
+        assert "event: message\n" in first_frame
+        assert "id: 1\n" in first_frame
+        with pytest.raises(StopAsyncIteration):
+            await anext(consumer)
         return recorder.cancelled
 
     assert asyncio.run(scenario()) == ["run-1"]
@@ -218,6 +265,27 @@ def test_creator_stream_close_after_end_does_not_cancel():
     async def scenario():
         recorder = _CancelRecorder()
         consumer = sse_consumer(_EndBridge(), _running_record(), _request(), recorder)
+        assert await anext(consumer) == "event: end\ndata: null\n\n"
+        await consumer.aclose()
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_close_after_orphan_recovery_end_does_not_cancel(monkeypatch):
+    """A synthetic orphan terminal frame owns the same local invariant as END."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+
+        async def orphan_recovered(record, run_mgr):
+            return True
+
+        monkeypatch.setattr(
+            "app.gateway.services._orphan_recovery_observed_after_heartbeat",
+            orphan_recovered,
+        )
+        consumer = sse_consumer(_HeartbeatBridge(), _running_record(), _request(), recorder)
         assert await anext(consumer) == "event: end\ndata: null\n\n"
         await consumer.aclose()
         return recorder.cancelled
