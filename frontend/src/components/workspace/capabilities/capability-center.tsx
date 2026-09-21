@@ -3,7 +3,7 @@
 import { BlocksIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { Input } from "@/components/ui/input";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -17,7 +17,18 @@ const SkillGallery = dynamic(() =>
   import("./skill-gallery").then((module) => module.SkillGallery),
 );
 
+// Do not accept search input before React can update the directory. A replayed
+// change on blur can move the install button between pointerdown and click.
+const subscribeHydration = () => () => undefined;
+const clientHydrated = () => true;
+const serverHydrated = () => false;
+
 export function CapabilityCenter() {
+  const hydrated = useSyncExternalStore(
+    subscribeHydration,
+    clientHydrated,
+    serverHydrated,
+  );
   const { t } = useI18n();
   const params = useSearchParams();
   const router = useRouter();
@@ -50,6 +61,7 @@ export function CapabilityCenter() {
             <div className="relative w-full md:w-72">
               <SearchIcon className="text-muted-foreground pointer-events-none absolute top-3 left-3 size-4" />
               <Input
+                disabled={!hydrated}
                 className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
                 aria-label={
                   tab === "plugins"

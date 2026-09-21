@@ -43,6 +43,11 @@ def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
 
 def message_content_to_text(content: Any) -> str:
     """Extract text from LangChain message content shapes."""
+    if content is None:
+        # ``str(None)`` is the truthy literal ``"None"``, so a content-less message
+        # would survive every downstream ``text if text else ...`` fallback and be
+        # reported as a real answer.
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):

@@ -798,6 +798,12 @@
   与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
   **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
   有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
+- **沙箱：** AIO 的 `grep` 与各远端 provider 的 `glob`/`grep` 不再把"恰好填满"的结果报告为截断。
+  它们本就持有整份列表——原始输出在上限之上截取并自行报告截断——但在收集到 `max_results` 个
+  过滤后的匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录也会被标记为被截断，
+  工具据此告诉模型结果不完整。现在改为多看一个匹配再判断，与 AIO 的 `glob` 两个分支一致。
+  这里涉及的只是**过滤后匹配数**上限；`parse_remote_search_output` 管的**原始输出行数**上限未作改动。
+  ([#5534])
 - **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
   token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
   却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
@@ -2085,6 +2091,25 @@
 
 ### 安全
 
+- **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
+  客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
+  宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
+  描述符，转换 uploads 之外的私有副本；客户端则转换调用方提供的源文件。([#5611])
+- **客户端：** `DeerFlowClient.upload_files` 不再写穿符号链接。沙箱可写的 uploads 目录中，
+  若在上传文件名或其 Markdown 配套文件名处放置符号链接，嵌入式客户端此前会覆盖链接指向的宿主
+  文件并报告成功。现在该文件会被跳过并列入 `skipped_files`，`success` 为 `false`，与 Gateway
+  一致；不安全的配套文件会被省略，原上传保留。复制时保留源文件的权限位与时间戳。([#5578])
+- **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
+  放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
+  `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
+  删除的是请求的文件名。现在符号链接返回 404，与上传列表一致；指向 uploads 目录之外的
+  链接仍以 400 拒绝。([#5547])
+- **前端：** 工具步骤不再把非 Web URL 渲染为链接。思维链面板中的 `web_fetch` URL 与
+  `web_search` / `image_search` 结果链接此前绕过了 Markdown 链接使用的协议白名单，
+  被提示注入的工具调用可在聊天中放入 `file:` 或系统协议处理程序链接（`ms-msdt:`、
+  `vscode:` 等）。现在它们会经过 `isSafeHref`，不安全的 URL 与 Markdown 链接一样显示
+  “Unsafe link omitted” 标记；缺少 args 的工具调用或非字符串的 `web_fetch` URL 也不再导致
+  消息列表崩溃。([#5526])
 - **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
   文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
   `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
@@ -3492,3 +3517,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
+[#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611

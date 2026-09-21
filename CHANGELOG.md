@@ -941,6 +941,10 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
+  acceptance checks. Readable empty files now satisfy `exists` and
+  `file_written` and deterministically fail `non-empty`, instead of remaining
+  UNVERIFIED. ([#5559])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -952,7 +956,9 @@ This release closes that milestone with **765 merged pull requests**.
   upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
   `UserPreferenceRow` are also registered in the ORM model registry so
   `create_all` and autogenerate see every table through explicit imports
-  instead of module side effects.
+  instead of module side effects. Rolling back the repair to
+  `0024_project_documents` intentionally leaves the ancestor-owned schema and
+  existing change positions intact; the repair downgrade is a no-op.
 - **nginx:** Extend the 600-second read timeout to the two remaining locations
   whose routes wait on the Gateway, both left on nginx's 60-second default by
   the thread-route fix. Behind the `/api/` catch-all, the stateless
@@ -1016,6 +1022,15 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
+- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
+  reporting an exactly-full result as truncated. They hold the whole listing —
+  the raw stream is capped above `max_results` and reports its own cut-off — but
+  they returned as soon as they had collected `max_results` filtered matches, so
+  a tree holding exactly that many — and no more — came back flagged as cut off
+  and the tool told the model the result was incomplete. They now look one match
+  past the cap before deciding, the rule AIO's `glob` branches already apply.
+  This concerns the filtered-match cap only; the raw-output cap
+  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2770,6 +2785,35 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Document conversion no longer re-opens the upload by name. The
+  Gateway converted the committed file and the embedded client converted the
+  copy it had just placed in the thread's uploads directory, so a sandbox that
+  replaced that name with a symlink in between had a host file converted into
+  the thread as the `.md` companion. The Gateway now converts a private copy of
+  the staged bytes, read through the descriptor it wrote, and the client
+  converts the caller's own source file. ([#5611])
+- **client:** `DeerFlowClient.upload_files` no longer writes through a
+  symlink. A symlink planted in the sandbox-writable uploads directory, at an
+  upload's name or its Markdown companion's name, made the embedded client
+  overwrite the host file it pointed to while reporting success. The file is
+  now skipped and listed in `skipped_files` with `success: false`, matching
+  the Gateway; an unsafe companion is left out and the upload kept. Copies
+  keep the source's permission bits and timestamps. ([#5578])
+- **uploads:** Deleting an upload no longer follows a symlink to delete a
+  different file. A symlink planted in the sandbox-writable uploads directory
+  made `DELETE /api/threads/{id}/uploads/{filename}` (and
+  `DeerFlowClient.delete_upload`) remove the upload it pointed to, plus that
+  file's companion `.md`, while reporting the requested name as deleted.
+  Symlinks now return 404, matching the upload listing; links that leave the
+  uploads directory are still rejected with 400. ([#5547])
+- **frontend:** Tool steps no longer turn non-web URLs into links. The
+  `web_fetch` URL and `web_search` / `image_search` result links in the
+  chain-of-thought panel skipped the scheme allowlist that markdown links use,
+  so a prompt-injected tool call could put a `file:` or OS protocol-handler
+  link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
+  and show an unsafe URL with the same "Unsafe link omitted" marker as
+  markdown links. A tool call whose args are missing, or whose `web_fetch` URL
+  is not a string, no longer crashes the message list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it
@@ -4281,3 +4325,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
+[#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
+[#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611

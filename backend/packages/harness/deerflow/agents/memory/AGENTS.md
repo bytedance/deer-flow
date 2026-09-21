@@ -84,6 +84,14 @@ existing enabled behavior.
 
 #### DeerMem storage contract
 
+`memory.backend_config.storage_class: markdown` opts into tolerant summary
+reads; writes still use JSON. Only a JSON object in a closed `memory-json`
+fence is accepted from Markdown. Decode the value before checking its closing
+fence so embedded backticks and later fenced notes stay lossless. Parser and
+storage regressions belong in `tests/test_memory_storage.py`; configure a data
+root directory, not the existing manifest file. Legacy v1 reads still migrate
+and advance the revision. Unparseable summary text is quarantined before rebuild.
+
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
 

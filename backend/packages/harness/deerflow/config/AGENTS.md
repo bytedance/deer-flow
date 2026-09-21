@@ -24,6 +24,13 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
+The v46 upgrade treats an existing `tools[]` entry in the `knowledge` group as
+pre-gate enablement and sets `knowledge_base.enabled: true` only when that flag
+was absent. Explicit `true` or `false` values remain authoritative. Moving
+legacy provider settings out of `knowledge_base` remains specific to the
+RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
+their tool-local settings unchanged.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
@@ -89,6 +96,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `subagent_runtime` - Startup-only shared process admission (`max_running`, bounded async wait queue, queue/reject policy, and queue timeout) for ordinary and durable-batch native subagents
 - `subagent_batches` - Startup-only explicit durable batch scheduler limits (disabled by default), including separate total, live, and running dimensions plus leases/retries/result bounds
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
+- `knowledge_base` - Hot-reloadable, provider-agnostic knowledge capability and custom-agent scope-selector flags. It gates the read-only Agent tools and selector; provider connection, allowlist, and retrieval defaults belong to the matching entry in `tools[]` (for example, the RAGFlow `knowledge_search` tool).
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
@@ -99,3 +107,24 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
 Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.
+
+`AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
+Gateway new-turn default. The API preserves omitted updates and clears explicit
+null; file and SQL stores persist it in the existing config document. Keep it
+outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+`setup_agent` also preserves the binding when re-bootstrapping. Admission uses
+explicit message scope before this default and snapshots it onto the current
+human message. Resolve the executing agent with runtime context over configurable,
+including legacy callers using `context.agent_name`; bootstrap skips defaults.
+Recovery (including a legacy null scope) never reapplies defaults.
+The operator allowlist is still checked by retrieval; this is not authorization.
+
+Unscoped new runs persist pre-default request digests even for unbound agents.
+Digest-free legacy retries compare pre-default canonical input; explicit scopes
+and recovery are excluded. Retries preserve the original run across binding edits.
+
+The file-backed singleton entrypoints additionally merge administrator-managed shared
+models from the encrypted runtime-home catalog. YAML entries win name conflicts;
+managed changes create new effective snapshots and do not alter an active runtime
+or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and reload
+boundaries. `AppConfig.from_file()` remains YAML-only.

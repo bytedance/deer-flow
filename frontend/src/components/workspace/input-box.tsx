@@ -302,6 +302,7 @@ export function InputBox({
   draftThreadId = threadId,
   draftAgentName,
   defaultModelName,
+  knowledgeScopeControl,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -310,6 +311,7 @@ export function InputBox({
   onSubmit,
   onStop,
   canStopStreaming = true,
+  canCreateRuns = true,
   agentSkillNames,
   agentSkillsLoading = false,
   ...props
@@ -343,6 +345,8 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
+  /** Optional knowledge-scope control rendered directly after mode. */
+  knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
   onContextChange?: (
     // Explicit selections contain only the fields changed by that action,
@@ -382,6 +386,13 @@ export function InputBox({
    * stays the enforcement point.
    */
   canStopStreaming?: boolean;
+  /**
+   * Whether the caller's role holds `runs:create` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canCreateRuns?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -1289,6 +1300,17 @@ export function InputBox({
           messageWithSlashSkill.files.length + projectAttachments.length,
         status,
       });
+      // Check run-starting actions before goal preparation or persistence:
+      // saving a goal also clears the draft and announces success. Status,
+      // clear, and compact commands do not start runs and keep their own gates.
+      if (
+        !canCreateRuns &&
+        (submitAction.kind === "message" ||
+          (submitAction.kind === "goal" && submitAction.command.kind === "set"))
+      ) {
+        toast.info(t.inputBox.startTurnUnavailable);
+        return Promise.reject(new Error("runs-create-denied"));
+      }
       if (submitAction.kind === "goal") {
         if (
           submitAction.command.kind === "set" &&
@@ -1351,10 +1373,6 @@ export function InputBox({
       if (submitAction.kind === "compact") {
         return handleCompactCommand();
       }
-      if (submitAction.kind === "stop") {
-        handleStopStreaming();
-        return;
-      }
       if (submitAction.kind === "empty") {
         return;
       }
@@ -1365,9 +1383,9 @@ export function InputBox({
     },
     [
       abortVoiceInput,
+      canCreateRuns,
       handleCompactCommand,
       handleGoalCommand,
-      handleStopStreaming,
       onPrepareThread,
       projectAttachments.length,
       selectedSlashSkill,
@@ -1375,6 +1393,7 @@ export function InputBox({
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
+      t.inputBox.startTurnUnavailable,
     ],
   );
 
@@ -1475,6 +1494,10 @@ export function InputBox({
   // A denied runs:cancel role sees a disabled stop affordance, not a removed
   // one — the composer must still show that a turn is in flight.
   const stopDenied = status === "streaming" && !canStopStreaming;
+  // Mirror for runs:create on the send side. While streaming the button is
+  // the stop affordance (gated above), so the send denial only applies to
+  // the send state.
+  const sendDenied = status !== "streaming" && !canCreateRuns;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2712,6 +2735,7 @@ export function InputBox({
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
+            {knowledgeScopeControl}
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger
@@ -2877,12 +2901,12 @@ export function InputBox({
             </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked || stopDenied}
+              disabled={composerLocked || stopDenied || sendDenied}
               variant="outline"
               status={status}
-              // A bare disabled stop square reads as a broken composer;
-              // explain the permission boundary (native title, since a
-              // Radix tooltip won't fire on a disabled button). Spread
+              // A bare disabled square reads as a broken composer; explain
+              // the permission boundary (native title, since a Radix
+              // tooltip won't fire on a disabled button). Spread
               // conditionally: an explicitly-undefined aria-label would
               // clobber PromptInputSubmit's default aria-label="Submit"
               // and strip the submit control's accessible name.
@@ -2891,7 +2915,12 @@ export function InputBox({
                     "aria-label": t.inputBox.stopStreamingUnavailable,
                     title: t.inputBox.stopStreamingUnavailable,
                   }
-                : {})}
+                : sendDenied
+                  ? {
+                      "aria-label": t.inputBox.startTurnUnavailable,
+                      title: t.inputBox.startTurnUnavailable,
+                    }
+                  : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();

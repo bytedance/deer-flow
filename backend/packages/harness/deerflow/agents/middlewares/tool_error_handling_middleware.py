@@ -172,6 +172,7 @@ def _build_runtime_middlewares(
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -189,9 +190,19 @@ def _build_runtime_middlewares(
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
         InputSanitizationMiddleware(),
+        KnowledgeScopeMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
     ]
+    if app_config.pii_redaction.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        # Listed last so it is the innermost Layer-1 wrapper: tool results are
+        # PII-redacted before ToolResultSanitizationMiddleware neutralizes tags
+        # and ToolOutputBudgetMiddleware externalizes oversized copies to disk
+        # (so those copies hold redacted text), and user messages reach it
+        # after the other request rewrites (issue #3190).
+        outer_wrappers.append(PiiRedactionMiddleware(app_config.pii_redaction))
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
@@ -507,6 +518,7 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            pii_redaction_config=getattr(app_config, "pii_redaction", None),
         )
     )
 

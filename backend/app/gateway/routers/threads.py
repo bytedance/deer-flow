@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 import uuid
@@ -32,7 +33,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
-from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -727,9 +728,32 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         ) from None
 
 
+def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str, str]:
+    """Pass owner scope only when an event store accepts that keyword.
+
+    Third-party ``RunEventStore`` implementations may still expose the legacy
+    ``delete_by_thread(thread_id)`` contract; they must keep deleting, just
+    without the owner filter (their storage is not user-scoped). An
+    uninspectable callable keeps the old call contract, and a ``TypeError``
+    raised inside the backend must never trigger a retry.
+    """
+    try:
+        parameters = inspect.signature(delete_by_thread).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "user_id" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"user_id": user_id}
+    return {}
+
+
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
+
+    # One owner identity for every cleanup step below: the filesystem bucket, the
+    # persisted runs/events/feedback and the thread_meta row all belong to the
+    # same owner, so they must not resolve their scope independently.
+    user_id = get_effective_user_id()
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -742,7 +766,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             message="Skipped local data cleanup for legacy thread ID",
         )
     else:
-        response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+        response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -753,11 +777,44 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
+    # are deleted, so the durable thread-operation reservation protecting this
+    # very request survives until ``reserve_thread_operation`` exits. Third-party
+    # RunStore implementations that predate the capability are skipped.
+    try:
+        delete_runs = getattr(get_run_store(request), "delete_by_thread", None)
+        if delete_runs is not None:
+            await delete_runs(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted run events (best-effort). These are the user-visible
+    # conversation history, not a cache: leaving them behind makes a deleted
+    # thread's feed readable again through GET /threads/{id}/messages. A legacy
+    # store that predates the owner-scoped signature is still called, with the
+    # old contract.
+    try:
+        delete_events = get_run_event_store(request).delete_by_thread
+        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
+    except Exception:
+        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted feedback best-effort. This cleans existing rows; fencing
+    # already-admitted writes across thread deletion is a separate lifecycle
+    # concern. The memory backend legitimately sets ``feedback_repo = None``, so
+    # the optional accessor is used here.
+    try:
+        feedback_repo = getattr(request.app.state, "feedback_repo", None)
+        if feedback_repo is not None:
+            await feedback_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
+        await thread_store.delete(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 

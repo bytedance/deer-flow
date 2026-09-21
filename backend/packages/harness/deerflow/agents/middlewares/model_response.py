@@ -48,6 +48,8 @@ def append_visible_text(message: AIMessage, text: str) -> Any:
     """Append a visible text block without dropping existing content blocks."""
     if isinstance(message.content, list):
         return [*message.content, {"type": "text", "text": text}]
+    if isinstance(message.content, str) and message.content.strip():
+        return f"{message.content}\n\n{text}"
     return text
 
 
