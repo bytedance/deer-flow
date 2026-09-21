@@ -280,3 +280,34 @@ def test_load_codex_cli_credential_supports_legacy_top_level_shape(tmp_path, mon
     assert cred is not None
     assert cred.access_token == "legacy-access-token"
     assert cred.account_id == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[]",  # JSON-encoded list
+        '"codex-access-token"',  # bare string (JSON-encoded twice)
+        "42",  # integer
+        "true",  # boolean
+        "null",  # explicit null
+    ],
+)
+def test_load_codex_cli_credential_ignores_malformed_container(tmp_path, monkeypatch, payload):
+    # A top-level JSON value that is not an object is not a usable credential
+    # container. load_codex_cli_credential() must degrade it to None (the same
+    # "credential not found, fall back" path the Claude Code loader uses) instead
+    # of raising AttributeError when it reads keys off the non-dict value (#5552).
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(payload)
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None
+
+
+def test_load_codex_cli_credential_returns_none_for_directory(tmp_path, monkeypatch):
+    # A directory at the credential path is not a JSON object either.
+    auth_dir = tmp_path / "auth.json"
+    auth_dir.mkdir()
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_dir))
+
+    assert load_codex_cli_credential() is None
