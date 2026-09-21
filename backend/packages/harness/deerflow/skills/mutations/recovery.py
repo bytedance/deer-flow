@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from deerflow_extension_api.host_capabilities import HostCapabilityError
-from sqlalchemy import delete, exists, literal, or_, select, update
+from sqlalchemy import and_, delete, exists, literal, or_, select, update
 
 from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOperationRow, SkillOwnerRow, SkillProposalRow, SkillScanAttemptRow
 from deerflow.skills.mutations.codec import operation_view
@@ -38,12 +38,17 @@ class SkillMutationRecovery:
         if type(limit) is not int or not 1 <= limit <= 101 or (after_id is not None and (not isinstance(after_id, str) or len(after_id) > 32)):
             raise HostCapabilityError("INVALID_REQUEST")
         with self.repository.sessions() as session:
+            cursor = session.get(SkillOperationRow, after_id) if after_id else None
+            if after_id and cursor is None:
+                return ()
+            after = or_(SkillOperationRow.created_at > cursor.created_at, and_(SkillOperationRow.created_at == cursor.created_at, SkillOperationRow.operation_id > cursor.operation_id)) if cursor is not None else True
             rows = session.scalars(
                 select(SkillOperationRow)
                 .where(
-                    or_(SkillOperationRow.publication.in_(("PREPARED", "NEEDS_REPAIR")), (SkillOperationRow.publication == "APPLIED") & SkillOperationRow.views.in_(("PENDING", "ERROR"))), SkillOperationRow.operation_id > (after_id or "")
+                    or_(SkillOperationRow.publication.in_(("PREPARED", "NEEDS_REPAIR")), (SkillOperationRow.publication == "APPLIED") & SkillOperationRow.views.in_(("PENDING", "ERROR"))),
+                    after,
                 )
-                .order_by(SkillOperationRow.operation_id)
+                .order_by(SkillOperationRow.created_at, SkillOperationRow.operation_id)
                 .limit(limit)
             ).all()
             return tuple(operation_view(row) for row in rows)
@@ -55,7 +60,7 @@ class SkillMutationRecovery:
         for operation_id in pending:
             resolve_prepared(self.repository, storage, operation_id)
         with self.repository.sessions() as session:
-            uncertain = session.scalars(select(SkillAssetRow.name).where(SkillAssetRow.owner_id == storage.user_id, SkillAssetRow.mutating.is_(True), SkillAssetRow.operation_id.is_(None))).all()
+            uncertain = session.scalars(select(SkillAssetRow.name).where(SkillAssetRow.owner_id == storage.user_id, SkillAssetRow.mutating.is_(True))).all()
         for name in uncertain:
             digest, enabled, exists = self.runtime.state(storage, name)
             self.repository.observe(storage.user_id, name, digest, enabled, exists=exists)

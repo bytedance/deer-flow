@@ -835,7 +835,9 @@ def skill_projection_mutation(
         _validate_projection_relative_path(relative_path)
         removals.add((root, relative_path))
 
-    with _projection_lock(scope_root):
+    from deerflow.skills.mutations.guard import managed_name_writes
+
+    with managed_name_writes(storage, mutation_names), _projection_lock(scope_root):
         if remove_names:
             names = set(remove_names)
             skills = _load_public_skills(storage, enabled_only=False) if scope == "public" else storage.load_skills(enabled_only=False)

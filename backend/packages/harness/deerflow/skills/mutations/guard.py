@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import ExitStack, contextmanager, nullcontext
 
 from deerflow_extension_api.host_capabilities import HostCapabilityError
@@ -56,12 +57,30 @@ def read_optional_text(storage, path):
 
 
 @contextmanager
+def managed_name_writes(storage, names, *, global_scope=False, timeout=None):
+    """Serialize one Skill name across public state and enrolled owner writes."""
+    runtime = _runtime
+    owner_id = getattr(storage, "user_id", None)
+    if runtime is None or not names or (not global_scope and owner_id not in runtime.owners):
+        yield
+        return
+    from deerflow.skills.projection import _projection_lock, get_skill_projection_paths
+
+    lock_root = get_skill_projection_paths(storage).public.parent / ".skill-mutation-names"
+    with ExitStack() as stack:
+        for name in sorted(set(names)):
+            token = hashlib.sha256(name.encode("utf-8")).hexdigest()
+            stack.enter_context(_projection_lock(lock_root / token, timeout=timeout))
+        yield
+
+
+@contextmanager
 def managed_global_state_write(storage, name):
     """A global same-name enable toggle also changes each user's custom asset.
 
     Acquire before config locks: global projection -> sorted owner guards -> DB.
-    All owners are reserved before changing the shared flag, preventing ABA and
-    snapshots observing half of an enable-state transition.
+    A name fence prevents concurrent same-name creation. Only owners that have
+    the affected custom asset are then reserved before changing the shared flag.
     """
     runtime = _runtime
     if runtime is None:
@@ -70,10 +89,12 @@ def managed_global_state_write(storage, name):
     from deerflow.skills.projection import _projection_lock, get_skill_projection_paths, skill_projection_read_lock
     from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-    with _projection_lock(get_skill_projection_paths(storage).public.parent, timeout=5.0), ExitStack() as stack:
+    with _projection_lock(get_skill_projection_paths(storage).public.parent, timeout=5.0), managed_name_writes(storage, (name,), global_scope=True, timeout=5.0), ExitStack() as stack:
         storages = []
         for owner in sorted(runtime.owners):
             scoped = UserScopedSkillStorage(owner, host_path=str(storage.get_skills_root_path()))
+            if not scoped.get_custom_skill_file(name).exists():
+                continue
             stack.enter_context(skill_projection_read_lock(scoped))
             runtime.ensure_readable(scoped)
             if scoped.get_custom_skill_file(name).exists():

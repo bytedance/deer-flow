@@ -43,6 +43,17 @@ async def put_event(events, run_id="r", content="hello", owner="alice"):
 
 
 @pytest.mark.asyncio
+async def test_source_fence_metadata_has_explicit_accessors(evidence):
+    sf, _events, runs, reader = evidence
+    await put_run(runs)
+    snapshot = await reader.get_snapshot(thread_id="t-r", run_id="r")
+    async with sf() as session:
+        run = await session.scalar(select(RunRow).where(RunRow.run_id == "r"))
+    assert len(reader.scope_digest) == 64
+    assert reader.revision_for_run(run) == snapshot.evidence_revision
+
+
+@pytest.mark.asyncio
 async def test_new_giant_digest_has_constant_read_queries(evidence):
     sf, events, runs, reader = evidence
     await put_run(runs)

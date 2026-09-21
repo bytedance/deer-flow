@@ -2,7 +2,7 @@
 
 import asyncio
 import importlib.util
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +17,7 @@ from deerflow.extensions.completed_run_evidence import HostCompletedRunEvidenceR
 from deerflow.extensions.host_access import BoundHostAccess, HostAccess
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
-from deerflow.persistence.skill_mutations.model import SkillOperationRow, SkillProposalRow
+from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOperationRow, SkillProposalRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.skills.mutations.guard import SkillMutationRuntime, configure_mutation_runtime
 from deerflow.skills.mutations.repository import SkillMutationRepository
@@ -49,12 +49,16 @@ async def host(tmp_path, monkeypatch):
         session.add(run)
         session.flush()
         snap = CompletedRunSnapshot(
-            snapshot_ref="source", run_id="run", thread_id="thread", owner_id="owner", agent_id="trainer", origin="interactive", status="success", seal_state="sealed", evidence_revision=HostCompletedRunEvidenceReader._revision(run)
+            snapshot_ref="source", run_id="run", thread_id="thread", owner_id="owner", agent_id="trainer", origin="interactive", status="success", seal_state="sealed", evidence_revision=HostCompletedRunEvidenceReader.revision_for_run(run)
         )
         session.add(CompletedRunSnapshotRow(snapshot_ref="source", run_id="run", scope_digest="scope", evidence_revision=snap.evidence_revision, retention_revision=0, snapshot_json=asdict(snap)))
 
     class Evidence:
-        _scope = "scope"
+        scope_digest = "scope"
+
+        @staticmethod
+        def revision_for_run(run):
+            return HostCompletedRunEvidenceReader.revision_for_run(run)
 
         async def resolve_snapshot(self, ref):
             if ref != "source":
@@ -161,6 +165,44 @@ async def test_fresh_source_fence_and_stale_policy_fail_closed(host):
     with pytest.raises(HostCapabilityError, match="SOURCE_STALE_OR_GONE"):
         await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="commit-1")
     assert host.storage.get_custom_skill_file("example").read_text() == CONTENT
+
+
+@pytest.mark.asyncio
+async def test_commit_maps_malformed_assessment_to_contract_error(host):
+    proposal = await stage(host)
+    await host.service.check(proposal_id=proposal.proposal_id)
+
+    @dataclass(frozen=True)
+    class DriftedAssessment:
+        evaluator: str
+        evaluator_version: str
+
+    for index, assessment in enumerate(({"evaluator": "plugin"}, DriftedAssessment("plugin", "1"))):
+        with pytest.raises(HostCapabilityError, match="INVALID_ASSESSMENT"):
+            await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key=f"bad-assessment-{index}", assessment_ref=assessment)
+
+
+@pytest.mark.asyncio
+async def test_commit_bounds_serialized_assessment_bytes(host):
+    from deerflow_extension_api.skill_mutations import AssessmentRef
+
+    proposal = await stage(host)
+    await host.service.check(proposal_id=proposal.proposal_id)
+    assessment = AssessmentRef(proposal.candidate_hash, proposal.base_revision, "é" * 300, "é" * 300, "é" * 300)
+    with pytest.raises(HostCapabilityError, match="INVALID_ASSESSMENT"):
+        await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="oversized-assessment", assessment_ref=assessment)
+
+
+@pytest.mark.asyncio
+async def test_commit_persists_valid_assessment(host):
+    from deerflow_extension_api.skill_mutations import AssessmentRef
+
+    proposal = await stage(host)
+    await host.service.check(proposal_id=proposal.proposal_id)
+    assessment = AssessmentRef(proposal.candidate_hash, proposal.base_revision, "skill-evolution", "1", "report-1")
+    operation = await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="assessed", assessment_ref=assessment)
+    with host.sessions() as session:
+        assert session.get(SkillOperationRow, operation.operation_id).assessment == asdict(assessment)
 
 
 @pytest.mark.asyncio
@@ -376,6 +418,30 @@ async def test_managed_reader_lazily_recovers_accepted_publication(host, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_failed_legacy_write_after_publication_is_recoverable(host, monkeypatch):
+    _, operation = await publish(host)
+
+    def no_space(*_args, **_kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("deerflow.skills.storage.user_scoped_skill_storage.tempfile.NamedTemporaryFile", no_space)
+    with pytest.raises(OSError, match="no space"):
+        host.storage.write_custom_skill("example", "SKILL.md", NEW + "manual")
+
+    with host.sessions() as session:
+        asset = session.scalar(select(SkillAssetRow).where(SkillAssetRow.owner_id == "owner", SkillAssetRow.name == "example"))
+        assert asset.mutating is True
+        assert asset.operation_id == operation.operation_id
+
+    assert host.storage.load_skills()
+    with host.sessions() as session:
+        asset = session.scalar(select(SkillAssetRow).where(SkillAssetRow.owner_id == "owner", SkillAssetRow.name == "example"))
+        assert asset.mutating is False
+        assert asset.operation_id is None
+        assert asset.mutation_seq == operation.after_revision.mutation_seq + 1
+
+
+@pytest.mark.asyncio
 async def test_history_mirror_is_compact_and_deduplicated_by_operation(host):
     _, operation = await publish(host)
     host.recovery.recover_all()
@@ -396,6 +462,23 @@ async def test_history_mirror_failure_does_not_change_publication(host, monkeypa
     monkeypatch.setattr(history, "mirror_operations", fail)
     _, operation = await publish(host)
     assert (operation.publication, operation.views) == ("APPLIED", "READY")
+
+
+@pytest.mark.asyncio
+async def test_admin_operation_pagination_uses_creation_order(host):
+    _, committed = await publish(host)
+    reverted = await host.service.revert(operation_id=committed.operation_id, expected_current_revision=committed.after_revision, idempotency_key="revert-order")
+    newer_id, older_id = sorted((committed.operation_id, reverted.operation_id))
+    with host.sessions.begin() as session:
+        older = session.get(SkillOperationRow, older_id)
+        newer = session.get(SkillOperationRow, newer_id)
+        older.created_at, newer.created_at = 1.0, 2.0
+        older.views = newer.views = "ERROR"
+
+    first = host.recovery.list_operations(limit=1)
+    assert [item.operation_id for item in first] == [older_id]
+    second = host.recovery.list_operations(limit=2, after_id=older_id)
+    assert [item.operation_id for item in second] == [newer_id]
 
 
 @pytest.mark.asyncio

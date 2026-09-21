@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from deerflow.config import paths
 from deerflow.config.paths import Paths
+from deerflow.extensions.completed_run_evidence import HostCompletedRunEvidenceReader
 from deerflow.extensions.host_access import BoundHostAccess, HostAccess
 from deerflow.skills.mutations import publication
 from deerflow.skills.mutations import service as service_module
@@ -22,6 +23,10 @@ from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillSto
 
 def die():
     os.kill(os.getpid(), signal.SIGKILL)
+    # Signal delivery is asynchronous: never return to a pre-rename fault
+    # injection site if the process is still briefly scheduled.
+    while True:
+        signal.pause()
 
 
 async def main(args):
@@ -32,7 +37,8 @@ async def main(args):
     configure_mutation_runtime(runtime)
     recovery = SkillMutationRecovery(runtime, lambda _: storage, rebuild_views=lambda _: None)
     binding = BoundHostAccess("plugin", HostAccess.model_validate(args["grant"]))
-    service = service_module.HostSkillMutationService(binding, runtime=runtime, evidence=SimpleNamespace(_scope="scope"), storage_factory=lambda _: storage, scanner=SimpleNamespace(policy_version_sync=lambda: "policy-1"), recovery=recovery)
+    evidence = SimpleNamespace(scope_digest="scope", revision_for_run=HostCompletedRunEvidenceReader.revision_for_run)
+    service = service_module.HostSkillMutationService(binding, runtime=runtime, evidence=evidence, storage_factory=lambda _: storage, scanner=SimpleNamespace(policy_version_sync=lambda: "policy-1"), recovery=recovery)
     boundary = args["boundary"]
     if boundary == "prepared":
         service_module.publish_prepared = lambda *_: die()

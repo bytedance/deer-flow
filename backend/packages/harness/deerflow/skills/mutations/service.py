@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -10,11 +11,10 @@ from contextlib import contextmanager
 from dataclasses import asdict
 
 from deerflow_extension_api.host_capabilities import HostCapabilityError
-from deerflow_extension_api.skill_mutations import AssetRevision, BundleFile, MutationCapabilities, ProposalBundle, SkillRevisionView
+from deerflow_extension_api.skill_mutations import AssessmentRef, AssetRevision, BundleFile, MutationCapabilities, ProposalBundle, SkillRevisionView
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from deerflow.extensions.completed_run_evidence import HostCompletedRunEvidenceReader
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
 from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOperationRow, SkillOwnerRow, SkillProposalRow
 from deerflow.persistence.user.model import UserRow
@@ -133,7 +133,7 @@ class HostSkillMutationService:
             run = session.scalar(select(RunRow).where(RunRow.run_id == source["run_id"]).with_for_update(read=True))
             if (
                 stored is None
-                or stored.scope_digest != self.evidence._scope
+                or stored.scope_digest != self.evidence.scope_digest
                 or fingerprint(stored.snapshot_json) != fingerprint(source)
                 or run is None
                 or run.user_id != owner_id
@@ -147,7 +147,7 @@ class HostSkillMutationService:
                 or source["owner_id"] != owner_id
                 or source.get("coverage") != "lead-journal-v1"
                 or run.evidence_retention_revision != source["retention_revision"]
-                or HostCompletedRunEvidenceReader._revision(run) != source["evidence_revision"]
+                or self.evidence.revision_for_run(run) != source["evidence_revision"]
             ):
                 raise HostCapabilityError("SOURCE_STALE_OR_GONE")
 
@@ -425,11 +425,33 @@ class HostSkillMutationService:
         except Exception:
             return operation
 
+    @staticmethod
+    def _assessment_payload(assessment_ref):
+        if assessment_ref is None:
+            return None
+        try:
+            if not isinstance(assessment_ref, AssessmentRef) or not isinstance(assessment_ref.base_revision, AssetRevision):
+                raise TypeError
+            assessment = asdict(assessment_ref)
+            base = assessment["base_revision"]
+            if (
+                not isinstance(assessment["candidate_hash"], str)
+                or len(assessment["candidate_hash"]) != 64
+                or set(base) != {"incarnation_id", "mutation_seq", "content_digest"}
+                or not isinstance(base["incarnation_id"], str)
+                or not isinstance(base["content_digest"], str)
+                or type(base["mutation_seq"]) is not int
+                or any(not isinstance(assessment[field], str) or not 1 <= len(assessment[field]) <= 512 for field in ("evaluator", "evaluator_version", "report_id"))
+                or len(json.dumps(assessment, allow_nan=False).encode("utf-8")) > 4096
+            ):
+                raise ValueError
+            return assessment
+        except Exception as exc:
+            raise HostCapabilityError("INVALID_ASSESSMENT") from exc
+
     async def commit(self, *, proposal_id, idempotency_key, assessment_ref=None):
         self._key(idempotency_key)
-        assessment = asdict(assessment_ref) if assessment_ref else None
-        if assessment is not None and (len(str(assessment).encode()) > 4096 or any(not isinstance(assessment[field], str) or not 1 <= len(assessment[field]) <= 512 for field in ("evaluator", "evaluator_version", "report_id"))):
-            raise HostCapabilityError("INVALID_ASSESSMENT")
+        assessment = self._assessment_payload(assessment_ref)
         request = fingerprint([proposal_id, assessment])
         proposal = await self.get_proposal(proposal_id=proposal_id)
 

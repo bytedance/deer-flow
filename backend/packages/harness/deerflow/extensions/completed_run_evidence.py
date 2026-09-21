@@ -57,6 +57,11 @@ class HostCompletedRunEvidenceReader:
         self._scope = hashlib.sha256(_json([plugin_id, sorted(self._owners)]).encode()).hexdigest()
         self._sf = run_store._sf if isinstance(run_store, RunRepository) and isinstance(event_store, DbRunEventStore) and run_store._sf is event_store._sf else None
 
+    @property
+    def scope_digest(self) -> str:
+        """Stable host-internal scope binding used by transactional consumers."""
+        return self._scope
+
     def _supported(self) -> None:
         if self._sf is None:
             raise HostCapabilityError("UNSUPPORTED", "completed evidence requires durable run and event stores on the same database")
@@ -151,7 +156,7 @@ class HostCompletedRunEvidenceReader:
         return seal
 
     @classmethod
-    def _revision(cls, run) -> str:
+    def revision_for_run(cls, run) -> str:
         # Include lifecycle transitions before a seal exists. Otherwise a
         # pending snapshot could hide the subsequent terminal/partial record.
         return hashlib.sha256(_json([run.evidence_revision, run.run_id, coerce_iso(run.created_at), run.status, cls._seal_state(run)]).encode()).hexdigest()
@@ -168,7 +173,7 @@ class HostCompletedRunEvidenceReader:
             if session.bind.dialect.name == "sqlite":
                 await session.execute(text("BEGIN IMMEDIATE"))
             run = await self._run(session, thread_id, run_id, write=True)
-            revision = self._revision(run)
+            revision = self.revision_for_run(run)
             existing = await session.scalar(
                 select(CompletedRunSnapshotRow).where(
                     CompletedRunSnapshotRow.run_id == run_id,
@@ -242,7 +247,7 @@ class HostCompletedRunEvidenceReader:
             raise HostCapabilityError("NOT_FOUND", "snapshot is unavailable in this scope")
         snap = _snapshot(stored.snapshot_json)
         run = await self._run(session, snap.thread_id, snap.run_id)
-        if run.user_id != snap.owner_id or run.evidence_retention_revision != snap.retention_revision or self._revision(run) != snap.evidence_revision:
+        if run.user_id != snap.owner_id or run.evidence_retention_revision != snap.retention_revision or self.revision_for_run(run) != snap.evidence_revision:
             raise HostCapabilityError("EVIDENCE_EXPIRED", "snapshot revision was replaced or its events were removed")
         return snap, run
 

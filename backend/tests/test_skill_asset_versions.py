@@ -1,7 +1,10 @@
 """Existing storage writers participate in the same version chain as plugins."""
 
+import threading
+from contextlib import contextmanager
+
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from deerflow.config.paths import Paths
@@ -207,6 +210,97 @@ def test_global_toggle_aba_invalidates_same_named_custom_asset(assets, monkeypat
     last = runtime.read_revision(storage, "example")
     assert last.content_digest == first.content_digest
     assert last.mutation_seq == first.mutation_seq + 2
+    reset_extensions_config()
+
+
+def test_global_toggle_does_not_lock_unrelated_owner(assets, monkeypatch, tmp_path):
+    from app.gateway.routers.skills import _write_extensions_skill_state
+    from deerflow.config.extensions_config import ExtensionsConfig, reload_extensions_config, reset_extensions_config
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.skills.projection import skill_projection_read_lock
+
+    storage, runtime, repository = assets
+    with repository.sessions.begin() as session:
+        session.add(UserRow(id="unrelated", email="unrelated@example.test"))
+    runtime.owners = frozenset({"owner", "unrelated"})
+    config_file = tmp_path / "extensions.json"
+    config_file.write_text('{"skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+    reload_extensions_config()
+
+    @contextmanager
+    def reject_unrelated(scoped, *args, **kwargs):
+        if scoped.user_id == "unrelated":
+            raise TimeoutError("unrelated owner is busy")
+        with skill_projection_read_lock(scoped, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr("deerflow.skills.projection.skill_projection_read_lock", reject_unrelated)
+    _write_extensions_skill_state(storage, "example", False, rebuild_public_projection=False)
+    assert ExtensionsConfig.from_file().is_skill_enabled("example", "public") is False
+    reset_extensions_config()
+
+
+def test_global_toggle_serializes_same_name_creation(assets, monkeypatch, tmp_path):
+    from app.gateway.routers import skills as skills_router
+    from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config
+    from deerflow.persistence.skill_mutations.model import SkillAssetRow
+    from deerflow.persistence.user.model import UserRow
+
+    storage, runtime, repository = assets
+    with repository.sessions.begin() as session:
+        session.add(UserRow(id="new-owner", email="new-owner@example.test"))
+    runtime.owners = frozenset({"owner", "new-owner"})
+    other = UserScopedSkillStorage("new-owner", host_path=str(storage.get_skills_root_path()))
+    config_file = tmp_path / "extensions.json"
+    config_file.write_text('{"skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+    reload_extensions_config()
+
+    entered, release, writer_done = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+    write_config = skills_router.atomic_write_extensions_config
+
+    def pause_config_write(path, raw):
+        entered.set()
+        if not release.wait(2):
+            raise TimeoutError("test did not release config write")
+        write_config(path, raw)
+
+    def toggle():
+        try:
+            skills_router._write_extensions_skill_state(storage, "example", False, rebuild_public_projection=False)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def create_same_name():
+        try:
+            other.write_custom_skill("example", "SKILL.md", CONTENT)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            writer_done.set()
+
+    monkeypatch.setattr(skills_router, "atomic_write_extensions_config", pause_config_write)
+    toggle_thread = threading.Thread(target=toggle)
+    writer_thread = threading.Thread(target=create_same_name)
+    toggle_thread.start()
+    assert entered.wait(2)
+    writer_thread.start()
+    try:
+        serialized = not writer_done.wait(0.2)
+    finally:
+        release.set()
+        toggle_thread.join(2)
+        writer_thread.join(2)
+
+    assert not toggle_thread.is_alive()
+    assert not writer_thread.is_alive()
+    assert serialized
+    assert not errors
+    with repository.sessions() as session:
+        asset = session.scalar(select(SkillAssetRow).where(SkillAssetRow.owner_id == "new-owner", SkillAssetRow.name == "example"))
+        assert asset.enabled is False
     reset_extensions_config()
 
 
