@@ -1118,6 +1118,10 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
+Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
+or data files depend on a specific working directory. The setting applies to
+both discovery and tool calls; see [MCP configuration](backend/docs/MCP_SERVER.md#stdio-working-directory).
+
 Tavily `web_search` also accepts optional `include_domains` and `exclude_domains`
 lists in its `config.yaml` tool entry to control search sources. Non-empty
 `include_domains` uses Tavily's `filter` mode to restrict results to those domains.

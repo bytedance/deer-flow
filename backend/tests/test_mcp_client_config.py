@@ -71,6 +71,16 @@ def test_build_server_params_http_like_success(transport: str):
 
 
 @pytest.mark.parametrize("transport", ["sse", "http"])
+def test_build_server_params_does_not_forward_stdio_cwd_to_remote_transports(transport: str):
+    config = McpServerConfig(type=transport, url="https://example.com/mcp", cwd="/local/server")
+
+    assert build_server_params("remote-server", config) == {
+        "transport": transport,
+        "url": "https://example.com/mcp",
+    }
+
+
+@pytest.mark.parametrize("transport", ["sse", "http"])
 def test_build_server_params_http_like_requires_url(transport: str):
     config = McpServerConfig(type=transport, url=None)
 
