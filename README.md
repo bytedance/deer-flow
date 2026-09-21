@@ -2090,6 +2090,40 @@ depth, not a boundary: these launchers exist to fetch and run remote packages,
 so **treat Gateway admin as equivalent to code execution on the host** and grant
 it accordingly.
 
+### External Chat Message Roles
+
+Gateway run requests and manual thread-state updates reject client-supplied
+`system` / `developer` messages with HTTP 400, including equivalent serialized
+message forms. Ordinary chat, attachments, and assistant/tool history replay
+remain supported. Session or PAT authentication does not grant system-prompt
+authority; trusted internal run producers retain that ability.
+
+This check prevents new role injection; it does not rewrite existing
+checkpoints. If an older version accepted an injected system message, use a
+fresh thread or have an operator review and clean the affected state. Restarting
+the service does not remove persisted instructions, and restoring an older
+checkpoint can restore them.
+
+For local verification, run `python backend/tests/poc_external_system_message_injection.py --help`.
+The same opt-in PoC supports `--expect vulnerable` on an isolated old revision
+and `--expect blocked` after the fix. Its help includes PAT creation, thread-ID
+selection, browser follow-up, and the distinction between persistence and model
+obedience. Use a fresh disposable thread for each run; the test appends messages.
+
+On an isolated unfixed checkout, `--expect vulnerable` demonstrates acceptance
+only when the request returns 200 and the exact injected message remains in the
+checkpoint as `type=system` across a normal follow-up. A marker in a web answer
+is model-dependent and is not evidence by itself that the role was promoted.
+After applying the fix, run the same script with `--expect blocked`: it requires
+the specific role-rejection 400, an unchanged checkpoint, a successful ordinary
+follow-up, and absence of the rejected message IDs. Other 400 responses and
+authentication, conflict, or server errors are inconclusive rather than passes.
+
+The PoC does not clean up automatically. When verification is complete, delete
+the disposable chat with the web sidebar's delete action and revoke the
+short-lived PAT if one was created. Restarting the service does not remove a
+persisted injected instruction.
+
 ### Deployment Defaults
 
 The Docker stack publishes its entry port on `127.0.0.1` only, matching the
