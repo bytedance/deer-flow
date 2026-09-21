@@ -941,6 +941,16 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** A converted document's Markdown companion is now named after the
+  whole document (`report.pdf` → `report.pdf.md`), the rule
+  `backend/docs/FILE_UPLOAD.md` already documented, instead of replacing the
+  suffix (`report.md`). Two uploads sharing a stem no longer compete for one
+  name: deleting `a.pdf` removed `a.docx`'s companion, the outline given to the
+  agent for `a.pdf` was read from `a.docx`'s companion, and a user's own
+  `report.md` was hidden from listings whenever a `report.*` existed. Companions
+  written under the old name are left in place — nothing can prove which
+  document they belong to — so they stay listed and are no longer deleted with
+  a document. ([#5632])
 - **subagents:** Recognize zero-byte regular deliverables in remote sandbox
   acceptance checks. Readable empty files now satisfy `exists` and
   `file_written` and deterministically fail `non-empty`, instead of remaining
@@ -4331,3 +4341,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5632]: https://github.com/bytedance/deer-flow/pull/5632

@@ -727,6 +727,12 @@
 
 ### 修复
 
+- **上传：** 转换生成的 Markdown 配套文件现在以完整文档名命名（`report.pdf` →
+  `report.pdf.md`），即 `backend/docs/FILE_UPLOAD.md` 早已记载的规则，而不再替换扩展名
+  （`report.md`）。主干名相同的两个上传不再争抢同一个名称：此前删除 `a.pdf` 会删掉
+  `a.docx` 的配套文件，`a.pdf` 注入给智能体的大纲读的是 `a.docx` 的配套文件，用户自己的
+  `report.md` 也会因为存在 `report.*` 而在列表中被隐藏。按旧规则生成的配套文件会原样保留
+  （无法确定其归属），因此仍会列出，也不再随文档一起删除。([#5632])
 - **nginx：** 把 600 秒读取超时扩展到其余两个会等待 Gateway 的 location，它们在线程路由的修复
   之后仍沿用 nginx 默认的 60 秒。`/api/` 兜底 location 之后：无状态的 `POST /api/runs/wait`
   阻塞在同一套运行完成等待上，并在客户端断开时取消该运行，因此等待超过 60 秒的 API 调用方会
@@ -3522,3 +3528,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5632]: https://github.com/bytedance/deer-flow/pull/5632
