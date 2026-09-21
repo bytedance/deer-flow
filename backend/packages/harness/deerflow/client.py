@@ -352,7 +352,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             memory_enabled,
-            tuple(mcp_plugins) if mcp_plugins is not None else None,
+            frozenset(mcp_plugins) if mcp_plugins is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,

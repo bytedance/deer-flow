@@ -1334,6 +1334,19 @@ class TestClientMcpSelection:
             metadata = call.kwargs["config"]["metadata"]
             assert metadata["mcp_plugins"] == selection
 
+    def test_reuses_graph_when_mcp_selection_order_changes(self, mcp_client):
+        agent_config = AgentConfig(name="researcher", mcp_plugins=["installation-A", "installation-B"])
+        mcp_client.load_config.return_value = agent_config
+        client = mcp_client.client
+        client._ensure_agent(client._get_runnable_config("t1"))
+
+        agent_config.mcp_plugins = ["installation-B", "installation-A"]
+        config = client._get_runnable_config("t2")
+        client._ensure_agent(config)
+
+        mcp_client.create_agent.assert_called_once()
+        assert config["metadata"]["mcp_plugins"] == ["installation-B", "installation-A"]
+
     def test_reset_refreshes_mcp_selection_and_graph_cache_identity(self, mcp_client):
         client = mcp_client.client
         keys = []
