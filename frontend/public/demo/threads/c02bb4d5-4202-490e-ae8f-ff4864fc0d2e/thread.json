@@ -589,7 +589,7 @@
             "name": "read_file",
             "args": {
               "description": "Load vercel-deploy skill",
-              "path": "/mnt/skills/public/vercel-deploy-claimable/SKILL.md"
+              "path": "/mnt/skills/public/vercel-deploy/SKILL.md"
             },
             "id": "read_file:11",
             "type": "tool_call"
