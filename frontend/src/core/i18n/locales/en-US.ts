@@ -17,7 +17,36 @@ export const enUS: Translations = {
     localName: "English",
   },
 
+  extensions: {
+    title: "Extensions",
+    navigation: "Extensions",
+    search: "Search extensions by name or purpose",
+    loading: "Loading extensions…",
+    pageLoading: "Loading extension…",
+    unavailable: "Extensions unavailable.",
+    retry: "Retry",
+    reload: "Reload",
+    reloadAll: "Reload extensions (refresh page)",
+    all: "All extensions",
+    notInstalled: "This extension is not installed.",
+    enabledManaged: "Enabled · Managed by your administrator",
+    disabledManaged: "Disabled · Managed by your administrator",
+    deploymentHint:
+      "Interface and browser features update on manual reload. Installation, activation and configuration are managed through deployment configuration or the CLI.",
+    moduleUnavailable: "Page module unavailable",
+    noResults: "No matching installed extensions.",
+    pageUnavailable: "Extension page unavailable",
+    pageUnavailableHint:
+      "This page is not registered, or its plugin is disabled or unavailable.",
+    viewAll: "View extensions",
+    viewFailed: "Plugin view unavailable. Reload to retry.",
+    actionFailed: "Extension action unavailable. Try again.",
+    view: (name) => `View ${name}`,
+    open: (name) => `Open ${name}`,
+  },
+
   capabilities: {
+    toolsAndIntegrations: "Tools & integrations",
     icon: {
       title: "Plugin icon",
       upload: "Upload plugin icon",

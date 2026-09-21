@@ -268,6 +268,10 @@ callbacks. Static demos and non-admin users must not query the management API.
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
 Module downloads use the configured backend base and authenticated fetch, then import
 and release a Blob URL; packages must be self-contained (no relative module/assets).
+This inline transport is experimental; packaged-asset compatibility is documented in
+`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+Conversation action factories, shapes and availability callbacks are guarded per plugin;
+only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
 Capability Center details only show metadata and status. Conversation action slots augment
 normal/custom-agent toolbars and sidebar menus without replacing native export or notification.

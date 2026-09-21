@@ -11,8 +11,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { PluginRow } from "./plugin-directory";
 
 export function ExtensionGallery({ query = "" }: { query?: string }) {
-  const { locale } = useI18n();
-  const zh = locale.startsWith("zh");
+  const { t } = useI18n();
   const publicQuery = useFrontendExtensions();
   const params = useSearchParams();
   const router = useRouter();
@@ -27,20 +26,19 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     else next.delete("extension");
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
   }
-  if (source.isPending)
-    return <p role="status">{zh ? "正在加载扩展…" : "Loading extensions…"}</p>;
+  if (source.isPending) return <p role="status">{t.extensions.loading}</p>;
   if (source.isError)
     return (
       <div role="alert">
-        <p>{zh ? "扩展暂不可用。" : "Extensions unavailable."}</p>
+        <p>{t.extensions.unavailable}</p>
         <Button variant="outline" onClick={() => void source.refetch()}>
-          {zh ? "重试" : "Retry"}
+          {t.extensions.retry}
         </Button>
       </div>
     );
   const reload = (
     <Button variant="outline" onClick={() => window.location.reload()}>
-      {zh ? "重新加载扩展（刷新页面）" : "Reload extensions (refresh page)"}
+      {t.extensions.reloadAll}
     </Button>
   );
   if (selected) {
@@ -50,24 +48,18 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
         {reload}
         <Button variant="ghost" onClick={() => select()}>
           <ArrowLeftIcon />
-          {zh ? "全部扩展" : "All extensions"}
+          {t.extensions.all}
         </Button>
         {!entry ? (
-          <p>
-            {zh ? "此扩展未安装或已移除。" : "This extension is not installed."}
-          </p>
+          <p>{t.extensions.notInstalled}</p>
         ) : (
           <div className="max-w-3xl space-y-4">
             <h2 className="text-2xl font-semibold">{entry.title}</h2>
             <p className="text-muted-foreground">{entry.description}</p>
             <p>
               {entry.settings.enabled === true
-                ? zh
-                  ? "已启用 · 由管理员管理"
-                  : "Enabled · Managed by your administrator"
-                : zh
-                  ? "已停用 · 由管理员管理"
-                  : "Disabled · Managed by your administrator"}
+                ? t.extensions.enabledManaged
+                : t.extensions.disabledManaged}
             </p>
           </div>
         )}
@@ -83,9 +75,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     <div className="space-y-5">
       {reload}
       <p className="text-muted-foreground text-sm">
-        {zh
-          ? "界面和浏览器功能在手动刷新后更新；安装、启停和配置由部署管理员通过配置文件或 CLI 管理。"
-          : "Interface and browser features update on manual reload. Installation, activation and configuration are managed through deployment configuration or the CLI."}
+        {t.extensions.deploymentHint}
       </p>
       <div className="grid gap-x-10 md:grid-cols-2">
         {visible.map((entry) => {
@@ -105,24 +95,18 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
               }
               label={
                 loaded?.error
-                  ? zh
-                    ? "当前页面加载失败"
-                    : "Page module unavailable"
+                  ? t.extensions.moduleUnavailable
                   : entry.settings.enabled === true
-                    ? zh
-                      ? "已启用"
-                      : "Enabled"
-                    : zh
-                      ? "已停用"
-                      : "Disabled"
+                    ? t.capabilities.enabled
+                    : t.capabilities.disabled
               }
               onDetails={() => select(entry.namespace)}
-              detailsLabel={zh ? `查看 ${entry.title}` : `View ${entry.title}`}
+              detailsLabel={t.extensions.view(entry.title)}
             >
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label={zh ? `打开 ${entry.title}` : `Open ${entry.title}`}
+                aria-label={t.extensions.open(entry.title)}
                 onClick={() => select(entry.namespace)}
               >
                 <ChevronRightIcon />
@@ -133,7 +117,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
       </div>
       {!visible.length && (
         <p role="status" className="text-muted-foreground py-8">
-          {zh ? "没有匹配的已安装扩展。" : "No matching installed extensions."}
+          {t.extensions.noResults}
         </p>
       )}
     </div>

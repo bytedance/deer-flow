@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api.plugins import ModelTool, PluginContribution
@@ -81,3 +82,44 @@ def test_group_filter_and_name_collision_fail_closed(installed):
     (tool,) = build_plugin_tools(loaded, groups=["extensions"])
     with pytest.raises(ValueError, match="collision"):
         build_plugin_tools(loaded, reserved_names={tool.name})
+
+
+@pytest.mark.parametrize("source", ["config", "builtin", "mcp", "acp"])
+def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(installed, monkeypatch, caplog, source):
+    from langchain_core.tools import Tool
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.extensions.plugin_tools import plugin_tool_name
+    from deerflow.tools import tools as assembly
+
+    loaded, plugin, _ = installed
+    name = plugin_tool_name(plugin.namespace, "search")
+    ordinary = Tool(name=name, description="Ordinary tool", func=lambda query: "ordinary result")
+    healthy = replace(plugin, namespace="community.healthy")
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test"):
+        registry.plugin(plugin)
+        registry.plugin(healthy)
+    config = SimpleNamespace(
+        tools=[SimpleNamespace(name=name, use="test:ordinary", group="extensions")] if source == "config" else [],
+        models=[],
+        acp_agents={"test": {}} if source == "acp" else {},
+    )
+    monkeypatch.setattr(assembly, "BUILTIN_TOOLS", [ordinary] if source == "builtin" else [])
+    monkeypatch.setattr(assembly, "is_mcp_task_runtime_available", lambda: False)
+    monkeypatch.setattr(assembly, "is_host_bash_allowed", lambda config: False)
+    monkeypatch.setattr(assembly, "resolve_variable", lambda *args: ordinary)
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: SimpleNamespace(get_enabled_mcp_servers=lambda: {"test": {}}))
+    monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: [ordinary])
+    monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.build_invoke_acp_agent_tool", lambda agents: ordinary)
+
+    result = assembly.get_available_tools(app_config=config, extensions=registry.build(), include_mcp=source == "mcp", include_upload_tool=False)
+    assert [tool.name for tool in result] == [name, plugin_tool_name(healthy.namespace, "search")]
+    assert result[0] is ordinary
+    assert result[0].invoke("hello") == "ordinary result"
+    assert "Duplicate tool name" in caplog.text
+
+    # A host collision must not weaken the strict plugin-vs-plugin check.
+    duplicate_snapshot = replace(loaded, plugins=loaded.plugins + loaded.plugins)
+    with pytest.raises(ValueError, match="collision"):
+        assembly.get_available_tools(app_config=config, extensions=duplicate_snapshot, include_mcp=False, include_upload_tool=False)

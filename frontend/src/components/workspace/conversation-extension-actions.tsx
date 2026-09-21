@@ -13,6 +13,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { resolveConversationActions } from "@/core/extensions/actions";
 import type {
   ConversationAction,
   ConversationActionContext,
@@ -56,11 +57,7 @@ export function ConversationExtensionActions({
         bindFrontendServices(services, contribution),
       );
     } catch {
-      toast.error(
-        locale.startsWith("zh")
-          ? "暂时无法执行扩展操作，请重试。"
-          : "Extension action unavailable. Try again.",
-      );
+      toast.error(t.extensions.actionFailed);
     } finally {
       setBusy(false);
     }
@@ -68,12 +65,15 @@ export function ConversationExtensionActions({
 
   return activeFrontendExtensions(entries).map(
     ({ contribution, extension }) => {
-      const group = extension.conversationActions?.(t, locale);
-      if (!group || context.messages?.length === 0) return null;
-      const actions = group.actions.filter((action) =>
-        action.available(contribution.settings),
+      if (context.messages?.length === 0) return null;
+      const group = resolveConversationActions(
+        extension,
+        contribution,
+        t,
+        locale,
       );
-      if (!actions.length) return null;
+      if (!group) return null;
+      const actions = group.actions;
       const GroupIcon = extensionIcon(group.icon);
       const items = actions.map((action) => {
         const Icon = extensionIcon(action.icon);

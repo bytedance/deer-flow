@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -283,6 +284,121 @@ test("bookmark package: save visible answer, custom page, tool lookup, isolation
     page.getByRole("searchbox", { name: "Search bookmarks" }),
   ).toHaveCount(0);
 });
+
+for (const brokenFactory of [
+  "throw new Error('broken plugin');",
+  "return { actions: undefined };",
+]) {
+  test(`a broken plugin action factory is isolated: ${brokenFactory}`, async ({
+    page,
+    baseURL,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Healthy conversation",
+          messages: [
+            {
+              id: "answer",
+              type: "ai",
+              content: "The conversation is still usable.",
+            },
+          ],
+        },
+      ],
+    });
+    const code = {
+      broken: `export default { apiVersion: 1, module: 'broken', conversationActions() { ${brokenFactory} } };`,
+      healthy: `export default { apiVersion: 1, module: 'healthy', conversationActions() { return { label: 'Healthy actions', icon: 'bookmark', actions: [{ id: 'test', label: 'Run healthy action', icon: 'bookmark', available: () => true, execute: async (_context, services) => services.showMessage('Healthy action completed.') }] }; } };`,
+    };
+    const entries = Object.entries(code).map(([module, source]) => ({
+      namespace: `test.${module}`,
+      module,
+      title: module,
+      description: "",
+      settings: { enabled: true },
+      entry: `/api/plugins/modules/${module}/${createHash("sha256").update(source).digest("hex")}.mjs`,
+    }));
+    await page.route("**/api/plugins**", async (route) => {
+      const url = new URL(route.request().url());
+      const headers = {
+        "access-control-allow-origin": new URL(baseURL!).origin,
+        "access-control-allow-credentials": "true",
+      };
+      if (url.pathname.endsWith("/api/plugins"))
+        return route.fulfill({ json: entries, headers });
+      const entry = entries.find((item) => url.pathname.endsWith(item.entry));
+      if (!entry) return route.fulfill({ status: 404, headers });
+      return route.fulfill({
+        body: code[entry.module as keyof typeof code],
+        contentType: "text/javascript",
+        headers,
+      });
+    });
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("The conversation is still usable.", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Healthy actions", exact: true })
+      .click();
+    await page
+      .getByRole("menuitem", { name: "Run healthy action", exact: true })
+      .click();
+    await expect(
+      page.getByText("Healthy action completed.", { exact: true }),
+    ).toBeVisible();
+  });
+}
+
+for (const locale of ["en-US", "zh-CN"]) {
+  test(`extension host uses ${locale} copy and its own search label`, async ({
+    page,
+    baseURL,
+  }) => {
+    const zh = locale === "zh-CN";
+    mockLangGraphAPI(page);
+    await page
+      .context()
+      .addCookies([{ name: "locale", value: locale, url: baseURL! }]);
+    await page.goto("/workspace/capabilities?tab=extensions");
+    await expect(
+      page.getByRole("tab", {
+        name: zh ? "扩展插件" : "Extensions",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: zh
+          ? "重新加载扩展（刷新页面）"
+          : "Reload extensions (refresh page)",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        zh ? "没有匹配的已安装扩展。" : "No matching installed extensions.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await page.goto("/workspace/extensions/missing.plugin/library");
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "扩展页面不可用" : "Extension page unavailable",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: zh ? "查看扩展" : "View extensions" }),
+    ).toBeVisible();
+  });
+}
 
 test("unregistered plugin pages stay unavailable", async ({ page }) => {
   mockLangGraphAPI(page);

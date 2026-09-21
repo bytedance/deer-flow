@@ -17,7 +17,35 @@ export const zhCN: Translations = {
     localName: "中文",
   },
 
+  extensions: {
+    title: "扩展插件",
+    navigation: "扩展",
+    search: "按名称或用途搜索扩展",
+    loading: "正在加载扩展…",
+    pageLoading: "正在加载扩展…",
+    unavailable: "扩展暂不可用。",
+    retry: "重试",
+    reload: "重新加载",
+    reloadAll: "重新加载扩展（刷新页面）",
+    all: "全部扩展",
+    notInstalled: "此扩展未安装或已移除。",
+    enabledManaged: "已启用 · 由管理员管理",
+    disabledManaged: "已停用 · 由管理员管理",
+    deploymentHint:
+      "界面和浏览器功能在手动刷新后更新；安装、启停和配置由部署管理员通过配置文件或 CLI 管理。",
+    moduleUnavailable: "当前页面加载失败",
+    noResults: "没有匹配的已安装扩展。",
+    pageUnavailable: "扩展页面不可用",
+    pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
+    viewAll: "查看扩展",
+    viewFailed: "扩展界面加载失败，请刷新重试。",
+    actionFailed: "暂时无法执行扩展操作，请重试。",
+    view: (name) => `查看 ${name}`,
+    open: (name) => `打开 ${name}`,
+  },
+
   capabilities: {
+    toolsAndIntegrations: "工具与集成",
     icon: {
       title: "插件图标",
       upload: "上传插件图标",

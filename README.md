@@ -1278,6 +1278,8 @@ authenticated backend operations and model tools through the
 one package with persistent user data, its own sidebar page and a read-only search tool.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
+The browser API and inline `BrowserModule.code` transport are experimental. The
+plugin guide describes an additive path to manifests and packaged static resources.
 
 DeerFlow allocates a task-scoped extension store only for middleware, lifecycle, or
 system-model observation. Services receive app-scoped runtime dependencies after Gateway

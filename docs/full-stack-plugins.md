@@ -5,6 +5,10 @@ optional browser code, authenticated backend actions and model tools. This exten
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
 APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.2).
 
+The browser contribution API in this slice is experimental. `BrowserModule(code=...)`
+is an MVP transport for validating page/action host interfaces, not the final asset
+packaging contract or a requirement that all future plugins ship one JavaScript file.
+
 ## What users see
 
 Capability Center has an **Extensions** tab with read-only information and deployment
@@ -74,6 +78,45 @@ Conversation actions receive a conversation context and host services. The
 `latestVisibleAnswer` and `conversationText` services reuse the existing export
 sanitizer; sidebar reads go through the authenticated conversation API. Plugin code
 must still escape user/model text when rendering it.
+The host validates each locale-dependent action group and evaluates availability
+inside a per-plugin error boundary. A malformed or throwing contribution is omitted
+without removing healthy plugin actions or failing the conversation page. Plugin tool
+names that collide with ordinary tools follow the host's ordinary-first deduplication;
+unrelated tools remain available. Duplicate names within the plugin tool set still fail
+strict validation.
+
+## Packaged assets and compatibility direction
+
+RFC #5510 proposes a manifest plus packaged static resources (`ui_manifest.json` and
+`static/dist/...`). That remains the intended direction for larger plugins. The current
+single-file transport cannot naturally support relative chunks, separate CSS, images,
+fonts, WASM, source maps or `import.meta.url` assets, and holds the module as a Python
+string. Its `no-store` response intentionally provides no immutable cache reuse.
+
+A follow-up should add a distinct, versioned packaged-asset declaration alongside the
+inline form, rather than silently changing the meaning of `BrowserModule.code`:
+
+- A validated manifest identifies the entry module and permitted files under a
+  package-owned asset root. The root comes from the installed package, never a browser
+  supplied filesystem path.
+- Namespace/revision-scoped URLs, for example
+  `/api/plugins/{namespace}/assets/{revision}/{path}`, must confine canonical paths to
+  that root, reject traversal and escaping symlinks, and serve only manifest-listed
+  files with correct MIME types and `nosniff`.
+- Revisioned assets should support immutable caching. Private assets must retain
+  authentication and private-cache policy; public/CDN caching needs an explicit public
+  distribution contract. Cache invalidation and removal semantics must be specified.
+- Entry modules and relative dependencies must share an authenticated loading design
+  for both same-origin and split-origin deployments. The current Blob importer cannot
+  simply be reused for relative chunks; an authenticated same-origin asset proxy is
+  one option to evaluate.
+- Discovery should negotiate the supported transport/version and reject unsupported
+  transports clearly. Existing inline v1 packages should keep working while the new
+  transport reuses the namespace, page/action interfaces and deployment lifecycle.
+
+These are compatibility requirements for the follow-up, not implemented asset APIs.
+The stable packaging contract requires review before plugin authors rely on it. Neither
+transport should require rebuilding DeerFlow's frontend for each compatible plugin.
 
 ## Trust and lifecycle
 

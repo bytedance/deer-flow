@@ -14,17 +14,14 @@ import { getBackendBaseURL } from "@/core/config";
 import type { FrontendContribution, FrontendExtension } from "./contracts";
 
 export function extensionIcon(name?: string): LucideIcon {
-  return (
-    (
-      {
-        bell: BellIcon,
-        bookmark: BookmarkIcon,
-        download: DownloadIcon,
-        "file-json": FileJsonIcon,
-        "file-text": FileTextIcon,
-      } as Record<string, LucideIcon>
-    )[name ?? ""] ?? PuzzleIcon
-  );
+  const icons: Record<string, LucideIcon> = {
+    bell: BellIcon,
+    bookmark: BookmarkIcon,
+    download: DownloadIcon,
+    "file-json": FileJsonIcon,
+    "file-text": FileTextIcon,
+  };
+  return name && Object.hasOwn(icons, name) ? icons[name]! : PuzzleIcon;
 }
 export type LoadedContribution = FrontendContribution & {
   extension?: FrontendExtension;

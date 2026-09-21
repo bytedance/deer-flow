@@ -283,7 +283,9 @@ def get_available_tools(
     from deerflow.extensions.plugin_tools import build_plugin_tools
 
     ordinary_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
-    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups, reserved_names={t.name for t in ordinary_tools})
+    # Keep plugin-vs-plugin validation strict. Host/plugin collisions use the
+    # ordinary-first deduplication below, without dropping unrelated tools.
+    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
     all_tools = [_ensure_sync_invocable_tool(t) for t in ordinary_tools + plugin_tools]
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []

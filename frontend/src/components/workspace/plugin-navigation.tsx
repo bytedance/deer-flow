@@ -18,16 +18,14 @@ import { useI18n } from "@/core/i18n/hooks";
 export function PluginNavigation() {
   const query = useFrontendExtensions();
   const pathname = usePathname();
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const pages = pluginPages(query.data ?? []).filter(
     ({ surface }) => surface.navigation,
   );
   if (!pages.length) return null;
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>
-        {locale.startsWith("zh") ? "扩展" : "Extensions"}
-      </SidebarGroupLabel>
+      <SidebarGroupLabel>{t.extensions.navigation}</SidebarGroupLabel>
       <SidebarMenu>
         {pages.map(({ surface, href, icon }) => {
           const Icon = extensionIcon(icon);

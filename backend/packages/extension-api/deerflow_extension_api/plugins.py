@@ -48,6 +48,12 @@ class ModelTool:
 
 @dataclass(frozen=True)
 class BrowserModule:
+    """Experimental single-file browser transport, not the final asset package API.
+
+    A future versioned packaged-asset transport will coexist with this inline
+    form; see docs/full-stack-plugins.md for the compatibility direction.
+    """
+
     module: str
     code: str
     public_fields: tuple[str, ...] = ()

@@ -26,7 +26,7 @@ function Surface({
   threadId?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const { user } = useAuth();
   const services = useFrontendServices();
   const currentServices = useRef(services);
@@ -58,13 +58,7 @@ function Surface({
   }, [entry, surface, locale, threadId, user?.id]);
   return (
     <section aria-label={surface.title}>
-      {failed && (
-        <p role="alert">
-          {locale.startsWith("zh")
-            ? "扩展界面加载失败，请刷新重试。"
-            : "Plugin view unavailable. Reload to retry."}
-        </p>
-      )}
+      {failed && <p role="alert">{t.extensions.viewFailed}</p>}
       <div ref={ref} />
     </section>
   );

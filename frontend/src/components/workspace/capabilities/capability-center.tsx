@@ -32,7 +32,7 @@ export function CapabilityCenter() {
     clientHydrated,
     serverHydrated,
   );
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -73,14 +73,18 @@ export function CapabilityCenter() {
                 disabled={!hydrated}
                 className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
                 aria-label={
-                  tab !== "skills"
-                    ? t.capabilities.searchPlugins
-                    : t.capabilities.searchSkills
+                  tab === "extensions"
+                    ? t.extensions.search
+                    : tab === "skills"
+                      ? t.capabilities.searchSkills
+                      : t.capabilities.searchPlugins
                 }
                 placeholder={
-                  tab !== "skills"
-                    ? t.capabilities.searchPlugins
-                    : t.capabilities.searchSkills
+                  tab === "extensions"
+                    ? t.extensions.search
+                    : tab === "skills"
+                      ? t.capabilities.searchSkills
+                      : t.capabilities.searchPlugins
                 }
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
@@ -91,9 +95,7 @@ export function CapabilityCenter() {
             <TabsList variant="line" className="h-12 gap-7">
               <TabsTrigger value="plugins" className="gap-2 px-1 pb-4 text-sm">
                 <BlocksIcon className="size-4" />
-                {locale.startsWith("zh")
-                  ? "工具与集成"
-                  : "Tools & integrations"}
+                {t.capabilities.toolsAndIntegrations}
               </TabsTrigger>
               <TabsTrigger value="skills" className="gap-2 px-1 pb-4 text-sm">
                 <SparklesIcon className="size-4" />
@@ -103,7 +105,7 @@ export function CapabilityCenter() {
                 value="extensions"
                 className="gap-2 px-1 pb-4 text-sm"
               >
-                {locale.startsWith("zh") ? "扩展插件" : "Extensions"}
+                {t.extensions.title}
               </TabsTrigger>
             </TabsList>
           </Tabs>
