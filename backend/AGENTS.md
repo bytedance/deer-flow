@@ -347,12 +347,13 @@ See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
 ### Plan Mode
 
-TodoList middleware for complex multi-step tasks:
-- Controlled via runtime config: `config.configurable.is_plan_mode = True`
-- Provides `write_todos` tool for task tracking
-- One task in_progress at a time, real-time updates
+`config.configurable.is_plan_mode=True` enables TodoList `write_todos` for
+multi-step tasks: one `in_progress` task, real-time updates. See
+[usage](docs/plan_mode_usage.md).
 
-See [docs/plan_mode_usage.md](docs/plan_mode_usage.md) for details.
+### Run Interaction Policy
+
+Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 

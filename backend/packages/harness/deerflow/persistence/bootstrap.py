@@ -99,6 +99,8 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from deerflow.utils.file_io import await_drained
+
 logger = logging.getLogger(__name__)
 
 
@@ -556,7 +558,7 @@ async def _postgres_lock(engine: AsyncEngine):
             yield
         finally:
             try:
-                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
+                await await_drained(conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY}))
             except Exception:  # noqa: BLE001
                 logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
 

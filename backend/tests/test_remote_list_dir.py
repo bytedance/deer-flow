@@ -89,6 +89,10 @@ def test_command_records_find_status_after_head() -> None:
     assert command.index("find -H ") < command.index("head -n")
     assert command.index("head -n") < command.rindex("__DF_FIND_STATUS__:")
     assert 'exit "${st:-126}"' in command
+    # Mirror pin (review on PR #5546): the exit must stay subshell-wrapped — a
+    # bare top-level exit wedges the implicit persistent session. A silent
+    # revert of the subshell wrap must fail this test.
+    assert command.endswith('exit "${st:-126}" )')
 
 
 def _run_list_dir_script(command: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

@@ -63,12 +63,14 @@ import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeSourcesPanel } from "../citations/knowledge-source";
 import { ConversationReferenceChip } from "../conversation-references/conversation-reference-chip";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
@@ -592,6 +594,11 @@ function MessageContent_({
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         ) : null}
+        <KnowledgeScopeSummary
+          additionalKwargs={
+            message.additional_kwargs as Record<string, unknown> | undefined
+          }
+        />
       </div>
     );
   }
@@ -612,6 +619,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}

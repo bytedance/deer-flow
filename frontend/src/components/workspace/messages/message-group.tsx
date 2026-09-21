@@ -48,6 +48,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { isSafeHref, UnsafeLink } from "./markdown-link";
 import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
@@ -759,11 +760,18 @@ function ToolCall({
       >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
+            {/* Tool args and results are model- or provider-controlled, so
+                every tool link passes the same scheme allowlist as markdown
+                links and degrades to the same UnsafeLink marker. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
-                  {item.title}
-                </a>
+                {isSafeHref(item.url) ? (
+                  <a href={item.url} target="_blank" rel="noopener noreferrer">
+                    {item.title}
+                  </a>
+                ) : (
+                  <UnsafeLink href={item.url}>{item.title}</UnsafeLink>
+                )}
               </ChainOfThoughtSearchResult>
             ))}
           </ChainOfThoughtSearchResults>
@@ -794,32 +802,48 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => (
-                <Tooltip key={item.image_url} content={item.title}>
-                  <a
-                    className="size-24 overflow-hidden rounded-lg object-cover"
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div className="bg-accent size-24">
-                      <img
-                        className="size-full object-cover"
-                        src={item.thumbnail_url}
-                        alt={item.title}
-                        width={100}
-                        height={100}
-                      />
-                    </div>
-                  </a>
-                </Tooltip>
-              ))}
+              results.map((item) => {
+                const thumbnail = (
+                  <div className="bg-accent size-24">
+                    <img
+                      className="size-full object-cover"
+                      src={item.thumbnail_url}
+                      alt={item.title}
+                      width={100}
+                      height={100}
+                    />
+                  </div>
+                );
+                return (
+                  <Tooltip key={item.image_url} content={item.title}>
+                    {isSafeHref(item.source_url) ? (
+                      <a
+                        className="size-24 overflow-hidden rounded-lg object-cover"
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {thumbnail}
+                      </a>
+                    ) : (
+                      <UnsafeLink
+                        href={item.source_url}
+                        className="size-24 overflow-hidden rounded-lg"
+                      >
+                        {thumbnail}
+                      </UnsafeLink>
+                    )}
+                  </Tooltip>
+                );
+              })}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
   } else if (kind === "web_fetch") {
-    const url = (args as { url: string })?.url;
+    // Models occasionally emit non-string args mid-stream; an object here
+    // would reach the JSX below and throw.
+    const url = typeof args.url === "string" ? args.url : undefined;
     let title = url;
     if (typeof result === "string") {
       const potentialTitle = extractTitleFromMarkdown(result);
@@ -834,16 +858,19 @@ function ToolCall({
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
-              {title}
-            </a>
-          )}
+          {url &&
+            (isSafeHref(url) ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cursor-pointer"
+              >
+                {title}
+              </a>
+            ) : (
+              <UnsafeLink href={url}>{title}</UnsafeLink>
+            ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
@@ -1089,7 +1116,9 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          // Persisted or mid-stream tool calls can omit args (or send null);
+          // every ToolCall branch reads them, so normalize once here.
+          args: tool_call.args ?? {},
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
