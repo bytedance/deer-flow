@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import shlex
 
+from deerflow.sandbox.search import should_ignore_path
+
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _MISSING_ROOT = "missing"
 _LIST_LIMIT = 500
@@ -59,9 +61,18 @@ def parse_remote_list_dir_output(
 ) -> list[str]:
     """Parse listing stdout, preferring the find-status marker over pipeline status.
 
+    Entries under ignored directories (``IGNORE_PATTERNS``) are dropped, matching
+    the local ``list_dir`` and the remote ``glob``/``grep`` implementations, which
+    already skip those paths. Patterns apply to the path relative to the listing
+    root, so an ignored name only hides that directory's *descendants*: explicitly
+    listing ``build`` — or a path below an ignored ancestor — still returns its
+    contents, as the local walk does. Filtering happens after the empty-output
+    check, so a directory whose entries are all ignored returns an empty list
+    rather than a missing-path error.
+
     Raises:
         OSError: Command/client failure or an incomplete traversal.
-        FileNotFoundError: The root is missing or no listable entries exist.
+        FileNotFoundError: The root is missing or ``find`` produced no output.
     """
     # find delimits records with "\n" only. splitlines() would also split on
     # \v, \f, \x1c-\x1e and \x85, which are legal in Linux filenames. Do not
@@ -98,4 +109,20 @@ def parse_remote_list_dir_output(
 
     if not entries:
         raise FileNotFoundError(resolved)
-    return entries
+    root = resolved.rstrip("/") or "/"
+    prefix = "/" if root == "/" else f"{root}/"
+    kept: list[str] = []
+    for entry in entries:
+        if entry.rstrip("/") == root:
+            # The requested root is what the caller asked for; keep it even when
+            # its own name matches an ignore pattern.
+            kept.append(entry)
+        elif entry.startswith(prefix):
+            if not should_ignore_path(entry[len(prefix) :]):
+                kept.append(entry)
+        else:
+            # ``find -H`` prints the resolved target when the root is a symlink,
+            # so an entry may not carry the requested prefix. Keep it: a path
+            # that cannot be placed relative to the root must not disappear.
+            kept.append(entry)
+    return kept
