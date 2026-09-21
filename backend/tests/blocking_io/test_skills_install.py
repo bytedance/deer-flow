@@ -107,3 +107,5 @@ async def test_user_scoped_install_skill_archive_does_not_block_event_loop(tmp_p
     assert result["skill_name"] == "loop-skill"
     installed_md = tmp_path / "users" / "anchoruser" / "skills" / "custom" / "loop-skill" / "SKILL.md"
     assert await asyncio.to_thread(installed_md.is_file)
+    installed_support = tmp_path / "users" / "anchoruser" / "skills" / "custom" / "loop-skill" / "references" / "usage.md"
+    assert await asyncio.to_thread(installed_support.is_file)
