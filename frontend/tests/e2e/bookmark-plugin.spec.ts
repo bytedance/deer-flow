@@ -59,6 +59,17 @@ test("bookmark package: save visible answer, custom page, tool lookup, isolation
   request,
 }) => {
   test.setTimeout(90_000);
+  const frontendURL =
+    process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
+  const backendBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "";
+  const backendURL = new URL(backendBase || frontendURL, frontendURL);
+  await page.context().addCookies([
+    {
+      name: "plugin_test_session",
+      value: "synthetic",
+      url: backendURL.origin,
+    },
+  ]);
   await page.setViewportSize({ width: 1360, height: 1050 });
   mockLangGraphAPI(page, {
     threads: [
@@ -89,19 +100,45 @@ test("bookmark package: save visible answer, custom page, tool lookup, isolation
     ],
   });
   let savedPayload: Record<string, unknown> | undefined;
+  const moduleRequests: string[] = [];
   await page.route("**/api/plugins**", async (route) => {
     const url = new URL(route.request().url());
+    const cors = {
+      "access-control-allow-origin": new URL(frontendURL).origin,
+      "access-control-allow-credentials": "true",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers":
+        "content-type, x-deerflow-plugin-viewer, x-csrf-token",
+    };
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: cors });
+      return;
+    }
+    if (url.pathname.includes("/modules/")) {
+      moduleRequests.push(url.href);
+      if (
+        !(await route.request().allHeaders()).cookie?.includes(
+          "plugin_test_session=synthetic",
+        )
+      ) {
+        await route.fulfill({ status: 401, headers: cors });
+        return;
+      }
+    }
     if (url.pathname.endsWith("/actions/save"))
       savedPayload = route.request().postDataJSON();
     const response = await route.fetch({
-      url: gatewayURL + url.pathname,
+      url: gatewayURL + url.pathname.slice(url.pathname.indexOf("/api/")),
       headers: {
         ...route.request().headers(),
         "x-test-user": "alice",
         "x-test-role": "admin",
       },
     });
-    await route.fulfill({ response });
+    await route.fulfill({
+      response,
+      headers: { ...response.headers(), ...cors },
+    });
   });
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
   const libraryURL = "/workspace/extensions/community.bookmarks/library";
@@ -110,6 +147,12 @@ test("bookmark package: save visible answer, custom page, tool lookup, isolation
     exact: true,
   });
   await expect(libraryLink).toHaveAttribute("href", libraryURL);
+  expect(moduleRequests).toHaveLength(1);
+  const modulePrefix = new URL(
+    `${backendBase.replace(/\/+$/, "")}/api/plugins/modules/`,
+    frontendURL,
+  ).href;
+  expect(moduleRequests[0]?.startsWith(modulePrefix)).toBe(true);
   await page.getByRole("button", { name: "Bookmarks", exact: true }).click();
   await page
     .getByRole("menuitem", { name: "Save last answer", exact: true })

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "@rstest/core";
+import { afterEach, describe, expect, rs, test } from "@rstest/core";
 
 import type {
   FrontendExtension,
@@ -13,6 +13,14 @@ import {
   loadFrontendExtensions,
   type LoadedContribution,
 } from "@/core/extensions/registry";
+
+rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: async () => new Response("export default {}"),
+}));
+afterEach(() => {
+  rs.restoreAllMocks();
+});
 
 const library: PluginSurface = {
   id: "library",
@@ -79,12 +87,14 @@ describe("plugin-owned pages", () => {
       { ...library, navigation: { label: "ok", labelZh: 42 } },
       { ...library, id: "../chats" },
     ]) {
-      const result = await loadFrontendExtensions([entry], async () => ({
+      const importer = rs.fn(async () => ({
         default: {
           ...entry.extension,
           surfaces: [surface],
         } as FrontendExtension,
       }));
+      const result = await loadFrontendExtensions([entry], importer);
+      expect(importer).toHaveBeenCalledTimes(1);
       expect(result[0]?.error).toBeTruthy();
       expect(pluginPages(result)).toEqual([]);
     }

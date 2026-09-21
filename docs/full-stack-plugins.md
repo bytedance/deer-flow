@@ -54,6 +54,14 @@ no-store caching. Existing Gateway session/CSRF policies apply; PATs do not gain
 route allowlist. The browser sends its descriptor's viewer ID so the action route can
 reject a stale view after account changes, in addition to normal request authentication.
 
+Module downloads honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including a path prefix,
+and use the host's authenticated fetch helper before importing a temporary Blob URL.
+The URL is released after import, including on failure. Browser modules must be
+self-contained: relative imports and assets resolved against `import.meta.url` are
+unsupported. Deployments with a Content Security Policy must allow `blob:` in
+`script-src` and the configured backend in `connect-src`; split-origin backends must
+allow credentialed CORS from the frontend, as for other host API calls.
+
 A page surface declares `id`, `slot: "page"`, `title`, `mount(root, context)` and
 optional `navigation: { label, labelZh?, icon? }`. The host generates the URL
 `/workspace/extensions/{namespace}/{id}` and mounts only that registered page.

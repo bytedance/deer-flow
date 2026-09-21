@@ -8,6 +8,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { fetch } from "@/core/api/fetcher";
+import { getBackendBaseURL } from "@/core/config";
+
 import type { FrontendContribution, FrontendExtension } from "./contracts";
 
 export function extensionIcon(name?: string): LucideIcon {
@@ -40,15 +43,30 @@ export async function loadFrontendExtensions(
       if (entry.settings.enabled !== true || entry.module === null)
         return entry;
       try {
-        // Code may only come from the authenticated same-origin Gateway asset route.
+        // Only fetch installed Gateway assets, using the same base and credentials
+        // as discovery/actions. Cross-origin import() would omit session cookies.
         const expected = `/api/plugins/modules/${entry.module}/`;
         if (
           !entry.entry?.startsWith(expected) ||
           !/^[a-f0-9]{64}\.mjs$/.test(entry.entry.slice(expected.length))
         )
           throw new Error("Invalid installed module entry");
-        const loadedModule = (await importer(entry.entry))
-          .default as FrontendExtension;
+        const response = await fetch(`${getBackendBaseURL()}${entry.entry}`, {
+          cache: "no-store",
+        });
+        if (!response.ok)
+          throw new Error(`Plugin module unavailable (${response.status})`);
+        // BrowserModule is a self-contained ES module; it has no relative imports.
+        const moduleURL = URL.createObjectURL(
+          new Blob([await response.text()], { type: "text/javascript" }),
+        );
+        let loadedModule: FrontendExtension;
+        try {
+          loadedModule = (await importer(moduleURL))
+            .default as FrontendExtension;
+        } finally {
+          URL.revokeObjectURL(moduleURL);
+        }
         if (
           loadedModule?.apiVersion !== 1 ||
           loadedModule.module !== entry.module ||
