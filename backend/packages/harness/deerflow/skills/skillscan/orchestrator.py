@@ -331,12 +331,17 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.extend(_scan_python_secret_assignments(rel_path, text))
         return findings
 
+    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    return findings
+
+
+def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityFinding]:
+    """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
     for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
         if not _looks_like_placeholder(value):
-            findings.append(_finding_from_match("secret-env-assignment", rel_path, text, match))
-            break
-    return findings
+            return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
+    return []
 
 
 def _python_secret_assignment_target(node: ast.expr) -> str | None:
@@ -357,11 +362,15 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     statement colon (``if not api_key:``), or this rule's own remediation
     (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
     assignment's annotation rather than at its value.
+
+    A file Python cannot parse falls back to that sweep: the AST is only an
+    improvement, and returning nothing would let one syntax error (or a NUL byte)
+    silence a HIGH-severity rule for the whole file.
     """
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return []
+        return _scan_secret_assignments_by_text(rel_path, text)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):

@@ -1489,6 +1489,30 @@ def test_secret_assignment_still_flags_non_python_text(tmp_path: Path) -> None:
     assert finding["line"] == 2
 
 
+def test_secret_assignment_survives_syntax_error_in_python(tmp_path: Path) -> None:
+    """A syntax error must not silence this rule for the whole file.
+
+    ``ast.parse`` rejects the file, so the rule has to fall back to the text sweep.
+    Otherwise appending one syntax error disables a HIGH-severity rule for an entire
+    file that ``main`` still scanned.
+    """
+    source = 'def broken(:\n    api_key = "9f8e7d6c5b4a3210ff"\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 2
+    assert finding["evidence"] == "[redacted]"
+
+
+def test_secret_assignment_survives_nul_byte_in_python(tmp_path: Path) -> None:
+    """``ast.parse`` also rejects NUL bytes, so that path needs the same fallback."""
+    source = 'import os\napi_key = "9f8e7d6c5b4a3210ff"\x00\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["file"] == "scripts/sample.py"
+
+
 def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
     """Bundled skill scripts must not fail the review gate on an unchanged checkout (#4996).
 
