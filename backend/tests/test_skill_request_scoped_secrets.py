@@ -102,7 +102,7 @@ class TestAioSandboxEnvInjection:
             return AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
 
     def test_env_none_uses_legacy_shell_path(self, sandbox):
-        """No injected env → unchanged shell.exec_command path (backward compat)."""
+        """No injected env uses the legacy shell path with bounded timeout/status handling."""
         sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="hello")))
         sandbox._client.bash.exec = MagicMock()
         out = sandbox.execute_command("echo hello")

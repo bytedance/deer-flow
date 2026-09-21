@@ -528,8 +528,8 @@ class AioSandbox(Sandbox):
     # T=600, the value sent to the sandbox is therefore 605, not 600.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    # Provider-wide default command hard timeout for both the legacy shell path
-    # and env-bearing commands routed through bash.exec.
+    # Fallback command hard timeout for both the legacy shell path and
+    # env-bearing commands routed through bash.exec when no provider default is set.
     # The bash.exec API exposes no idle/no-change timeout (unlike
     # shell.exec_command's ``no_change_timeout`` on the legacy path), so
     # env-bearing commands are bounded by total elapsed wall-clock time, not
