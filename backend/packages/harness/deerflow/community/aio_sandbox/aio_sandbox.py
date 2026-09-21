@@ -10,6 +10,7 @@ from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
@@ -191,11 +192,12 @@ class AioSandbox(Sandbox):
             )
 
     @staticmethod
-    def _format_shell_result(result) -> tuple[str, int | None]:
+    def _format_shell_result(result) -> tuple[str, int | None, str | None]:
         data = result.data if result else None
         output = data.output if data else ""
         exit_code = getattr(data, "exit_code", None) if data else None
-        return output, exit_code
+        status = getattr(data, "status", None) if data else None
+        return output, exit_code, status
 
     @staticmethod
     def _is_missing_shell_session_error(error: ApiError) -> bool:
@@ -221,13 +223,22 @@ class AioSandbox(Sandbox):
         client.shell.create_session(id=session_id)
         return session_id
 
-    def _exec_shell(self, client, command: str, *, session_id: str | None) -> tuple[str, int | None]:
+    def _exec_shell(
+        self,
+        client,
+        command: str,
+        *,
+        session_id: str | None,
+        hard_timeout: float | None = None,
+    ) -> tuple[str, int | None, str | None]:
         kwargs = {
             "command": command,
             "no_change_timeout": self._DEFAULT_NO_CHANGE_TIMEOUT,
         }
         if session_id is not None:
             kwargs["id"] = session_id
+        if hard_timeout is not None:
+            kwargs["hard_timeout"] = hard_timeout
         return self._format_shell_result(client.shell.exec_command(**kwargs))
 
     def _rotate_and_retry_shell(
@@ -237,7 +248,8 @@ class AioSandbox(Sandbox):
         *,
         corrupted_session_id: str | None,
         context: str,
-    ) -> tuple[str, int | None, str | None]:
+        hard_timeout: float | None = None,
+    ) -> tuple[str, int | None, str | None, str | None]:
         if corrupted_session_id is not None:
             self._cleanup_session_best_effort(
                 client,
@@ -246,10 +258,11 @@ class AioSandbox(Sandbox):
             )
         replacement_id = self._create_shell_session(client)
         try:
-            output, exit_code = self._exec_shell(
+            output, exit_code, status = self._exec_shell(
                 client,
                 command,
                 session_id=replacement_id,
+                hard_timeout=hard_timeout,
             )
         except BaseException:
             self._cleanup_session_best_effort(
@@ -264,8 +277,8 @@ class AioSandbox(Sandbox):
                 replacement_id,
                 context=f"failed replacement for {context}",
             )
-            return output, exit_code, None
-        return output, exit_code, replacement_id
+            return output, exit_code, status, None
+        return output, exit_code, status, replacement_id
 
     def execute_command_in_scope(
         self,
@@ -309,7 +322,7 @@ class AioSandbox(Sandbox):
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
-                    output, exit_code = self._exec_shell(
+                    output, exit_code, _status = self._exec_shell(
                         client,
                         command,
                         session_id=scoped.session_id,
@@ -319,7 +332,7 @@ class AioSandbox(Sandbox):
                         raise
                     logger.warning("Execution-scoped sandbox shell session is missing; recreating it once")
                     scoped.session_id = None
-                    output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
+                    output, exit_code, _status, scoped.session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=None,
@@ -327,7 +340,7 @@ class AioSandbox(Sandbox):
                     )
                 if scoped.session_id is not None and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
-                    output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
+                    output, exit_code, _status, scoped.session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=scoped.session_id,
@@ -408,14 +421,15 @@ class AioSandbox(Sandbox):
                 persist; secret values travel in the structured ``env`` field, never
                 in the command string. When ``None`` the legacy persistent-shell path
                 runs unchanged.
-            timeout: Optional per-call timeout. The current sandbox SDK does not
-                expose a command-level timeout distinct from its client/request
-                timeout, so DeerFlow keeps using the backend's default here.
+            timeout: Optional per-call timeout. Enforced through the SDK's
+                ``hard_timeout``: the sandbox forcefully stops the command when
+                the deadline passes and reports a timeout status, which is
+                surfaced as a LocalSandbox-style timeout notice. ``None`` keeps
+                the backend defaults, matching previous behavior.
 
         Returns:
             The output of the command.
         """
-        del timeout
         # Validate ``env`` keys before forwarding them to the ``bash.exec`` API.
         # The public ``Sandbox.execute_command`` contract accepts arbitrary dict
         # keys; enforcing the POSIX env-var name rule keeps the contract
@@ -423,7 +437,7 @@ class AioSandbox(Sandbox):
         # early. ``_validate_extra_env`` is a no-op when ``env`` is None or empty.
         _validate_extra_env(env)
         if env:
-            return self._execute_with_env(command, env)
+            return self._execute_with_env(command, env, timeout)
         with self._lock:
             try:
                 client = self._client
@@ -436,11 +450,14 @@ class AioSandbox(Sandbox):
                     self._recovery_session_id = self._create_shell_session(client)
                 recovered_missing_session = False
                 try:
-                    output, exit_code = self._exec_shell(
+                    output, exit_code, status = self._exec_shell(
                         client,
                         command,
                         session_id=self._recovery_session_id,
+                        hard_timeout=timeout,
                     )
+                    if status == "hard_timeout":
+                        return LocalSandbox._format_timeout_notice(timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
@@ -448,29 +465,35 @@ class AioSandbox(Sandbox):
                     self._default_shell_corrupted = True
                     self._recovery_session_id = None
                     recovered_missing_session = True
-                    output, exit_code, self._recovery_session_id = self._rotate_and_retry_shell(
+                    output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=None,
                         context="default shell after missing session",
+                        hard_timeout=timeout,
                     )
+                    if status == "hard_timeout":
+                        return LocalSandbox._format_timeout_notice(timeout)
 
                 if not recovered_missing_session and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     self._default_shell_corrupted = True
                     logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
-                    output, exit_code, self._recovery_session_id = self._rotate_and_retry_shell(
+                    output, exit_code, status, self._recovery_session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=self._recovery_session_id,
                         context="default shell",
+                        hard_timeout=timeout,
                     )
+                    if status == "hard_timeout":
+                        return LocalSandbox._format_timeout_notice(timeout)
 
                 return self._render_shell_output(output, exit_code)
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
                 return f"Error: {e}"
 
-    def _execute_with_env(self, command: str, env: dict[str, str]) -> str:
+    def _execute_with_env(self, command: str, env: dict[str, str], timeout: float | None = None) -> str:
         """Execute a command with per-call environment variables injected.
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
@@ -501,15 +524,15 @@ class AioSandbox(Sandbox):
         """
         if self._bash_exec_unsupported:
             return _BASH_EXEC_UNSUPPORTED_ERROR
-        output = self._run_bash_exec(command, env)
+        output = self._run_bash_exec(command, env, timeout)
         if output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
-            retried = self._run_bash_exec(command, env)
+            retried = self._run_bash_exec(command, env, timeout)
             if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
                 return retried
         return output
 
-    def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
+    def _run_bash_exec(self, command: str, env: dict[str, str], timeout: float | None = None) -> str:
         """Single bash.exec invocation in an explicitly released fresh session."""
         with self._lock:
             for attempt in range(2):
@@ -522,9 +545,11 @@ class AioSandbox(Sandbox):
                         command=command,
                         session_id=session_id,
                         env=env,
-                        hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                        hard_timeout=timeout if timeout is not None else self._DEFAULT_HARD_TIMEOUT,
                     )
                     data = result.data if result else None
+                    if data is not None and timeout is not None and getattr(data, "status", None) in ("timed_out", "killed"):
+                        return LocalSandbox._format_timeout_notice(timeout)
                     stdout = (data.stdout or "") if data else ""
                     stderr = (data.stderr or "") if data else ""
                     exit_code = getattr(data, "exit_code", None) if data else None
