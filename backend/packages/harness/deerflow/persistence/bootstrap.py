@@ -531,7 +531,7 @@ async def _postgres_lock(engine: AsyncEngine):
     backing session disconnects (process crash, kill -9).
 
     Idle-in-transaction protection
-    ---------------------------
+    ------------------------------
 
     ``engine.connect()`` auto-begins a transaction on the first ``execute``,
     and this connection then sits idle while ``asyncio.to_thread(_upgrade,
