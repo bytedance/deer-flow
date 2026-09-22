@@ -76,7 +76,8 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # slot: connectionpool passes the origin-form request target, and the Location
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
-# collapse to ``/<redacted>`` here; absolute slots are left for that pass.
+# collapse to ``/<redacted>`` here; a slot is left for that pass only when
+# it is a whitespace-free absolute URL that the pass consumes whole.
 # The pattern keeps the ``^Redirecting `` prefix anchor — the urllib3-owned
 # literal — because an ``-> /path`` arrow is not urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
@@ -86,17 +87,23 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # header string, and interior spaces are legal field syntax a misbehaving
 # server can emit — a whitespace-strict tail would void the pass entirely
 # and leak the origin-form request target in the first slot (round 13). A
-# space-carrying second slot collapses whole when it starts with ``/``. The
+# space-carrying slot collapses whole whether or not it starts with ``/``:
+# the generic pass stops its ``rest`` at whitespace, so an absolute
+# space-carrying slot kept its signed tail (round 16). The
 # first slot gets the same grammar treatment: the recursive urlopen frame
 # passes the previous raw Location as its url, so t1 can carry interior
 # spaces too — it is lazy, splitting at the FIRST `` -> `` the way the
 # line was constructed left to right.
 _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
 
-# A Redirecting slot is kept only when it starts with an absolute
-# hierarchical URL; everything else (every RFC 3986 relative-reference
-# form, and non-hierarchical schemes) collapses — see _redact_redirecting_origin.
-_SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
+# A Redirecting slot is kept only when it is a whitespace-free absolute
+# hierarchical URL, so the generic pass consumes the slot WHOLE: its
+# ``host`` and ``rest`` groups both stop at whitespace, so handing over a
+# space-carrying slot leaves everything after the first space — typically
+# the signed query of a malformed ``Location`` — in the clear. Every other
+# form (the RFC 3986 relative references, non-hierarchical schemes, and
+# space-carrying slots) collapses — see _redact_redirecting_origin.
+_SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -167,8 +174,9 @@ class UrlRedactionFilter(logging.Filter):
     retry lines that log a bare origin-form target (``Retry: <target>``,
     ``Incremented Retry for (url='<target>')``, ``Retrying (…) after
     connection broken by '…': <target>``), and every non-absolute slot of
-    ``Redirecting <target> -> <target>`` (kept whole only when a scheme
-    starts the slot, for the generic pass to rewrite). The record is rewritten in place
+    ``Redirecting <target> -> <target>`` (kept whole only when a
+    whitespace-free scheme-bearing URL fills it, for the generic pass to
+    rewrite). The record is rewritten in place
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
@@ -207,18 +215,22 @@ class UrlRedactionFilter(logging.Filter):
             return match.group("head") + ": /<redacted>"
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
-            # A slot stays verbatim ONLY when it is an absolute URL (a
-            # scheme at position 0), so the generic absolute-URL pass —
-            # which runs after this one — rewrites it. Everything else
-            # collapses: the Location field-value grammar (RFC 3986
-            # relative-part) also admits slash-less relative references
-            # (``download?sign=…``, ``?sign=…``, ``#frag``), network-path
-            # references (``//host/x``, whose userinfo collapses with it),
-            # and non-hierarchical schemes (``data:…``) — none of which
-            # either pass could otherwise see, and the slash-less forms
-            # kept their signed queries verbatim (round 15).
+            # A slot stays verbatim ONLY when the generic absolute-URL pass
+            # — which runs after this one — consumes it whole: a
+            # whitespace-free absolute URL (see _SLOT_ABSOLUTE_URL_RE).
+            # Everything else collapses: the Location field-value grammar
+            # (RFC 3986 relative-part) also admits slash-less relative
+            # references (``download?sign=…``, ``?sign=…``, ``#frag``),
+            # network-path references (``//host/x``, whose userinfo
+            # collapses with it), and non-hierarchical schemes
+            # (``data:…``) — none of which either pass could otherwise see,
+            # and the slash-less forms kept their signed queries verbatim
+            # (round 15). A space-carrying slot is legal Location syntax
+            # too, and the generic pass stops its ``rest`` at whitespace,
+            # so the signed tail after the first space survived the same
+            # way (round 16).
             def _slot(target: str) -> str:
-                return target if _SLOT_ABSOLUTE_URL_RE.match(target) else "/<redacted>"
+                return target if _SLOT_ABSOLUTE_URL_RE.fullmatch(target) else "/<redacted>"
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 
