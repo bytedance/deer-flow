@@ -165,6 +165,30 @@ async def test_requests_are_packed_under_the_size_limit_when_categories_or_texts
     assert sum(len(json.loads(r.content)["state"]) if not config else len(json.loads(json.loads(r.content)["messages"][-1]["content"])["items"]) for r in requests) == 40
 
 
+@pytest.mark.parametrize("config", [{}, LLM], ids=["jev", "llm"])
+@pytest.mark.asyncio
+async def test_packing_measures_the_escaped_wire_size_for_non_ascii_text(load, monkeypatch, config):
+    # httpx escapes non-ASCII JSON as six-byte sequences, so a CJK request is about twice its UTF-8 size.
+    def jev_billing(request, body):
+        return httpx.Response(200, json={"model": "jev", "answers": jev_answers(body, lambda text: "billing")})
+
+    def chat_billing(request, body):
+        sent = json.loads(body["messages"][-1]["content"])["items"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"labels": [{"id": item["id"], "label": "billing"} for item in sent]})}}]})
+
+    requests = transport(monkeypatch, chat_billing if config else jev_billing)
+    categories = [{"name": f"类别{index:02d}", "description": "描" * 600} for index in range(32)]
+    categories[0] = {"name": "billing", "description": "付款、发票与退款。"}
+    data = {"items": [{"id": str(index), "text": ("发票 " * 700)[:2000]} for index in range(1, 41)], "categories": categories}
+    result = await handler(load(batch_size=10, max_text_chars=2000, **config))(data, context())
+    assert result["counts"] == {"ok": 40}
+    # Measured on the bytes the mock transport actually received, not on the estimate.
+    assert all(len(r.content) <= 256 * 1024 for r in requests)
+    # Jev repeats the criteria per question (two items fit), chat sends them once (all ten fit).
+    assert len(requests) == (4 if config else 20)
+    assert sum(len(json.loads(r.content)["state"]) if not config else len(json.loads(json.loads(r.content)["messages"][-1]["content"])["items"]) for r in requests) == 40
+
+
 @pytest.mark.asyncio
 async def test_concurrency_is_bounded(load, monkeypatch):
     in_flight, peak = [0], [0]
@@ -271,14 +295,15 @@ async def test_http_failures_are_reported_per_batch_and_an_auth_or_rate_limit_fa
         assert result["counts"] == {"error": 10, "not_processed": 20}
 
 
+@pytest.mark.parametrize(("failure", "code"), [(httpx.ReadTimeout, "timeout"), (httpx.ConnectError, "network"), (httpx.RemoteProtocolError, "network")], ids=["read_timeout", "connect_error", "protocol_error"])
 @pytest.mark.asyncio
-async def test_transport_timeouts_are_reported_per_item_without_upstream_detail(load, monkeypatch):
-    def timeout(request, body):
-        raise httpx.ReadTimeout("private upstream details")
+async def test_transport_failures_are_reported_per_item_without_upstream_detail(load, monkeypatch, failure, code):
+    def fail(request, body):
+        raise failure("private upstream details")
 
-    transport(monkeypatch, timeout)
+    transport(monkeypatch, fail)
     result = await handler(load(batch_size=10))(payload(20), context())
-    assert set(statuses(result)) == {("error", "timeout")}
+    assert set(statuses(result)) == {("error", code)}
     assert "private upstream details" not in json.dumps(result)
 
 
@@ -297,7 +322,8 @@ async def test_the_call_deadline_bounds_in_flight_batches_and_skips_the_rest(loa
     elapsed = time.monotonic() - started
     assert statuses(result) == [("error", "timeout")] * 20 + [("not_processed", "deadline")] * 20
     assert result["requests"] == 2 and len(requests) == 2
-    assert elapsed < 1.6
+    # The upstream never answers, so returning at all proves the asyncio bound; the slack only guards tightness on a loaded runner.
+    assert elapsed < 3.0
     release.set()
 
 

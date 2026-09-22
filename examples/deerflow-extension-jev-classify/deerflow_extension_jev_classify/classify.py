@@ -142,6 +142,11 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict[str, Any], heade
         raise BackendError("invalid_response") from None
 
 
+def _wire_size(value: Any) -> int:
+    """Bytes ``httpx`` sends for ``json=value``: the ``json.dumps`` default, non-ASCII escaped."""
+    return len(json.dumps(value).encode())
+
+
 def _model_name(payload: Any) -> str | None:
     # The only backend-controlled text that reaches the result; keep it a short identifier.
     model = payload.get("model") if isinstance(payload, Mapping) else None
@@ -176,14 +181,16 @@ class JevBackend:
         self.headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
         self.labels = labels
         self.instruction = instruction
-        self.base = len(json.dumps({"model": self.model, "state": [], "questions": {}}).encode())
-        self.overhead = len(json.dumps({f"item_{MAX_ITEMS}": self.question(MAX_ITEMS)}, ensure_ascii=False).encode()) + 8
+        # Estimates measure what httpx puts on the wire for ``json=``: ``json.dumps`` with its
+        # defaults, so every non-ASCII character counts as a six-byte escape.
+        self.base = _wire_size({"model": self.model, "state": [], "questions": {}})
+        self.overhead = _wire_size({f"item_{MAX_ITEMS}": self.question(MAX_ITEMS)}) + 8
 
     def question(self, index: int) -> dict[str, Any]:
         return {"type": "choice", "instructions": f"{self.instruction} Classify only the item whose id is {index} in state. Do not classify another item.", "criteria": self.labels.categories}
 
     def cost(self, text: str) -> int:
-        return self.overhead + len(json.dumps({"id": MAX_ITEMS, "text": text}, ensure_ascii=False).encode()) + 2
+        return self.overhead + _wire_size({"id": MAX_ITEMS, "text": text}) + 2
 
     async def classify(self, client: httpx.AsyncClient, texts: list[str]) -> tuple[list[str | None], str | None]:
         # Wire ids are positions. Caller ids are untrusted and never become state ids or question keys.
@@ -213,13 +220,13 @@ class ChatBackend:
         self.system = (
             f'{instruction} Return only a JSON object of the form {{"labels": [{{"id": "<item id>", "label": "<category name>"}}]}} with exactly one entry for every item. Categories: {json.dumps(labels.categories, ensure_ascii=False)}'
         )
-        self.base = len(json.dumps(self.body(""), ensure_ascii=False).encode()) + 8
+        self.base = _wire_size(self.body("")) + 8
 
     def body(self, user: str) -> dict[str, Any]:
         return {"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": self.system}, {"role": "user", "content": user}]}
 
     def cost(self, text: str) -> int:
-        return len(json.dumps({"id": str(MAX_ITEMS), "text": text}, ensure_ascii=False).encode()) + 2
+        return _wire_size({"id": str(MAX_ITEMS), "text": text}) + 2
 
     async def classify(self, client: httpx.AsyncClient, texts: list[str]) -> tuple[list[str | None], str | None]:
         expected = [str(index) for index in range(1, len(texts) + 1)]
