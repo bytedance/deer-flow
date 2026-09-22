@@ -7,6 +7,13 @@ FIFOs remain rejected.
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
+**Execution teardown confirmation**: Only the isolated-loop `run_with_timeout()`
+wrapper's `finally` publishes `execution_teardown_event`, after child cleanup.
+Cancelling the cross-thread submission `Future` invokes its done callbacks before
+the actual task finishes cancellation; `forget_future` removes the handle but
+must not mark teardown complete. Keep regressions for cancellation while cleanup
+is blocked and cancellation before the isolated loop dispatches the wrapper.
+
 **Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until the owned service stop task terminates, then propagates the first caller cancellation with any service failure/cancellation as its cause. The drain is intentionally unbounded: repository awaits and child cleanup must terminate; a timeout must not detach still-owned work. Keep terminal-outcome and repeated-cancellation coverage in `tests/test_subagent_runtime.py`.
 
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria

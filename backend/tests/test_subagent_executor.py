@@ -3763,6 +3763,193 @@ class TestCooperativeCancellation:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done: Task"
         assert result.error is None
+        assert result.is_execution_teardown_complete()
+
+    def test_execute_async_teardown_event_is_set_after_run_with_timeout_returns(self, executor_module, base_config, monkeypatch):
+        """Teardown event fires only after ``_aexecute``'s lease/holder release.
+
+        Terminal status is published earlier and is not confirmation. This
+        drives production ``_aexecute_admitted`` ``finally`` (the sandbox
+        lease release) and ``run_with_timeout``'s mark, so moving
+        ``mark_execution_teardown_complete()`` to the top of that
+        ``finally`` — before release — inverts ``["release", "teardown_event"]``.
+        """
+        SubagentExecutor = executor_module.SubagentExecutor
+        SubagentStatus = executor_module.SubagentStatus
+
+        in_release = threading.Event()
+        finish_release = threading.Event()
+        order: list[str] = []
+        lease_held = True
+
+        class ImmediateSlot:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class ImmediateCapacity:
+            def slot(self):
+                return ImmediateSlot()
+
+        class DelayedLeaseManager:
+            async def release_async(self, _owner_id):
+                nonlocal lease_held
+                in_release.set()
+                deadline = time.monotonic() + 5
+                while not finish_release.is_set():
+                    if time.monotonic() >= deadline:
+                        break
+                    await asyncio.sleep(0.01)
+                lease_held = False
+                order.append("release")
+
+        async def failing_stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "shared"
+            raise RuntimeError("synthetic")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent = MagicMock()
+        mock_agent.astream = failing_stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = MagicMock()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: DelayedLeaseManager())
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="teardown-signal-trace",
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+            execution_capacity=ImmediateCapacity(),
+        )
+        task_id = None
+        try:
+            with (
+                patch.object(executor_module, "build_tracing_callbacks", return_value=[]),
+                patch.object(executor_module, "inject_langfuse_metadata"),
+                patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+                patch.object(executor, "_create_agent", return_value=mock_agent),
+            ):
+                task_id = executor.execute_async("Task")
+                assert in_release.wait(timeout=3), "sandbox lease release did not start"
+                result = executor_module.get_background_task_result(task_id)
+                assert result is not None
+                assert result.status == SubagentStatus.FAILED
+                assert lease_held, "sandbox lease/holder was released before _aexecute's finally finished"
+                assert not result.is_execution_teardown_complete()
+                # Hook this result's event so "teardown_event" is recorded at
+                # the moment it is set (this class reloads the executor
+                # module, so a patch on classes["SubagentResult"] would miss
+                # the live class).
+                original_set = result.execution_teardown_event.set
+
+                def tracking_set():
+                    first = not result.execution_teardown_event.is_set()
+                    if first:
+                        order.append("teardown_event")
+                    original_set()
+
+                result.execution_teardown_event.set = tracking_set
+                finish_release.set()
+                assert result.execution_teardown_event.wait(timeout=3), "teardown event was not set after run_with_timeout"
+                assert result.is_execution_teardown_complete()
+                assert not lease_held
+                assert order == ["release", "teardown_event"]
+            if task_id is not None:
+                executor_module.cleanup_background_task(task_id)
+        finally:
+            finish_release.set()
+
+    def test_cancelled_future_does_not_confirm_execution_teardown(self, executor_module, base_config, monkeypatch):
+        """Future cancellation must not acknowledge a still-draining child."""
+        started = threading.Event()
+        releasing = threading.Event()
+        allow_release = threading.Event()
+        released = threading.Event()
+        execution_tasks = []
+        lease_manager = SandboxLeaseManager(MagicMock())
+
+        def release(_owner_id):
+            releasing.set()
+            assert allow_release.wait(timeout=10), "test did not release sandbox cleanup"
+            released.set()
+
+        monkeypatch.setattr(lease_manager, "release", release)
+
+        async def aexecute(_task, result):
+            execution_tasks.append(asyncio.current_task())
+            result.status = executor_module.SubagentStatus.RUNNING
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Exercise production shield/drain behavior around a blocked
+                # synchronous release, rather than making cleanup cancellable.
+                await lease_manager.release_async("test-owner")
+
+        async def drain():
+            await asyncio.gather(*execution_tasks, return_exceptions=True)
+
+        executor = executor_module.SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        monkeypatch.setattr(executor, "_aexecute", aexecute)
+        execution_id = executor.execute_async("Task")
+        result = executor_module.get_background_task_result(execution_id)
+        try:
+            assert started.wait(timeout=5)
+            future = executor_module._background_futures[execution_id]
+            executor_module.request_cancel_background_task(execution_id)
+            assert future.cancelled()
+            assert releasing.wait(timeout=5)
+            assert not released.is_set()
+            assert not result.is_execution_teardown_complete()
+            allow_release.set()
+            assert result.execution_teardown_event.wait(timeout=5)
+            assert released.is_set()
+            assert result.status is executor_module.SubagentStatus.CANCELLED
+        finally:
+            allow_release.set()
+            executor_module.run_on_isolated_subagent_loop(drain()).result(timeout=5)
+            executor_module.cleanup_background_task(execution_id)
+            lease_manager.close()
+
+    def test_cancel_before_isolated_loop_dispatch_still_confirms_teardown(self, executor_module, base_config):
+        """An early cancellation must eventually terminalize without a false ack."""
+        loop_blocked = threading.Event()
+        allow_dispatch = threading.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+
+        def block_dispatch():
+            loop_blocked.set()
+            assert allow_dispatch.wait(timeout=10), "test did not unblock isolated loop"
+
+        loop.call_soon_threadsafe(block_dispatch)
+        assert loop_blocked.wait(timeout=5)
+        executor = executor_module.SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        async def aexecute(_task, result):
+            await asyncio.Event().wait()
+
+        async def drain():
+            current = asyncio.current_task()
+            await asyncio.gather(*(task for task in asyncio.all_tasks() if task is not current), return_exceptions=True)
+
+        with patch.object(executor, "_aexecute", side_effect=aexecute):
+            execution_id = executor.execute_async("Task")
+            result = executor_module.get_background_task_result(execution_id)
+            try:
+                executor_module.request_cancel_background_task(execution_id)
+                assert not result.is_execution_teardown_complete()
+            finally:
+                allow_dispatch.set()
+                # The cancellation proxy is not joinable, and its teardown
+                # event is exactly what this regression distrusts. Await the
+                # real loop tasks before the fixture restores mocks.
+                executor_module.run_on_isolated_subagent_loop(drain()).result(timeout=5)
+                executor_module.cleanup_background_task(execution_id)
+            assert result.status is executor_module.SubagentStatus.CANCELLED
+            assert result.is_execution_teardown_complete()
 
     def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
         """Concurrent runs must not share registry entries when provider IDs collide."""
