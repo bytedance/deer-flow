@@ -50,6 +50,7 @@ router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 # project-shelf attach route. They are re-exported deliberately — do not
 # prune them as "unused".
 __all__ = [
+    "CONVERTIBLE_EXTENSIONS",
     "UnsafeUploadPathError",
     "claim_unique_filename",
     "convert_file_to_markdown",
@@ -329,7 +330,7 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
 
 def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+    return delete_file_safe(uploads_dir, filename)
 
 
 async def _stream_upload_file(file: UploadFile) -> AsyncIterator[bytes]:
