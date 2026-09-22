@@ -355,17 +355,32 @@ def _python_secret_assignment_target(node: ast.expr) -> str | None:
     return None
 
 
+def _secret_assignment_finding(rel_path: str, name: str | None, value: ast.AST | None) -> SecurityFinding | None:
+    """Finding for a secret-named binding of a literal value, else None."""
+    if not name or not _SECRET_ASSIGNMENT_NAME_RE.match(name):
+        return None
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
+        return None
+    literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
+    if _looks_like_placeholder(literal):
+        return None
+    return _finding_for_node("secret-env-assignment", rel_path, value, literal)
+
+
 def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
-    """Report embedded Python secrets from real literal assignments, not from raw text.
+    """Report embedded Python secrets from real literal values, not from raw text.
 
     A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
     statement colon (``if not api_key:``), or this rule's own remediation
     (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
     assignment's annotation rather than at its value.
 
-    A file Python cannot parse falls back to that sweep: the AST is only an
-    improvement, and returning nothing would let one syntax error (or a NUL byte)
-    silence a HIGH-severity rule for the whole file.
+    Names are paired with their literal in every binding form the text sweep also
+    matched: assignment targets, annotated assignments, function parameter
+    defaults (positional and keyword-only), and call keyword arguments. A file
+    Python cannot parse falls back to that sweep instead, because returning
+    nothing would let one syntax error (or a NUL byte) silence a HIGH-severity
+    rule for the whole file.
     """
     try:
         tree = ast.parse(text)
@@ -374,19 +389,27 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            targets, value = list(node.targets), node.value
+            for target in node.targets:
+                if finding := _secret_assignment_finding(rel_path, _python_secret_assignment_target(target), node.value):
+                    return [finding]
         elif isinstance(node, ast.AnnAssign):
-            # A bare annotation binds no value at all, so `value` stays None.
-            targets, value = [node.target], node.value
-        else:
-            continue
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
-            continue
-        literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
-        if _looks_like_placeholder(literal):
-            continue
-        if any(_SECRET_ASSIGNMENT_NAME_RE.match(_python_secret_assignment_target(target) or "") for target in targets):
-            return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
+            # A bare annotation binds no value at all, so `node.value` stays None.
+            if finding := _secret_assignment_finding(rel_path, _python_secret_assignment_target(node.target), node.value):
+                return [finding]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            # `defaults` aligns to the trailing positional parameters only.
+            positional = arguments.args[len(arguments.args) - len(arguments.defaults) :]
+            for arg, default in zip(positional, arguments.defaults):
+                if finding := _secret_assignment_finding(rel_path, arg.arg, default):
+                    return [finding]
+            for arg, default in zip(arguments.kwonlyargs, arguments.kw_defaults):
+                if finding := _secret_assignment_finding(rel_path, arg.arg, default):
+                    return [finding]
+        elif isinstance(node, ast.keyword):
+            # A call keyword argument; `**kwargs` carries arg=None and binds nothing by name.
+            if finding := _secret_assignment_finding(rel_path, node.arg, node.value):
+                return [finding]
     return []
 
 

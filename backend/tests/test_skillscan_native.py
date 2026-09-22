@@ -1513,6 +1513,33 @@ def test_secret_assignment_survives_nul_byte_in_python(tmp_path: Path) -> None:
     assert finding["file"] == "scripts/sample.py"
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def connect(password="9f8e7d6c5b4a3210ff"):\n    return password\n',
+        'def connect(*, api_key="9f8e7d6c5b4a3210ff"):\n    return api_key\n',
+        'connect(password="9f8e7d6c5b4a3210ff")\n',
+    ],
+    ids=["positional-default", "keyword-only-default", "call-keyword"],
+)
+def test_secret_assignment_flags_python_parameter_and_call_literals(tmp_path: Path, source: str) -> None:
+    """A literal bound to a secret-named parameter or call keyword is still embedded.
+
+    The AST path replaced a text sweep that matched all three of these, so walking
+    only ``Assign``/``AnnAssign`` silently dropped the coverage.
+    """
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["evidence"] == "[redacted]"
+
+
+def test_secret_assignment_ignores_none_valued_parameter_default(tmp_path: Path) -> None:
+    """``token=None`` binds no literal, so the parameter default stays unreported."""
+    source = "def connect(token=None, password=None, *, secret=None):\n    return token, password, secret\n"
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
 def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
     """Bundled skill scripts must not fail the review gate on an unchanged checkout (#4996).
 
