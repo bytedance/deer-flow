@@ -158,3 +158,16 @@ failures, transport timeouts, the enforced call deadline, cancellation, a backen
 bug, the chat backend's output contract and prompt escaping, missing credentials,
 invalid requests, the output bound at the largest allowed call, served model
 names, real tool-node dispatch, the status action and rejected configuration.
+
+An opt-in smoke test classifies 20 synthetic English and Chinese sentences plus a
+blank and an over-long item through the real plugin path against the configured
+backend. It costs money, prints labels and statuses only, and never prints the key:
+
+```sh
+export TYPESAFE_API_KEY='your-deployment-secret'
+uv run python ../examples/deerflow-extension-jev-classify/scripts/verify_live.py
+```
+
+Add `--backend llm --llm-url ... --llm-model ... --api-key-env NAME` for a chat
+endpoint. A label that differs from the obvious one is printed with the expected
+value; that is a prompt to look, not a test failure.
