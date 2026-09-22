@@ -1,12 +1,12 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
-**Network approval interaction policy**: Sync and async `SandboxMiddleware` tool
-wrappers use `resolve_run_interaction_policy()` to decide whether a lead run can
-open a network approval card. Explicit `autonomous`, `webhook`, and `scheduled`
-modes auto-deny pending requests, as do the legacy unattended flags and GitHub
-channel fallback. An explicit `interactive` mode takes precedence over those
-legacy hints. Subagents always auto-deny, including in interactive runs; never
-consume events into a human-input card when no human can respond.
+**Network approval policy**: Sync/async `SandboxMiddleware` wrappers use
+`resolve_run_interaction_policy()` to gate lead-run network approval cards.
+Explicit `autonomous`, `webhook`, and `scheduled` modes auto-deny pending requests,
+as do legacy unattended flags and the GitHub channel fallback. Explicit
+`interactive` overrides legacy hints. Subagents always auto-deny, even in
+interactive runs; never consume events into a human-input card without a human
+to respond.
 
 **Interface**: `Sandbox`: `execute_command(command, env=None)`, additive `execute_command_in_scope(..., scope_id=...)` / `release_command_scope(scope_id)`, `read_file`, `write_file`, `list_dir`, `glob`, `grep`. Scoped hooks default to pass-through without server-side sessions, preserving third-party subclasses. `grep` accepts a text file or directory tree. Per-call `env` injects secrets: `LocalSandbox` merges into the subprocess environment; `AioSandbox` uses fresh `bash.exec(env=...)` sessions. `list_dir`: missing path → `FileNotFoundError`; command/client failure → `OSError`, never `[]` (`ls_tool`: `(empty)`). Remote `glob`/`grep` share it via `sandbox/remote_search.py`: missing root → `FileNotFoundError`, failed search → `OSError`; only a genuine no-match returns `[]`. The parser takes the command's `limit` and reports `truncated` when output passed it, which providers return after Python-side filtering; tools call an empty truncated result incomplete. Remote `grep(glob=...)` scopes like `glob()` (root-relative `path_matches`), never by basename alone. Remotes use `sandbox/remote_list_dir.py`: capture `find`'s status, not `| head`'s (`sh -lc` lacks `pipefail`); missing binary → `OSError`; truncation SIGPIPE → success.
 **Provider Pattern**: `SandboxProvider` exposes `acquire`, `acquire_async`, `get`, `release`. Async agent/tool paths use async hooks to keep Docker creation, discovery, cross-process locking, readiness polling, and release off-loop. Set `supports_agent_skill_isolation=True` only when the whole tool surface enforces explicit lead Agent policy: bind mounts use prepared thread roots; upload providers implement `sync_agent_skills`. Host-backed providers report false if an enabled shell bypasses path mappings. Under explicit policy, middleware rejects unsupported providers before acquire.
