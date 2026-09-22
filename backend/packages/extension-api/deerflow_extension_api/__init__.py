@@ -62,12 +62,15 @@ from deerflow_extension_api.release import (
     collect_release_policies,
 )
 from deerflow_extension_api.run_evidence import (
+    RUN_EVIDENCE_READER_RESOLVER_KEY,
     InvalidRunEvidenceCursor,
     RunEventPage,
     RunEventView,
     RunEvidenceReader,
     RunPage,
     RunStatusView,
+    require_run_evidence_reader,
+    resolve_run_evidence_reader,
 )
 from deerflow_extension_api.runtime_bridge import (
     EXTENSION_TASK_STORE_KEY,
@@ -77,7 +80,7 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.1"
+API_VERSION = "0.2.2"
 
 __all__ = [
     "API_VERSION",
@@ -109,10 +112,13 @@ __all__ = [
     "Placement",
     "ReleasePolicyProvider",
     "RunEvidenceReader",
+    "RUN_EVIDENCE_READER_RESOLVER_KEY",
     "RunEventPage",
     "RunEventView",
     "RunPage",
     "RunStatusView",
+    "require_run_evidence_reader",
+    "resolve_run_evidence_reader",
     "SystemModelCallObserver",
     "SystemModelRequest",
     "SystemModelResult",
