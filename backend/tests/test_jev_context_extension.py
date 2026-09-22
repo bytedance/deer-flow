@@ -117,10 +117,10 @@ def test_real_host_prunes_before_summary_and_checkpoints_same_message_ids(jev, m
     assert model._seen[0][1] == history()[1]
     state = graph.get_state(config).values
     assert state["messages"][2] == sent
-    assert state[jev.STATE_KEY] == {"remaining": 2}
+    assert state[jev.STATE_KEY] == {"remaining": 3}
     # Persisted cooldown is local to the thread, not to the cached agent instance.
     graph.invoke({"messages": [HumanMessage(content="continue", id="followup")]}, config)
-    assert graph.get_state(config).values[jev.STATE_KEY] == {"remaining": 1}
+    assert graph.get_state(config).values[jev.STATE_KEY] == {"remaining": 2}
     assert len(requests) == 1
     graph.invoke({"messages": history()}, {"configurable": {"thread_id": "two"}})
     assert len(requests) == 2
@@ -207,11 +207,107 @@ def test_missing_key_and_below_threshold_do_not_request(jev, monkeypatch):
 def test_cooldown_survives_failure_and_reconstruction(jev, monkeypatch):
     requests = transport(monkeypatch, error=httpx.ConnectError("offline"))
     state = {"messages": history()}
-    for expected in (2, 1, 0, 2):
+    for expected in (3, 2, 1, 0, 3):
         # Equivalent to reconstructing from the saved checkpoint on each run.
         state.update(jev.JevCompaction(options(jev)).before_model(state, None))
         assert state[jev.STATE_KEY]["remaining"] == expected
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize("gap", [1, 3, 16])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("failure", [False, True])
+def test_cooldown_skips_all_configured_intervening_calls(jev, monkeypatch, gap, asynchronous, failure):
+    requests = transport(monkeypatch, result={"answers": {"result_0": {"noul": 1.0}}}, error=httpx.ConnectError("offline") if failure else None)
+    opts = jev.Options(enabled=True, trigger_tokens=1000, min_calls_between_attempts=gap)
+    state = {"messages": history()}
+    attempts = []
+    for call in range(1, gap + 3):
+        count = len(requests)
+        middleware = jev.JevCompaction(opts)
+        update = asyncio.run(middleware.abefore_model(state, None)) if asynchronous else middleware.before_model(state, None)
+        state.update(update)
+        if len(requests) != count:
+            attempts.append(call)
+    assert attempts == [1, gap + 2]
+    assert state["messages"] == history()
+
+
+@pytest.mark.parametrize("metadata", [{"status": "error"}, {"status": "partial_success"}, {"status": "cancelled"}, {}, None, "error"])
+def test_structured_non_success_results_are_protected(jev, metadata):
+    messages = history()
+    messages[2].additional_kwargs["deerflow_tool_meta"] = metadata
+    assert not list(jev.candidates(messages, options(jev)))
+
+
+def test_real_host_normalized_error_is_protected(jev):
+    from deerflow.agents.middlewares.tool_result_meta import normalize_tool_message
+
+    messages = history()
+    messages[2].content = json.dumps({"error": "Permission denied. " * 350})
+    normalize_tool_message(messages[2])
+    assert messages[2].status == "success"
+    assert messages[2].additional_kwargs["deerflow_tool_meta"]["status"] == "error"
+    assert jev.prepare(messages, options(jev)) is None
+
+
+def test_structured_success_remains_eligible_and_keeps_metadata(jev):
+    messages = history()
+    messages[2].additional_kwargs["deerflow_tool_meta"] = {"status": "success", "source": "tool_return"}
+    _, selected = jev.prepare(messages, options(jev))
+    (replacement,) = jev.updates(messages, selected, {"answers": {"result_0": {"noul": 0.0}}}, options(jev))
+    assert replacement.additional_kwargs["deerflow_tool_meta"] == messages[2].additional_kwargs["deerflow_tool_meta"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("enabled", False),
+        ("trigger_tokens", 2000),
+        ("preserve_recent_messages", 7),
+        ("min_result_chars", 5000),
+        ("min_calls_between_attempts", 2),
+        ("max_candidates", 4),
+        ("keep_threshold", 0.3),
+        ("min_reduction_ratio", 0.2),
+        ("timeout_seconds", 9.0),
+    ],
+)
+def test_effective_options_change_wrapped_middleware_identity(jev, field, value):
+    from deerflow.agents.assembly_descriptor import describe_middleware
+    from deerflow.extensions.isolation import IsolatedMiddleware
+
+    original = options(jev)
+    changed = original.model_copy(update={field: value})
+
+    def describe(opts):
+        return describe_middleware(IsolatedMiddleware(jev.JevCompaction(opts), source="jev:install", on_error=lambda _: None))
+
+    assert describe(original) != describe(changed)
+    assert describe(original) == describe(original.model_copy())
+    assert "test-only-not-a-real-key" not in repr(describe(original))
+    assert "TYPESAFE_API_KEY" not in repr(describe(original))
+    assert describe(original) == describe(original.model_copy(update={"api_key_env": "ANOTHER_KEY"}))
+
+
+def test_oversized_candidate_does_not_starve_smaller_later_result(jev):
+    messages = [HumanMessage(content="Task", id="u0")]
+    for i in range(2):
+        messages.extend(
+            [
+                AIMessage(content="", id=f"a{i}", tool_calls=[{"id": f"c{i}", "name": "read_file", "args": {"path": "😀" * 1000 if i == 0 else "/tmp/log"}}]),
+                ToolMessage(content="😀" * 4000 if i == 0 else "old log " * 1000, id=f"t{i}", tool_call_id=f"c{i}"),
+            ]
+        )
+    for i in range(3):
+        messages.extend([AIMessage(content="a" * 400, id=f"recent-a{i}"), HumanMessage(content="😀" * 1000, id=f"recent-u{i}")])
+    prepared = jev.prepare(messages, options(jev))
+    assert prepared is not None
+    body, selected = prepared
+    assert [c.message.id for c in selected] == ["t1"]
+    assert list(body["questions"]) == ["result_0"]
+    assert list(body["state"]["candidates"]) == ["result_0"]
+    assert len(json.dumps(body, ensure_ascii=False).encode()) <= jev.MAX_REQUEST_BYTES
 
 
 def test_bounded_unicode_payload_and_untrusted_input_separation(jev):

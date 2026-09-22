@@ -75,6 +75,12 @@ def candidates(messages, options):
             continue
         if message.status != "success" or message.additional_kwargs.get(MARKER):
             continue
+        if "deerflow_tool_meta" in message.additional_kwargs:
+            metadata = message.additional_kwargs["deerflow_tool_meta"]
+            # The host can mark an error/partial result while LangChain's status
+            # stays "success". Preserve unknown/malformed stamped outcomes too.
+            if not isinstance(metadata, dict) or metadata.get("status") != "success":
+                continue
         if not isinstance(message.content, str) or len(message.content) < options.min_result_chars:
             continue
         # DeerFlow's sandbox also returns errors as successful string results.
@@ -129,7 +135,7 @@ def prepare(messages, options):
         if len(encoded) > MAX_REQUEST_BYTES:
             del body["state"]["candidates"][key]
             del body["questions"][key]
-            break
+            continue
         selected.append(candidate)
         if len(selected) == options.max_candidates:
             break
@@ -166,6 +172,17 @@ class JevCompaction(AgentMiddleware):
     def __init__(self, options):
         self.options = options
 
+    def release_policy_parameters(self):
+        return {
+            "policy_version": 1,
+            "model": "jev-latest",
+            "max_request_bytes": MAX_REQUEST_BYTES,
+            "read_tools": sorted(READ_TOOLS),
+            # Credentials and their deployment-specific variable names are not
+            # policy. Include every other option without probing host internals.
+            "options": self.options.model_dump(exclude={"api_key_env"}),
+        }
+
     def start(self, state):
         if not self.options.enabled:
             return None, None
@@ -180,7 +197,7 @@ class JevCompaction(AgentMiddleware):
         prepared = prepare(messages, self.options)
         if prepared is None:
             return None, None
-        return {STATE_KEY: {"remaining": self.options.min_calls_between_attempts - 1}}, prepared
+        return {STATE_KEY: {"remaining": self.options.min_calls_between_attempts}}, prepared
 
     def finish(self, state, update, selected, response):
         replacements = updates(state["messages"], selected, response, self.options)

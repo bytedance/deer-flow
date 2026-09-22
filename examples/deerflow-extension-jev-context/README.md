@@ -52,24 +52,30 @@ only from the named environment variable, never from plugin settings or messages
   outputs, assistant text, users, and all tool-call records. Write/bash/task and
   other tools are never candidates. Deployments must preserve the read-only
   meaning of these built-in names.
+  Host-stamped errors, partial results and unknown/malformed structured outcomes
+  are protected even when LangChain's message status still says `success`.
 - A result is shortened only when its keep probability is below 0.2. Preserves
   300 characters at each end plus an explicit omission note. Samples cannot
   prove that the omitted middle is irrelevant: **this is lossy**, and historical
   source contents may not be reproducible by reading again.
 - Applies a batch only when estimated total context reduction reaches 10%.
   Sends at most eight candidates in one request, capped at 24,000 UTF-8 bytes
-  including question instructions. Oversized candidates/batches are skipped;
-  it does not repeatedly call Jev to process the entire conversation.
+  including question instructions. Oversized candidates are skipped while later,
+  smaller candidates can still fit in the same request. It does not repeatedly
+  call Jev to process the entire conversation.
 - Replaces result contents under their existing IDs in the **persisted graph
   state**. Disabling the plugin does not restore omitted text. It creates no
   transcript archive. Existing message metadata and call/result pairing remain.
 - HTTP failures, missing/invalid answers, missing keys or insufficient reduction
   leave messages unchanged. The host's usual summarization remains available.
   Cancellation propagates. There are no automatic Jev retries or payload logs.
-- After an attempt (including failure/no change), waits at least 16 logical model
-  calls before trying again. This cooldown is checkpointed per thread, so a
-  shared agent instance does not mix users' state. Already shortened results
+- After an attempt (including failure/no change), skips the next 16 logical model
+  calls before trying again (attempts at calls 1, 18, 35, ...). This cooldown is
+  checkpointed per thread, so a shared agent instance does not mix users' state. Already shortened results
   are not scored again. It does not intercept manual native compaction.
+- Declares effective non-secret options through `release_policy_parameters()` so
+  the host's assembly fingerprint changes when pruning policy changes. Neither
+  the API key nor its environment variable name participates in that identity.
 
 Optional deployment fields (all validated; unknown fields rejected):
 
@@ -79,7 +85,7 @@ Optional deployment fields (all validated; unknown fields rejected):
 | `trigger_tokens` | `60000` | Approximate history tokens; choose for your main model |
 | `preserve_recent_messages` | `6` | Protected suffix, minimum six |
 | `min_result_chars` | `4000` | Minimum eligible result length |
-| `min_calls_between_attempts` | `16` | Minimum model-call spacing, including failed attempts |
+| `min_calls_between_attempts` | `16` | Number of intervening calls to skip, including after failed attempts |
 | `max_candidates` | `8` | Per-request candidate limit, maximum 16 |
 | `keep_threshold` | `0.2` | Shorten only below this keep probability; maximum 0.5 |
 | `min_reduction_ratio` | `0.1` | Minimum estimated reduction of the whole history |
@@ -106,6 +112,11 @@ uv run pytest tests/test_jev_context_extension.py
 Coverage includes sync/async host isolation, checkpoint persistence, per-thread
 cooldown, message pairing, protected content, malformed decisions, failure
 fallback to real native summarization, cancellation and the plugin catalog.
+The **Jev Plugin Package** CI workflow separately builds and installs the wheel,
+then loads its declared entry point and registers its contributions through the
+real host. `scripts/verify_package.py --installed-dir PATH` runs that check against
+an isolated `uv pip install --no-deps --target PATH` installation; it does not
+substitute a source-tree import for the installed distribution.
 
 An opt-in synthetic smoke test calls real Jev and a caller-selected
 OpenAI-compatible chat endpoint, without using real user transcripts:
