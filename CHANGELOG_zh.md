@@ -2554,6 +2554,13 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
   ([#3313])
 - **CI：** 统一 PR / issue 打标签逻辑，修复 reviewing 任务的崩溃与标签抖动。
   ([#3455])
+- **依赖：** `langgraph-checkpoint` 下限提升到 `>=4.2.0,<5.0`，
+  `langgraph-checkpoint-postgres` 提升到 `>=3.1.2,<3.2`，并移除
+  `InMemorySaver` delta-history 兼容补丁。上游 4.2.0 修复了 full → delta
+  迁移后首条写入丢失（langchain-ai/langgraph#8526），postgres 新版本能定位
+  plain-value delta 种子（langchain-ai/langgraph#8535），因此由依赖下限取代
+  补丁；full → delta 迁移合约测试保留为门禁。`langgraph` 与
+  `langgraph-checkpoint-sqlite` 不变。
 
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 

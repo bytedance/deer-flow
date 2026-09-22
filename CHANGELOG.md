@@ -3365,6 +3365,14 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
   IO. ([#3313])
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
+- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
+  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
+  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
+  first write dropped after a full → delta migration
+  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
+  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
+  the patch; the full → delta migration contract test remains the gate.
+  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged.
 
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
