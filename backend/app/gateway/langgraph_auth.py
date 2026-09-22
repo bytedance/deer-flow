@@ -104,6 +104,7 @@ async def _ensure_standalone_thread_incarnation(
     ctx,
     *,
     create_if_missing: bool,
+    creation_metadata: dict | None = None,
 ) -> str | None | object:
     thread = await _read_standalone_thread(thread_id, ctx)
     if thread is None:
@@ -132,7 +133,7 @@ async def _ensure_standalone_thread_incarnation(
             rows = await Threads.put(
                 conn,
                 thread_id,
-                metadata={THREAD_INCARNATION_CONTEXT_KEY: incarnation},
+                metadata={**(creation_metadata or {}), THREAD_INCARNATION_CONTEXT_KEY: incarnation},
                 if_exists="do_nothing",
                 ctx=ctx,
             )
@@ -161,10 +162,20 @@ async def _bind_standalone_run_incarnation(ctx, value: dict) -> None:
     if thread_id is None:
         incarnation: str | None = None
     else:
+        # Pre-creation bypasses LangGraph's implicit-create metadata merge.
+        # Preserve its precedence using only the already-sanitized metadata;
+        # the helper adds the server incarnation last and never updates an
+        # existing thread (including a concurrent creation winner).
+        config_metadata = value["kwargs"]["config"].get("metadata")
+        creation_metadata = {
+            **(config_metadata if isinstance(config_metadata, dict) else {}),
+            **value["metadata"],
+        }
         incarnation = await _ensure_standalone_thread_incarnation(
             thread_id,
             ctx,
             create_if_missing=value.get("if_not_exists") == "create",
+            creation_metadata=creation_metadata,
         )
         if incarnation is _MISSING:
             return

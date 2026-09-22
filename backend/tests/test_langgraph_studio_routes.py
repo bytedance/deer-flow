@@ -435,6 +435,67 @@ def test_studio_implicit_thread_creation_persists_mcp_incarnation(
     assert _run_scope(studio_client, thread_id) == scope
 
 
+def test_studio_implicit_thread_creation_preserves_searchable_metadata(
+    studio_client: httpx.Client,
+):
+    thread_id = str(uuid4())
+    project_tag = f"project-{uuid4()}"
+    payload = {
+        "assistant_id": "test_graph",
+        "input": {"messages": []},
+        "if_not_exists": "create",
+        "context": {"preserved_context_probe": "kept"},
+        "metadata": {
+            "title": "Run title",
+            "project_tag": project_tag,
+            "user_id": "attacker",
+            "thread_incarnation": "attacker",
+            "__deerflow_thread_incarnation_metadata_guard": False,
+        },
+        "config": {
+            "metadata": {
+                "title": "Config title",
+                "config_tag": "retained",
+                "user_id": "config-attacker",
+                "thread_incarnation": "config-attacker",
+                "__deerflow_thread_incarnation_metadata_guard": False,
+            },
+        },
+    }
+    response = studio_client.post(f"/threads/{thread_id}/runs/wait", json=payload)
+    assert response.status_code == 200, response.text
+    tool_message = response.json()["messages"][-1]
+    assert tool_message["status"] == "success"
+
+    response = studio_client.get(f"/threads/{thread_id}")
+    assert response.status_code == 200, response.text
+    metadata = response.json()["metadata"]
+    assert metadata["title"] == "Run title"
+    assert metadata["project_tag"] == project_tag
+    assert metadata["config_tag"] == "retained"
+    assert metadata["user_id"] == "langgraph-studio-user"
+    assert metadata["thread_incarnation"] not in {"attacker", "config-attacker"}
+    assert "__deerflow_thread_incarnation_metadata_guard" not in metadata
+    assert tool_message["content"][0]["text"] == mcp_session_scope_key(
+        user_id="langgraph-studio-user",
+        thread_id=thread_id,
+        thread_incarnation=metadata["thread_incarnation"],
+    )
+
+    response = studio_client.post("/threads/search", json={"metadata": {"project_tag": project_tag}})
+    assert response.status_code == 200, response.text
+    assert [thread["thread_id"] for thread in response.json()] == [thread_id]
+
+    # A later run must not overwrite the existing thread's creation metadata.
+    payload["metadata"]["title"] = "Later run title"
+    payload["metadata"]["project_tag"] = "later-project"
+    response = studio_client.post(f"/threads/{thread_id}/runs/wait", json=payload)
+    assert response.status_code == 200, response.text
+    response = studio_client.get(f"/threads/{thread_id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == metadata
+
+
 def test_studio_stateless_runs_get_distinct_mcp_scopes(
     studio_client: httpx.Client,
 ):

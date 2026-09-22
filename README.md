@@ -512,6 +512,11 @@ warning if the persisted-store contract no longer matches its expectations.
 The documented command uses LangGraph's file-based custom-app loader, which is
 also covered directly by DeerFlow's regression tests.
 
+Standalone runs using `if_not_exists="create"` retain config and run metadata
+on the newly created thread, including searchable tags; run metadata takes
+precedence for duplicate keys. Thread ownership and MCP incarnation remain
+server-owned, and later runs do not replace the thread's creation metadata.
+
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity
 published by that runtime and uses it for custom-agent configuration/SOUL, user
