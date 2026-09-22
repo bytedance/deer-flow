@@ -3,8 +3,7 @@
 An opt-in Python plugin that uses Jev to shorten clearly obsolete **read-only
 tool results** before DeerFlow's normal summarization. It uses the existing
 extension API 0.2.2 and full-stack plugin catalog, with no host code changes.
-The idea was inspired by [fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
-This is an independent implementation, distributed under DeerFlow's [MIT license](LICENSE).
+Distributed under DeerFlow's [MIT license](LICENSE).
 
 ## Install and configure
 
