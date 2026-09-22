@@ -6,7 +6,34 @@ export interface Translations {
     localName: string;
   };
 
+  extensions: {
+    title: string;
+    navigation: string;
+    search: string;
+    loading: string;
+    pageLoading: string;
+    unavailable: string;
+    retry: string;
+    reload: string;
+    reloadAll: string;
+    all: string;
+    notInstalled: string;
+    enabledManaged: string;
+    disabledManaged: string;
+    deploymentHint: string;
+    moduleUnavailable: string;
+    noResults: string;
+    pageUnavailable: string;
+    pageUnavailableHint: string;
+    viewAll: string;
+    viewFailed: string;
+    actionFailed: string;
+    view: (name: string) => string;
+    open: (name: string) => string;
+  };
+
   capabilities: {
+    toolsAndIntegrations: string;
     icon: {
       title: string;
       upload: string;

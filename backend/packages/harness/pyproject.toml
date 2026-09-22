@@ -17,6 +17,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
+    "jsonschema>=4.26.0",
     "kubernetes>=30.0.0",
     # Lower bound reflects what the lockfile resolves and tests run against
     # (langgraph 1.2.9 pulls langchain >=1.3 transitively).

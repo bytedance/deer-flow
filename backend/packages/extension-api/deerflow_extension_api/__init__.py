@@ -47,6 +47,7 @@ from deerflow_extension_api.placement import (
     MiddlewarePlacement,
     Placement,
 )
+from deerflow_extension_api.plugins import ActionContext, BackendAction, BrowserModule, ModelTool, PluginContribution, ToolContext
 from deerflow_extension_api.provenance import (
     MESSAGE_CONTENT_KIND_KEY,
     MESSAGE_PRODUCER_ENTITY_ID_KEY,
@@ -75,6 +76,7 @@ from deerflow_extension_api.runtime_bridge import (
     EXTENSION_TASK_STORE_KEY,
     task_store_from_runtime,
 )
+from deerflow_extension_api.settings import SettingsField
 from deerflow_extension_api.skill_mutations import AssessmentRef, AssetRevision, BundleFile, HostCheckResult, MutationCapabilities, Operation, Proposal, ProposalBundle, SkillMutationService, SkillRevisionView
 from deerflow_extension_api.state import ExtensionData
 
@@ -83,6 +85,13 @@ from deerflow_extension_api.state import ExtensionData
 API_VERSION = "0.2.2"
 
 __all__ = [
+    "ActionContext",
+    "BackendAction",
+    "BrowserModule",
+    "ModelTool",
+    "PluginContribution",
+    "SettingsField",
+    "ToolContext",
     "CompletedRunEvent",
     "CompletedRunEventPage",
     "CompletedRunEvidenceReader",

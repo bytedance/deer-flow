@@ -2,6 +2,23 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+## Shared sandbox search contracts
+
+`test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
+Local, AIO, E2B, BoxLite, Tenki and OpenSandbox adapters. POSIX shell transports
+execute production commands against temporary files; AIO file RPCs use an
+independent filesystem-backed double. Do not substitute precomputed final search
+results or import another test module's private fixtures. Provisioning, live SDK
+compatibility, permissions enforced above Sandbox, and session lifecycle remain
+in their existing suites. Windows skips this POSIX execution tier explicitly.
+
+Compare result names/content, errors and completeness, allowing documented root
+entries and directory suffixes to differ. First-stage cases use ordinary roots,
+positive caps and a plain literal pattern: ignored-root fixes (#5667), E2B literal
+metacharacters (#5627), and exactly-full local caps (#5491) have separate owners.
+Add those shared scenarios after their fixes land; do not encode known bugs as
+expected successful behavior or hide them with permanent xfails.
+
 ## External system-role admission
 
 `poc_external_system_message_injection.py --help` is the opt-in live reproduction
