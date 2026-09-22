@@ -75,6 +75,14 @@ def test_render_no_allowed_tools_shows_all(sample_skills: list[Skill]):
     assert "Allowed tools: (all)" in rendered
 
 
+def test_render_empty_allowed_tools_shows_none():
+    """Skills with explicitly empty allowed_tools should show '(none)'."""
+    skill = _make_skill("locked-down", allowed_tools=())
+    rendered = _render_skill_metadata([skill], "/mnt/skills")
+    assert "Allowed tools: (none)" in rendered
+    assert "Allowed tools: (all)" not in rendered
+
+
 def test_render_multiple_skills(sample_skills: list[Skill]):
     rendered = _render_skill_metadata(sample_skills, "/mnt/skills")
     assert "## Skill: data-analysis" in rendered
