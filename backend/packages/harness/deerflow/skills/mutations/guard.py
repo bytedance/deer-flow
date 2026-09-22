@@ -78,7 +78,7 @@ def managed_name_writes(storage, names, *, global_scope=False, timeout=None):
 def managed_global_state_write(storage, name):
     """A global same-name enable toggle also changes each user's custom asset.
 
-    Acquire before config locks: global projection -> sorted owner guards -> DB.
+    Acquire before config locks: name fence -> global projection -> sorted owner guards -> DB.
     A name fence prevents concurrent same-name creation. Only owners that have
     the affected custom asset are then reserved before changing the shared flag.
     """
@@ -89,7 +89,7 @@ def managed_global_state_write(storage, name):
     from deerflow.skills.projection import _projection_lock, get_skill_projection_paths, skill_projection_read_lock
     from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-    with _projection_lock(get_skill_projection_paths(storage).public.parent, timeout=5.0), managed_name_writes(storage, (name,), global_scope=True, timeout=5.0), ExitStack() as stack:
+    with managed_name_writes(storage, (name,), global_scope=True, timeout=5.0), _projection_lock(get_skill_projection_paths(storage).public.parent, timeout=5.0), ExitStack() as stack:
         storages = []
         for owner in sorted(runtime.owners):
             scoped = UserScopedSkillStorage(owner, host_path=str(storage.get_skills_root_path()))

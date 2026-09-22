@@ -241,6 +241,38 @@ def test_global_toggle_does_not_lock_unrelated_owner(assets, monkeypatch, tmp_pa
     reset_extensions_config()
 
 
+def test_global_toggle_acquires_name_fence_before_public_projection(assets, monkeypatch):
+    from deerflow.skills import projection
+    from deerflow.skills.mutations import guard
+
+    storage, _runtime, _repository = assets
+    events = []
+
+    @contextmanager
+    def record_name_fence(*_args, **_kwargs):
+        events.append("name-enter")
+        try:
+            yield
+        finally:
+            events.append("name-exit")
+
+    @contextmanager
+    def record_projection_lock(*_args, **_kwargs):
+        events.append("projection-enter")
+        try:
+            yield
+        finally:
+            events.append("projection-exit")
+
+    monkeypatch.setattr(guard, "managed_name_writes", record_name_fence)
+    monkeypatch.setattr(projection, "_projection_lock", record_projection_lock)
+
+    with guard.managed_global_state_write(storage, "missing"):
+        pass
+
+    assert events == ["name-enter", "projection-enter", "projection-exit", "name-exit"]
+
+
 def test_global_toggle_serializes_same_name_creation(assets, monkeypatch, tmp_path):
     from app.gateway.routers import skills as skills_router
     from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config
