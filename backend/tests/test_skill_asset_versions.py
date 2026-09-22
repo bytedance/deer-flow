@@ -273,6 +273,46 @@ def test_global_toggle_acquires_name_fence_before_public_projection(assets, monk
     assert events == ["name-enter", "projection-enter", "projection-exit", "name-exit"]
 
 
+def test_gateway_global_toggle_enters_managed_write_before_projection(assets, monkeypatch, tmp_path):
+    from app.gateway.routers.skills import _write_extensions_skill_state
+    from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config
+    from deerflow.skills import projection
+    from deerflow.skills.mutations import guard
+
+    storage, _runtime, _repository = assets
+    config_file = tmp_path / "extensions.json"
+    config_file.write_text('{"skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+    reload_extensions_config()
+    events = []
+
+    @contextmanager
+    def record_managed_write(*_args, **_kwargs):
+        events.append("managed-enter")
+        try:
+            yield
+        finally:
+            events.append("managed-exit")
+
+    @contextmanager
+    def record_projection(*_args, **_kwargs):
+        events.append("projection-enter")
+        try:
+            yield
+        finally:
+            events.append("projection-exit")
+
+    monkeypatch.setattr(guard, "managed_global_state_write", record_managed_write)
+    monkeypatch.setattr(projection, "skill_projection_mutation", record_projection)
+
+    try:
+        _write_extensions_skill_state(storage, "example", False, rebuild_public_projection=True)
+    finally:
+        reset_extensions_config()
+
+    assert events == ["managed-enter", "projection-enter", "projection-exit", "managed-exit"]
+
+
 def test_global_toggle_serializes_same_name_creation(assets, monkeypatch, tmp_path):
     from app.gateway.routers import skills as skills_router
     from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config

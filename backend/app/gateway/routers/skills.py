@@ -708,12 +708,12 @@ def _write_extensions_skill_state(
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    the public projection lock before the process-local and cross-process
-    extensions config locks. The first keeps the enabled-only view synchronized
-    across workers; the latter two prevent this router and the MCP router from
-    interleaving writes to the shared file. All locks are held by the worker, so
-    request cancellation cannot release them while the write or projection
-    rebuild is still running.
+    the same-name mutation fence before the public projection, process-local,
+    and cross-process extensions config locks. The projection lock keeps the
+    enabled-only view synchronized across workers; the latter two prevent this
+    router and the MCP router from interleaving writes to the shared file. All
+    locks are held by the worker, so request cancellation cannot release them
+    while the write or projection rebuild is still running.
     """
     from contextlib import nullcontext
 
@@ -729,7 +729,7 @@ def _write_extensions_skill_state(
 
     from deerflow.skills.mutations.guard import managed_global_state_write
 
-    with projection_update, managed_global_state_write(storage, skill_name):
+    with managed_global_state_write(storage, skill_name), projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
             # not. Existing files are therefore re-read under the lock, raw, so

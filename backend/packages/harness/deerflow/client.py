@@ -1434,7 +1434,7 @@ class DeerFlowClient:
             from deerflow.skills.projection import skill_projection_mutation
 
             removal_names = (name,) if not enabled else ()
-            with skill_projection_mutation(storage, "public", remove_names=removal_names), managed_global_state_write(storage, name):
+            with managed_global_state_write(storage, name), skill_projection_mutation(storage, "public", remove_names=removal_names):
                 with extensions_config_write_lock, extensions_config_file_lock(config_path):
                     # The projection lock is cross-process, but the singleton
                     # cache is not. Reload raw from disk under the config lock.
