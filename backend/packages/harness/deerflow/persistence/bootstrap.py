@@ -631,7 +631,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
             async with engine.begin() as conn:
                 await conn.run_sync(_run_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, head)
+            await await_drained(asyncio.to_thread(_stamp, cfg, head))
 
         elif decision == "legacy":
             logger.info(
@@ -651,8 +651,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             # columns those revisions would add.
             async with engine.begin() as conn:
                 await conn.run_sync(_run_baseline_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            await await_drained(asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION))
+            await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
 
         elif decision == "versioned":
             # The same revision id once named a different out-of-tree schema.
@@ -669,7 +669,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                     head,
                 )
                 try:
-                    await asyncio.to_thread(_upgrade, cfg, "head")
+                    await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
                 except CommandError:
                     # SQLite has no cross-process bootstrap mutex. Another
                     # process may advance 0018 to the reviewed 0019 after this
