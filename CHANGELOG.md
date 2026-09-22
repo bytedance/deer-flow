@@ -941,6 +941,10 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
+  acceptance checks. Readable empty files now satisfy `exists` and
+  `file_written` and deterministically fail `non-empty`, instead of remaining
+  UNVERIFIED. ([#5559])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -2781,6 +2785,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Document conversion no longer re-opens the upload by name. The
+  Gateway converted the committed file and the embedded client converted the
+  copy it had just placed in the thread's uploads directory, so a sandbox that
+  replaced that name with a symlink in between had a host file converted into
+  the thread as the `.md` companion. The Gateway now converts a private copy of
+  the staged bytes, read through the descriptor it wrote, and the client
+  converts the caller's own source file. ([#5611])
 - **client:** `DeerFlowClient.upload_files` no longer writes through a
   symlink. A symlink planted in the sandbox-writable uploads directory, at an
   upload's name or its Markdown companion's name, made the embedded client
@@ -4314,7 +4325,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611

@@ -6,7 +6,34 @@ export interface Translations {
     localName: string;
   };
 
+  extensions: {
+    title: string;
+    navigation: string;
+    search: string;
+    loading: string;
+    pageLoading: string;
+    unavailable: string;
+    retry: string;
+    reload: string;
+    reloadAll: string;
+    all: string;
+    notInstalled: string;
+    enabledManaged: string;
+    disabledManaged: string;
+    deploymentHint: string;
+    moduleUnavailable: string;
+    noResults: string;
+    pageUnavailable: string;
+    pageUnavailableHint: string;
+    viewAll: string;
+    viewFailed: string;
+    actionFailed: string;
+    view: (name: string) => string;
+    open: (name: string) => string;
+  };
+
   capabilities: {
+    toolsAndIntegrations: string;
     icon: {
       title: string;
       upload: string;
@@ -348,6 +375,7 @@ export interface Translations {
     )[];
     pleaseWaitStreaming: string;
     stopStreamingUnavailable: string;
+    startTurnUnavailable: string;
   };
 
   // Sidebar
@@ -879,6 +907,59 @@ export interface Translations {
     setupTitle: (name: string) => string;
     setupEditTitle: (name: string) => string;
     setupDescription: string;
+    wechatQr: {
+      restart: string;
+      restartHint: string;
+      restartKeepCommand: string;
+      autoSave: string;
+      verifyTitle: string;
+      verifyDescription: string;
+      verifyLabel: string;
+      verifySubmit: string;
+      verifying: string;
+      network: string;
+      invalid_response: string;
+      verification_rejected: string;
+      verification_blocked: string;
+      already_bound: string;
+      saved: string;
+      savedDescription: string;
+      bindTitle: string;
+      bindDescription: string;
+      bindWaiting: string;
+      bindLoading: string;
+      bindFailed: string;
+      bindExpired: string;
+      bindRetry: string;
+      copyCommand: string;
+      copied: string;
+      copyFailed: string;
+      connectedTitle: string;
+      connectedDescription: string;
+      done: string;
+
+      methodLabel: string;
+      tokenTitle: string;
+      tokenDescription: string;
+      tokenPlaceholder: string;
+      tokenHint: string;
+      privacy: string;
+      waiting: string;
+      scannedTitle: string;
+      expiredTitle: string;
+      failedTitle: string;
+      login: string;
+      manual: string;
+      description: string;
+      loading: string;
+      imageTitle: string;
+      scan: string;
+      scanned: string;
+      expired: string;
+      failed: string;
+      confirmed: string;
+      retry: string;
+    };
     saveAndConnect: string;
     saveChanges: string;
     descriptions: Record<string, string>;
