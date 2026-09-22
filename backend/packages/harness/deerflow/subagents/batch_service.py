@@ -10,6 +10,7 @@ from typing import Any
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
@@ -47,12 +48,16 @@ class SubagentBatchService:
         runtime_config: SubagentRuntimeConfig,
         app_config: AppConfig | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
+        extensions: LoadedExtensions | None = None,
     ) -> None:
         self._repository = repository
         self._config = config
         self._runtime_config = runtime_config
         self._app_config = app_config
         self._execution_capacity = execution_capacity
+        # One worker owns one generation, including recovered durable items.
+        # Never persist this Python object in the serializable execution_spec.
+        self._extensions = extensions if extensions is not None else get_loaded_extensions()
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._stop = asyncio.Event()
         self._poller: asyncio.Task[None] | None = None
@@ -206,6 +211,7 @@ class SubagentBatchService:
                 subagent_enabled=False,
                 include_upload_tool=False,
                 app_config=app_config,
+                extensions=self._extensions,
             )
             # Revalidate durable state before launching: cancel_batch may have
             # terminalized this item (or its lease may have been lost) while
@@ -240,6 +246,7 @@ class SubagentBatchService:
                 authz_attributes=spec.get("authz_attributes"),
                 knowledge_scope=spec.get("knowledge_scope"),
                 execution_capacity=self._execution_capacity,
+                extensions=self._extensions,
                 acceptance_criteria=item.get("acceptance_criteria"),
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"

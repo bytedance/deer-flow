@@ -14,7 +14,10 @@ not an error.
 
 from __future__ import annotations
 
+import os
 import shlex
+
+from deerflow.sandbox.search import IGNORE_PATTERNS, should_ignore_path
 
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _MISSING_ROOT = "missing"
@@ -29,6 +32,12 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     quoted = shlex.quote(path)
     depth = int(max_depth)
     n = int(limit)
+    # Match the parser's host-platform case policy. Prune ignored descendants
+    # before head so they cannot consume the visible listing's output budget.
+    name_test = "-iname" if os.path.normcase("A") == "a" else "-name"
+    # IGNORE_PATTERNS must contain basename patterns (no '/'); -name/-iname do not match paths.
+    ignored = " -o ".join(f"{name_test} {shlex.quote(pattern)}" for pattern in IGNORE_PATTERNS)
+    prune = f"\\( {ignored} \\) -prune -o " if ignored else ""
     # Status file is written by the find side of the pipe, then printed AFTER
     # head so a 500-line listing cannot truncate the marker. ``set +e`` undoes
     # a login-profile ``set -e`` so a failing find still records $?. End with
@@ -43,7 +52,11 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     return (
         f"set +e; ( if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 1; fi; "
         f"_st=/tmp/df_find_$$; "
-        f"{{ find -H {quoted} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null; "
+        # Print the explicit root separately and only filter its descendants.
+        # Unlike a -path root exemption, this treats glob metacharacters in
+        # the root literally and still permits listing an ignored root itself.
+        f"{{ printf '%s\\n' {quoted}; "
+        f"find -H {quoted} -mindepth 1 -maxdepth {depth} {prune}\\( -type f -o -type d \\) -print 2>/dev/null; "
         f'echo $? > "$_st"; }} | head -n {n}; '
         f'st=$(cat "$_st" 2>/dev/null); '
         f"printf '\\n%s\\n' {_STATUS_PREFIX}$st; "
@@ -59,9 +72,18 @@ def parse_remote_list_dir_output(
 ) -> list[str]:
     """Parse listing stdout, preferring the find-status marker over pipeline status.
 
+    Entries under ignored directories (``IGNORE_PATTERNS``) are dropped, matching
+    the local ``list_dir`` and the remote ``glob``/``grep`` implementations, which
+    already skip those paths. Patterns apply to the path relative to the listing
+    root, so an ignored name only hides that directory's *descendants*: explicitly
+    listing ``build`` — or a path below an ignored ancestor — still returns its
+    contents, as the local walk does. Filtering happens after the empty-output
+    check, so a directory whose entries are all ignored returns an empty list
+    rather than a missing-path error.
+
     Raises:
         OSError: Command/client failure or an incomplete traversal.
-        FileNotFoundError: The root is missing or no listable entries exist.
+        FileNotFoundError: The root is missing or ``find`` produced no output.
     """
     # find delimits records with "\n" only. splitlines() would also split on
     # \v, \f, \x1c-\x1e and \x85, which are legal in Linux filenames. Do not
@@ -98,4 +120,19 @@ def parse_remote_list_dir_output(
 
     if not entries:
         raise FileNotFoundError(resolved)
-    return entries
+    root = resolved.rstrip("/") or "/"
+    prefix = "/" if root == "/" else f"{root}/"
+    kept: list[str] = []
+    for entry in entries:
+        if entry.rstrip("/") == root:
+            # The requested root is what the caller asked for; keep it even when
+            # its own name matches an ignore pattern.
+            kept.append(entry)
+        elif entry.startswith(prefix):
+            if not should_ignore_path(entry[len(prefix) :]):
+                kept.append(entry)
+        else:
+            # Defensive fallback for unexpected entries outside the requested
+            # prefix: root-relative ignore matching cannot classify them.
+            kept.append(entry)
+    return kept

@@ -142,6 +142,12 @@ _MOCKED_SUBAGENT_MODULES = (
 @pytest.fixture
 def _subagent_env():
     """Import the real executor behind tests/conftest.py's cycle-breaking mock."""
+    # Load the real leaf before replacing its parent package with a cycle-breaking
+    # mock; otherwise isolated execution depends on earlier test collection.
+    import importlib
+
+    importlib.import_module("deerflow.agents.middlewares.audit_context")
+    importlib.import_module("deerflow.authz.principal")
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_SUBAGENT_MODULES}
     original_executor = sys.modules.get("deerflow.subagents.executor")
     missing = object()

@@ -25,6 +25,7 @@ from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -419,8 +420,11 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
     # Offload the synchronous checkpointer call so its blocking IO never runs on
-    # the event loop (backend/AGENTS.md blocking-IO gate).
-    result = await asyncio.to_thread(sync_method, *args, **kwargs)
+    # the event loop (backend/AGENTS.md blocking-IO gate). A sync checkpoint
+    # mutation must finish before cancellation propagates; otherwise the caller
+    # can observe cancellation while the worker commits state afterwards.
+    worker = asyncio.to_thread(sync_method, *args, **kwargs)
+    result = await await_drained(worker) if sync_name in {"put", "put_writes", "delete_thread"} else await worker
     return await result if inspect.isawaitable(result) else result
 
 
