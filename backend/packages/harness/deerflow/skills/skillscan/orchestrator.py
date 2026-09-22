@@ -383,6 +383,37 @@ def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
     return bindings
 
 
+def _python_secret_literal(expr: ast.expr) -> str | None:
+    """Text of a value Python resolves from source alone, else None.
+
+    The pre-AST sweep reported a hardcoded credential that was spelled as a
+    concatenation of literals (``API_KEY = "sk-" + "a1b2c3d4"``), because its
+    line-oriented value capture stopped at the first closing quote. Splitting
+    the quotes is not obfuscation: the bound value is still the same constant,
+    so the shapes the sweep saw stay visible here - a literal, an explicit
+    ``+`` of literals, an implicit (adjacent) literal run, and a placeholder-free
+    f-string. Anything that needs runtime data - a call, a variable,
+    ``%``-formatting of a template - is not a literal this rule can assert on.
+    """
+    if isinstance(expr, ast.Constant):
+        value = expr.value
+        if not isinstance(value, (str, bytes, int)):
+            return None
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    if isinstance(expr, ast.JoinedStr):
+        parts: list[str] = []
+        for part in expr.values:
+            if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
+                return None
+            parts.append(part.value)
+        return "".join(parts)
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        left = _python_secret_literal(expr.left)
+        right = _python_secret_literal(expr.right)
+        return f"{left}{right}" if left is not None and right is not None else None
+    return None
+
+
 def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
     """Report embedded Python secrets from real literal bindings, not from raw text.
 
@@ -392,7 +423,8 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     assignment's annotation rather than at its value.
 
     What it gains is precision, never less coverage: every binding form the
-    sweep reported stays reported, per ``_python_secret_bindings``.
+    sweep reported stays reported, per ``_python_secret_bindings``, and so does
+    every literal value shape it saw, per ``_python_secret_literal``.
 
     A file Python cannot parse falls back to that sweep: the AST is only an
     improvement, and returning nothing would let one syntax error (or a NUL byte)
@@ -404,10 +436,8 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
         return _scan_secret_assignments_by_text(rel_path, text)
 
     for name, value in _python_secret_bindings(tree):
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
-            continue
-        literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
-        if _looks_like_placeholder(literal):
+        literal = _python_secret_literal(value)
+        if literal is None or _looks_like_placeholder(literal):
             continue
         if _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
             return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]

@@ -1513,6 +1513,29 @@ def test_secret_assignment_ignores_python_keyword_environment_lookup(tmp_path: P
     assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
 
 
+def test_secret_assignment_still_flags_python_literal_concatenation(tmp_path: Path) -> None:
+    """``API_KEY = "sk-" + "a1b2c3d4e5f6"`` binds a constant, and the sweep saw it."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, 'API_KEY = "sk-" + "a1b2c3d4e5f6"\n'), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "a1b2c3d4e5f6" not in repr(finding)
+
+
+def test_secret_assignment_still_flags_python_placeholder_free_fstring(tmp_path: Path) -> None:
+    """An f-string with no interpolated field is a literal written oddly."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, 'password = f"hunter2-literal"\n'), "secret-env-assignment")
+
+    assert finding["line"] == 1
+
+
+def test_secret_assignment_ignores_python_runtime_composed_value(tmp_path: Path) -> None:
+    """Only fully constant values fold; half of this one comes from the host."""
+    source = 'import os\n\napi_key = os.environ["DEERFLOW_KEY"] + "a1b2c3d4e5f6"\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
 def test_secret_assignment_still_flags_non_python_text(tmp_path: Path) -> None:
     """Non-Python text keeps the line-oriented sweep for config and shell files."""
     skill_dir = tmp_path / "demo-skill"
