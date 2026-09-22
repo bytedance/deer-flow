@@ -355,13 +355,44 @@ def _python_secret_assignment_target(node: ast.expr) -> str | None:
     return None
 
 
+def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
+    """Every ``(bound name, value expression)`` pair the tree binds, in walk order.
+
+    Assignment statements are not the only place a skill can park a credential:
+    a keyword argument, a parameter default and a walrus all read as
+    ``name=value`` to the line-oriented sweep this rule replaced, so a caller
+    that merely moves the assignment into a call escapes the gate.
+    """
+    bindings: list[tuple[str | None, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            bindings.extend((_python_secret_assignment_target(target), node.value) for target in node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            # A bare annotation binds no value at all, so ``AnnAssign.value`` is None.
+            bindings.append((_python_secret_assignment_target(node.target), node.value))
+        elif isinstance(node, ast.keyword):
+            # ``**spread`` carries ``arg=None`` and binds no name of its own.
+            if node.arg is not None:
+                bindings.append((node.arg, node.value))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = [*node.args.posonlyargs, *node.args.args]
+            if node.args.defaults:
+                # Positional defaults align with the trailing parameters.
+                bindings.extend((param.arg, default) for param, default in zip(params[len(params) - len(node.args.defaults) :], node.args.defaults, strict=True))
+            bindings.extend((param.arg, default) for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True) if default is not None)
+    return bindings
+
+
 def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
-    """Report embedded Python secrets from real literal assignments, not from raw text.
+    """Report embedded Python secrets from real literal bindings, not from raw text.
 
     A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
     statement colon (``if not api_key:``), or this rule's own remediation
     (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
     assignment's annotation rather than at its value.
+
+    What it gains is precision, never less coverage: every binding form the
+    sweep reported stays reported, per ``_python_secret_bindings``.
 
     A file Python cannot parse falls back to that sweep: the AST is only an
     improvement, and returning nothing would let one syntax error (or a NUL byte)
@@ -372,20 +403,13 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     except SyntaxError:
         return _scan_secret_assignments_by_text(rel_path, text)
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets, value = list(node.targets), node.value
-        elif isinstance(node, ast.AnnAssign):
-            # A bare annotation binds no value at all, so `value` stays None.
-            targets, value = [node.target], node.value
-        else:
-            continue
+    for name, value in _python_secret_bindings(tree):
         if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
             continue
         literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
         if _looks_like_placeholder(literal):
             continue
-        if any(_SECRET_ASSIGNMENT_NAME_RE.match(_python_secret_assignment_target(target) or "") for target in targets):
+        if _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
             return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
     return []
 

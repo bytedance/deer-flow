@@ -1475,6 +1475,44 @@ def test_secret_assignment_still_flags_annotated_python_literal(tmp_path: Path) 
     assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 5
 
 
+def test_secret_assignment_still_flags_python_keyword_argument(tmp_path: Path) -> None:
+    """``connect(token="…")`` binds the literal just as firmly as ``token = "…"``.
+
+    The line-oriented sweep this rule replaced reported the keyword form, so the
+    AST path has to keep reporting it; a caller that only moved the assignment
+    into a call would otherwise walk out of a HIGH-severity gate.
+    """
+    source = 'client = connect("https://api.example", token="9f8e7d6c5b4a3210ff")\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_still_flags_python_parameter_default(tmp_path: Path) -> None:
+    """A credential baked into a parameter default ships inside the skill."""
+    source = 'def load(api_key="9f8e7d6c5b4a3210ff"):\n    return api_key\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
+
+
+def test_secret_assignment_still_flags_python_walrus_binding(tmp_path: Path) -> None:
+    """``(token := "…")`` is an assignment written as an expression."""
+    source = 'if (secret := "9f8e7d6c5b4a3210ff"):\n    use(secret)\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
+
+
+def test_secret_assignment_ignores_python_keyword_environment_lookup(tmp_path: Path) -> None:
+    """The precision gain must survive the new binding forms: a keyword whose
+    value is read from the environment is the documented remediation."""
+    source = 'import os\n\n\ndef load():\n    return connect("https://api.example", token=os.getenv("DEERFLOW_TOKEN"))\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
 def test_secret_assignment_still_flags_non_python_text(tmp_path: Path) -> None:
     """Non-Python text keeps the line-oriented sweep for config and shell files."""
     skill_dir = tmp_path / "demo-skill"
