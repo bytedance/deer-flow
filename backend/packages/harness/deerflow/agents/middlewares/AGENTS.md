@@ -7,17 +7,7 @@ mixed windows keep normal anchoring and final-message fallback. Budget raw text
 before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
 LangChain default.
 
-Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
-trigger check and before selecting the retained tail. They enter neither summary
-generation/pre-compaction hooks nor retained messages, while `state["todos"]`
-remains unchanged. Only a successful compaction commits the removal; no-op and
-failure paths keep the original state. The following `TodoMiddleware.before_model`
-rebuilds one reminder from current todos when no `write_todos` call is still
-visible; empty todos need no reminder. Both automatic and manual compaction use
-this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
-`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
-the producer, presence check, and compaction filter share it. Its value remains
-`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
 Delegation verdicts are untrusted: revalidate persisted values, ignore malformed
 ones, and treat completed work as reusable evidence rather than acceptance.
