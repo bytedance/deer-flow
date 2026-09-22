@@ -19,6 +19,7 @@ class CheckpointLineageIntegrityError(CheckpointLineageError):
 
 
 def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
+    """Return checkpoint messages across materialized and raw snapshot shapes."""
     values = getattr(checkpoint_tuple, "values", None)
     if isinstance(values, dict):
         messages = values.get("messages", [])
@@ -30,17 +31,20 @@ def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
 
 
 def checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
+    """Return the checkpoint's configurable LangGraph state as a plain mapping."""
     config = getattr(checkpoint_tuple, "config", None) or {}
     configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
     return dict(configurable) if isinstance(configurable, dict) else {}
 
 
 def checkpoint_metadata(checkpoint_tuple: Any) -> dict[str, Any]:
+    """Return checkpoint metadata as a plain dictionary."""
     metadata = getattr(checkpoint_tuple, "metadata", None) or {}
     return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
+    """Return whether a checkpoint contains only runtime-duration writes."""
     writes = checkpoint_metadata(checkpoint_tuple).get("writes")
     return isinstance(writes, dict) and "runtime_run_duration" in writes
 
