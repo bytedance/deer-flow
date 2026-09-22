@@ -2399,20 +2399,40 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return sandbox
 
     def release(self, sandbox_id: str) -> None:
-        """Release a sandbox from active use into the warm pool.
+        """Release a sandbox from active use.
 
-        The container is kept running so it can be reclaimed quickly by the same
-        thread on its next turn without a cold-start.  The container will only be
-        stopped when the replicas limit forces eviction or during shutdown.
+        Healthy sandboxes are parked in the warm pool for fast reuse. Sandboxes
+        quarantined after an ambiguous session-creation outcome are destroyed
+        instead so unresolved server-side session state is never deliberately
+        reused.
 
-        The host-side HTTP client owned by the cached ``AioSandbox`` instance is
-        closed before the instance is dropped (#2872). The warm-pool entry only
-        stores ``SandboxInfo``, so a fresh ``AioSandbox`` (and a fresh client)
-        is constructed if the container is later reclaimed.
+        Release is best-effort at turn teardown: recycle failures are logged
+        rather than propagated to the completed agent run.
 
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
+        with self._lock:
+            recycle_sandbox = self._sandboxes.get(sandbox_id)
+
+        if recycle_sandbox is not None and recycle_sandbox.requires_container_recycle:
+            logger.warning(
+                "Recycling sandbox %s instead of returning it to the warm pool after ambiguous session creation",
+                sandbox_id,
+            )
+            try:
+                self._destroy_tracked(
+                    sandbox_id,
+                    still_reapable=lambda: self._sandboxes.get(sandbox_id) is recycle_sandbox,
+                )
+            except Exception:
+                logger.error(
+                    "Failed to recycle sandbox %s after ambiguous session creation",
+                    sandbox_id,
+                    exc_info=True,
+                )
+            return
+
         info = None
         sandbox = None
         thread_keys_to_remove: list[tuple[str, str]] = []
