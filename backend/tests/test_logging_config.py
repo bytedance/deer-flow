@@ -731,3 +731,37 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
     sandbox = logging.LogRecord("deerflow.sandbox.local.local_sandbox_provider", logging.ERROR, "p.py", 1, "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing", (), None)
     assert filt.filter(sandbox) is True
     assert sandbox.getMessage() == "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing"
+
+
+def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> None:
+    """Round-15 residual: a Redirecting slot stayed verbatim unless it
+    started with "/", but the Location field-value grammar (RFC 3986
+    relative-part) also admits slash-less relative references —
+    ``download?sign=…`` and ``?sign=…`` kept their signed queries verbatim,
+    and neither the slot rule nor the generic absolute-URL pass (which
+    needs a scheme) could see them. A slot is now kept ONLY when it starts
+    with an absolute hierarchical URL (scheme at position 0), so every
+    relative-reference form collapses and non-hierarchical schemes
+    (``data:…``) collapse too; network-path references collapse with any
+    userinfo credentials they carry."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    cases = [
+        # (t1, t2, expected t2 rendering after the generic pass runs)
+        ("/private/BearerSecret?token=QuerySecret", "download?sign=LeakedSig", "Redirecting /<redacted> -> /<redacted>"),  # round-15 repro
+        ("/private/BearerSecret?token=QuerySecret", "?sign=LeakedSig", "Redirecting /<redacted> -> /<redacted>"),  # query-only
+        ("/private/x", "#frag", "Redirecting /<redacted> -> /<redacted>"),  # fragment-only
+        ("/private/x", "data:application/json;base64,SECRET", "Redirecting /<redacted> -> /<redacted>"),  # non-hierarchical scheme
+        ("/private/x", "//cdn.example/private/x?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # network-path
+        ("/private/x", "//user:tok@cdn.example/private/x?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # network-path + userinfo
+        # Absolute URLs are still kept whole for the generic absolute-URL pass.
+        ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other?sig=OtherSecret", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
+    ]
+    for t1, t2, expected in cases:
+        record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, "Redirecting %s -> %s", (t1, t2), None)
+        assert filt.filter(record) is True
+        assert record.getMessage() == expected, (t1, t2)
+        assert "LeakedSig" not in record.getMessage()
+        assert "token=QuerySecret" not in record.getMessage()

@@ -7,6 +7,8 @@ runtime projection.
 
 from __future__ import annotations
 
+import inspect
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ from deerflow_extension_api import (
     TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
+from deerflow_extension_api.plugins import PluginContribution
 
 _Entry = tuple[str, Any]
 
@@ -50,6 +53,7 @@ class LoadedExtensions:
     context_compaction_observers: tuple[tuple[str, ContextCompactionObserver], ...] = ()
     services: tuple[tuple[str, ExtensionService], ...] = ()
     routers: tuple[tuple[str, Any], ...] = ()
+    plugins: tuple[tuple[str, PluginContribution], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
@@ -77,6 +81,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._context_compaction_observers: list[_Entry] = []
         self._services: list[_Entry] = []
         self._routers: list[_Entry] = []
+        self._plugins: list[_Entry] = []
         self._current_source: str | None = None
 
     @contextmanager
@@ -93,6 +98,38 @@ class ExtensionRegistry(ExtensionRegistryContract):
         if self._current_source is None:
             raise RuntimeError("registration must happen inside ExtensionRegistry.attributed_to(...)")
         return self._current_source
+
+    def plugin(self, contribution: PluginContribution) -> bool:
+        if not isinstance(contribution, PluginContribution) or contribution.api_version != 1:
+            raise ValueError("Unsupported plugin contract")
+        if not contribution.frontend and not contribution.backend and not contribution.tools:
+            raise ValueError("A plugin must contribute a browser module, backend action or tool")
+        from deerflow.extensions.plugin_tools import validate_schema
+
+        tool_names = set()
+        for tool in contribution.tools:
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
+                raise ValueError("Model tools require unique names, descriptions and async handlers")
+            validate_schema(tool.input_schema, tool=True)
+            tool_names.add(tool.name)
+        names = set()
+        for action in contribution.backend:
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
+                raise ValueError("Backend actions require unique names and async handlers")
+            names.add(action.name)
+        if contribution.frontend and (not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024):
+            raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        # Validate everything before writing the plugin bucket; loader rollback also
+        # covers a later failure elsewhere in this package's install function.
+        from deerflow.config.plugin_settings import validate_contribution
+
+        validate_contribution(contribution.settings_contribution())
+        if any(item.namespace == contribution.namespace for _, item in self._plugins):
+            raise ValueError("Duplicate plugin namespace")
+        if contribution.frontend and any(item.frontend and item.frontend.module == contribution.frontend.module for _, item in self._plugins):
+            raise ValueError("Duplicate browser module")
+        self._plugins.append((self._source(), contribution))
+        return True
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
@@ -137,10 +174,11 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._context_compaction_observers,
             self._services,
             self._routers,
+            self._plugins,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
-    def mark(self) -> tuple[int, int, int, int, int, int, int]:
+    def mark(self) -> tuple[int, ...]:
         """Snapshot bucket lengths so one install() can be undone positionally."""
         return (
             len(self._middlewares),
@@ -150,9 +188,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._context_compaction_observers),
             len(self._services),
             len(self._routers),
+            len(self._plugins),
         )
 
-    def rollback_to(self, mark: tuple[int, int, int, int, int, int, int]) -> None:
+    def rollback_to(self, mark: tuple[int, ...]) -> None:
         """Undo every registration made since ``mark``.
 
         Positional rather than source-keyed: two specs may legitimately share
@@ -168,6 +207,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._context_compaction_observers,
                 self._services,
                 self._routers,
+                self._plugins,
             ),
             mark,
             strict=True,
@@ -184,6 +224,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             context_compaction_observers=tuple(self._context_compaction_observers),
             services=tuple(self._services),
             routers=tuple(self._routers),
+            plugins=tuple(self._plugins),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),

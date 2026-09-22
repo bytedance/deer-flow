@@ -285,7 +285,9 @@ test("plugin filters remain usable after an MCP refetch fails", async ({
   await page
     .getByRole("switch", { name: "Enabled GitHub", exact: true })
     .click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Admin privileges" }),
+  ).toBeVisible();
   await expect(installed).toHaveAttribute("aria-selected", "true");
   await expect(
     page.getByRole("button", { name: "Add MCP plugin" }),

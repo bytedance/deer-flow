@@ -11,6 +11,7 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
     copy_upload_file_no_symlink,
@@ -20,6 +21,31 @@ from deerflow.uploads.manager import (
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
+
+
+@pytest.mark.skipif(not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")), reason="POSIX-only: O_NOFOLLOW + fchmod")
+def test_apply_upload_sandbox_permits_propagates_permission_errors(tmp_path):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+
+    with patch.object(os, "fchmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
+    assert stat.S_IMODE(upload.stat().st_mode) == 0o600
+
+
+def test_apply_upload_sandbox_permits_fallback_propagates_permission_errors(tmp_path, monkeypatch):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    with patch.object(os, "chmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
 
 # ---------------------------------------------------------------------------
 # normalize_filename
@@ -384,6 +410,21 @@ class TestDeleteFileSafe:
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
 
+    def test_delete_keeps_the_converted_markdown(self, tmp_path):
+        """Companion ownership cannot be proven from the name, so nothing is guessed at."""
+        (tmp_path / "a.docx").write_bytes(b"DOCX")
+        (tmp_path / "a.md").write_text("converted from the docx", encoding="utf-8")
+        (tmp_path / "a.pdf").write_bytes(b"PDF")
+        (tmp_path / "a_1.md").write_text("converted from the pdf", encoding="utf-8")
+
+        result = delete_file_safe(tmp_path, "a.pdf")
+
+        assert result["success"] is True
+        assert not (tmp_path / "a.pdf").exists()
+        # a.md belongs to a.docx; deleting a.pdf used to remove it.
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "converted from the docx"
+        assert (tmp_path / "a_1.md").read_text(encoding="utf-8") == "converted from the pdf"
+
     def test_delete_symlink_to_sibling_upload_keeps_target(self, tmp_path):
         """A symlink planted in the uploads dir must not delete the upload it aliases."""
         victim = tmp_path / "victim.pdf"
@@ -399,7 +440,7 @@ class TestDeleteFileSafe:
             raise
 
         with pytest.raises(FileNotFoundError):
-            delete_file_safe(tmp_path, "alias.pdf", convertible_extensions={".pdf"})
+            delete_file_safe(tmp_path, "alias.pdf")
 
         assert victim.read_bytes() == b"pdf-bytes"
         assert companion.exists()

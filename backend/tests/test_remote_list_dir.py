@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -210,8 +211,10 @@ def test_list_dir_command_head_truncation_is_not_an_error(tmp_path) -> None:
     )
     entries = parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
     assert len(entries) == 500
-    assert entries[0] == "/dir/f1"
-    assert entries[-1] == "/dir/f500"
+    # The explicitly emitted root shares the same 500-entry output budget.
+    assert entries[0] == str(tmp_path)
+    assert entries[1] == "/dir/f1"
+    assert entries[-1] == "/dir/f499"
 
 
 @_POSIX_SH
@@ -314,3 +317,77 @@ def test_list_dir_command_lists_an_explicitly_requested_ignored_directory(tmp_pa
     entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
     assert str(root) in entries
     assert str(root / "notes.txt") in entries
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None or shutil.which("sort") is None, reason="system find and sort required")
+@pytest.mark.parametrize("root_name", ["workspace", "build", "project [one]'s"])
+@pytest.mark.parametrize("ignored_kind", ["directory", "files"])
+def test_ignored_entries_do_not_consume_listing_budget(tmp_path, root_name, ignored_kind) -> None:
+    """A deterministic real-find order puts ignored entries before the useful file."""
+    root = tmp_path / root_name
+    root.mkdir()
+    if ignored_kind == "directory":
+        ignored = root / "node_modules"
+        ignored.mkdir()
+        for index in range(600):
+            (ignored / f"dependency_{index:04}.js").touch()
+    else:
+        for index in range(600):
+            (root / f"ignored_{index:04}.log").touch()
+    visible = root / "zz_report.txt"
+    visible.write_text("report", encoding="utf-8")
+    # Only enumeration order is normalized. The real find still evaluates the
+    # production arguments and traversal/pruning expression against real files.
+    find = shlex.quote(shutil.which("find"))
+    sort = shlex.quote(shutil.which("sort"))
+    fake_bin = _write_fake_find(tmp_path, f'#!/bin/sh\n{find} "$@" | LC_ALL=C {sort}\n')
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2), env=_env_with_bin(str(fake_bin)))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(visible)]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_visible_listing_still_obeys_depth_and_output_limit(tmp_path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(8):
+        (root / f"visible_{index}.txt").touch()
+    (root / "nested" / "too-deep").mkdir(parents=True)
+    (root / "nested" / "too-deep" / "report.txt").touch()
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 1, limit=4))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert len(entries) == 4
+    assert entries[0] == str(root)
+    assert all("too-deep" not in entry for entry in entries)
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_pruning_preserves_an_ignored_symlinked_root(tmp_path) -> None:
+    target = tmp_path / "actual"
+    target.mkdir()
+    (target / "report.txt").touch()
+    (target / "node_modules").mkdir()
+    (target / "node_modules" / "dependency.js").touch()
+    root = tmp_path / "build"
+    root.symlink_to(target, target_is_directory=True)
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "report.txt")]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_pruning_uses_the_parsers_case_policy(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "workspace"
+    (root / "BUILD").mkdir(parents=True)
+    (root / "BUILD" / "ignored.txt").touch()
+    (root / "report.txt").touch()
+    # Exercise the policy a Windows Gateway applies to a POSIX remote sandbox.
+    monkeypatch.setattr(os.path, "normcase", lambda value: value.lower())
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    assert "BUILD" not in proc.stdout
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "report.txt")]
