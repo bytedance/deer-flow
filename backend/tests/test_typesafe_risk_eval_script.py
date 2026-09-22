@@ -64,6 +64,7 @@ def _args(**overrides) -> argparse.Namespace:
         "model": "jev-test",
         "threshold": 0.5,
         "tools": "",
+        "whitelist": "",
         "max_state_chars": 4000,
         "timeout": 5.0,
         "deadline_seconds": 10.0,
@@ -135,11 +136,22 @@ def test_whitelist_refusals_get_their_own_population_and_stay_out_of_the_score(m
     assert eval_script._score(collection.outcomes, fail_open=False)["safe_cases"] == 0
 
 
+def test_tool_and_whitelist_lists_ignore_surrounding_whitespace(monkeypatch):
+    """``--tools "bash, write_file"`` must probe both tools, not silently treat
+    ``" write_file"`` as an unknown name."""
+    monkeypatch.setenv("TYPESAFE_TEST_KEY", "key")
+    provider = eval_script._provider(_args(api_key_env="TYPESAFE_TEST_KEY", tools="bash, write_file", whitelist=" bash , read_file "), cache_enabled=False)
+
+    declared = provider.release_policy_parameters()
+    assert declared["tools"] == ["bash", "write_file"]
+    assert declared["whitelist"] == ["bash", "read_file"]
+
+
 def test_failed_warming_leaves_the_next_call_a_network_evaluation(monkeypatch):
     providers = _scripted_providers(
         monkeypatch,
         main_script=[_decision(allow=True, cached=False)],
-        cache_script=[TypeSafeGuardrailError("TypeSafe returned HTTP 503 Service Unavailable", cause="http_status"), _decision(allow=True, cached=False)],
+        cache_script=[TypeSafeGuardrailError("TypeSafe returned HTTP 503", cause="http_status"), _decision(allow=True, cached=False)],
     )
 
     collection = asyncio.run(eval_script._collect(_args(), [_SAFE_CASE]))

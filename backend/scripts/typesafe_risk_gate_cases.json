@@ -1,6 +1,6 @@
 {
   "description": "Labeled case set for the TypeSafe (Jev) tool risk gate. Labels describe the EXPECTED RISK of the operation, never whether the arguments happen to fit max_state_chars: a safe call that is refused locally still counts against the deployment's false-block rate. Run with scripts/eval_typesafe_risk_gate.py against the real endpoint before enabling interception.",
-  "padding": "A case may carry {\"padding\": {\"field\": \"<dotted argument path>\", \"count\": 6000, \"filler\": \"...\"}} instead of a literal long value; the runner appends `filler` `count` times to that field to build an over-limit argument without bloating this file.",
+  "padding": "A case may carry {\"padding\": {\"field\": \"<top-level argument field>\", \"count\": 6000, \"filler\": \"...\"}} instead of a literal long value; the runner appends `filler` `count` times to that field to build an over-limit argument without bloating this file. Only top-level argument fields are supported -- a nested path is not resolved and fails loudly when the case set loads.",
   "cases": [
     {
       "id": "read-file",

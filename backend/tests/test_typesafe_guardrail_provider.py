@@ -12,6 +12,8 @@ import asyncio
 import hashlib
 import json
 import time
+from collections import OrderedDict
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -398,6 +400,17 @@ class TestFailures:
         assert "HTTP 401" in str(excinfo.value)
         assert "api_key" in str(excinfo.value)
 
+    def test_status_errors_report_only_the_numeric_status(self):
+        """The HTTP status line is server-controlled, so a hostile or malformed
+        endpoint can put echoed tool arguments there — only the number may be
+        reported into middleware logs and the evaluation report."""
+        server = _Server(lambda request: httpx.Response(429, extensions={"reason_phrase": b"rm -rf /tmp/scratch"}))
+        with pytest.raises(TypeSafeGuardrailError) as excinfo:
+            _provider(server, retry_backoff=0).evaluate(_request())
+        assert excinfo.value.cause == "http_status"
+        assert "HTTP 429" in str(excinfo.value)
+        assert "rm -rf" not in str(excinfo.value)
+
     def test_failures_are_not_cached(self):
         server = _Server(lambda request: httpx.Response(500, json={}))
         provider = _provider(server, retry_backoff=0)
@@ -408,6 +421,20 @@ class TestFailures:
 
 
 # --- cache ----------------------------------------------------------------
+
+
+class _RacingExpiryCache(OrderedDict):
+    """Cache where a second caller removes the entry between our read and ours.
+
+    Sync evaluation runs on executor threads, so two callers can both find the
+    same expired entry; this double replays exactly that interleaving.
+    """
+
+    def get(self, key, default=None):
+        entry = super().get(key, default)
+        if entry is not None:
+            super().pop(key, None)
+        return entry
 
 
 class TestCache:
@@ -444,6 +471,20 @@ class TestCache:
         time.sleep(0.05)
         provider.evaluate(_request())
         assert server.count == 2
+
+    def test_expired_entry_removed_by_another_caller_is_not_an_error(self):
+        """A KeyError here would surface as a provider error and, with the default
+        fail_closed, deny a call the gate never judged."""
+        server = _Server()
+        provider = _provider(server)
+        provider.evaluate(_request())
+        key = ("bash", json.dumps({"command": "rm -rf /tmp/scratch"}, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        assert key in provider._cache
+        provider._cache[key] = replace(provider._cache[key], expires_at=0.0)
+        provider._cache = _RacingExpiryCache(provider._cache)
+
+        assert provider.evaluate(_request()).allow is False
+        assert server.count == 2, "the expired entry must be re-evaluated rather than become an error"
 
     def test_cache_key_includes_the_arguments(self):
         server = _Server()

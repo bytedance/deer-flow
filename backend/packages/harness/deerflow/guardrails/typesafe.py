@@ -353,7 +353,7 @@ class TypeSafeGuardrailProvider:
             with client.stream("POST", self._url, json=payload, headers=self._headers()) as response:
                 self._check_budget(deadline_at)
                 if response.status_code != _OK_STATUS:
-                    raise self._status_error(response.status_code, response.reason_phrase)
+                    raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
                 body = response.read()
                 self._check_budget(deadline_at)
@@ -368,7 +368,7 @@ class TypeSafeGuardrailProvider:
             async with client.stream("POST", self._url, json=payload, headers=self._headers()) as response:
                 self._check_budget(deadline_at)
                 if response.status_code != _OK_STATUS:
-                    raise self._status_error(response.status_code, response.reason_phrase)
+                    raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
                 body = await response.aread()
                 self._check_budget(deadline_at)
@@ -381,11 +381,13 @@ class TypeSafeGuardrailProvider:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}", "Accept": "application/json"}
 
-    def _status_error(self, status_code: int, reason_phrase: str) -> TypeSafeGuardrailError:
-        # The response body is deliberately omitted: TypeSafe may echo the state,
-        # which carries raw tool arguments.
+    def _status_error(self, status_code: int) -> TypeSafeGuardrailError:
+        # Only the numeric status is reported. The response body *and* the HTTP
+        # status line are both server-controlled, TypeSafe may echo the state
+        # (raw tool arguments) in either, and this message reaches middleware
+        # logs and the evaluation report.
         hint = " (check the API key configured via api_key / the API key environment variable)" if status_code == _UNAUTHORIZED_STATUS else ""
-        message = f"TypeSafe returned HTTP {status_code} {reason_phrase}{hint}"
+        message = f"TypeSafe returned HTTP {status_code}{hint}"
         if status_code in _RETRYABLE_STATUS_CODES:
             return _RetryableAttempt(message, cause="http_status")
         return TypeSafeGuardrailError(message, cause="http_status")
@@ -453,7 +455,12 @@ class TypeSafeGuardrailProvider:
         if entry is None:
             return None
         if entry.expires_at <= time.monotonic():
-            del self._cache[key]
+            # pop(): sync evaluation can run on executor threads when a turn
+            # produces parallel tool calls, so another thread may already have
+            # removed this same expired entry. A bare ``del`` would raise
+            # KeyError, which the middleware reports as a provider error and,
+            # under fail_closed, turns into a spurious denial.
+            self._cache.pop(key, None)
             return None
         return entry
 
