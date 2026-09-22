@@ -253,6 +253,7 @@ class UrlRedactionFilter(logging.Filter):
         # two scheme-bearing passes scan from ``://`` occurrences (see
         # _scheme_starts) instead of re.sub, so long letter runs in any
         # record — URL paths or URL-free error bodies — stay linear-time.
+        redacted = message
         # The dump pass runs first: the absolute-URL rewrite consumes the
         # ``): `` closer that separates the url argument from the error repr
         # (see the note on _URL_REDACT_RE's ``rest`` class), and after that the
@@ -262,7 +263,7 @@ class UrlRedactionFilter(logging.Filter):
             # The record's own second argument, not a URL line: the response
             # header block that urllib3 echoes when it could not parse it.
             redacted = _redact_credential_headers(redacted)
-        redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, message)
+        redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, redacted)
         redacted = _URLLIB3_INCREMENT_RETRY_RE.sub(_redact_increment, redacted)
         redacted = _URLLIB3_RETRY_TARGET_RE.sub(_redact_retry_target, redacted)
         redacted = _URLLIB3_RETRYING_RE.sub(_redact_retrying, redacted)
