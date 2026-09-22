@@ -19,7 +19,8 @@ export function importAssetModule(url: string): Promise<{ default: unknown }> {
           : new Error("Plugin module failed", { cause: error }),
       );
     };
-    // Bound evaluation as well as network loading (including top-level await).
+    // Stop host waiting for loading/evaluation (including top-level await).
+    // Removing the node cannot cancel native evaluation or its late side effects.
     const timer = setTimeout(
       () => fail(new Error("Plugin module timed out")),
       30_000,

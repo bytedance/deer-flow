@@ -15,6 +15,9 @@ declare global {
   interface Window {
     loadPlugin: (url: string) => Promise<{ default: TestPlugin }>;
     executions: number;
+    releasePlugin: () => void;
+    pluginResumed: Promise<void>;
+    latePluginEffects: number;
   }
 }
 
@@ -37,7 +40,13 @@ test.beforeAll(async () => {
   const files: Record<string, [string, string]> = {
     "pending.mjs": [
       "text/javascript",
-      "await new Promise(() => {}); export default {};",
+      `window.latePluginEffects = 0;
+       let resumed;
+       window.pluginResumed = new Promise(resolve => { resumed = resolve; });
+       await new Promise(resolve => { window.releasePlugin = resolve; });
+       window.latePluginEffects++;
+       resumed();
+       export default {};`,
     ],
     "index.mjs": [
       "text/javascript",
@@ -188,7 +197,7 @@ test("unauthenticated resource load rejects and removes the script", async ({
   expect(result).toBe("Error: Plugin module unavailable; scripts=0");
 });
 
-test("unsettled module evaluation times out without retaining its script", async ({
+test("timeout ends host waiting but cannot cancel late native module effects", async ({
   page,
   context,
 }) => {
@@ -199,12 +208,29 @@ test("unsettled module evaluation times out without retaining its script", async
   await page.goto(frontendURL);
   await page.waitForFunction(() => typeof window.loadPlugin === "function");
   const result = await page.evaluate(async (url) => {
-    try {
-      await window.loadPlugin(url);
-      return "unexpected success";
-    } catch (error) {
-      return `${String(error)}; scripts=${document.querySelectorAll("script[src]").length}`;
-    }
+    const attempt = window.loadPlugin(url).then(
+      () => "unexpected success",
+      (error: Error) => error.message,
+    );
+    const failure = await attempt;
+    const scripts = document.querySelectorAll("script[src]").length;
+    const effectsAtTimeout = window.latePluginEffects;
+    // Release evaluation only after the deadline has settled the host result.
+    window.releasePlugin();
+    await window.pluginResumed;
+    return {
+      failure,
+      scripts,
+      effectsAtTimeout,
+      effectsAfterResume: window.latePluginEffects,
+      resultAfterResume: await attempt,
+    };
   }, `${backendURL}/gateway/assets/pending/pending.mjs`);
-  expect(result).toBe("Error: Plugin module timed out; scripts=0");
+  expect(result).toEqual({
+    failure: "Plugin module timed out",
+    scripts: 0,
+    effectsAtTimeout: 0,
+    effectsAfterResume: 1,
+    resultAfterResume: "Plugin module timed out",
+  });
 });

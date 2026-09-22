@@ -159,3 +159,22 @@ def test_intermediate_symlink_and_manifest_limits(package, tmp_path, monkeypatch
     (tmp_path / "ui_manifest.json").write_bytes(b" " * (64 * 1024 + 1))
     with pytest.raises(ValueError, match="size limit"):
         load_browser_assets(declaration)
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_asset_root_symlink_is_rejected_before_resolution(package, dangling):
+    declaration, _ = package
+    link = declaration.root / "root-link"
+    link.symlink_to(declaration.root / "missing" if dangling else declaration.root, target_is_directory=True)
+    with pytest.raises(ValueError, match="root.*symlink"):
+        load_browser_assets(replace(declaration, root=link))
+
+
+def test_asset_root_retains_normal_parent_symlink_resolution(package):
+    declaration, _ = package
+    # Deployment paths can legitimately traverse aliases such as /var -> /private/var.
+    alias = declaration.root / "parent-alias"
+    alias.symlink_to(declaration.root.parent, target_is_directory=True)
+    via_alias = alias / declaration.root.name
+    assert not via_alias.is_symlink()
+    assert load_browser_assets(replace(declaration, root=via_alias)).revision == load_browser_assets(declaration).revision

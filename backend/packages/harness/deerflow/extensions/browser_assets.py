@@ -83,7 +83,11 @@ def _unique_object(pairs):
 
 
 def load_browser_assets(declaration: BrowserAssets) -> LoadedBrowserAssets:
-    root = Path(declaration.root).resolve(strict=True)
+    declared_root = Path(declaration.root)
+    if declared_root.is_symlink():
+        raise ValueError("Browser asset root must not be a symlink")
+    # Parent path aliases (for example /var on macOS) remain supported.
+    root = declared_root.resolve(strict=True)
     if not root.is_dir():
         raise ValueError("Browser asset root must be a directory")
     manifest = json.loads(_read(root, declaration.manifest, 64 * 1024), object_pairs_hook=_unique_object)

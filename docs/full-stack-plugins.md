@@ -140,7 +140,9 @@ relative URLs, not absolute `/assets/...` paths from a bundler's default public 
 
 The manifest accepts only `schema_version`, `entry` and `files`; unknown versions,
 extra/duplicate keys, duplicate paths, missing files and symlinks are rejected at
-registration. Paths use ASCII letters, digits, `_`, `-`, `.` and `/` separators;
+registration. The declared root itself must not be a symlink (including a dangling
+link); ordinary parent directory aliases are resolved before checking package files.
+Paths use ASCII letters, digits, `_`, `-`, `.` and `/` separators;
 segments must start with a letter, digit, `_` or `-`. Dotfiles, dot segments, empty
 segments, percent encoding, query strings and backslashes are rejected. No directory
 listing or unlisted file is served. Limits: 64 KiB manifest, 256 files, 4 MiB per
@@ -171,6 +173,14 @@ For packaged JavaScript the host inserts a native module script with
 This preserves authenticated static and lazy imports without rewriting source or Blob
 URLs. See the [HTML module-script credential rules](https://html.spec.whatwg.org/multipage/scripting.html#attr-script-crossorigin).
 URLs honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including relative/absolute prefixes.
+The host stops waiting after 30 seconds and rejects that contribution, removing its
+loading script node. This is a waiting deadline, not execution cancellation: native
+module fetching/evaluation can continue and top-level side effects can occur later.
+A late completion cannot change the already rejected host result. Blocking synchronous
+plugin code can also delay the deadline's timer. Trusted plugins should keep top-level
+code free of user-visible side effects, start UI work in `mount` and release it in
+`dispose`. This loader does not provide preemption, rollback or a security sandbox.
+
 Module exports are shared within a document. Keep viewer data in per-mount state,
 observe the host abort signal and clear it on dispose; never retain principals or
 private results in module-level state across account changes.
