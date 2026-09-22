@@ -1958,9 +1958,14 @@ export function InputBox({
 
   const handlePromptTextareaKeyDown = useCallback(
     (event: KeyboardEvent<HTMLElement>) => {
-      handleSkillSuggestionKeyDown(event);
-      if (event.defaultPrevented) {
-        return;
+      // Same rule as the inline-skill editor: the catalog's navigation keys must
+      // win over Enter-to-submit, but not mid-composition, where Enter belongs
+      // to the IME candidate rather than the list.
+      if (!isIMEComposing(event)) {
+        handleSkillSuggestionKeyDown(event);
+        if (event.defaultPrevented) {
+          return;
+        }
       }
       handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
