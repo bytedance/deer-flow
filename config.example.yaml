@@ -2835,8 +2835,9 @@ run_ownership:
 #   long heredocs / large write_file payloads are denied locally once the
 #   argument text exceeds max_state_chars. Probe every tool that can perform the
 #   risky work instead of narrowing the gate. Pointing `guardrails.provider` at
-#   TypeSafe REPLACES the allowlist/OAP provider -- migrate static tool rules to
-#   `authorization.*` first (see backend/docs/GUARDRAILS.md, Option 4).
+#   TypeSafe REPLACES the allowlist/OAP provider: the allow half of an old
+#   allowlist moves into `whitelist` below, while deny rules still belong to
+#   `authorization.*` (see backend/docs/GUARDRAILS.md, Option 4).
 # guardrails:
 #   enabled: true
 #   fail_closed: true
@@ -2847,6 +2848,10 @@ run_ownership:
 #                                   # decisions must stay traceable across releases
 #       threshold: 0.5              # example value; calibrate with the online evaluation
 #       tools: ["bash"]
+#       # whitelist: ["bash", "read_file", "write_file"]   # hard permission list:
+#       #   unlisted tools are refused locally before any state is built, and
+#       #   listed tools still have to pass the risk gate. Omit to enforce none;
+#       #   [] refuses every tool.
 #       # Optional: api_key / api_key_env (default TYPESAFE_API_KEY) / base_url /
 #       #           timeout / deadline_seconds / max_attempts / retry_backoff /
 #       #           max_state_chars / cache_size / cache_ttl_seconds /

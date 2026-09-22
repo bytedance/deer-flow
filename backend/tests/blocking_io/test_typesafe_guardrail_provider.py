@@ -85,6 +85,19 @@ async def test_aevaluate_over_a_real_socket_stays_off_the_loop() -> None:
     assert decision.metadata["model"] == "jev-1.13.0"
 
 
+async def test_whitelist_refusal_stays_local_under_strict_blocking_io() -> None:
+    """The refusal branch runs before any state is built.
+
+    Driven under the strict Blockbuster gate, touching a socket or a client here
+    would fail the anchor: a refused tool is answered without network setup.
+    """
+    provider = TypeSafeGuardrailProvider(api_key="anchor-key", whitelist=["bash"])
+    decision = await provider.aevaluate(GuardrailRequest(tool_name="read_file", tool_input={"path": "a.txt"}))
+
+    assert decision.allow is False
+    assert decision.reasons[0].code == "typesafe.tool_not_whitelisted"
+
+
 async def test_sync_evaluate_on_the_loop_trips_the_gate() -> None:
     """Meta-check (teeth): the sync path blocks, so a loop-blocking regression fails."""
     async with _typesafe_endpoint() as base_url:

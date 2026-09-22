@@ -22,6 +22,12 @@ Three properties are load-bearing and easy to lose in a refactor:
   ``transport_factory`` is therefore a factory, called once per network-needing
   evaluation and closed together with the client it was handed to.
 
+A configured ``whitelist`` is a hard permission list, not an exemption from
+evaluation: a tool outside it is refused locally and never probed, while a
+whitelisted tool still has to clear the risk gate. ``None`` means "no whitelist
+configured" and ``[]`` means "no tool may run" — a truthiness test would collapse
+the second into the first and fail open.
+
 This provider does not extend the audit path: denials reach the run journal
 through ``GuardrailMiddleware`` as usual, allow decisions remain unpersisted, and
 the recorded reason message carries the fields needed to replay the threshold
@@ -110,6 +116,9 @@ class _CacheEntry:
 class TypeSafeGuardrailProvider:
     """Deny tool calls whose Jev risk probability reaches ``threshold``.
 
+    A configured ``whitelist`` decides which tools may run at all: tools outside
+    it are refused locally, without a state, a request or a cache entry.
+
     Configuration lives in ``guardrails.provider.config``; constructor arguments
     are validated eagerly so a bad deployment fails at agent build time rather
     than on the first tool call.
@@ -117,7 +126,7 @@ class TypeSafeGuardrailProvider:
 
     name = "typesafe"
     policy_id = "deerflow.guardrails.typesafe"
-    policy_version = "1.0.0"
+    policy_version = "1.1.0"
 
     def __init__(
         self,
@@ -130,6 +139,7 @@ class TypeSafeGuardrailProvider:
         instructions: str | None = None,
         criteria: dict[object, object] | None = None,
         tools: list[str] | None = None,
+        whitelist: list[str] | None = None,
         timeout: float = 5.0,
         deadline_seconds: float = 10.0,
         max_attempts: int = 2,
@@ -155,7 +165,8 @@ class TypeSafeGuardrailProvider:
         self._instructions = _defaulted_text("instructions", instructions, _DEFAULT_INSTRUCTIONS)
         self._criteria_true = _defaulted_text("criteria.true", _criteria_entry(criteria, True), _DEFAULT_CRITERIA_TRUE)
         self._criteria_false = _defaulted_text("criteria.false", _criteria_entry(criteria, False), _DEFAULT_CRITERIA_FALSE)
-        self._tools = _tool_names(tools)
+        self._tools = _tool_names("tools", tools)
+        self._whitelist = _tool_names("whitelist", whitelist)
         self._timeout = _finite_float("timeout", timeout, minimum=0.0, exclusive=True)
         self._deadline_seconds = _finite_float("deadline_seconds", deadline_seconds, minimum=0.0, exclusive=True)
         self._max_attempts = _whole_number("max_attempts", max_attempts, minimum=1)
@@ -177,6 +188,7 @@ class TypeSafeGuardrailProvider:
             "instructions_hash": canonical_hash(self._instructions),
             "criteria": {"true": self._criteria_true, "false": self._criteria_false},
             "tools": None if self._tools is None else sorted(self._tools),
+            "whitelist": None if self._whitelist is None else sorted(self._whitelist),
             "timeout": self._timeout,
             "deadline_seconds": self._deadline_seconds,
             "max_attempts": self._max_attempts,
@@ -215,8 +227,21 @@ class TypeSafeGuardrailProvider:
     # --- preflight (local, no network) ------------------------------------
 
     def _prepare(self, request: GuardrailRequest) -> _Probe | GuardrailDecision:
-        """Build the state to send, or return a decision that needs no network."""
+        """Build the state to send, or return a decision that needs no network.
+
+        Order is load-bearing: the whitelist is a permission list, so it is
+        checked before the probe scope -- a tool it refuses stays refused even
+        when ``tools`` would have skipped probing it, and must not inherit an
+        allow from being out of probe scope.
+        """
         tool_name = str(request.tool_name)
+        if self._whitelist is not None and tool_name not in self._whitelist:
+            return GuardrailDecision(
+                allow=False,
+                reasons=[GuardrailReason(code="typesafe.tool_not_whitelisted", message=f"typesafe.tool_not_whitelisted: tool={tool_name!r} not in configured whitelist policy={self._policy_ref()}")],
+                policy_id=self.policy_id,
+                metadata={"tool_not_whitelisted": True},
+            )
         if self._tools is not None and tool_name not in self._tools:
             return GuardrailDecision(
                 allow=True,
@@ -530,12 +555,18 @@ def _criteria_entry(criteria: dict[object, object] | None, flag: bool) -> object
     return None
 
 
-def _tool_names(tools: list[str] | None) -> frozenset[str] | None:
-    if tools is None:
+def _tool_names(name: str, value: object) -> frozenset[str] | None:
+    """``None`` means "not configured"; an empty list is a configured empty set.
+
+    A truthiness test would collapse ``[]`` into ``None`` and silently fail open:
+    no whitelist configured lets every whitelisted-scope call through, while no
+    tool whitelisted must refuse every call.
+    """
+    if value is None:
         return None
-    if not isinstance(tools, list) or any(not isinstance(tool, str) or not tool for tool in tools):
-        raise ValueError("tools must be a list of non-empty tool names, or omitted to probe every tool")
-    return frozenset(tools)
+    if not isinstance(value, list) or any(not isinstance(tool, str) or not tool for tool in value):
+        raise ValueError(f"{name} must be a list of non-empty tool names, or omitted")
+    return frozenset(value)
 
 
 __all__ = ["DEFAULT_API_KEY_ENV", "DEFAULT_BASE_URL", "TypeSafeGuardrailError", "TypeSafeGuardrailProvider"]

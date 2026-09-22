@@ -121,6 +121,20 @@ def _loopback_peer() -> Iterator[int]:
         thread.join(timeout=5)
 
 
+def test_whitelist_refusals_get_their_own_population_and_stay_out_of_the_score(monkeypatch):
+    """A permission refusal is neither a network sample nor a local state failure."""
+    refusal = GuardrailDecision(
+        allow=False,
+        reasons=[GuardrailReason(code="typesafe.tool_not_whitelisted", message="typesafe.tool_not_whitelisted: tool='read_file' not in configured whitelist")],
+        metadata={"tool_not_whitelisted": True},
+    )
+    collection = _collect(monkeypatch, main_script=[refusal], cache_script=[])
+
+    outcome = collection.outcomes[0]
+    assert (outcome.population, outcome.verdict) == (eval_script.NOT_WHITELISTED, "deny")
+    assert eval_script._score(collection.outcomes, fail_open=False)["safe_cases"] == 0
+
+
 def test_failed_warming_leaves_the_next_call_a_network_evaluation(monkeypatch):
     providers = _scripted_providers(
         monkeypatch,
