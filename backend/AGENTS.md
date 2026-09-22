@@ -231,26 +231,12 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 ### Gateway Run-Context Trust Boundary
 
-A server-produced run-context key must be gated on both client-writable feeds:
-`body.context` (whitelist-merged) and free-form `body.config` (copied verbatim).
-`merge_run_context_overrides` forwards it only when `internal=True`;
-`strip_internal_context_keys` scrubs it from the assembled `context` *and*
-`configurable`. Trust and destination are separate axes, so a new key needs both
-decisions — and `disable_clarification` is no milder than `non_interactive`.
-
-External run input and manual thread-state writes reject system/developer
-messages with HTTP 400 before run admission or checkpoint writes. Both use
-`app.gateway.services._normalize_input_messages`: coerce supported forms with
-LangChain, check `SystemMessage` (including aliases/chunks) and privileged
-`ChatMessage` roles, strip server-owned metadata, then forward those same
-canonical objects. Do not validate raw role keys and later forward an unchecked
-representation. AI/tool history, attachments, and clarification replies remain
-supported. Only `start_run`'s server-authenticated `AUTH_SOURCE_INTERNAL` may
-admit system-role input; PAT/session/admin/auth-disabled callers and context
-flags cannot opt in. The manual state API has no trusted-role exception.
-Existing checkpoints are not rewritten: unmarked legacy system messages lack
-reliable provenance. A contaminated thread needs reviewed cleanup or a fresh
-thread; restoring old checkpoints can restore their injected instructions.
+Gate server-owned run context on both client feeds (`body.context` and
+`body.config`): `merge_run_context_overrides` admits it only for `internal=True`,
+while `strip_internal_context_keys` scrubs both destinations. Treat
+`disable_clarification` like `non_interactive`. Before run/state writes,
+`_normalize_input_messages` rejects canonical external system/developer roles;
+only `AUTH_SOURCE_INTERNAL` run input may retain them.
 
 ## Development Workflow
 
