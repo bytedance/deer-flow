@@ -11,14 +11,17 @@ from pathlib import Path
 
 
 def default_source(repo_root: Path) -> Path:
+    """Return the repository path to the bundled memory review sample."""
     return repo_root / "backend" / "docs" / "memory-settings-sample.json"
 
 
 def default_target(repo_root: Path) -> Path:
+    """Return the default local runtime memory file path."""
     return repo_root / "backend" / ".deer-flow" / "memory.json"
 
 
 def parse_args(repo_root: Path) -> argparse.Namespace:
+    """Parse CLI options using repository-relative source and target defaults."""
     parser = argparse.ArgumentParser(
         description="Copy the Memory Settings sample data into the local runtime memory file.",
     )
@@ -43,11 +46,13 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
 
 
 def validate_json_file(path: Path) -> None:
+    """Validate that *path* contains parseable JSON."""
     with path.open(encoding="utf-8") as handle:
         json.load(handle)
 
 
 def main() -> int:
+    """Load the sample memory file, backing up an existing target by default."""
     repo_root = Path(__file__).resolve().parents[1]
     args = parse_args(repo_root)
 
