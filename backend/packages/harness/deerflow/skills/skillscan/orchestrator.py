@@ -395,22 +395,49 @@ def _python_secret_literal(expr: ast.expr) -> str | None:
     f-string. Anything that needs runtime data - a call, a variable,
     ``%``-formatting of a template - is not a literal this rule can assert on.
     """
-    if isinstance(expr, ast.Constant):
-        value = expr.value
+    texts: list[str] = []
+    for part in _python_secret_literal_parts(expr):
+        text = _python_secret_literal_atom(part)
+        if text is None:
+            return None
+        texts.append(text)
+    return "".join(texts)
+
+
+def _python_secret_literal_parts(expr: ast.expr) -> list[ast.expr]:
+    """Operands of a concatenation, in source order; a single node for anything else.
+
+    A stack loop rather than recursion: the caller reports a finding from this
+    value, and a chain deep enough to pass the recursion limit would raise past
+    the per-file analyzer guard, which drops every other finding for that file.
+    """
+    stack: list[ast.expr] = [expr]
+    parts: list[ast.expr] = []
+    while stack:
+        node = stack.pop()
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            parts.append(node)
+            continue
+        # Right goes on first so the left operand is collected first: a
+        # concatenation reads in source order however it is parenthesised.
+        stack.append(node.right)
+        stack.append(node.left)
+    return parts
+
+
+def _python_secret_literal_atom(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Constant):
+        value = node.value
         if not isinstance(value, (str, bytes, int)):
             return None
         return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
-    if isinstance(expr, ast.JoinedStr):
+    if isinstance(node, ast.JoinedStr):
         parts: list[str] = []
-        for part in expr.values:
+        for part in node.values:
             if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
                 return None
             parts.append(part.value)
         return "".join(parts)
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        left = _python_secret_literal(expr.left)
-        right = _python_secret_literal(expr.right)
-        return f"{left}{right}" if left is not None and right is not None else None
     return None
 
 

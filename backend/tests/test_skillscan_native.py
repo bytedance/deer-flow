@@ -1522,6 +1522,18 @@ def test_secret_assignment_still_flags_python_literal_concatenation(tmp_path: Pa
     assert "a1b2c3d4e5f6" not in repr(finding)
 
 
+def test_secret_assignment_flags_python_literal_chain_that_parses_but_recurses(tmp_path: Path) -> None:
+    """A long ``+`` chain is valid Python, so folding it must not reach the recursion limit.
+
+    An analyzer exception is caught per file and discards that file's findings, so a
+    chain deep enough to blow the stack silences every rule for the whole file.
+    """
+    source = 'token = os.getenv("DEERFLOW_TOKEN")\nAPI_KEY = ' + " + ".join(['"a1b2c3d4e5f6"'] * 1000) + "\n"
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 2
+
+
 def test_secret_assignment_still_flags_python_placeholder_free_fstring(tmp_path: Path) -> None:
     """An f-string with no interpolated field is a literal written oddly."""
     finding = _finding_by_rule(_scan_python_sample(tmp_path, 'password = f"hunter2-literal"\n'), "secret-env-assignment")
