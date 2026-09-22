@@ -249,7 +249,9 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
     the loss is observable. The wording is deliberately distinct from the
     render-budget "omitted from this model view" line above it: budget
     omission hides entries from one request only, while cap truncation means
-    the entries are gone from the durable ledger for good.
+    the entries are gone from the durable ledger for good. Room for the marker
+    is reserved out of ``max_chars`` before entry lines are laid out, so a
+    full ledger can never crowd the marker out of the render.
     """
     if not entries and not truncated_count:
         return ""
@@ -258,10 +260,20 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
         "## Work already delegated",
         "Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. Retain useful work and address remaining gaps within the current budget.",
     ]
+    marker_line = ""
+    if truncated_count > 0:
+        marker_line = f"- ... (+{truncated_count} earlier delegations dropped permanently at the {_DELEGATION_LEDGER_MAX_ENTRIES}-entry durable ledger cap)"
+    # Reserve room for the cap-truncation marker before laying out entry lines.
+    # A full ledger is exactly the case where the marker matters, and per-entry
+    # text is not constant across releases (the status guidance wording has
+    # grown over time), so without the reservation a longer entry line can push
+    # the marker past the budget and silently hide the permanent drop.
+    entry_budget = max_chars - (len(marker_line) + 1 if marker_line else 0)
+
     omitted = 0
     for index, entry in enumerate(reversed(entries)):
         line = _render_entry_line(entry)
-        if _fits_budget(lines, line, max_chars):
+        if _fits_budget(lines, line, entry_budget):
             lines.append(line)
             continue
         omitted = len(entries) - index
@@ -269,15 +281,14 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
 
     if omitted:
         omitted_line = f"- ... {omitted} older delegation entries omitted from this model view because of context budget"
-        while len(lines) > 1 and not _fits_budget(lines, omitted_line, max_chars):
+        while len(lines) > 1 and not _fits_budget(lines, omitted_line, entry_budget):
             lines.pop()
             omitted += 1
             omitted_line = f"- ... {omitted} older delegation entries omitted from this model view because of context budget"
-        if _fits_budget(lines, omitted_line, max_chars):
+        if _fits_budget(lines, omitted_line, entry_budget):
             lines.append(omitted_line)
 
-    if truncated_count > 0:
-        marker_line = f"- ... (+{truncated_count} earlier delegations dropped permanently at the {_DELEGATION_LEDGER_MAX_ENTRIES}-entry durable ledger cap)"
+    if marker_line:
         if _fits_budget(lines, marker_line, max_chars):
             lines.append(marker_line)
         else:
