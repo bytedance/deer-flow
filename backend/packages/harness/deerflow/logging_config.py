@@ -77,7 +77,7 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
 # collapse to ``/<redacted>`` here; a slot is left for that pass only when
-# it is a whitespace-free absolute URL that the pass consumes whole.
+# the pass consumes it whole (see _url_pass_consumes_slot).
 # The pattern keeps the ``^Redirecting `` prefix anchor — the urllib3-owned
 # literal — because an ``-> /path`` arrow is not urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
@@ -96,14 +96,20 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # line was constructed left to right.
 _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
 
-# A Redirecting slot is kept only when it is a whitespace-free absolute
-# hierarchical URL, so the generic pass consumes the slot WHOLE: its
-# ``host`` and ``rest`` groups both stop at whitespace, so handing over a
-# space-carrying slot leaves everything after the first space — typically
-# the signed query of a malformed ``Location`` — in the clear. Every other
-# form (the RFC 3986 relative references, non-hierarchical schemes, and
-# space-carrying slots) collapses — see _redact_redirecting_origin.
-_SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
+
+# A Redirecting slot is kept only when the generic absolute-URL pass consumes
+# it WHOLE, so the rule is asked of that pass itself rather than of an
+# approximation that can drift from it. The pass leaves a tail in the clear
+# whenever its match stops early: ``rest`` halts at whitespace and at a quote
+# that reads as a closing mark (``https://h/a')b?sig=…`` keeps ``')b?sig=…``),
+# and an empty host before the first ``/?#`` (``https:///path?sig=…``) matches
+# nothing at all because ``host`` needs one character. Both are legal absolute
+# URLs, so a hand-written "is it absolute and whitespace-free" test cannot see
+# them. Everything the pass does not consume whole collapses.
+def _url_pass_consumes_slot(slot: str) -> bool:
+    match = _URL_REDACT_RE.match(slot)
+    return match is not None and match.end() == len(slot)
+
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -173,10 +179,9 @@ class UrlRedactionFilter(logging.Filter):
     per-request ``scheme://host:port "METHOD target HTTP/x.x"`` line, the
     retry lines that log a bare origin-form target (``Retry: <target>``,
     ``Incremented Retry for (url='<target>')``, ``Retrying (…) after
-    connection broken by '…': <target>``), and every non-absolute slot of
-    ``Redirecting <target> -> <target>`` (kept whole only when a
-    whitespace-free scheme-bearing URL fills it, for the generic pass to
-    rewrite). The record is rewritten in place
+    connection broken by '…': <target>``), and every ``Redirecting <target>
+    -> <target>`` slot the generic pass would not consume whole
+    (see _url_pass_consumes_slot). The record is rewritten in place
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
@@ -216,8 +221,8 @@ class UrlRedactionFilter(logging.Filter):
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
             # A slot stays verbatim ONLY when the generic absolute-URL pass
-            # — which runs after this one — consumes it whole: a
-            # whitespace-free absolute URL (see _SLOT_ABSOLUTE_URL_RE).
+            # — which runs after this one — consumes it whole; that pass is
+            # asked directly (see _url_pass_consumes_slot).
             # Everything else collapses: the Location field-value grammar
             # (RFC 3986 relative-part) also admits slash-less relative
             # references (``download?sign=…``, ``?sign=…``, ``#frag``),
@@ -230,7 +235,7 @@ class UrlRedactionFilter(logging.Filter):
             # so the signed tail after the first space survived the same
             # way (round 16).
             def _slot(target: str) -> str:
-                return target if _SLOT_ABSOLUTE_URL_RE.fullmatch(target) else "/<redacted>"
+                return target if _url_pass_consumes_slot(target) else "/<redacted>"
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 

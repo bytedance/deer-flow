@@ -759,11 +759,12 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
     relative-part) also admits slash-less relative references —
     ``download?sign=…`` and ``?sign=…`` kept their signed queries verbatim,
     and neither the slot rule nor the generic absolute-URL pass (which
-    needs a scheme) could see them. A slot is now kept ONLY when it is a
-    whitespace-free absolute hierarchical URL that the generic pass
-    consumes whole, so every relative-reference form collapses,
-    non-hierarchical schemes (``data:…``) collapse, and a space-carrying
-    absolute slot collapses instead of leaking its signed tail (round 16);
+    needs a scheme) could see them. A slot is now kept ONLY when the generic
+    pass itself consumes it whole, so every relative-reference form collapses,
+    non-hierarchical schemes (``data:…``) collapse, a space-carrying
+    absolute slot collapses instead of leaking its signed tail (round 16),
+    and so does a slot the pass stops early on — a quote that reads as a
+    closing mark, or an empty host the ``host`` group never matches;
     network-path references collapse with any
     userinfo credentials they carry."""
     from deerflow.logging_config import UrlRedactionFilter
@@ -787,6 +788,18 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
         ("https://mirror.example/other page?sig=OtherSecret", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
         ("/private/x", "https://mirror.example/a\tb?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # any whitespace, not just a space
         ("/private/x", "https://mirror.example/a%20b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),  # percent-encoded space stays absolute
+        # The pass also stops early INSIDE a whitespace-free absolute slot, so
+        # the "is it absolute" test alone was still not sufficient (review of
+        # #5687): a quote that reads as a closing mark ends ``rest`` there,
+        # and an empty host before the first ``/?#`` matches nowhere at all.
+        ("/private/x", "https://mirror.example/a')b?sig=LeakedSigQuote", "Redirecting /<redacted> -> /<redacted>"),
+        ("https://mirror.example/a')b?sig=LeakedSigQuote", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", "https:///path?sig=LeakedSigEmptyHost", "Redirecting /<redacted> -> /<redacted>"),
+        ("https:///path?sig=LeakedSigEmptyHost", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", 'https://mirror.example/a")b?sig=LeakedSigDQuote', "Redirecting /<redacted> -> /<redacted>"),
+        # A quote embedded mid-path is NOT a closing mark, so that slot is
+        # still consumed whole and keeps its host for debuggability.
+        ("/private/x", "https://mirror.example/a'b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
     ]
     for t1, t2, expected in cases:
         record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, "Redirecting %s -> %s", (t1, t2), None)
