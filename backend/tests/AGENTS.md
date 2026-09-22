@@ -57,3 +57,13 @@ missing token fence; always drain paused tasks and restore session patches.
 Use explicit synchronization such as `threading.Event` rather than sleep-based timing thresholds for worker lifecycle assertions. Every test must release blocked workers and restore any process-global monkeypatches so teardown cannot leak threads or state into later tests.
 
 Stress/soak testing, AnyIO worker instrumentation, Uvicorn multi-process behavior, and broad production executor redesign are separate concerns and should not be folded into these deterministic regressions.
+
+## Managed DeepSeek compatibility
+
+`test_managed_deepseek.py` exercises real SDK request serialization and SSE parsing
+with an HTTP double; do not replace the provider classes with successful stubs.
+`test_managed_deepseek_live.py` uses the same production probe/model configuration
+against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
+`DEEPSEEK_TEST_API_KEY`, never in CI. Keep credentials and provider payloads out of
+committed evidence. A passing connectivity probe does not establish full agent
+compatibility; distinguish protocol assertions from observed live behavior.
