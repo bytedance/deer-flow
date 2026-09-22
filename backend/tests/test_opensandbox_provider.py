@@ -603,6 +603,7 @@ def test_text_binary_append_and_line_ranges() -> None:
     # start reads from the first line instead of wrapping around.
     assert box.read_file(path, 99) == ""
     assert box.read_file(path, -1) == "one\ntwo\nthree\nfour"
+    assert box.read_file(path, end_line=-1) == ""
     binary_path = "/mnt/user-data/outputs/blob.bin"
     box.update_file(binary_path, b"\x00\xffpayload")
     assert box.download_file(binary_path) == b"\x00\xffpayload"

@@ -3554,6 +3554,7 @@ def test_read_file_supports_bounded_ranges():
     # start reads from the first line instead of wrapping around.
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
 
     resolved_path = "/home/user/workspace/range.txt"
     assert all(path == resolved_path for path, _fmt in files.read_calls), files.read_calls
