@@ -574,6 +574,32 @@ class AioSandbox(Sandbox):
             "max_retries": 0,
         }
 
+    # `list_dir` runs its remote `find` while holding `self._lock`, which
+    # serializes *every* sandbox operation. That makes its request lifetime a
+    # shared resource rather than a private one: inheriting the SDK client's
+    # 600 s transport budget would let one stalled `find` monopolize the sandbox
+    # for that whole budget (#5644).
+    #
+    # Two budgets apply, and the ordering between them is load-bearing. This
+    # constant is the server-side total-duration bound, passed as `hard_timeout`.
+    # The host-side request budget is the one `_command_request_options` derives
+    # from it, which is always ``ceil(T + _REQUEST_TIMEOUT_GRACE_SECONDS)`` and
+    # therefore strictly larger. Equal values would let the client win the race
+    # -- the two clocks do not start together, because the client clock covers
+    # connect and send while the server clock starts when the command is picked
+    # up -- and a stalled `find` would then surface as the client's
+    # `TimeoutError` instead of the server's structured HARD_TIMEOUT. Deriving
+    # the host budget through the shared helper keeps that ordering structural
+    # rather than a coincidence between two hand-written numbers.
+    #
+    # `max_retries=0` comes from the same helper. It is a defensive pin rather
+    # than part of the fix: the installed SDK already defaults it to 0 and its
+    # retry branch only fires on 5xx/429/408/409 responses, so a transport
+    # timeout never reached it. Pinning it keeps that true if the default
+    # changes, which matters here because every retry would re-hold the
+    # sandbox-wide lock for another full budget.
+    _DIRECTORY_HARD_TIMEOUT_SECONDS = 25
+
     def execute_command(
         self,
         command: str,
@@ -906,6 +932,13 @@ class AioSandbox(Sandbox):
 
         Returns:
             The contents of the directory.
+
+        Holds ``self._lock`` for the duration of the remote ``find``, so the
+        request is explicitly bounded rather than inheriting the SDK client's
+        600 s transport budget (issue #5644). Two budgets are set, and the
+        server's is strictly below the host's -- see
+        ``_DIRECTORY_HARD_TIMEOUT_SECONDS`` for why that ordering is
+        load-bearing rather than cosmetic.
         """
         resolved = path
         with self._lock:
@@ -916,6 +949,8 @@ class AioSandbox(Sandbox):
                 kwargs = {
                     "command": remote_list_dir_command(resolved, max_depth),
                     "no_change_timeout": self._DEFAULT_NO_CHANGE_TIMEOUT,
+                    "hard_timeout": self._DIRECTORY_HARD_TIMEOUT_SECONDS,
+                    "request_options": self._command_request_options(self._DIRECTORY_HARD_TIMEOUT_SECONDS),
                 }
                 if session_id is not None:
                     kwargs["id"] = session_id

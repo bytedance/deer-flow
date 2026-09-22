@@ -1828,6 +1828,55 @@ class TestNoChangeTimeout:
         assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
 
 
+class TestListDirLockedOperationBudget:
+    """list_dir holds the sandbox-wide lock, so its request must be bounded (#5644)."""
+
+    @staticmethod
+    def _capture_list_dir_call(sandbox):
+        calls = []
+
+        def mock_exec(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b\n\n__DF_FIND_STATUS__:0\n", exit_code=0))
+
+        sandbox._client.shell.exec_command = mock_exec
+        return calls
+
+    def test_list_dir_forwards_hard_timeout_and_bounded_request(self, sandbox):
+        """A locked listing must not inherit the SDK client's 600 s transport budget."""
+        calls = self._capture_list_dir_call(sandbox)
+
+        sandbox.list_dir("/test")
+
+        assert len(calls) == 1
+        assert calls[0]["no_change_timeout"] == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        assert calls[0]["hard_timeout"] == 25
+        assert calls[0]["request_options"] == {
+            "timeout_in_seconds": 30,
+            "max_retries": 0,
+        }
+
+    def test_list_dir_server_budget_is_strictly_below_the_request_budget(self, sandbox):
+        """The ordering between the two budgets is the point, so pin it.
+
+        The client and server clocks do not start together -- the client clock
+        covers connect and send while the server clock starts when the command is
+        picked up -- so equal budgets would let the client always win the race and
+        a stalled `find` would surface as the client's TimeoutError instead of the
+        server's structured HARD_TIMEOUT.
+        """
+        calls = self._capture_list_dir_call(sandbox)
+
+        sandbox.list_dir("/test")
+
+        assert len(calls) == 1
+        hard_timeout = calls[0]["hard_timeout"]
+        request_timeout = calls[0]["request_options"]["timeout_in_seconds"]
+
+        assert hard_timeout < request_timeout, f"the server budget ({hard_timeout}s) must fire before the host request budget ({request_timeout}s), or the structured HARD_TIMEOUT is unreachable"
+        assert request_timeout < sandbox._DEFAULT_HARD_TIMEOUT, f"the host request budget ({request_timeout}s) must stay below the SDK client budget ({sandbox._DEFAULT_HARD_TIMEOUT}s), or a stalled listing re-monopolizes the lock (#5644)"
+
+
 class TestReadFile:
     def test_read_file_forwards_requested_line_range(self, sandbox):
         sandbox._client.file.read_file = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2")))

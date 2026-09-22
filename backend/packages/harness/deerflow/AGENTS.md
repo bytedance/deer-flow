@@ -102,6 +102,35 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### AIO Sandbox Locked-Operation Lifetime
+
+An operation that holds `self._lock` — the sandbox-wide serialization lock every
+operation contends for — makes its request lifetime a shared resource, not a
+private one. It must carry an explicit `request_options.timeout_in_seconds`
+rather than inherit the SDK client's 600 s transport budget, or one stalled
+request monopolizes the sandbox for that whole budget (#5644).
+
+`AioSandbox.list_dir()` is the one call site converted so far. It sets two
+budgets whose ordering is load-bearing: the server-side `hard_timeout`
+(`_DIRECTORY_HARD_TIMEOUT_SECONDS`) is deliberately *strictly below* the host
+request budget, which is derived from it through `_command_request_options`, so
+the ordering is structural rather than two hand-written numbers that must be kept
+in sync. The two clocks do not start together — the client clock covers connect
+and send, the server clock starts when the command is picked up — so equal values
+would let the client always win the race and a stalled `find` would surface as the
+client's `TimeoutError` instead of the server's structured `HARD_TIMEOUT`. The
+`max_retries=0` that comes with the same helper is a defensive pin, not part of
+the fix: the SDK already defaults it to 0 and its retry branch only fires on
+5xx/429/408/409, so a transport timeout never reached it. `file.find_files` /
+`file.list_path` (the `glob` path) do not take the lock and are outside this
+contract.
+
+**Known gaps.** The same monopoly mode still applies to the other locked SDK
+calls: `download_file`, `write_file` and `update_file` hold `self._lock` for
+requests that inherit the full 600 s client budget, so a wedged download or write
+blocks the sandbox exactly as #5644 described for `find`. Convert them the same
+way before treating this invariant as satisfied rather than aspirational.
+
 ### E2B Mount Uploads
 
 E2B uploads host mounts during sandbox creation using binary file objects.
