@@ -672,6 +672,228 @@ class TestErrorObservationRetry:
         assert len(created_ids) == 2
 
 
+class TestShellSessionCreationOwnership:
+    """Shell session creation must be bounded and ambiguous outcomes quarantined."""
+
+    def test_shell_create_uses_bounded_no_retry_request(self, sandbox):
+        sandbox._default_shell_corrupted = True
+
+        sandbox._client.shell.create_session = MagicMock(side_effect=lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id)))
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.execute_command("echo ok") == "ok"
+
+        kwargs = sandbox._client.shell.create_session.call_args.kwargs
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 5,
+            "max_retries": 0,
+        }
+
+    def test_shell_ambiguous_create_is_quarantined_without_exec(self, sandbox):
+        sandbox._default_shell_corrupted = True
+        create_session = MagicMock(side_effect=httpx.ReadTimeout("response stalled"))
+        cleanup_session = MagicMock()
+        exec_command = MagicMock()
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.cleanup_session = cleanup_session
+        sandbox._client.shell.exec_command = exec_command
+
+        out = sandbox.execute_command("unsafe-to-run")
+
+        assert "session creation outcome is unknown" in out
+        exec_command.assert_not_called()
+
+        created_id = create_session.call_args.kwargs["id"]
+        cleanup_session.assert_called_once_with(
+            created_id,
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+        assert sandbox.requires_container_recycle is True
+
+    def test_shell_ambiguous_create_blocks_later_create_without_replay(
+        self,
+        sandbox,
+    ):
+        sandbox._default_shell_corrupted = True
+        create_session = MagicMock(side_effect=httpx.ReadTimeout("response stalled"))
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        first = sandbox.execute_command("first")
+        assert "session creation outcome is unknown" in first
+        assert create_session.call_count == 1
+
+        create_session.reset_mock()
+
+        second = sandbox.execute_command("second")
+
+        assert "earlier ambiguous create outcome" in second
+        create_session.assert_not_called()
+
+    def test_shell_connect_error_is_definite_and_does_not_quarantine(
+        self,
+        sandbox,
+    ):
+        sandbox._default_shell_corrupted = True
+        create_session = MagicMock(side_effect=httpx.ConnectError("connection refused"))
+        cleanup_session = MagicMock()
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.cleanup_session = cleanup_session
+
+        assert sandbox.execute_command("first").startswith("Error:")
+        assert sandbox.requires_container_recycle is False
+        cleanup_session.assert_not_called()
+
+        sandbox.execute_command("second")
+        assert create_session.call_count == 2
+
+    def test_shell_client_error_is_definite_and_does_not_quarantine(
+        self,
+        sandbox,
+    ):
+        from agent_sandbox.core.api_error import ApiError
+
+        sandbox._default_shell_corrupted = True
+        sandbox._client.shell.create_session = MagicMock(
+            side_effect=ApiError(
+                status_code=400,
+                body={"message": "invalid request"},
+            )
+        )
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        assert sandbox.execute_command("bad").startswith("Error:")
+        assert sandbox.requires_container_recycle is False
+        sandbox._client.shell.cleanup_session.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("status_code", "body"),
+        [
+            (500, {"message": "upstream failed after create"}),
+            (200, "not-json"),
+        ],
+    )
+    def test_shell_api_error_without_definite_failure_quarantines(
+        self,
+        sandbox,
+        status_code,
+        body,
+    ):
+        from agent_sandbox.core.api_error import ApiError
+
+        sandbox._default_shell_corrupted = True
+        sandbox._client.shell.create_session = MagicMock(
+            side_effect=ApiError(
+                status_code=status_code,
+                body=body,
+            )
+        )
+        sandbox._client.shell.cleanup_session = MagicMock()
+        sandbox._client.shell.exec_command = MagicMock()
+
+        out = sandbox.execute_command("unsafe")
+
+        assert "session creation outcome is unknown" in out
+        assert sandbox.requires_container_recycle is True
+        sandbox._client.shell.exec_command.assert_not_called()
+        sandbox._client.shell.cleanup_session.assert_called_once()
+
+    def test_shell_create_already_in_flight_may_finish_but_no_new_create_starts_after_dirty(
+        self,
+        sandbox,
+    ):
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+        create_calls = 0
+
+        def create_session(id, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            created_ids.append(id)
+            if create_calls == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+                raise httpx.ReadTimeout("first create stalled")
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.cleanup_session = MagicMock()
+        sandbox._client.shell.exec_command = lambda command, **kwargs: (
+            exec_ids.append(kwargs["id"])
+            or SimpleNamespace(
+                data=SimpleNamespace(
+                    output="ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        first_results: list[str] = []
+
+        def first_scope() -> None:
+            first_results.append(
+                sandbox.execute_command_in_scope(
+                    "first",
+                    scope_id="scope-a",
+                )
+            )
+
+        thread = threading.Thread(target=first_scope)
+        thread.start()
+        assert first_entered.wait(timeout=2)
+
+        # This create began while the plane was still CLEAN.
+        assert (
+            sandbox.execute_command_in_scope(
+                "second",
+                scope_id="scope-b",
+            )
+            == "ok"
+        )
+        owned_id = sandbox._scoped_shell_sessions["scope-b"].session_id
+        assert owned_id is not None
+
+        release_first.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert "session creation outcome is unknown" in first_results[0]
+        assert sandbox.requires_container_recycle is True
+
+        # Existing confirmed ownership remains usable.
+        assert (
+            sandbox.execute_command_in_scope(
+                "reuse",
+                scope_id="scope-b",
+            )
+            == "ok"
+        )
+        assert exec_ids[-1] == owned_id
+
+        before = create_calls
+        blocked = sandbox.execute_command_in_scope(
+            "new",
+            scope_id="scope-c",
+        )
+        assert "earlier ambiguous create outcome" in blocked
+        assert create_calls == before
+
+
 class TestScopedShellSessions:
     """Concurrent subagents use independent persistent shell sessions (#5128)."""
 

@@ -45,6 +45,14 @@ class _ScopedShellSession:
     session_id: str | None = None
 
 
+@dataclass
+class _SessionCreationState:
+    """Process-local ownership state for one server-side session plane."""
+
+    pending: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
+
+
 class AioSandbox(Sandbox):
     """Sandbox implementation using the agent-infra/sandbox Docker container.
 
@@ -112,6 +120,9 @@ class AioSandbox(Sandbox):
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
+        self._session_creation_state_lock = threading.Lock()
+        self._shell_session_creation_state = _SessionCreationState()
+        self._bash_session_creation_state = _SessionCreationState()
 
     @property
     def base_url(self) -> str:
@@ -242,9 +253,76 @@ class AioSandbox(Sandbox):
                 cleanup_error,
             )
 
+    @staticmethod
+    def _is_definite_session_creation_failure(error: Exception) -> bool:
+        if isinstance(error, httpx.ConnectError):
+            return True
+        if isinstance(error, ApiError):
+            return 400 <= error.status_code < 500
+        return False
+
+    def _session_creation_state(self, plane: str) -> _SessionCreationState:
+        if plane == "shell":
+            return self._shell_session_creation_state
+        if plane == "bash":
+            return self._bash_session_creation_state
+        raise ValueError(f"unknown session creation plane: {plane}")
+
+    def _begin_session_creation(self, plane: str, session_id: str) -> None:
+        with self._session_creation_state_lock:
+            state = self._session_creation_state(plane)
+            if state.ambiguous:
+                raise RuntimeError(f"AIO {plane} session creation is quarantined after an earlier ambiguous create outcome; recycle the sandbox before creating another session")
+            state.pending.add(session_id)
+
+    def _resolve_session_creation(self, plane: str, session_id: str) -> None:
+        with self._session_creation_state_lock:
+            self._session_creation_state(plane).pending.discard(session_id)
+
+    def _mark_session_creation_ambiguous(
+        self,
+        plane: str,
+        session_id: str,
+    ) -> None:
+        with self._session_creation_state_lock:
+            state = self._session_creation_state(plane)
+            state.pending.discard(session_id)
+            state.ambiguous.add(session_id)
+
+    @property
+    def requires_container_recycle(self) -> bool:
+        with self._session_creation_state_lock:
+            shell = self._shell_session_creation_state
+            bash = self._bash_session_creation_state
+            return bool(shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
-        client.shell.create_session(id=session_id)
+        self._begin_session_creation("shell", session_id)
+
+        try:
+            client.shell.create_session(
+                id=session_id,
+                request_options=self._session_create_request_options(),
+            )
+        except Exception as error:
+            if self._is_definite_session_creation_failure(error):
+                self._resolve_session_creation("shell", session_id)
+                raise
+
+            self._mark_session_creation_ambiguous("shell", session_id)
+
+            # Best effort only. A successful cleanup does NOT clear the tombstone:
+            # the original create may still commit after this cleanup returns.
+            self._cleanup_session_best_effort(
+                client,
+                session_id,
+                context="ambiguous shell session creation",
+                request_options=self._bounded_cleanup_request_options(),
+            )
+            raise RuntimeError("AIO shell session creation outcome is unknown; the sandbox is quarantined for recycle") from error
+
+        self._resolve_session_creation("shell", session_id)
         return session_id
 
     def _ensure_default_shell_session_id(self, client) -> str | None:
@@ -481,6 +559,13 @@ class AioSandbox(Sandbox):
         }
 
     @classmethod
+    def _session_create_request_options(cls) -> dict[str, int]:
+        return {
+            "timeout_in_seconds": cls._SESSION_CREATE_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+    @classmethod
     def _transport_timeout_error(cls, timeout: float) -> str:
         request_timeout = cls._command_request_options(timeout)["timeout_in_seconds"]
         return f"Error: Sandbox command response timed out after {request_timeout} seconds; command outcome is unknown and the command was not retried."
@@ -553,6 +638,7 @@ class AioSandbox(Sandbox):
     _DEFAULT_HARD_TIMEOUT = 600.0
     _REQUEST_TIMEOUT_GRACE_SECONDS = 5.0
     _CLEANUP_REQUEST_TIMEOUT_SECONDS = 5
+    _SESSION_CREATE_REQUEST_TIMEOUT_SECONDS = 5
 
     def _effective_command_timeout(self, timeout: float | None) -> float:
         return timeout if timeout is not None else (getattr(self, "_default_command_timeout", None) or self._DEFAULT_HARD_TIMEOUT)
