@@ -324,6 +324,9 @@ class DeerFlowClient:
                 self._loaded_agent_config_key = loaded_config_key
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
+        mcp_plugins = getattr(agent_config, "mcp_plugins", None)
+        # Delegation reads this run's metadata, including when the graph is cached.
+        config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -349,6 +352,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             memory_enabled,
+            frozenset(mcp_plugins) if mcp_plugins is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -390,7 +394,7 @@ class DeerFlowClient:
         )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
@@ -483,11 +487,11 @@ class DeerFlowClient:
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(*, model_name: str | None, subagent_enabled: bool, mcp_plugins: list[str] | None = None):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
