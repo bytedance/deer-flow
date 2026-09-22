@@ -230,6 +230,23 @@ class TestMigrateUserProfile:
         assert (base_dir / "migration-conflicts" / "USER.md").read_text(encoding="utf-8") == "# legacy"
         assert not paths.user_md_file.exists()
 
+    def test_a_second_conflict_does_not_replace_the_first(self, base_dir: Path, paths: Paths):
+        """The conflict bucket is for manual review, so it must not lose a copy."""
+        dest = paths.user_profile_file("default")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("# already migrated", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        for ordinal in ("first", "second", "third"):
+            paths.user_md_file.write_text(f"# {ordinal} conflicted profile", encoding="utf-8")
+            migrate_user_profile(paths, user_id="default")
+
+        bucket = base_dir / "migration-conflicts"
+        kept = sorted(f.read_text(encoding="utf-8") for f in bucket.iterdir())
+        assert kept == ["# first conflicted profile", "# second conflicted profile", "# third conflicted profile"]
+        assert sorted(f.name for f in bucket.iterdir()) == ["USER.md", "USER_1.md", "USER_2.md"]
+
     def test_no_legacy_profile_is_noop(self, base_dir: Path, paths: Paths):
         from scripts.migrate_user_isolation import migrate_user_profile
 

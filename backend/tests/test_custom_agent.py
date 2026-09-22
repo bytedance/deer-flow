@@ -909,6 +909,22 @@ class TestUserProfileAPI:
 class TestUserProfileIsolation:
     """The profile describes one person, so it must not be shared between users."""
 
+    @pytest.fixture(autouse=True)
+    def _enabled_agents_api(self):
+        """Enable the management API and restore the previous process-global config.
+
+        These tests call the handlers directly rather than through
+        ``agent_client``, so they own the save/restore that fixture does — a
+        leaked ``enabled=True`` would make any later test of the disabled
+        default pass or fail on suite order.
+        """
+        previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        try:
+            yield
+        finally:
+            set_agents_api_config(previous_config)
+
     @staticmethod
     def _as_user(user_id: str):
         from deerflow.runtime.user_context import set_current_user
@@ -943,7 +959,6 @@ class TestUserProfileIsolation:
         from deerflow.runtime.user_context import reset_current_user
 
         agents_router, paths_patch = self._profile_routes(tmp_path)
-        set_agents_api_config(AgentsApiConfig(enabled=True))
         with paths_patch:
             token = self._as_user("alice")
             try:
@@ -973,7 +988,6 @@ class TestUserProfileIsolation:
 
         (tmp_path / "USER.md").write_text("# From before user isolation", encoding="utf-8")
         agents_router, paths_patch = self._profile_routes(tmp_path)
-        set_agents_api_config(AgentsApiConfig(enabled=True))
         with paths_patch:
             token = self._as_user("alice")
             try:

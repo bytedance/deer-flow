@@ -9,6 +9,7 @@ The script is idempotent — re-running it after a successful migration is a no-
 import argparse
 import logging
 import shutil
+from pathlib import Path
 
 from deerflow.config.paths import Paths, get_paths
 
@@ -130,6 +131,22 @@ def migrate_agents(
     return report
 
 
+def _unique_conflict_path(conflicts_dir: Path, name: str) -> Path:
+    """Return a free path in the conflict bucket, so a re-run never replaces an earlier copy.
+
+    The thread and agent migrations move directories, which nest; a single
+    file would overwrite its predecessor under ``rename`` semantics.
+    """
+    candidate = conflicts_dir / name
+    if not candidate.exists():
+        return candidate
+    stem, suffix = Path(name).stem, Path(name).suffix
+    counter = 1
+    while (candidate := conflicts_dir / f"{stem}_{counter}{suffix}").exists():
+        counter += 1
+    return candidate
+
+
 def migrate_user_profile(
     paths: Paths,
     user_id: str = "default",
@@ -163,11 +180,13 @@ def migrate_user_profile(
     entry = {"file": legacy_profile.name, "user_id": user_id, "action": ""}
 
     if dest.exists():
-        conflicts_path = paths.base_dir / "migration-conflicts" / "USER.md"
-        entry["action"] = f"conflict -> {conflicts_path}"
+        conflicts_dir = paths.base_dir / "migration-conflicts"
+        conflicts_path = conflicts_dir / "USER.md"
         if not dry_run:
-            conflicts_path.parent.mkdir(parents=True, exist_ok=True)
+            conflicts_dir.mkdir(parents=True, exist_ok=True)
+            conflicts_path = _unique_conflict_path(conflicts_dir, "USER.md")
             shutil.move(str(legacy_profile), str(conflicts_path))
+        entry["action"] = f"conflict -> {conflicts_path}"
         logger.warning("Conflict for USER.md: moved legacy copy to %s", conflicts_path)
     else:
         entry["action"] = f"moved -> {dest}"
