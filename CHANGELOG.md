@@ -941,6 +941,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** Deleting an uploaded document no longer deletes the converted
+  Markdown beside it. Conversion names a companion after the document's stem
+  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
+  a document can belong to another document sharing the stem, or to the user:
+  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
+  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
+  document, stay listed, and can be deleted on their own. ([#5673])
 - **subagents:** Recognize zero-byte regular deliverables in remote sandbox
   acceptance checks. Readable empty files now satisfy `exists` and
   `file_written` and deterministically fail `non-empty`, instead of remaining
@@ -2785,6 +2792,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Document conversion no longer re-opens the upload by name. The
+  Gateway converted the committed file and the embedded client converted the
+  copy it had just placed in the thread's uploads directory, so a sandbox that
+  replaced that name with a symlink in between had a host file converted into
+  the thread as the `.md` companion. The Gateway now converts a private copy of
+  the staged bytes, read through the descriptor it wrote, and the client
+  converts the caller's own source file. ([#5611])
 - **client:** `DeerFlowClient.upload_files` no longer writes through a
   symlink. A symlink planted in the sandbox-writable uploads directory, at an
   upload's name or its Markdown companion's name, made the embedded client
@@ -4323,3 +4337,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673

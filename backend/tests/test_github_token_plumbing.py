@@ -119,7 +119,7 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
             captured["exec_session"] = kwargs["session_id"]
             return SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))
 
-        def close_session(self, session_id):
+        def close_session(self, session_id, **kwargs):
             captured["closed_session"] = session_id
 
     sbx = AioSandbox.__new__(AioSandbox)
