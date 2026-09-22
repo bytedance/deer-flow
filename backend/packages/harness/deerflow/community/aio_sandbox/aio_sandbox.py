@@ -385,17 +385,17 @@ class AioSandbox(Sandbox):
                         session_id=scoped.session_id,
                         timeout=effective_timeout,
                     )
-                except httpx.TimeoutException:
+                except httpx.TransportError as exc:
                     session_id = scoped.session_id
                     scoped.session_id = None
                     if session_id is not None:
                         self._cleanup_session_best_effort(
                             client,
                             session_id,
-                            context="execution scope after transport timeout",
+                            context="execution scope after transport failure",
                             request_options=self._bounded_cleanup_request_options(),
                         )
-                    return self._transport_timeout_error(effective_timeout)
+                    return self._transport_failure_error(exc, effective_timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
@@ -409,8 +409,8 @@ class AioSandbox(Sandbox):
                             context="execution scope after missing session",
                             timeout=effective_timeout,
                         )
-                    except httpx.TimeoutException:
-                        return self._transport_timeout_error(effective_timeout)
+                    except httpx.TransportError as exc:
+                        return self._transport_failure_error(exc, effective_timeout)
                 if self._is_session_invalidating_shell_status(status):
                     session_id = scoped.session_id
                     scoped.session_id = None
@@ -439,8 +439,8 @@ class AioSandbox(Sandbox):
                             context="execution scope",
                             timeout=effective_timeout,
                         )
-                    except httpx.TimeoutException:
-                        return self._transport_timeout_error(effective_timeout)
+                    except httpx.TransportError as exc:
+                        return self._transport_failure_error(exc, effective_timeout)
                 return self._render_shell_output(
                     output,
                     exit_code,
@@ -487,6 +487,12 @@ class AioSandbox(Sandbox):
     def _transport_timeout_error(cls, timeout: float) -> str:
         request_timeout = cls._command_request_options(timeout)["timeout_in_seconds"]
         return f"Error: Sandbox command response timed out after {request_timeout} seconds; command outcome is unknown and the command was not retried."
+
+    @classmethod
+    def _transport_failure_error(cls, error: httpx.TransportError, timeout: float) -> str:
+        if isinstance(error, httpx.TimeoutException):
+            return cls._transport_timeout_error(timeout)
+        return "Error: Sandbox command transport failed; command outcome is unknown and the command was not retried."
 
     @staticmethod
     def _is_unexpected_shell_status(status: str | None) -> bool:
@@ -641,7 +647,7 @@ class AioSandbox(Sandbox):
                         session_id=session_id,
                         timeout=effective_timeout,
                     )
-                except httpx.TimeoutException:
+                except httpx.TransportError as exc:
                     session_id = self._recovery_session_id
                     self._recovery_session_id = None
                     self._default_shell_corrupted = True
@@ -649,10 +655,10 @@ class AioSandbox(Sandbox):
                         self._cleanup_session_best_effort(
                             client,
                             session_id,
-                            context="default shell after transport timeout",
+                            context="default shell after transport failure",
                             request_options=self._bounded_cleanup_request_options(),
                         )
-                    return self._transport_timeout_error(effective_timeout)
+                    return self._transport_failure_error(exc, effective_timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
@@ -668,8 +674,8 @@ class AioSandbox(Sandbox):
                             context="default shell after missing session",
                             timeout=effective_timeout,
                         )
-                    except httpx.TimeoutException:
-                        return self._transport_timeout_error(effective_timeout)
+                    except httpx.TransportError as exc:
+                        return self._transport_failure_error(exc, effective_timeout)
 
                 if not recovered_missing_session and status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     self._default_shell_corrupted = True
@@ -684,8 +690,8 @@ class AioSandbox(Sandbox):
                             context="default shell",
                             timeout=effective_timeout,
                         )
-                    except httpx.TimeoutException:
-                        return self._transport_timeout_error(effective_timeout)
+                    except httpx.TransportError as exc:
+                        return self._transport_failure_error(exc, effective_timeout)
 
                 if self._is_session_invalidating_shell_status(status):
                     session_id = self._recovery_session_id
@@ -936,7 +942,7 @@ class AioSandbox(Sandbox):
                     kwargs["id"] = session_id
 
                 result = client.shell.exec_command(**kwargs)
-            except httpx.TimeoutException as exc:
+            except httpx.TransportError as exc:
                 # The response never arrived, so we cannot tell whether ``find``
                 # is still running on the targeted shell generation. Fence that
                 # generation and replay nothing. Local recovery ownership is
@@ -948,11 +954,20 @@ class AioSandbox(Sandbox):
                     self._cleanup_session_best_effort(
                         client,
                         session_id,
-                        context="list_dir after transport timeout",
+                        context="list_dir after transport failure",
                         request_options=self._bounded_cleanup_request_options(),
                     )
                 logger.error(f"Failed to list directory in sandbox: {exc}")
-                raise OSError(f"Failed to list directory '{resolved}': request timed out; directory result is unknown") from exc
+                reason = "request timed out" if isinstance(exc, httpx.TimeoutException) else "transport failed"
+                raise OSError(f"Failed to list directory '{resolved}': {reason}; directory result is unknown") from exc
+            except ApiError as exc:
+                if self._is_missing_shell_session_error(exc):
+                    # The server has lost this generation. Forget it without replaying
+                    # the listing; the next call creates a fresh recovery session.
+                    self._default_shell_corrupted = True
+                    self._recovery_session_id = None
+                logger.error(f"Failed to list directory in sandbox: {exc}")
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: {exc}") from exc
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
                 raise OSError(f"Failed to list directory '{resolved}' in sandbox: {e}") from e
