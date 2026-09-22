@@ -514,6 +514,23 @@ def test_read_missing_file_returns_error() -> None:
     assert box.read_file("/mnt/user-data/workspace/nope.txt").startswith("Error:")
 
 
+def test_read_file_supports_bounded_ranges() -> None:
+    """The tools layer passes ``start_line``/``end_line`` on every ranged read."""
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/range.txt", "line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising: the tool layer's
+    # "(start_line exceeds file length)" message and the truncated-read
+    # continuation path both depend on that contract.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    # Negative bounds clamp like LocalSandbox instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == ("line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
+
+
 def test_download_missing_file_raises_oserror() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     with pytest.raises(OSError):
