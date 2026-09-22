@@ -99,6 +99,8 @@ def image_search_tool(
         max_results: Maximum number of images to return. Default is 5.
         size: Image size filter. Options: "Small", "Medium", "Large", "Wallpaper". Use "Large" for reference images.
         color: Color filter. Options: "color", "Monochrome", "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Brown", "Black", "Gray", "Teal", "White".
+            Note that "color" means full-color (as opposed to "Monochrome"), not a meta-parameter.
+            Match the dominant palette of the image you plan to generate; omit it for unrestricted results.
         type_image: Image type filter. Options: "photo", "clipart", "gif", "transparent", "line". Use "photo" for realistic references.
         layout: Layout filter. Options: "Square", "Tall", "Wide". Choose based on your generation needs.
         license_image: License filter. Options: "any", "Public", "Share", "ShareCommercially", "Modify", "ModifyCommercially".
