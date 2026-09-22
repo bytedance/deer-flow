@@ -1390,8 +1390,9 @@ def test_release_dirty_sandbox_destroys_container_instead_of_warming(
     provider._backend.destroy.assert_called_once_with(info)
 
 
-def test_release_dirty_sandbox_destroy_failure_never_parks_warm(
+def test_release_dirty_sandbox_destroy_failure_is_logged_without_warming(
     tmp_path,
+    caplog,
 ):
     provider, sandbox, _ = _make_provider_with_active_sandbox(
         tmp_path,
@@ -1400,13 +1401,15 @@ def test_release_dirty_sandbox_destroy_failure_never_parks_warm(
     sandbox.requires_container_recycle = True
     provider._backend.destroy.side_effect = RuntimeError("container stop failed")
 
-    with pytest.raises(
-        RuntimeError,
-        match="container stop failed",
-    ):
+    with caplog.at_level("ERROR"):
         provider.release("sandbox-dirty-fail")
 
     assert "sandbox-dirty-fail" not in provider._warm_pool
+    assert "sandbox-dirty-fail" not in provider._sandboxes
+    assert "sandbox-dirty-fail" not in provider._sandbox_infos
+    assert "Failed to recycle sandbox sandbox-dirty-fail" in caplog.text
+    provider._backend.destroy.assert_called_once()
+    sandbox.close.assert_called_once_with()
 
 
 def test_release_swallows_close_errors(tmp_path, caplog):
