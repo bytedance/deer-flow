@@ -447,7 +447,8 @@ def _normalize_input_messages(
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The ``messages`` channel is canonicalized to a list of ``BaseMessage``
+    The server-owned ``sandbox`` channel is rejected. The ``messages`` channel
+    is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
     forged metadata and delegation verdicts are removed. ``normalize_input``
@@ -458,6 +459,12 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
+    if "sandbox" in values:
+        raise HTTPException(
+            status_code=400,
+            detail="External sandbox state is not allowed",
+        )
+
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
         if channel == "messages" and value is not None:
@@ -487,6 +494,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
+    The ``sandbox`` channel is also server-owned. External callers cannot select
+    a provider resource by id; trusted internal run admission may carry the
+    server's own restored value.
+
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
     receipts, delegated receipt metadata/verdicts, and ``untrusted_input`` are
@@ -509,6 +520,11 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     """
     if raw_input is None:
         return {}
+    if not trusted_internal and "sandbox" in raw_input:
+        raise HTTPException(
+            status_code=400,
+            detail="External sandbox state is not allowed",
+        )
     result = raw_input
     messages = raw_input.get("messages")
     if messages is not None:

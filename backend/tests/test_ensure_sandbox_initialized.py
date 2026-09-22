@@ -80,6 +80,10 @@ class _RecordingProvider(SandboxProvider):
             return self.sandbox
         return None
 
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id: str) -> None:
         self.released.append(sandbox_id)
 
