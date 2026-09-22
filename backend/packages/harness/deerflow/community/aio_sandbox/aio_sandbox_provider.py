@@ -15,12 +15,14 @@ import atexit
 import contextlib
 import hashlib
 import logging
+import math
 import os
 import signal
 import threading
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 try:
     import fcntl
@@ -169,6 +171,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     # normally timing-out refresh + release still finishes synchronously.
     _TEARDOWN_JOIN_TIMEOUT_SECONDS = 12.0
 
+    @staticmethod
+    def _positive_float(name: str, value: Any, default: float) -> float:
+        try:
+            resolved = float(default if value is None else value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"sandbox.{name} must be positive") from exc
+        if not math.isfinite(resolved) or resolved <= 0:
+            raise ValueError(f"sandbox.{name} must be positive")
+        return resolved
+
     def __init__(self):
         self._lock = threading.Lock()
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
@@ -301,6 +313,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             configured_skills_path = DEFAULT_SKILLS_CONTAINER_PATH
 
         environment = self._resolve_env_vars(sandbox_config.environment or {})
+        command_timeout = self._positive_float(
+            "bash_command_timeout",
+            getattr(sandbox_config, "bash_command_timeout", None),
+            AioSandbox._DEFAULT_HARD_TIMEOUT,
+        )
         max_running_subagents = int(getattr(getattr(config, "subagent_runtime", None), "max_running", 3))
         required_shell_sessions = max_running_subagents + _SHELL_SESSION_HEADROOM
         configured_shell_sessions = environment.get("MAX_SHELL_SESSIONS")
@@ -321,6 +338,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "command_timeout": command_timeout,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
@@ -1686,7 +1704,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             self._warm_pool_identity.pop(sandbox_id, None)
             info, _ = warm_item
-            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
+            sandbox = AioSandbox(
+                id=sandbox_id,
+                base_url=info.sandbox_url,
+                request_headers=info.request_headers,
+                default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+            )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._active_sandbox_identity[sandbox_id] = key
@@ -1731,7 +1754,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._assert_active_identity_available_locked(info.sandbox_id, key)
             self._assert_warm_identity_available_locked(info.sandbox_id, key)
 
-        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
+        sandbox = AioSandbox(
+            id=info.sandbox_id,
+            base_url=info.sandbox_url,
+            request_headers=info.request_headers,
+            default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+        )
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
         # There is no container to roll back (we did not create it), but the
         # host-side HTTP client constructed above is ours and must not leak —
@@ -1777,7 +1805,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
+        sandbox = AioSandbox(
+            id=sandbox_id,
+            base_url=info.sandbox_url,
+            request_headers=info.request_headers,
+            default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+        )
         key = (
             self._thread_key(
                 thread_id,
