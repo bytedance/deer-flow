@@ -1778,10 +1778,9 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts
