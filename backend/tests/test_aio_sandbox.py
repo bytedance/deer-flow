@@ -1694,6 +1694,22 @@ class TestScopedShellSessions:
         assert sandbox._scoped_shell_sessions == {}
         client.shell.create_session.assert_not_called()
 
+    def test_release_command_scope_uses_bounded_cleanup(self, sandbox):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ScopedShellSession
+
+        sandbox._scoped_shell_sessions["scope-a"] = _ScopedShellSession(session_id="session-a")
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        sandbox.release_command_scope("scope-a")
+
+        sandbox._client.shell.cleanup_session.assert_called_once_with(
+            "session-a",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
 
 class TestBashExecUnsupportedFailFast:
     """Regression tests for #3921: sandbox images older than all-in-one-sandbox
@@ -1984,6 +2000,179 @@ class TestListDirSerialization:
         assert sandbox._default_shell_corrupted is True
         assert sandbox._recovery_session_id is None
         sandbox._client.shell.exec_command.assert_not_called()
+
+
+class TestListDirTimeout:
+    """list_dir owns a directory-operation deadline, independent of bash_command_timeout (#5644).
+
+    ``list_dir`` shells out to ``find`` while holding ``self._lock``, on whichever
+    shell generation #5634 selects: the implicit persistent session, or the
+    explicit recovery session once the implicit one has been fenced. Before this
+    contract it sent only the SDK's 600s ``no_change_timeout`` and used the SDK
+    client's 600s transport budget, so a wedged ``find`` held the sandbox lock for
+    the full SDK timeout. These tests pin the directory deadline, the
+    returned-status matrix, the target-generation fencing, and the "exception
+    must release the lock" liveness invariant.
+    """
+
+    def test_list_dir_passes_hard_timeout_and_bounded_request_options(self, sandbox):
+        """find runtime <= 60s, request wait <= 65s, no retry; idle guard cannot preempt it."""
+        calls = []
+
+        def exec_command(command, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n/b\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+
+        sandbox._client.shell.exec_command = exec_command
+
+        assert sandbox.list_dir("/test") == ["/a", "/b"]
+
+        budget = type(sandbox)._LIST_DIR_TIMEOUT_SECONDS
+        assert budget == 60.0
+        assert len(calls) == 1
+        assert calls[0]["hard_timeout"] == budget
+        assert calls[0]["request_options"] == {"timeout_in_seconds": 65, "max_retries": 0}
+        # no_change_timeout must not be the binding constraint: it stays strictly above
+        # the hard timeout, so a find that is merely quiet still dies on hard_timeout.
+        assert calls[0]["no_change_timeout"] > budget
+
+    def test_list_dir_transport_timeout_releases_lock_and_fences_implicit_shell(self, sandbox):
+        """A host transport timeout is ambiguous: fence the implicit shell, replay nothing, free the lock."""
+        calls = []
+
+        def exec_command(command, **kwargs):
+            calls.append(kwargs)
+            raise httpx.ReadTimeout("response stalled")
+
+        sandbox._client.shell.exec_command = exec_command
+
+        with pytest.raises(OSError, match="Failed to list directory") as exc:
+            sandbox.list_dir("/test")
+
+        assert "unknown" in str(exc.value)
+        assert len(calls) == 1, "an ambiguous list_dir outcome must never be replayed"
+        assert sandbox._default_shell_corrupted is True
+        assert sandbox._lock.acquire(blocking=False) is True, "list_dir must release the lock after a transport timeout"
+        sandbox._lock.release()
+
+    def test_list_dir_transport_timeout_fences_targeted_recovery_session(self, sandbox):
+        """An ambiguous list_dir on the recovery session must drop that generation, not keep it."""
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = "recovery-session"
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+        sandbox._client.shell.exec_command = MagicMock(side_effect=httpx.ConnectTimeout("connect stalled"))
+
+        with pytest.raises(OSError):
+            sandbox.list_dir("/test")
+
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["id"] == "recovery-session"
+        assert sandbox._default_shell_corrupted is True
+        assert sandbox._recovery_session_id is None
+        cleanup_session.assert_called_once_with(
+            "recovery-session",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
+    def test_list_dir_hard_timeout_raises_without_fencing_shell(self, sandbox):
+        """hard_timeout is a definite termination: raise, but keep the targeted generation reusable."""
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = "recovery-session"
+        sandbox._client.shell.cleanup_session = MagicMock()
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/a\n/b\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=None,
+                    status="hard_timeout",
+                )
+            )
+        )
+
+        with pytest.raises(TimeoutError) as exc:
+            sandbox.list_dir("/test")
+
+        assert type(exc.value) is TimeoutError
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["id"] == "recovery-session"
+        assert sandbox._default_shell_corrupted is True
+        assert sandbox._recovery_session_id == "recovery-session"
+        sandbox._client.shell.cleanup_session.assert_not_called()
+        assert sandbox._lock.acquire(blocking=False) is True
+        sandbox._lock.release()
+
+    def test_list_dir_partial_output_with_hard_timeout_is_not_a_listing(self, sandbox):
+        """Partial find stdout under hard_timeout must never be returned as a complete listing."""
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(output="/a\n/b\n", exit_code=None, status="hard_timeout"),
+            )
+        )
+
+        with pytest.raises(TimeoutError):
+            sandbox.list_dir("/test")
+
+    @pytest.mark.parametrize("status", ["no_change_timeout", "terminated", "running", "pending", "weird_future_status"])
+    def test_list_dir_ambiguous_status_does_not_return_partial_listing(self, sandbox, status):
+        """Ambiguous statuses raise, never parse, and fence the generation that ran the listing."""
+        sandbox._default_shell_corrupted = True
+        sandbox._recovery_session_id = "recovery-session"
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(output="/a\n/b\n", exit_code=0, status=status),
+            )
+        )
+
+        with pytest.raises(OSError, match="Failed to list directory") as exc:
+            sandbox.list_dir("/test")
+
+        assert type(exc.value) is OSError
+        kwargs = sandbox._client.shell.exec_command.call_args.kwargs
+        assert kwargs["id"] == "recovery-session"
+        assert sandbox._default_shell_corrupted is True
+        assert sandbox._recovery_session_id is None
+        cleanup_session.assert_called_once_with(
+            "recovery-session",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
+    def test_list_dir_completed_status_preserves_existing_parsing(self, sandbox):
+        """A completed find still follows the shared stdout contract, including missing-path classification."""
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="/test\n/test/sub\n\n__DF_FIND_STATUS__:0\n",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.list_dir("/test") == ["/test", "/test/sub"]
+
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(output="\n__DF_FIND_STATUS__:missing\n", exit_code=1, status="completed"),
+            )
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/missing")
 
 
 class TestNoChangeTimeout:
@@ -2488,6 +2677,38 @@ class TestClose:
         sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
         sandbox.close()  # must not raise
         assert sandbox._client is None
+
+    def test_close_scoped_session_cleanup_uses_bounded_request(self, sandbox):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ScopedShellSession
+
+        sandbox._scoped_shell_sessions["scope-a"] = _ScopedShellSession(session_id="session-a")
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+
+        sandbox.close()
+
+        cleanup_session.assert_called_once_with(
+            "session-a",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
+    def test_close_recovery_session_cleanup_uses_bounded_request(self, sandbox):
+        sandbox._recovery_session_id = "recovery-session"
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+
+        sandbox.close()
+
+        cleanup_session.assert_called_once_with(
+            "recovery-session",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
 
 
 def test_list_dir_preserves_trailing_space_in_filename(sandbox):
