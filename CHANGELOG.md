@@ -941,6 +941,11 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **logging:** A `Redirecting` log slot carrying an absolute URL with an
+  interior space no longer leaks everything after the space. The slot is
+  trimmed there before the absolute-URL pass, so the parseable head still
+  redacts to scheme + host and the signed tail never reaches a handler.
+  ([#5743])
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
