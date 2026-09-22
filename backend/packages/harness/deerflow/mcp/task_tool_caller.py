@@ -218,15 +218,15 @@ class McpTaskToolCaller:
                 )
             captured: BaseException | None = None
             call_result: Any | None = None
-            async with create_session(effective_connection) as remote_session:
-                initialize = remote_session.initialize()
-                if session_init_timeout_seconds is not None:
-                    await asyncio.wait_for(
-                        initialize,
-                        timeout=session_init_timeout_seconds,
-                    )
-                else:
-                    await initialize
+            # Bound transport entry and initialization together, keeping the
+            # adapter's AnyIO context managers in the same task for cleanup.
+            async with (
+                asyncio.timeout(session_init_timeout_seconds) as init_timeout,
+                create_session(effective_connection) as remote_session,
+            ):
+                await remote_session.initialize()
+                # Tool calls have their own independent timeout below.
+                init_timeout.reschedule(None)
                 try:
                     call = remote_session.call_tool(
                         request.name,
