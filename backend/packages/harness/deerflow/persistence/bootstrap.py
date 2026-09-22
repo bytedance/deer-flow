@@ -507,12 +507,12 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
 
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic stamp; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.stamp(cfg, revision)
 
 
 def _upgrade(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic upgrade; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic upgrade; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.upgrade(cfg, revision)
 
 
@@ -531,7 +531,7 @@ async def _postgres_lock(engine: AsyncEngine):
     backing session disconnects (process crash, kill -9).
 
     Idle-in-transaction protection
-    ------------------------------
+    ---------------------------
 
     ``engine.connect()`` auto-begins a transaction on the first ``execute``,
     and this connection then sits idle while ``asyncio.to_thread(_upgrade,
