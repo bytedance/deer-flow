@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 def copy_if_missing(src: Path, dst: Path) -> None:
+    """Copy a template to *dst* only when the destination does not exist."""
     if dst.exists():
         return
     if not src.exists():
@@ -18,6 +19,7 @@ def copy_if_missing(src: Path, dst: Path) -> None:
 
 
 def main() -> int:
+    """Generate local config files from templates unless configuration already exists."""
     project_root = Path(__file__).resolve().parent.parent
 
     existing_config = [
