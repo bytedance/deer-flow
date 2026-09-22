@@ -1792,6 +1792,7 @@ export const enUS: Translations = {
       exportOptional: "optional",
       exportRequired: "required",
       exportUndeclared: "Not declared",
+      exportNone: "None",
       exportScope:
         "Includes all files inside this skill. Account settings, conversations and history outside the skill folder are excluded. Configure tools and credentials again on the destination.",
       exportWarnings: "Check package contents",

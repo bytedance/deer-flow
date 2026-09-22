@@ -1683,6 +1683,7 @@ export const zhCN: Translations = {
       exportOptional: "可选",
       exportRequired: "必需",
       exportUndeclared: "未声明",
+      exportNone: "无",
       exportScope:
         "包含此技能目录内的全部文件。账号配置、对话和目录外的历史不会导出；目标环境需重新配置工具与凭据。",
       exportWarnings: "请检查包内文件",
