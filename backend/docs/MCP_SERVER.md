@@ -14,6 +14,34 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Stdio Working Directory
+
+Set `cwd` when a stdio server needs to resolve its entrypoint or data files
+relative to a specific directory:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "/absolute/path/to/server"
+    }
+  }
+}
+```
+
+The directory must exist on the Gateway host (inside the container for Docker).
+Use an absolute path for consistent behavior across launch locations; a
+whole-string environment reference such as `"$MCP_SERVER_CWD"` is also supported.
+The configured directory applies to discovery and subsequent tool calls.
+When `cwd` is omitted, `null`, or an empty string (including an unset environment
+reference), discovery inherits the Gateway's working directory and pooled calls
+use the thread workspace. HTTP/SSE servers ignore it.
+Files created outside the thread's user-data tree are not exposed through the
+sandbox/artifact API.
+
 ## OpenViking MCP Tools
 
 OpenViking's official server exposes a Streamable HTTP MCP endpoint at `/mcp`.

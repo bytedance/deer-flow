@@ -162,7 +162,30 @@ It is disabled by default; see the linked guide to enable it.
    saving refreshes the chat model list. Connection testing sends a short streaming
    tool-call request and may incur provider charges. It does not save the draft or
    verify image support; set image support and token limits from provider documentation.
-   Native provider adapters and advanced reasoning settings remain YAML-configured.
+   Official DeepSeek models at `https://api.deepseek.com` or
+   `https://api.deepseek.com/v1` (default HTTPS port) automatically use DeerFlow's
+   DeepSeek adapter, preserving reasoning content across tool calls and honoring
+   output token limits. Chat uses the selected thinking mode; the connection test
+   temporarily disables thinking because DeepSeek rejects forced tool selection
+   in thinking mode. The test checks streaming tool connectivity, not every agent
+   workflow or thinking-mode behavior. Existing saved DeepSeek profiles receive
+   this adapter without re-entering credentials. DeepSeek-specific settings for
+   third-party proxies, other native adapters, and advanced reasoning settings
+   remain YAML-configured.
+
+   DeepSeek regression tests run offline with the normal backend suite. To verify
+   the real provider explicitly, set `DEEPSEEK_TEST_API_KEY` in your environment
+   and run from `backend/`:
+
+   ```bash
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   ```
+
+   These opt-in tests send short requests to DeepSeek and may incur charges;
+   they use temporary state, never save credentials to the deployment catalog,
+   and are skipped in CI. `DEEPSEEK_TEST_MODEL` optionally selects a different
+   DeepSeek model ID (default: `deepseek-flash`). The same tests can be run on
+   unfixed and fixed revisions; success is always the expected result.
 
    YAML models remain read-only in this page and take precedence on name conflicts.
    Managed models are appended after YAML models; edits apply to new configuration
@@ -1130,6 +1153,11 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
+Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
+or data files depend on a specific working directory. The setting applies to
+both discovery and tool calls; see [MCP configuration](backend/docs/MCP_SERVER.md#stdio-working-directory).
+Omitted, `null`, or empty values keep the default working directories.
+
 Tavily `web_search` also accepts optional `include_domains` and `exclude_domains`
 lists in its `config.yaml` tool entry to control search sources. Non-empty
 `include_domains` uses Tavily's `filter` mode to restrict results to those domains.
@@ -1275,13 +1303,25 @@ A managed package declares exactly one standard PEP 621 entry point:
 acme = "acme_deerflow_extension:install"
 ```
 
-That callable uses the standalone `deerflow-extension-api` contract and can register five
+That callable uses the standalone `deerflow-extension-api` contract and can register several
 contribution kinds: isolated middleware at semantic lead/subagent model or tool positions,
 lead and subagent task-lifecycle hooks, observers for DeerFlow-owned model calls that are
 not wrapped by middleware model-call hooks (goal, memory, title, and summarization),
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+
+Full-stack contributions can additionally provide browser pages, conversation actions,
+authenticated backend operations and model tools through the
+[plugin APIs](docs/full-stack-plugins.md). The independent
+[bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
+one package with persistent user data, its own sidebar page and a read-only search tool.
+Reopening a bookmark resolves the conversation's current agent through the host, so
+custom-agent conversations retain their original chat entry point, including older bookmarks.
+Installation and activation remain deployment-controlled; Capability Center shows plugin
+information and status. Browser code runs as trusted same-origin code.
+The browser API and inline `BrowserModule.code` transport are experimental. The
+plugin guide describes an additive path to manifests and packaged static resources.
 
 DeerFlow allocates a task-scoped extension store only for middleware, lifecycle, or
 system-model observation. Services receive app-scoped runtime dependencies after Gateway
@@ -1478,6 +1518,12 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+Automatic and manual compaction exclude old todo reminder messages from both the
+summary input and retained context. The current todo list stays in thread state.
+In planning mode, if the original `write_todos` call is no longer visible,
+DeerFlow adds a reminder using the latest task statuses before the next model
+call. Skipped or failed compaction leaves the existing messages unchanged.
+
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
 LLM title input. It is off by default. Existing summary placeholders reserve
@@ -1547,6 +1593,8 @@ For file acceptance criteria, an empty regular file in the shared workspace can 
 Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
+
+Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; full stored result text is available only through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
@@ -1636,6 +1684,10 @@ Each task gets its own execution environment with a full filesystem view — ski
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
+
+AIO directory listings discard missing shell sessions so the next request can recover.
+After a dropped connection, directory listings and persistent shell commands report an
+unknown outcome without replaying the operation; later calls use a fresh session.
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.

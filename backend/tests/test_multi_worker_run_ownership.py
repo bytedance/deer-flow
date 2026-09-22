@@ -1297,6 +1297,97 @@ async def test_create_thread_operation_atomic_interrupt_claims_and_creates():
 
 
 @pytest.mark.anyio
+async def test_create_thread_operation_atomic_uses_one_change_position():
+    """One atomic thread operation advances the change cursor once.
+
+    ``runtime/AGENTS.md`` documents that an atomic thread operation uses one
+    position for its interrupted rows and its new row, with ``run_id``
+    ordering ties, and ``test_run_evidence_reader`` pins that for the SQL
+    store. The memory store must agree: it is the backend an install runs
+    whenever no durable database is configured. Advancing once per row splits
+    a single interrupt-and-replace into two positions in the
+    ``(change_seq, run_id)`` cursor extensions page with.
+    """
+    store = MemoryRunStore()
+    config = _lease_config()
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+
+    await store.create_thread_operation_atomic(
+        run_id="run-old",
+        thread_id="thread-1",
+        owner_worker_id="w1",
+        lease_expires_at=expired_lease,
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    new_row, claimed = await store.create_thread_operation_atomic(
+        run_id="run-new",
+        thread_id="thread-1",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="interrupt",
+        grace_seconds=config.grace_seconds,
+    )
+
+    assert [row["run_id"] for row in claimed] == ["run-old"]
+    assert claimed[0]["change_seq"] == new_row["change_seq"]
+
+    # The shared position is what a paging consumer observes: the interrupted
+    # row and its replacement surface under one cursor value, ordered by
+    # ``run_id``, exactly as the SQL store reports them.
+    changed = await store.list_changed(after_change_seq=-1, after_run_id="")
+    positions = {row["run_id"]: row["change_seq"] for row in changed}
+    assert positions["run-old"] == positions["run-new"]
+    assert [row["run_id"] for row in changed if row["change_seq"] == positions["run-new"]] == ["run-new", "run-old"]
+
+
+@pytest.mark.anyio
+async def test_create_thread_operation_atomic_rejection_consumes_no_change_position():
+    """A ``ConflictError``-rejected operation advances no change position.
+
+    ``create_thread_operation_atomic`` allocates its position only after the
+    raise-only candidate scan, so a rejected operation consumes nothing — the
+    memory-store counterpart of the SQL store's rollback leaving the clock
+    untouched. A consumed-but-unused position leaves no trace in the rows
+    themselves, so the assertion is on the position the next accepted
+    operation lands on. Hoisting the allocation above the scan keeps every
+    other test in this file green and shows up here as a gap.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(grace_seconds=10)
+
+    accepted, _ = await store.create_thread_operation_atomic(
+        run_id="valid-lease-run",
+        thread_id="thread-1",
+        owner_worker_id="other-worker",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    with pytest.raises(ConflictError, match="another worker"):
+        await store.create_thread_operation_atomic(
+            run_id="run-new",
+            thread_id="thread-1",
+            owner_worker_id="w2",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+            multitask_strategy="interrupt",
+            grace_seconds=config.grace_seconds,
+        )
+
+    next_row, _ = await store.create_thread_operation_atomic(
+        run_id="run-after",
+        thread_id="thread-2",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+    assert next_row["change_seq"] == accepted["change_seq"] + 1
+
+
+@pytest.mark.anyio
 async def test_create_thread_operation_atomic_interrupt_rejects_other_worker_valid_lease():
     """Interrupt must raise ConflictError when a valid-lease run is owned by another worker.
 

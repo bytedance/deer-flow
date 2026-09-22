@@ -384,6 +384,21 @@ class TestDeleteFileSafe:
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
 
+    def test_delete_keeps_the_converted_markdown(self, tmp_path):
+        """Companion ownership cannot be proven from the name, so nothing is guessed at."""
+        (tmp_path / "a.docx").write_bytes(b"DOCX")
+        (tmp_path / "a.md").write_text("converted from the docx", encoding="utf-8")
+        (tmp_path / "a.pdf").write_bytes(b"PDF")
+        (tmp_path / "a_1.md").write_text("converted from the pdf", encoding="utf-8")
+
+        result = delete_file_safe(tmp_path, "a.pdf")
+
+        assert result["success"] is True
+        assert not (tmp_path / "a.pdf").exists()
+        # a.md belongs to a.docx; deleting a.pdf used to remove it.
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "converted from the docx"
+        assert (tmp_path / "a_1.md").read_text(encoding="utf-8") == "converted from the pdf"
+
     def test_delete_symlink_to_sibling_upload_keeps_target(self, tmp_path):
         """A symlink planted in the uploads dir must not delete the upload it aliases."""
         victim = tmp_path / "victim.pdf"
@@ -399,7 +414,7 @@ class TestDeleteFileSafe:
             raise
 
         with pytest.raises(FileNotFoundError):
-            delete_file_safe(tmp_path, "alias.pdf", convertible_extensions={".pdf"})
+            delete_file_safe(tmp_path, "alias.pdf")
 
         assert victim.read_bytes() == b"pdf-bytes"
         assert companion.exists()

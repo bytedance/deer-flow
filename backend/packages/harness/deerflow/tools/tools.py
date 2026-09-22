@@ -111,6 +111,7 @@ def get_available_tools(
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
     app_config: AppConfig | None = None,
+    extensions=None,
     chat_model: BaseChatModel | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -278,7 +279,14 @@ def get_available_tools(
     # Deduplicate by tool name — config-loaded tools take priority, followed by
     # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
     # receive ambiguous or concatenated function schemas (issue #1803).
-    all_tools = [_ensure_sync_invocable_tool(t) for t in loaded_tools + builtin_tools + mcp_tools + acp_tools]
+    from deerflow.extensions import get_agent_build_extensions
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    ordinary_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
+    # Keep plugin-vs-plugin validation strict. Host/plugin collisions use the
+    # ordinary-first deduplication below, without dropping unrelated tools.
+    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
+    all_tools = [_ensure_sync_invocable_tool(t) for t in ordinary_tools + plugin_tools]
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
     for t in all_tools:
