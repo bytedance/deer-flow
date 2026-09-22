@@ -1343,6 +1343,51 @@ async def test_create_thread_operation_atomic_uses_one_change_position():
 
 
 @pytest.mark.anyio
+async def test_create_thread_operation_atomic_rejection_consumes_no_change_position():
+    """A ``ConflictError``-rejected operation advances no change position.
+
+    ``create_thread_operation_atomic`` allocates its position only after the
+    raise-only candidate scan, so a rejected operation consumes nothing — the
+    memory-store counterpart of the SQL store's rollback leaving the clock
+    untouched. A consumed-but-unused position leaves no trace in the rows
+    themselves, so the assertion is on the position the next accepted
+    operation lands on. Hoisting the allocation above the scan keeps every
+    other test in this file green and shows up here as a gap.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(grace_seconds=10)
+
+    accepted, _ = await store.create_thread_operation_atomic(
+        run_id="valid-lease-run",
+        thread_id="thread-1",
+        owner_worker_id="other-worker",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    with pytest.raises(ConflictError, match="another worker"):
+        await store.create_thread_operation_atomic(
+            run_id="run-new",
+            thread_id="thread-1",
+            owner_worker_id="w2",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+            multitask_strategy="interrupt",
+            grace_seconds=config.grace_seconds,
+        )
+
+    next_row, _ = await store.create_thread_operation_atomic(
+        run_id="run-after",
+        thread_id="thread-2",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+    assert next_row["change_seq"] == accepted["change_seq"] + 1
+
+
+@pytest.mark.anyio
 async def test_create_thread_operation_atomic_interrupt_rejects_other_worker_valid_lease():
     """Interrupt must raise ConflictError when a valid-lease run is owned by another worker.
 
