@@ -20,8 +20,8 @@ import pytest
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 PROVIDERS = ("local", "aio", "e2b", "boxlite", "tenki", "opensandbox")
-REMOTE_PROVIDERS = PROVIDERS[1:]
-SHELL_SEARCH_PROVIDERS = PROVIDERS[2:]
+REMOTE_PROVIDERS = tuple(name for name in PROVIDERS if name != "local")
+SHELL_SEARCH_PROVIDERS = ("e2b", "boxlite", "tenki", "opensandbox")
 pytestmark = pytest.mark.skipif(
     os.name == "nt" or any(shutil.which(name) is None for name in ("sh", "find", "grep", "head")),
     reason="offline provider search contract requires a POSIX shell and search utilities",
