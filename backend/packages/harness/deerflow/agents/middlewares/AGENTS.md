@@ -7,6 +7,8 @@ mixed windows keep normal anchoring and final-message fallback. Budget raw text
 before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
 LangChain default.
 
+Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
+
 Delegation verdicts are untrusted: revalidate persisted values, ignore malformed
 ones, and treat completed work as reusable evidence rather than acceptance.
 
