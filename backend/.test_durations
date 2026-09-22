@@ -10142,7 +10142,7 @@
     "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[skill-reviewer]": 0.0012424320001400702,
     "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[surprise-me]": 0.0012647949999973207,
     "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[systematic-literature-review]": 0.0013007800000650604,
-    "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[vercel-deploy-claimable]": 0.0014600299999756317,
+    "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[vercel-deploy]": 0.0014600299999756317,
     "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[video-generation]": 0.0011253740000256585,
     "tests/test_skills_bundled.py::test_bundled_skill_frontmatter_is_valid[web-design-guidelines]": 0.0014314249998506057,
     "tests/test_skills_bundled.py::test_runtime_registry_excludes_skill_reviewer_eval_fixtures": 0.015141091000032247,
