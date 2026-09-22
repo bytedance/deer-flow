@@ -249,6 +249,7 @@ class ThreadUploadIngestionService:
         file_size = 0
         upload_temp = None
         convert_source_fd: int | None = None
+        deferred_staged_path: Path | None = None
         try:
             upload_temp = await run_file_io(uploads._prepare_upload_destination, self._uploads_dir, safe_filename)
             async for chunk in chunks:
@@ -269,12 +270,26 @@ class ThreadUploadIngestionService:
             # Link-commit with collision retry: the FileExistsError arm
             # leaves the staged part in place for the retry under the next
             # suffix (the handle's second close is idempotent).
+            #
+            # The conversion descriptor above keeps the staged inode open, and
+            # Windows refuses to remove a file that still has an open handle.
+            # Publishing is therefore split from removing the staged name:
+            # this request keeps ownership of the staged path and removes it
+            # once the descriptor is released below.
             while True:
                 try:
-                    file_path = await run_file_io(uploads._commit_upload_temp_no_overwrite, upload_temp, self._uploads_dir, safe_filename)
+                    file_path = await run_file_io(
+                        uploads._commit_upload_temp_no_overwrite,
+                        upload_temp,
+                        self._uploads_dir,
+                        safe_filename,
+                        unlink_staged=convert_source_fd is None,
+                    )
                     break
                 except FileExistsError:
                     safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+            if convert_source_fd is not None:
+                deferred_staged_path = upload_temp.temp_path
             upload_temp = None
         except uploads.UnsafeUploadPathError as exc:
             _close_fd(convert_source_fd)
@@ -343,6 +358,10 @@ class ThreadUploadIngestionService:
                 raise
             finally:
                 _close_fd(convert_source_fd)
+                if deferred_staged_path is not None:
+                    # The descriptor that pinned the staged inode is released
+                    # by now, so the deferred staged-name removal can land.
+                    await run_file_io(uploads._remove_staged_file, deferred_staged_path)
                 if private_dir is not None:
                     await run_file_io(shutil.rmtree, private_dir, True)
             if not md_staged:
