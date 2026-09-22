@@ -2413,6 +2413,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
+        with self._lock:
+            recycle_sandbox = self._sandboxes.get(sandbox_id)
+
+        if recycle_sandbox is not None and recycle_sandbox.requires_container_recycle:
+            logger.warning(
+                "Recycling sandbox %s instead of returning it to the warm pool after ambiguous session creation",
+                sandbox_id,
+            )
+            self._destroy_tracked(
+                sandbox_id,
+                still_reapable=lambda: self._sandboxes.get(sandbox_id) is recycle_sandbox,
+            )
+            return
+
         info = None
         sandbox = None
         thread_keys_to_remove: list[tuple[str, str]] = []

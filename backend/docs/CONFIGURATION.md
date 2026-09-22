@@ -640,6 +640,15 @@ the `hard_timeout` API when the image exposes it. DeerFlow's legacy frozen
 request is bounded there. Timed-out or otherwise ambiguous commands are never
 replayed.
 
+Explicit AIO shell/bash session creation is a separate control-plane
+operation. DeerFlow bounds those create requests to 5 seconds with SDK
+retries disabled. If a response cannot prove whether creation committed,
+DeerFlow does not replay the create or execute on that session id. The
+affected creation plane is quarantined, bounded best-effort session cleanup
+is attempted, and the container is recycled instead of being returned to the
+warm pool. Session-level cleanup does not clear that quarantine because a
+timed-out create may commit after cleanup has already returned.
+
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml
 sandbox:
