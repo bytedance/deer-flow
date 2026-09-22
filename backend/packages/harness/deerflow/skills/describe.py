@@ -133,7 +133,13 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     blocks: list[str] = []
     for s in skills:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
-        tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
+        # `()` is an explicit empty allowlist — the policy middleware strips every
+        # business tool for it — so only an omitted field (`None`) means unrestricted.
+        # `(all)` describes this skill's own frontmatter, not the enforced union: once
+        # any loaded skill declares allowed-tools,
+        # ``allowed_tool_names_for_skills`` (tool_policy.py) gives a `None` skill no
+        # tools, so a mixed set can render `(all)` while the middleware restricts it.
+        tools_line = "(all)" if s.allowed_tools is None else (", ".join(s.allowed_tools) or "(none)")
         location = s.get_container_file_path(container_base_path)
         # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
         # escape so a value cannot forge a framework tag in the describe_skill output.
