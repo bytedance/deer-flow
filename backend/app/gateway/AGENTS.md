@@ -90,7 +90,7 @@ owner-scoped assistant version selection remains enabled.
 
 | Router | Endpoints |
 |--------|-----------|
-| **Managed Models** (`/api/managed-models`) | Admin-only GET catalog, PUT create/update with revision checks, POST `/test` streaming tool-call probe. YAML names are reserved; credentials stay private. |
+| **Managed Models** (`/api/managed-models`) | Admin-only GET/PUT with revisions; streaming POST `/test` (DeepSeek thinking off). Clients/storage off-loop; YAML names reserved; keys private. |
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, separate batch repository/worker states so history stays readable without a worker, `conversation_references` (whether `read_conversation` is configured, plus the per-run reference cap), and knowledge scope selection |
 | **Knowledge** (`/api/knowledge/retrieval-catalog`) | Authenticated, allowlist-safe, read-only dataset/document catalog used only by main and custom-agent chat scope selection; knowledge management remains in RAGFlow |
