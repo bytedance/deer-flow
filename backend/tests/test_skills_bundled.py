@@ -43,6 +43,7 @@ def test_vercel_deploy_commands_use_the_mounted_script_path() -> None:
     content = skill.skill_file.read_text(encoding="utf-8")
 
     assert content.count(mounted_script) == 4
+    assert content.count("deploy.sh") == content.count(mounted_script)
 
 
 def test_runtime_registry_excludes_skill_reviewer_eval_fixtures() -> None:
