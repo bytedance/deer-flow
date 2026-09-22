@@ -162,7 +162,30 @@ It is disabled by default; see the linked guide to enable it.
    saving refreshes the chat model list. Connection testing sends a short streaming
    tool-call request and may incur provider charges. It does not save the draft or
    verify image support; set image support and token limits from provider documentation.
-   Native provider adapters and advanced reasoning settings remain YAML-configured.
+   Official DeepSeek models at `https://api.deepseek.com` or
+   `https://api.deepseek.com/v1` (default HTTPS port) automatically use DeerFlow's
+   DeepSeek adapter, preserving reasoning content across tool calls and honoring
+   output token limits. Chat uses the selected thinking mode; the connection test
+   temporarily disables thinking because DeepSeek rejects forced tool selection
+   in thinking mode. The test checks streaming tool connectivity, not every agent
+   workflow or thinking-mode behavior. Existing saved DeepSeek profiles receive
+   this adapter without re-entering credentials. DeepSeek-specific settings for
+   third-party proxies, other native adapters, and advanced reasoning settings
+   remain YAML-configured.
+
+   DeepSeek regression tests run offline with the normal backend suite. To verify
+   the real provider explicitly, set `DEEPSEEK_TEST_API_KEY` in your environment
+   and run from `backend/`:
+
+   ```bash
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   ```
+
+   These opt-in tests send short requests to DeepSeek and may incur charges;
+   they use temporary state, never save credentials to the deployment catalog,
+   and are skipped in CI. `DEEPSEEK_TEST_MODEL` optionally selects a different
+   DeepSeek model ID (default: `deepseek-flash`). The same tests can be run on
+   unfixed and fixed revisions; success is always the expected result.
 
    YAML models remain read-only in this page and take precedence on name conflicts.
    Managed models are appended after YAML models; edits apply to new configuration
@@ -1495,6 +1518,12 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+Automatic and manual compaction exclude old todo reminder messages from both the
+summary input and retained context. The current todo list stays in thread state.
+In planning mode, if the original `write_todos` call is no longer visible,
+DeerFlow adds a reminder using the latest task statuses before the next model
+call. Skipped or failed compaction leaves the existing messages unchanged.
+
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
 LLM title input. It is off by default. Existing summary placeholders reserve
@@ -1655,6 +1684,10 @@ Each task gets its own execution environment with a full filesystem view — ski
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
+
+AIO directory listings discard missing shell sessions so the next request can recover.
+After a dropped connection, directory listings and persistent shell commands report an
+unknown outcome without replaying the operation; later calls use a fresh session.
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
