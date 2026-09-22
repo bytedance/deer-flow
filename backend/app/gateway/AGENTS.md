@@ -34,7 +34,7 @@ it from `context`, so `merge_run_context_overrides` never sees it; sending both
 is a 422. `conversation_references_enabled()` is the one "tool is configured"
 predicate, used by admission and by `/api/features`.
 
-FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; concurrently probes the ORM engine behind `database:` plus the effective LangGraph checkpointer/Store backend - the legacy `checkpointer:` section, otherwise derived from `database:`, resolved from the startup config snapshot recorded on `app.state` - beneath a single bounded deadline, with connection-opening probes serialized behind a strict per-process gate, 503 while either is unreachable or the startup backend cannot be resolved, `not_configured` for process-local backends such as `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
+FastAPI listens on 8001. `GET /health` is liveness; `GET /health/ready` concurrently probes the startup-bound ORM and effective checkpointer/Store backends within one deadline. Connection-opening probes serialize per process; unresolved/unreachable backends return 503, while in-process memory reports `not_configured`. SQLite/PostgreSQL probe connections remain owned through `close()` across repeated caller cancellation. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json`.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
 hot-reloaded top-level `recursion_limit` setting. A valid request-level value

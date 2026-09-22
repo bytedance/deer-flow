@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import text
 
 from deerflow.persistence.engine import get_engine
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -184,7 +185,7 @@ async def _probe_sqlite_backend(conn_string: str | None) -> str:
             try:
                 await connection.execute("SELECT 1")
             finally:
-                await connection.close()
+                await await_drained(connection.close())
     except Exception:
         logger.warning("Readiness sqlite checkpointer probe failed", exc_info=True)
         return DATABASE_UNREACHABLE
@@ -208,7 +209,7 @@ async def _probe_postgres_backend(conn_string: str, schema: str) -> str:
                 async with connection.cursor() as cursor:
                     await cursor.execute("SELECT 1")
             finally:
-                await connection.close()
+                await await_drained(connection.close())
     except Exception:
         logger.warning("Readiness postgres checkpointer probe failed", exc_info=True)
         return DATABASE_UNREACHABLE
