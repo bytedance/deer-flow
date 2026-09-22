@@ -894,6 +894,212 @@ class TestShellSessionCreationOwnership:
         assert create_calls == before
 
 
+class TestBashSessionCreationOwnership:
+    """Bash env-session creation follows the same bounded ownership contract."""
+
+    def test_bash_create_uses_bounded_no_retry_request(self, sandbox):
+        sandbox._client.bash.create_session = MagicMock()
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr="",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert (
+            sandbox.execute_command(
+                "echo $TOKEN",
+                env={"TOKEN": "secret"},
+            )
+            == "ok"
+        )
+
+        kwargs = sandbox._client.bash.create_session.call_args.kwargs
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 5,
+            "max_retries": 0,
+        }
+
+    @pytest.mark.parametrize(
+        "error_cls",
+        [
+            httpx.ReadTimeout,
+            httpx.ReadError,
+        ],
+    )
+    def test_bash_ambiguous_create_is_quarantined_without_exec(
+        self,
+        sandbox,
+        error_cls,
+    ):
+        create_session = MagicMock(side_effect=error_cls("response became ambiguous"))
+        close_session = MagicMock()
+        exec_command = MagicMock()
+
+        sandbox._client.bash.create_session = create_session
+        sandbox._client.bash.close_session = close_session
+        sandbox._client.bash.exec = exec_command
+
+        out = sandbox.execute_command(
+            "unsafe",
+            env={"TOKEN": "secret"},
+        )
+
+        assert "session creation outcome is unknown" in out
+        exec_command.assert_not_called()
+
+        created_id = create_session.call_args.kwargs["session_id"]
+        close_session.assert_called_once_with(
+            created_id,
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+        assert sandbox.requires_container_recycle is True
+
+    def test_bash_ambiguous_create_blocks_later_create(self, sandbox):
+        create_session = MagicMock(side_effect=httpx.ReadTimeout("response stalled"))
+        sandbox._client.bash.create_session = create_session
+        sandbox._client.bash.close_session = MagicMock()
+
+        first = sandbox.execute_command(
+            "first",
+            env={"TOKEN": "secret"},
+        )
+        assert "session creation outcome is unknown" in first
+        assert create_session.call_count == 1
+
+        create_session.reset_mock()
+
+        second = sandbox.execute_command(
+            "second",
+            env={"TOKEN": "secret"},
+        )
+
+        assert "earlier ambiguous create outcome" in second
+        create_session.assert_not_called()
+
+    def test_shell_creation_quarantine_does_not_block_bash_plane(
+        self,
+        sandbox,
+    ):
+        sandbox._default_shell_corrupted = True
+        sandbox._client.shell.create_session = MagicMock(side_effect=httpx.ReadTimeout("shell stalled"))
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        assert "session creation outcome is unknown" in sandbox.execute_command("shell")
+
+        sandbox._client.bash.create_session = MagicMock()
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="bash-ok",
+                    stderr="",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert (
+            sandbox.execute_command(
+                "echo $TOKEN",
+                env={"TOKEN": "secret"},
+            )
+            == "bash-ok"
+        )
+
+    def test_bash_creation_quarantine_does_not_block_shell_plane(
+        self,
+        sandbox,
+    ):
+        sandbox._client.bash.create_session = MagicMock(side_effect=httpx.ReadTimeout("bash stalled"))
+        sandbox._client.bash.close_session = MagicMock()
+
+        assert "session creation outcome is unknown" in sandbox.execute_command(
+            "bash",
+            env={"TOKEN": "secret"},
+        )
+
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    output="shell-ok",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        assert sandbox.execute_command("shell") == "shell-ok"
+
+    def test_bash_connect_error_is_definite_and_does_not_quarantine(
+        self,
+        sandbox,
+    ):
+        sandbox._client.bash.create_session = MagicMock(side_effect=httpx.ConnectError("connection refused"))
+        sandbox._client.bash.close_session = MagicMock()
+
+        out = sandbox.execute_command(
+            "echo x",
+            env={"TOKEN": "secret"},
+        )
+
+        assert out.startswith("Error:")
+        assert sandbox.requires_container_recycle is False
+        sandbox._client.bash.close_session.assert_not_called()
+
+    def test_close_retries_ambiguous_creation_cleanup_without_clearing_tombstones(
+        self,
+        sandbox,
+    ):
+        shell_cleanup = MagicMock()
+        bash_close = MagicMock()
+
+        sandbox._default_shell_corrupted = True
+        sandbox._client.shell.create_session = MagicMock(side_effect=httpx.ReadTimeout("shell stalled"))
+        sandbox._client.shell.cleanup_session = shell_cleanup
+
+        sandbox.execute_command("shell")
+        shell_id = sandbox._client.shell.create_session.call_args.kwargs["id"]
+        assert shell_cleanup.call_count == 1
+
+        sandbox._client.bash.create_session = MagicMock(side_effect=httpx.ReadTimeout("bash stalled"))
+        sandbox._client.bash.close_session = bash_close
+
+        sandbox.execute_command(
+            "bash",
+            env={"TOKEN": "secret"},
+        )
+        bash_id = sandbox._client.bash.create_session.call_args.kwargs["session_id"]
+        assert bash_close.call_count == 1
+        assert sandbox.requires_container_recycle is True
+
+        sandbox.close()
+
+        assert shell_cleanup.call_count == 2
+        assert shell_cleanup.call_args_list[-1].args == (shell_id,)
+        assert shell_cleanup.call_args_list[-1].kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+        assert bash_close.call_count == 2
+        assert bash_close.call_args_list[-1].args == (bash_id,)
+        assert bash_close.call_args_list[-1].kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+        # Cleanup is compensation, not proof that a late create cannot commit.
+        assert sandbox.requires_container_recycle is True
+
+
 class TestScopedShellSessions:
     """Concurrent subagents use independent persistent shell sessions (#5128)."""
 

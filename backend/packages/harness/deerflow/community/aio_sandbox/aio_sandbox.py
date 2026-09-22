@@ -177,6 +177,20 @@ class AioSandbox(Sandbox):
                 )
                 self._recovery_session_id = None
             client = self._client
+            if client is not None:
+                shell_tombstones, bash_tombstones = self._ambiguous_session_creation_snapshot()
+                for session_id in shell_tombstones:
+                    self._cleanup_session_best_effort(
+                        client,
+                        session_id,
+                        context="ambiguous shell session creation during close",
+                        request_options=self._bounded_cleanup_request_options(),
+                    )
+                for session_id in bash_tombstones:
+                    self._cleanup_bash_session_best_effort(
+                        client,
+                        session_id,
+                    )
             # Drop the reference under the lock for use-after-close safety: any
             # later command on this instance fails loudly instead of reusing a
             # half-closed client.
@@ -289,6 +303,15 @@ class AioSandbox(Sandbox):
             state.pending.discard(session_id)
             state.ambiguous.add(session_id)
 
+    def _ambiguous_session_creation_snapshot(
+        self,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        with self._session_creation_state_lock:
+            return (
+                tuple(self._shell_session_creation_state.ambiguous),
+                tuple(self._bash_session_creation_state.ambiguous),
+            )
+
     @property
     def requires_container_recycle(self) -> bool:
         with self._session_creation_state_lock:
@@ -323,6 +346,33 @@ class AioSandbox(Sandbox):
             raise RuntimeError("AIO shell session creation outcome is unknown; the sandbox is quarantined for recycle") from error
 
         self._resolve_session_creation("shell", session_id)
+        return session_id
+
+    def _create_bash_session(self, client) -> str:
+        session_id = str(uuid.uuid4())
+        self._begin_session_creation("bash", session_id)
+
+        try:
+            client.bash.create_session(
+                session_id=session_id,
+                request_options=self._session_create_request_options(),
+            )
+        except Exception as error:
+            if self._is_definite_session_creation_failure(error):
+                self._resolve_session_creation("bash", session_id)
+                raise
+
+            self._mark_session_creation_ambiguous("bash", session_id)
+
+            # Same rule as shell: compensation is bounded but cannot prove that
+            # the original create will not commit later.
+            self._cleanup_bash_session_best_effort(
+                client,
+                session_id,
+            )
+            raise RuntimeError("AIO bash session creation outcome is unknown; the sandbox is quarantined for recycle") from error
+
+        self._resolve_session_creation("bash", session_id)
         return session_id
 
     def _ensure_default_shell_session_id(self, client) -> str | None:
@@ -845,11 +895,9 @@ class AioSandbox(Sandbox):
         """Single bash.exec invocation in an explicitly released fresh session."""
         with self._lock:
             for attempt in range(2):
-                session_id = str(uuid.uuid4())
-                session_created = False
+                session_id: str | None = None
                 try:
-                    self._client.bash.create_session(session_id=session_id)
-                    session_created = True
+                    session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
                         command=command,
                         session_id=session_id,
@@ -910,7 +958,7 @@ class AioSandbox(Sandbox):
                     logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                     return f"Error: {e}", None
                 finally:
-                    if session_created:
+                    if session_id is not None:
                         self._cleanup_bash_session_best_effort(self._client, session_id)
             return "Error: bash.exec session disappeared after retry", None
 
