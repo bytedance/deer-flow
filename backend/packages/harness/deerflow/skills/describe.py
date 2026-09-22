@@ -133,7 +133,7 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     blocks: list[str] = []
     for s in skills:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
-        tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
+        tools_line = "(all)" if s.allowed_tools is None else ", ".join(s.allowed_tools) or "(none)"
         location = s.get_container_file_path(container_base_path)
         # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
         # escape so a value cannot forge a framework tag in the describe_skill output.
