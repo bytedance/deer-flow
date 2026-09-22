@@ -1427,3 +1427,104 @@ def test_python_reverse_shell_via_create_connection_blocks(tmp_path: Path) -> No
 
     assert _finding_by_rule(result["findings"], "python-reverse-shell")["severity"] == "CRITICAL"
     assert result["blocked"] is True
+
+
+def _scan_python_sample(tmp_path: Path, source: str) -> list[dict]:
+    """Scan a minimal skill package whose only code file is one Python script."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "sample.py").write_text(source, encoding="utf-8")
+    return scan_skill_dir(skill_dir)["findings"]
+
+
+def _secret_assignments(findings: list[dict]) -> list[dict]:
+    return [finding for finding in findings if finding["rule_id"] == "secret-env-assignment"]
+
+
+def test_secret_assignment_ignores_python_bare_annotation(tmp_path: Path) -> None:
+    """`token: Optional[str]` names a parameter's type; it embeds no secret value."""
+    source = "from typing import Optional\n\n\nclass Client:\n    def __init__(self, token: Optional[str] = None):\n        self.token = token\n"
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_ignores_python_environment_lookup(tmp_path: Path) -> None:
+    """Reading the secret from the environment is the documented remediation, not a finding."""
+    source = 'import os\n\n\ndef load():\n    api_key = os.getenv("MINIMAX_API_KEY")\n    return api_key\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_still_flags_python_string_literal(tmp_path: Path) -> None:
+    """A hardcoded literal stays reported, and the value never reaches the finding."""
+    source = 'import os\n\n\ndef load():\n    api_key = "9f8e7d6c5b4a3210ff"\n    return api_key\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 5
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_still_flags_annotated_python_literal(tmp_path: Path) -> None:
+    """An annotated assignment still embeds its literal, so it must stay reported."""
+    source = 'import os\n\n\ndef load():\n    password: str = "hunter2-literal"\n    return password\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 5
+
+
+def test_secret_assignment_still_flags_non_python_text(tmp_path: Path) -> None:
+    """Non-Python text keeps the line-oriented sweep for config and shell files."""
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "deploy.sh").write_text("#!/bin/sh\nPASSWORD=hunter2-literal\n", encoding="utf-8")
+
+    finding = _finding_by_rule(scan_skill_dir(skill_dir)["findings"], "secret-env-assignment")
+
+    assert finding["file"] == "scripts/deploy.sh"
+    assert finding["line"] == 2
+
+
+def test_secret_assignment_survives_syntax_error_in_python(tmp_path: Path) -> None:
+    """A syntax error must not silence this rule for the whole file.
+
+    ``ast.parse`` rejects the file, so the rule has to fall back to the text sweep.
+    Otherwise appending one syntax error disables a HIGH-severity rule for an entire
+    file that ``main`` still scanned.
+    """
+    source = 'def broken(:\n    api_key = "9f8e7d6c5b4a3210ff"\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 2
+    assert finding["evidence"] == "[redacted]"
+
+
+def test_secret_assignment_survives_nul_byte_in_python(tmp_path: Path) -> None:
+    """``ast.parse`` also rejects NUL bytes, so that path needs the same fallback."""
+    source = 'import os\napi_key = "9f8e7d6c5b4a3210ff"\x00\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["file"] == "scripts/sample.py"
+
+
+def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
+    """Bundled skill scripts must not fail the review gate on an unchanged checkout (#4996).
+
+    Scoped to ``.py`` files on purpose: ``SKILL.md`` inside ``evals/fixtures`` is deliberately
+    hostile review material that the reviewer withholds from SkillScan, and declaration
+    scanning of real ``SKILL.md`` prose is governed by a separate rule.
+    """
+    skills_public_dir = Path(__file__).resolve().parents[2] / "skills" / "public"
+    offenders: dict[str, list[tuple[str | None, int | None]]] = {}
+    for skill_dir in sorted(path for path in skills_public_dir.iterdir() if path.is_dir()):
+        hits = [finding for finding in _secret_assignments(scan_skill_dir(skill_dir)["findings"]) if (finding["file"] or "").endswith(".py")]
+        if hits:
+            offenders[skill_dir.name] = [(finding["file"], finding["line"]) for finding in hits]
+
+    assert offenders == {}
