@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 def make_skill_path_sandbox_readable(path: Path) -> None:
+    """Ensure sandbox read/execute access while removing group/other write bits."""
     if path.is_symlink():
         return
     mode = stat.S_IMODE(path.stat().st_mode)
@@ -16,12 +17,14 @@ def make_skill_path_sandbox_readable(path: Path) -> None:
 
 
 def make_skill_tree_sandbox_readable(target: Path) -> None:
+    """Apply sandbox-readable permissions recursively to an installed skill tree."""
     make_skill_path_sandbox_readable(target)
     for path in target.rglob("*"):
         make_skill_path_sandbox_readable(path)
 
 
 def make_skill_written_path_sandbox_readable(skill_root: Path, target: Path) -> None:
+    """Apply sandbox-readable permissions to a written path and its parent chain."""
     resolved_root = skill_root.resolve()
     resolved_target = target.resolve()
     resolved_target.relative_to(resolved_root)
