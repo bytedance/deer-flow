@@ -1473,8 +1473,8 @@ uploads:
 # ============================================================================
 # Sandbox Configuration
 # ============================================================================
-# Choose between local sandbox (direct execution) or Docker-based AIO sandbox
-
+# Choose between local sandbox (direct execution), Docker-based AIO sandbox, 
+# or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
 sandbox:
