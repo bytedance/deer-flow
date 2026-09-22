@@ -347,12 +347,14 @@ def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_b
     process that swaps the upload for a symlink after validation cannot redirect
     the change to a target outside the uploads directory. ``O_NONBLOCK`` stops a
     swapped-in FIFO from blocking the open before the type check. On platforms
-    without ``O_NOFOLLOW``/``os.fchmod`` (Windows) the best-effort ``os.chmod``
-    path (with the lstat symlink guard) is retained.
+    without ``O_NOFOLLOW``/``os.fchmod`` (Windows) the ``os.chmod`` path (with
+    the lstat symlink guard) is retained. A path that disappears or becomes a
+    symlink during validation is skipped; other permission errors propagate so
+    callers do not report an upload the sandbox still cannot access.
     """
     try:
         file_stat = os.lstat(file_path)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return
     if stat.S_ISLNK(file_stat.st_mode):
         return
@@ -370,26 +372,32 @@ def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_b
             open_flags |= os.O_NONBLOCK
         try:
             fd = os.open(file_path, open_flags)
-        except OSError:
-            # ELOOP: the path is a symlink (swapped in after the lstat above)
-            # or disappeared. Leave permissions untouched.
-            return
+        except OSError as exc:
+            # The path disappeared, stopped resolving, or became a symlink
+            # after lstat. Leave permissions untouched for these expected
+            # replacement races, but surface operational failures such as
+            # EACCES so callers cannot report an unreadable upload as ready.
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                return
+            raise
         try:
             opened = os.fstat(fd)
             if not stat.S_ISREG(opened.st_mode):
                 return
             os.fchmod(fd, stat.S_IMODE(opened.st_mode) | extra_mode_bits)
-        except OSError:
-            logger.debug("could not apply sandbox perms to upload %s", file_path, exc_info=True)
         finally:
             os.close(fd)
         return
 
-    # Windows / platforms without O_NOFOLLOW + fchmod: best-effort os.chmod.
+    # Windows / platforms without O_NOFOLLOW + fchmod: retain the lstat-guarded
+    # chmod fallback. Expected replacement races are no-ops; permission errors
+    # must still reach the caller.
     try:
         os.chmod(file_path, stat.S_IMODE(file_stat.st_mode) | extra_mode_bits)
-    except OSError:
-        logger.debug("could not apply sandbox perms to upload %s", file_path, exc_info=True)
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            return
+        raise
 
 
 def list_files_in_dir(directory: Path) -> dict:
