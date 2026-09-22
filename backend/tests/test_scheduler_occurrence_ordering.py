@@ -22,7 +22,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from app.scheduler.service import ScheduledTaskService
 from deerflow.persistence.base import Base
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -72,7 +72,17 @@ async def occurrence_databases(request, tmp_path):
                 engine = create_async_engine(postgres_uri, connect_args={"server_settings": {"search_path": schema}})
             engines.append(engine)
         async with engines[0].begin() as connection:
-            await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
+            await connection.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync,
+                    tables=[
+                        ScheduledTaskRow.__table__,
+                        ScheduledTaskRunRow.__table__,
+                        RunRow.__table__,
+                        RunChangeClockRow.__table__,
+                    ],
+                )
+            )
         yield [async_sessionmaker(engine, expire_on_commit=False) for engine in engines], backend == "postgres-multi"
     finally:
         for engine in engines:

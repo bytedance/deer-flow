@@ -83,6 +83,11 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 ## Code Style
 
+`core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
+Match zero to three literal spaces before `# ` without trimming indentation;
+mixed space/tab code blocks must fall back to the URL. Keep this local to title
+extraction rather than changing the shared streamdown fence parser.
+
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.
@@ -94,6 +99,13 @@ do not use HTML `maxLength`, which counts UTF-16 code units instead.
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
+
+Scheduled-task list search filters the current authorized query result by title or
+prompt, composing with status/type filters and thread scope. Selection must derive
+from the filtered list so hidden tasks cannot remain actionable. Keep literal
+matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
+
+Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
 
 ## Environment
 
@@ -115,8 +127,9 @@ Leave these unset for the standard `make dev` / Docker flow, where nginx serves 
 
 `make build-static` creates a standalone read-only demo and copies `.next/static`
 and `public` into the output. In static mode, `core/api/static-response.ts`
-resolves Gateway REST reads with empty capability/catalog responses or existing
-same-origin `/mock/api` fixtures; writes and unknown API routes fail locally.
+resolves Gateway REST reads with the bundled capability catalog and safe
+installation projections from existing same-origin `/mock/api` fixtures; writes
+and unknown API routes fail locally.
 The homepage client counter calls `/github-stars`, outside the Gateway proxy.
 That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
 GitHub data for one hour, and returns 204 when the count is unavailable. Start
@@ -124,6 +137,13 @@ the standalone server from `frontend/` with `node --env-file=.env
 .next/standalone/server.js` to load the current credentials.
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
+
+One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
+do not round-trip in the selected timezone. Invalid input emits an empty spec and
+localized inline feedback; both create and edit must block submission. Keep this
+UI validation separate from the API payload. Preserve the original instant when
+wall time and timezone match the mounted snapshot; validate changed inputs, and
+restore the exact original timestamp when those edits are reverted.
 
 ## Resources
 
@@ -172,3 +192,94 @@ Custom skill export is admin-only and disabled in static demos. The lazy
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
+
+Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
+`WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
+thread snapshot and retry UI alive when a partial deletion removes its row.
+Focus Cancel on open and after a failed deletion has re-enabled the actions;
+block dismissal while deletion is pending. Show the error message when available,
+with a localized fallback, and log the rejection for debugging. The shared
+delete helper accepts remote 404 (not 403) before retrying local cleanup, and
+`onDeleted` runs only after both deletion steps succeed.
+
+## Capability Center
+
+`/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
+MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
+mutation permissions, and cache ownership remain in the existing hooks. Skill display names/summaries are presentation
+metadata; runtime names and full descriptions remain unchanged. Public, custom,
+integration, and legacy sources must stay distinct. Community currently offers
+archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.
+`backend/packages/harness/deerflow/capabilities/builtin.json` owns localized
+catalog manifests. Refresh the generated demo snapshot with `pnpm catalog:sync`
+after changing the catalog; unit tests enforce equality with the source. Demo
+business projections derive provider IDs from the catalog adapter metadata. The
+sync script uses decoded filesystem paths for formatter configuration lookup.
+`plugin-catalog.ts` only resolves localized text and explicit
+installation metadata; never infer provider identity from server display names.
+`plugin-directory.tsx` groups rows and applies search/category/installed filters.
+`core/capabilities` consumes catalog and safe status projections; MCP secrets and
+raw settings remain in the administrator-only editor. `plugin-adapters.tsx`
+registers integration-specific settings flows once, independent of catalog size.
+The `business` form uses manifest credential fields without asking for an MCP URL;
+its backend adapter generates bundled DingTalk/WeCom notification or HubSpot CRM
+connections. These also appear in MCP discovery, so deduplicate projections by
+installation ID. Keep their labels as configuration, not package installation.
+Keep installation, enabled state, configured credentials, and verified authorization
+distinct. Agent `mcp_plugins` uses stable installation IDs; null means all, [] means
+none. The settings dialog submits only selections changed from its opening
+snapshot, preserving concurrent updates on unrelated saves and treating restored
+selections as unchanged. It is runtime selection, not a replacement authorization policy. See
+`docs/capability-center.md` for the complete contract and extension example.
+`PluginIcon` is shared by recommendations, configured entries, and the editor;
+brand assets and their provenance live in `public/images/plugins/`. Brand icons
+require explicit catalog metadata; a custom server name never selects a brand.
+Ambiguous installation IDs remain visible but cannot be selected for an Agent. The icon picker
+accepts local PNG/JPEG/WebP up to 2 MiB, checks the signature, decodes and contains
+the image in a 128px PNG, and stages changes until the existing targeted MCP save.
+`presentation.icon` is a bounded PNG data URL carried by the API's existing extra
+metadata support; it must never enter transport parameters. Preserve sibling
+presentation fields and masked credentials; cancel/reset/unmount must fence stale
+image-decoding results. Uploaded remote URLs and SVG are never rendered. Existing
+shared-MCP administrator checks remain authoritative; this adds no personal scope.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+
+### Shared model settings
+
+Settings → Models (`?settings=models`) offers administrator-only catalog management
+through `/api/managed-models`. YAML entries are read-only. `core/models/management.ts`
+whitelists editable fields so source metadata and `has_api_key` never get posted.
+Draft credentials stay in editor state, never query cache or browser storage; blank
+keeps the saved key, explicit removal sends an empty key. Saving invalidates both the
+admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
+callbacks. Static demos and non-admin users must not query the management API.
+
+## Full-stack plugin UI
+
+`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
+Module downloads use the configured backend base and authenticated fetch, then import
+and release a Blob URL; packages must be self-contained (no relative module/assets).
+This inline transport is experimental; packaged-asset compatibility is documented in
+`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+Conversation action factories, shapes and availability callbacks are guarded per plugin;
+only validated value snapshots reach the toolbar/sidebar render paths.
+`PluginNavigation` and the dynamic workspace extension route consume page declarations;
+Capability Center details only show metadata and status. Conversation action slots augment
+normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
+Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
+namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
+
+Plugin page `openConversation(threadId)` resolves authenticated thread metadata
+with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
+abort signal fences late navigation after unmount/account changes. Synchronous
+conversation-action callbacks reject Promise returns while consuming rejections.

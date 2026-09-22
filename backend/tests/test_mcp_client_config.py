@@ -26,6 +26,17 @@ def test_build_server_params_stdio_success():
     }
 
 
+@pytest.mark.parametrize("cwd", [None, ""], ids=["null", "empty"])
+def test_build_server_params_omits_empty_stdio_cwd(cwd: str | None):
+    config = McpServerConfig(command="python", args=["server.py"], cwd=cwd)
+
+    assert build_server_params("local", config) == {
+        "transport": "stdio",
+        "command": "python",
+        "args": ["server.py"],
+    }
+
+
 def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
     monkeypatch.setenv("MCP_TOKEN", "secret")
     monkeypatch.delenv("MISSING_TOKEN", raising=False)
@@ -67,6 +78,16 @@ def test_build_server_params_http_like_success(transport: str):
         "transport": transport,
         "url": "https://example.com/mcp",
         "headers": {"Authorization": "Bearer token"},
+    }
+
+
+@pytest.mark.parametrize("transport", ["sse", "http"])
+def test_build_server_params_does_not_forward_stdio_cwd_to_remote_transports(transport: str):
+    config = McpServerConfig(type=transport, url="https://example.com/mcp", cwd="/local/server")
+
+    assert build_server_params("remote-server", config) == {
+        "transport": transport,
+        "url": "https://example.com/mcp",
     }
 
 
@@ -243,7 +264,7 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     assert parallel["enabled"] is False
     assert parallel["type"] == "http"
     assert parallel["url"] == "https://search.parallel.ai/mcp"
-    assert "headers" not in parallel
+    assert parallel["headers"] == {"User-Agent": "deer-flow"}
 
     config = ExtensionsConfig.model_validate(example)
     assert "parallel-search" not in build_servers_config(config)
@@ -252,4 +273,5 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     assert build_servers_config(config)["parallel-search"] == {
         "transport": "http",
         "url": "https://search.parallel.ai/mcp",
+        "headers": {"User-Agent": "deer-flow"},
     }

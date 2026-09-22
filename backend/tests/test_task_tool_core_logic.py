@@ -36,6 +36,18 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
+def test_parent_loop_middleware_recorder_requires_the_journal_owner_loop():
+    owner_loop = asyncio.new_event_loop()
+    other_loop = asyncio.new_event_loop()
+    journal = SimpleNamespace(_owner_loop=owner_loop)
+    try:
+        with pytest.raises(ValueError, match="must match"):
+            task_tool_module._ParentLoopMiddlewareRecorderProxy(journal, other_loop)
+    finally:
+        owner_loop.close()
+        other_loop.close()
+
+
 def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
     """Subagent middleware events must never call RunJournal from the child loop."""
     calls: list[tuple[object, dict]] = []
@@ -425,11 +437,14 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
 
     assert captured["executor_kwargs"]["extensions"] is loaded
+
+    assert assemble_tools.call_args.kwargs["extensions"] is loaded
 
 
 def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
@@ -462,6 +477,7 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
     assert kwargs["tool_promotion_recorder"] is proxy
+    assert kwargs["tool_progress_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()
@@ -491,11 +507,14 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+    assert "extensions" not in assemble_tools.call_args.kwargs
 
 
 def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
@@ -1004,7 +1023,8 @@ def test_task_tool_context_mode_schema_rejects_unknown_mode():
         schema.model_validate({"runtime": None, "prompt": "Task", "subagent_type": "general-purpose", "tool_call_id": "tc", "context_mode": "shared"})
 
 
-def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
+@pytest.mark.parametrize("mcp_plugins", [None, [], ["stable-plugin"]])
+def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
     """Verify tool_groups from parent metadata are passed to get_available_tools(groups=...)."""
     config = _make_subagent_config()
     parent_tool_groups = ["file:read", "file:write", "bash"]
@@ -1017,7 +1037,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
             "uploaded_files": [],
         },
         context={"thread_id": "thread-1"},
-        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups}},
+        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups, "mcp_plugins": mcp_plugins}},
     )
     events = []
     captured = {}
@@ -1053,7 +1073,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     assert captured["uploaded_files"] == []
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True, **({"mcp_plugins": mcp_plugins} if mcp_plugins is not None else {}))
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -3263,3 +3283,21 @@ def test_task_tool_forwards_no_criteria_by_default(monkeypatch):
 
     assert executor_kwargs["acceptance_criteria"] is None
     assert "<acceptance_criteria>" not in delegated_prompt
+
+
+def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context["__knowledge_scope_execution"] = {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+        "display": {"datasets": [{"id": "dataset-1", "name": "Private label"}]},
+    }
+
+    executor_kwargs, _ = _capture_executor_call(monkeypatch, runtime=runtime)
+
+    assert executor_kwargs["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }

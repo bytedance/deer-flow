@@ -20,7 +20,17 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 43
+config_version: 46
+
+# Optional per-model request pacing (inside a models[] entry):
+# request_admission:
+#   requests_per_minute: 60
+#   group: shared-provider-account  # optional; defaults to the model config name
+#   max_wait_seconds: 300
+#   max_queue_size: 256
+# Off unless configured. Shared groups require identical settings; restart after
+# changes. Process-local RPM only, not TPM or a cluster-wide quota. See the
+# "Model request admission" section in backend/docs/CONFIGURATION.md.
 
 # ============================================================================
 # Logging
@@ -305,6 +315,35 @@ models:
   #
   # For Docker deployments, use host.docker.internal instead of localhost:
   #   base_url: http://host.docker.internal:11434
+
+  # Example: llama.cpp (OpenAI-compatible local server)
+  #
+  # llama-server exposes an OpenAI-compatible /v1/chat/completions endpoint,
+  # so use ChatOpenAI and point base_url at the server's /v1 root. --alias
+  # gives the served model a stable API name independent of the GGUF filename.
+  #
+  # Start llama.cpp, for example:
+  #   llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 --alias qwen-local
+  #
+  # Tool calling depends on the model's chat template supporting tools. Current
+  # llama.cpp enables its Jinja template engine by default; if you override the
+  # template, use one that supports function/tool calls.
+  #
+  # - name: qwen-llamacpp
+  #   display_name: Qwen (llama.cpp)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: qwen-local
+  #   api_key: no-key              # Non-empty placeholder when llama-server auth is disabled
+  #   base_url: http://localhost:8080/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   supports_vision: false
+  #
+  # If llama-server was started with --api-key, replace the placeholder with
+  # that key (prefer an environment variable). In Docker, localhost is the
+  # DeerFlow container itself; use an address reachable from the container,
+  # for example on Docker Desktop:
+  #   base_url: http://host.docker.internal:8080/v1
 
   # Example: Anthropic Claude model (with extended thinking)
   # supports_thinking: true is required — without it, DeerFlow silently falls
@@ -718,6 +757,18 @@ models:
   #   pool_timeout: 30.0
 
 # ============================================================================
+# Knowledge Capability
+# ============================================================================
+# Optional knowledge capability. The feature is disabled by default. Provider
+# connection and retrieval settings belong to the matching entry in `tools:`
+# below (for example, the RAGFlow `knowledge_search` tool), not here.
+knowledge_base:
+  enabled: false
+  # Custom-agent chat only. Keeps the selector hidden unless the effective
+  # knowledge_search provider is the bundled RAGFlow tool.
+  scope_selection_enabled: false
+
+# ============================================================================
 # Tool Groups Configuration
 # ============================================================================
 # Define groups of tools for organization and access control
@@ -736,6 +787,12 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # Read explicitly referenced conversations (Gateway API only, opt-in).
+  # Each run must submit conversation_references; see backend/docs/API.md.
+  # - name: read_conversation
+  #   group: conversation
+  #   use: deerflow.tools.conversation:read_conversation
+
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
   # search time; an explicit `datasets: []` is invalid. Empty datasets are
@@ -759,6 +816,9 @@ tools:
   #   top_k: 256
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
+  # - name: list_knowledge_bases
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
@@ -838,6 +898,11 @@ tools:
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool
   #   max_results: 5
+  #   # Optional search-source filters; omit or use [] for no restriction of that kind.
+  #   # include_domains:
+  #   #   - docs.python.org
+  #   #   - developer.mozilla.org
+  #   # exclude_domains: []
   #   # api_key: $TAVILY_API_KEY  # Set if needed
 
   # Web search tool (uses InfoQuest, requires InfoQuest API key)
@@ -926,6 +991,7 @@ tools:
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
+  #   # wait_for_selector_timeout_ms: 5000  # How long to wait for that selector, in milliseconds
 
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
@@ -1285,6 +1351,26 @@ loop_detection:
   #     hard_limit: 300
 
 # ============================================================================
+# PII Redaction Middleware Configuration (issue #3190)
+# ============================================================================
+# Deterministic PII redaction in model-bound context. When enabled, emails,
+# phone numbers, API keys, credit-card numbers (Luhn-validated) and national
+# IDs found in genuine user messages and remote-content tool results
+# (web_fetch / web_search / image_search / web_capture and MCP tools) are
+# rewritten to irreversible placeholders like [EMAIL_1] before they reach the
+# model. No mapping is stored, so redaction cannot be reversed. Raw text stays
+# in thread state for the UI; the memory-extraction path is not covered.
+# Compaction and configured LLM title inputs are redacted too. Existing
+# placeholders reserve indices; compacted raw identities cannot be relinked.
+pii_redaction:
+  enabled: false
+  # redact_email: true
+  # redact_api_key: true
+  # redact_credit_card: true
+  # redact_phone: true
+  # redact_national_id: true
+
+# ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)
 # ============================================================================
 # Detects tool stagnation and repetition at the (thread, tool) level.
@@ -1330,6 +1416,32 @@ read_before_write:
   elide_min_chars: 2000
 
 # ============================================================================
+# Projects
+# ============================================================================
+# User projects group threads under a name plus free-form instructions. Member
+# threads receive the project's current instructions as a bounded, request-
+# scoped <project> block rendered from the snapshot pinned at run admission;
+# the block never enters the system prompt or persisted history. The shelf
+# index bounds below cap the request-scoped <documents> listing rendered from
+# the same pinned snapshot. Oversized instructions are rejected at write time
+# (422) and never truncated.
+
+projects:
+  # Hard UTF-8 byte cap for project instructions (range: 256-262144). Multi-
+  # byte characters count as their UTF-8 byte length, not as characters.
+  instructions_max_bytes: 8192
+  # Maximum shelf entries rendered into the <documents> index per run
+  # (range: 1-500).
+  shelf_index_max_entries: 50
+  # UTF-8 byte cap for the rendered <documents> index, counting IDs, escaped
+  # names, wrappers, separators and the overflow note (range: 512-65536).
+  # Usually binds before the entry cap for CJK document names.
+  shelf_index_max_bytes: 4096
+  # Days a trashed project document stays recoverable before the retention
+  # sweep may purge it permanently (range: 1-3650).
+  trash_retention_days: 30
+
+# ============================================================================
 # Provider Safety Termination Configuration
 # ============================================================================
 # Intercept AIMessages where the provider stopped generation for safety reasons
@@ -1365,12 +1477,9 @@ safety_finish_reason:
   #       error_codes: [336003, 17, 18]
 
 # ============================================================================
-# Sandbox Configuration
+# Uploads
 # ============================================================================
-# Choose between local sandbox (direct execution) or Docker-based AIO sandbox
-
-# Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Limits and conversion settings for files attached to a conversation.
 uploads:
   # Application-level upload limits enforced by the gateway and exposed to the
   # frontend before file selection.
@@ -1391,6 +1500,13 @@ uploads:
   # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
   pdf_converter: auto
 
+# ============================================================================
+# Sandbox Configuration
+# ============================================================================
+# Choose between local sandbox (direct execution), Docker-based AIO sandbox, 
+# or BoxLite micro-VM sandbox
+# Option 1: Local Sandbox (Default)
+# Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
@@ -1411,18 +1527,24 @@ sandbox:
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.
   # read_file and ls use head-truncation since their content is front-loaded.
+  # A read_file cut lands on a line boundary when the budget allows, and the marker names
+  # the next start_line to continue with, so the agent can page through a long file exactly.
   # Set to 0 to disable truncation.
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
 
-  # Maximum wall-clock seconds a single host bash command may run before it is
-  # terminated (process group and all). A blocking foreground command — e.g. a
-  # server started without backgrounding — is killed after this long so the
-  # agent's turn cannot hang. Start long-lived processes in the background with
-  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`) when you
-  # need logs; unredirected background output is drained with bounded capture
-  # and excess output is discarded.
+  # Provider command deadline (default: 600). AIO images on the supported
+  # semver line (1.9.3+, recommended 1.11.0) enforce it server-side through
+  # `hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image only
+  # gets the bounded host-side request. `bash_command_timeout` is used by
+  # providers that explicitly wire this setting (currently LocalSandbox,
+  # AioSandbox, and OpenSandbox). Other providers retain their provider-specific
+  # command defaults unless a caller supplies an explicit timeout. For providers
+  # that enforce this deadline server- or process-side, blocking foreground
+  # commands are terminated at the configured deadline. Long-lived processes
+  # should be started in the background with output redirected; unredirected
+  # background output is drained with bounded capture.
   bash_command_timeout: 600
 
 # Option 2: Container-based AIO Sandbox
@@ -1494,7 +1616,12 @@ sandbox:
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
+#   # AIO semver images default MAX_SHELL_SESSIONS to 10. DeerFlow leaves that
+#   # image default unchanged while subagent_runtime.max_running + 1 fits, and
+#   # otherwise injects the required value for local and provisioner sandboxes.
+#   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
+#   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
@@ -1659,7 +1786,9 @@ subagent_runtime:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
 #   timeout_seconds: 1800
-#   # Optional global max-turn override for all subagents.
+#   # Optional global max-turn override for all subagents. One turn is one
+#   # model call plus the tools it runs; the turn count is converted into
+#   # LangGraph's step budget, so this is the number of turns you actually get.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
@@ -2620,6 +2749,10 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
+#     # Optional: extra host suffixes inbound media downloads may come from,
+#     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
+#     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
+#     allowed_media_hosts: []
 #     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
 #     polling_retry_delay: 5
@@ -2659,6 +2792,11 @@ run_ownership:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#     # Optional: extra host suffixes inbound media downloads may come from, in
+#     # addition to the built-in qq.com family and WeCom's official COS media
+#     # host (ww-aibot-img-1258476243.<region>.myqcloud.com). Add a suffix here
+#     # if WeCom rotates to a new COS account or media is routed through a proxy.
+#     allowed_media_hosts: []
 #
 #   dingtalk:
 #     enabled: false
@@ -2740,17 +2878,23 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # `models` / `skills` govern the per-caller listing/detail surfaces
+#       # (which models/skills the caller sees on GET /api/models and the
+#       # GET /api/skills[.../custom, /{name}] skill routes); skill
+#       # management endpoints (install/edit/export) stay admin-gated.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2760,6 +2904,7 @@ run_ownership:
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
+#           skills: {allow: []}      # no skills visible in the listing
 authorization:
   enabled: false
 

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support.symlinks import symlink_or_skip
 
 from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
@@ -1636,7 +1637,7 @@ def test_local_install_rejects_symlinks_before_copying_or_resolving(tmp_path: Pa
     _write_local_extension(source)
     outside = tmp_path / "operator-secret.txt"
     outside.write_text("do not vendor me", encoding="utf-8")
-    (source / "linked-secret.txt").symlink_to(outside)
+    symlink_or_skip(source / "linked-secret.txt", outside)
     original_pyproject = (root / "backend" / "pyproject.toml").read_bytes()
 
     with pytest.raises(ValueError, match="symbolic links"):

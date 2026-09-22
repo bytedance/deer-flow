@@ -410,6 +410,19 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
   )}T${pad2(local.getUTCHours())}:${pad2(local.getUTCMinutes())}`;
 }
 
+/** Validate minute-precision YYYY-MM-DDTHH:mm input; invalid or skipped wall times return null. */
+export function validZonedLocalToUtcIso(
+  localValue: string,
+  timezone: string,
+): string | null {
+  try {
+    const iso = zonedLocalToUtcIso(localValue, timezone);
+    return utcToZonedLocalInput(iso, timezone) === localValue ? iso : null;
+  } catch {
+    return null;
+  }
+}
+
 function tzOffsetMs(timezone: string, date: Date): number {
   const tzParts = formatParts(timezone, date);
   const utcParts = formatParts("UTC", date);

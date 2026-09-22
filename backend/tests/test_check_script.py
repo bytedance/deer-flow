@@ -31,7 +31,8 @@ def test_find_pnpm_command_prefers_resolved_executable(monkeypatch):
 
     monkeypatch.setattr(pnpm_script.shutil, "which", fake_which)
 
-    assert pnpm_script.find_pnpm_command() == [r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"]
+    expected_path = r"C:\Users\tester\AppData\Roaming\npm\pnpm.cmd" if pnpm_script.os.name == "nt" else r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"
+    assert pnpm_script.find_pnpm_command() == [expected_path]
 
 
 def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
