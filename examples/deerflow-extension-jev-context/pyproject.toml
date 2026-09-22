@@ -5,7 +5,7 @@ description = "Opt-in Jev pruning of old read-only tool results for DeerFlow"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-license-files = ["THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE"]
 dependencies = [
     "deerflow-extension-api>=0.2.2,<0.3",
     "langchain>=1.2,<2",
