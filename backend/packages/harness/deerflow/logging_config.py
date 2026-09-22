@@ -109,14 +109,16 @@ _SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
 # operator legibility, and the pass runs only on a record that opens with
 # urllib3's own literal, so a header-looking line in any other log keeps its
 # text. ``location`` is in the list because that field value is the same
-# origin-form signed target the Redirecting and retry passes collapse.
-_CREDENTIAL_HEADER_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|location)[ \t]*:[ \t]*\S.*$")
+# origin-form signed target the Redirecting and retry passes collapse. The
+# pattern is deliberately not line-anchored: the dump's first field follows the
+# ``url=`` argument on the same physical line, so ``^`` could never see it.
+_CREDENTIAL_HEADER_RE = re.compile(r"(?i)\b(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|location)[ \t]*:[ \t]*[^\r\n]*")
 _HEADER_DUMP_PREFIX = "Failed to parse headers (url="
 
 
 def _redact_credential_headers(message: str) -> str:
     def _collapse(match: re.Match[str]) -> str:
-        return match.group("indent") + match.group("name") + ": <redacted>"
+        return match.group("name") + ": <redacted>"
 
     return _CREDENTIAL_HEADER_RE.sub(_collapse, message)
 
@@ -254,11 +256,10 @@ class UrlRedactionFilter(logging.Filter):
         # _scheme_starts) instead of re.sub, so long letter runs in any
         # record — URL paths or URL-free error bodies — stay linear-time.
         redacted = message
-        # The dump pass runs first: the absolute-URL rewrite consumes the
-        # ``): `` closer that separates the url argument from the error repr
-        # (see the note on _URL_REDACT_RE's ``rest`` class), and after that the
-        # first header line of the dump no longer starts a line, so a
-        # line-anchored collapse could not see it.
+        # Runs before the URL passes: the absolute-URL rewrite consumes the
+        # ``): `` closer and the repr scaffolding that separate the url
+        # argument from the header dump, which would blur the two together and
+        # leave a value whose only boundary was the consumed closer behind.
         if message.startswith(_HEADER_DUMP_PREFIX):
             # The record's own second argument, not a URL line: the response
             # header block that urllib3 echoes when it could not parse it.
