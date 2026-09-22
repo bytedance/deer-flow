@@ -727,11 +727,16 @@ def _storage_config(skills_root: Path, *, scan_enabled: bool) -> SimpleNamespace
 
 def _malicious_archive(directory: Path, skill_name: str = "evil-skill") -> Path:
     """A well-formed archive whose SKILL.md carries CRITICAL private-key material."""
+    return _archive(directory, skill_name, extra="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n")
+
+
+def _archive(directory: Path, skill_name: str = "benign-skill", extra: str = "") -> Path:
+    """A well-formed archive containing one SKILL.md."""
     path = directory / f"{skill_name}.skill"
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr(
             f"{skill_name}/SKILL.md",
-            f"---\nname: {skill_name}\ndescription: Demo skill\n---\n\n# {skill_name}\n\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n",
+            f"---\nname: {skill_name}\ndescription: Demo skill\n---\n\n# {skill_name}\n\n{extra}",
         )
     return path
 
@@ -767,13 +772,13 @@ class TestInstallScanConfigParity:
 
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow)
 
-    def _local_storage(self, skills_root: Path, *, scan_enabled: bool) -> LocalSkillStorage:
-        return LocalSkillStorage(host_path=str(skills_root), app_config=_storage_config(skills_root, scan_enabled=scan_enabled))
+    def _local_storage(self, skills_root: Path, config: SimpleNamespace) -> LocalSkillStorage:
+        return LocalSkillStorage(host_path=str(skills_root), app_config=config)
 
-    def _user_storage(self, base: Path, skills_root: Path, *, scan_enabled: bool) -> UserScopedSkillStorage:
+    def _user_storage(self, base: Path, skills_root: Path, config: SimpleNamespace) -> UserScopedSkillStorage:
         with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base)):
             with patch("deerflow.config.paths._paths", None):
-                return UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=_storage_config(skills_root, scan_enabled=scan_enabled))
+                return UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=config)
 
     def test_content_scan_honours_the_storages_own_config(self, tmp_path: Path, monkeypatch) -> None:
         """Storage config ON, process global OFF: the archive must still be blocked."""
@@ -781,9 +786,10 @@ class TestInstallScanConfigParity:
 
         skills_root = _skills_root(tmp_path)
         archive = _malicious_archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=True)
 
-        assert _install_outcome(self._local_storage(skills_root, scan_enabled=True), archive) == "blocked"
-        assert _install_outcome(self._user_storage(tmp_path, skills_root, scan_enabled=True), archive) == "blocked"
+        assert _install_outcome(self._local_storage(skills_root, config), archive) == "blocked"
+        assert _install_outcome(self._user_storage(tmp_path, skills_root, config), archive) == "blocked"
 
     def test_kill_switch_off_in_the_storages_own_config_skips_both_gates(self, tmp_path: Path, monkeypatch) -> None:
         """Storage config OFF, process global ON: both storages accept it.
@@ -796,6 +802,33 @@ class TestInstallScanConfigParity:
 
         skills_root = _skills_root(tmp_path)
         archive = _malicious_archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=False)
 
-        assert _install_outcome(self._local_storage(skills_root, scan_enabled=False), archive) == "installed"
-        assert _install_outcome(self._user_storage(tmp_path, skills_root, scan_enabled=False), archive) == "installed"
+        assert _install_outcome(self._local_storage(skills_root, config), archive) == "installed"
+        assert _install_outcome(self._user_storage(tmp_path, skills_root, config), archive) == "installed"
+
+    def test_llm_scan_receives_the_storages_own_config(self, tmp_path: Path, monkeypatch) -> None:
+        """The per-file LLM scan resolves its config the same way.
+
+        ``skill_scan.enabled`` does not gate it — ``scan_skill_content`` always
+        runs — but it reads ``skill_evolution.moderation_model_name`` and builds
+        the model from its ``app_config``, so leaving it on the process global
+        keeps the two halves of one install on two different configs.
+        """
+        seen: list[object] = []
+
+        async def _record(*args, **kwargs):
+            seen.append(kwargs.get("app_config"))
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _record)
+
+        skills_root = _skills_root(tmp_path)
+        archive = _archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=True)
+
+        self._local_storage(skills_root, config).install_skill_from_archive(archive)
+        self._user_storage(tmp_path, skills_root, config).install_skill_from_archive(archive)
+
+        assert seen, "the LLM scan should have run for the installed SKILL.md"
+        assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"
