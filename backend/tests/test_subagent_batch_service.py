@@ -70,6 +70,25 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 
 @pytest.mark.asyncio
+async def test_submit_rejects_explicit_zero_limits_instead_of_applying_defaults() -> None:
+    """An explicit 0 is out of range and must not be silently replaced by the default."""
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=3),
+    )
+
+    with pytest.raises(ValueError, match="max_live_items must be between 1 and"):
+        await service.submit(_request(max_live_items=0))
+
+    with pytest.raises(ValueError, match="max_running_items must be between 1 and"):
+        await service.submit(_request(max_running_items=0))
+
+    repository.create_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,
