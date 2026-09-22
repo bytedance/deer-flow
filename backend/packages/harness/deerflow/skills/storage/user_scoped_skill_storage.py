@@ -329,8 +329,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
         path = Path(archive_path)
         custom_dir = self._user_custom_root
 
-        # Ensure user custom directory exists
-        custom_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure user custom directory exists. This is filesystem work too, so
+        # it goes through the same worker-thread discipline as the phases below
+        # — the install route awaits this coroutine on the Gateway event loop.
+        await asyncio.to_thread(custom_dir.mkdir, parents=True, exist_ok=True)
 
         # The per-file security scan is an async LLM call and must stay on the
         # event loop; every filesystem phase around it runs in a worker thread.
