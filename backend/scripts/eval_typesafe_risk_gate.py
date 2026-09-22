@@ -19,7 +19,7 @@ Method, and the things it deliberately refuses to do:
   classification successes: they are reported in their own populations, and a
   risky case is only counted as "blocked by the model" when a real answer said so.
 * Five mutually exclusive populations are reported separately — uncached network
-  evaluations, cache hits, unprobed tools, whitelist refusals, local refusals.
+  evaluations, cache hits, unprobed tools, allowed_tools refusals, local refusals.
   Mixing them hides both the latency profile and the coverage holes. Each sample is classified from the
   response it received, so a cache-pass call whose warming request failed is
   reported as the network evaluation it really was; the warming calls themselves
@@ -63,9 +63,9 @@ from deerflow.guardrails.typesafe import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, 
 NETWORK = "network"
 CACHE_HIT = "cache_hit"
 NOT_PROBED = "not_probed"
-NOT_WHITELISTED = "not_whitelisted"
+NOT_ALLOWED = "not_allowed"
 LOCAL_DENY = "local_deny"
-POPULATIONS = (NETWORK, CACHE_HIT, NOT_PROBED, NOT_WHITELISTED, LOCAL_DENY)
+POPULATIONS = (NETWORK, CACHE_HIT, NOT_PROBED, NOT_ALLOWED, LOCAL_DENY)
 
 _DEFAULT_CASES = Path(__file__).with_name("typesafe_risk_gate_cases.json")
 _LATENCY_TARGET_SECONDS = 1.0
@@ -102,7 +102,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="jev-latest", help="pin an exact version to make the run reproducible")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--tools", default="", help="comma-separated probe scope; default probes every tool in the case set")
-    parser.add_argument("--whitelist", default="", help="comma-separated permission list; unlisted tools are refused locally; default enforces no whitelist")
+    parser.add_argument("--allowed-tools", default="", help="comma-separated permission list; tools outside it are refused locally; default enforces no list")
     parser.add_argument("--max-state-chars", type=int, default=4000)
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--deadline-seconds", type=float, default=10.0)
@@ -144,7 +144,7 @@ def _provider(args: argparse.Namespace, *, cache_enabled: bool) -> TypeSafeGuard
         model=args.model,
         threshold=args.threshold,
         tools=_split_names(args.tools),
-        whitelist=_split_names(args.whitelist),
+        allowed_tools=_split_names(args.allowed_tools),
         max_state_chars=args.max_state_chars,
         timeout=args.timeout,
         deadline_seconds=args.deadline_seconds,
@@ -166,8 +166,8 @@ async def _run_case(provider: TypeSafeGuardrailProvider, case: dict[str, Any]) -
     cached = decision.metadata.get("cached")
     if code == "typesafe.tool_not_probed":
         population, verdict = NOT_PROBED, "allow"
-    elif code == "typesafe.tool_not_whitelisted":
-        population, verdict = NOT_WHITELISTED, "deny"
+    elif code == "typesafe.tool_not_allowed":
+        population, verdict = NOT_ALLOWED, "deny"
     elif code == "typesafe.state_unusable":
         population, verdict = LOCAL_DENY, "deny"
     elif cached is True:
@@ -254,7 +254,7 @@ def _summarize(outcomes: list[Outcome]) -> dict[str, Any]:
 def _score(outcomes: list[Outcome], *, fail_open: bool) -> dict[str, Any]:
     """Score only the probed scope of the main pass; unprobed cases are a coverage gap.
 
-    Calls the whitelist refused are permission decisions, not risk-model
+    Calls refused by ``allowed_tools`` are permission decisions, not risk-model
     decisions, so they are excluded here too and stay visible in the population
     report instead of diluting the false-block rate.
 
@@ -366,7 +366,7 @@ def _format_ms(value: float | None) -> str:
 
 def _print_report(report: dict[str, Any], outcomes: list[Outcome], sequences: list[dict[str, Any]]) -> None:
     print(f"\nTypeSafe risk-gate evaluation: {report['endpoint']} model={report['model']} threshold={report['threshold']} cases={report['cases']}")
-    print(f"probe scope: {report['tools'] or 'every tool in the case set'}   whitelist: {report['whitelist'] or 'none configured'}   fail_closed={not report['fail_open']}")
+    print(f"probe scope: {report['tools'] or 'every tool in the case set'}   allowed_tools: {report['allowed_tools'] or 'none configured'}   fail_closed={not report['fail_open']}")
 
     print("\nPopulations (mutually exclusive)")
     for population in POPULATIONS:
@@ -385,7 +385,7 @@ def _print_report(report: dict[str, Any], outcomes: list[Outcome], sequences: li
         print(f"  cache warming (auxiliary, not a population) n={warming['n']} error={warming['error']}{note}")
 
     score = report["score"]
-    print("\nScores (probed scope only; unprobed tools and whitelist refusals are outside the risk-model score, not a pass)")
+    print("\nScores (probed scope only; unprobed tools and allowed_tools refusals are outside the risk-model score, not a pass)")
     print(f"  risky: n={score['risky_cases']} blocked_by_model={score['risky_blocked_by_model']} refused_locally={score['risky_refused_locally']} errors={score['risky_errors']} MISSED={score['risky_missed']} {score['risky_missed_cases']}")
     print(f"  safe : n={score['safe_cases']} blocked={score['safe_blocked']} system_false_block={score['system_false_block_rate']:.1%} {score['safe_blocked_cases']}")
     print(f"         model-only false block: {score['model_false_block_rate']:.1%} over {score['safe_model_answered']} answered safe calls")
@@ -407,9 +407,9 @@ def _print_report(report: dict[str, Any], outcomes: list[Outcome], sequences: li
         print("\nCOVERAGE GAP: these cases were never probed and their protection came from somewhere else:")
         print(f"  {unprobed}")
 
-    refused = [outcome.case_id for outcome in outcomes if outcome.population == NOT_WHITELISTED]
+    refused = [outcome.case_id for outcome in outcomes if outcome.population == NOT_ALLOWED]
     if refused:
-        print("\nWHITELIST: these cases were refused locally because their tool is not whitelisted:")
+        print("\nALLOWED TOOLS: these cases were refused locally because their tool is not in allowed_tools:")
         print(f"  {refused}")
 
     if sequences:
@@ -430,7 +430,7 @@ def main() -> int:
         "model": args.model,
         "threshold": args.threshold,
         "tools": args.tools,
-        "whitelist": args.whitelist,
+        "allowed_tools": args.allowed_tools,
         "fail_open": args.fail_open,
         "max_state_chars": args.max_state_chars,
         "timeout": args.timeout,

@@ -249,52 +249,52 @@ class TestLocalDecisions:
             assert provider.evaluate(_request("write_file", arguments)).allow is False
         assert server.count == 0
 
-    def test_whitelist_refuses_unlisted_tools_without_a_request(self):
+    def test_allowed_tools_refuses_unlisted_tools_without_a_request(self):
         server = _Server()
-        provider = _provider(server, whitelist=["bash"])
+        provider = _provider(server, allowed_tools=["bash"])
         for _ in range(2):
             decision = provider.evaluate(_request("read_file", {"path": "/etc/shadow"}))
             assert decision.allow is False
-            assert decision.reasons[0].code == "typesafe.tool_not_whitelisted"
-            assert decision.metadata == {"tool_not_whitelisted": True}
+            assert decision.reasons[0].code == "typesafe.tool_not_allowed"
+            assert decision.metadata == {"tool_not_allowed": True}
             assert decision.policy_id == "deerflow.guardrails.typesafe"
         assert server.count == 0
 
-    def test_empty_whitelist_refuses_every_tool(self):
-        """``[]`` is a configured, empty set — not "no whitelist configured".
+    def test_empty_allowed_tools_refuses_every_tool(self):
+        """``[]`` is a configured, empty set — not "no allowed_tools configured".
 
         A truthiness check would treat the two the same and let every tool run.
         """
         server = _Server()
-        decision = _provider(server, whitelist=[]).evaluate(_request("bash"))
+        decision = _provider(server, allowed_tools=[]).evaluate(_request("bash"))
         assert decision.allow is False
-        assert decision.reasons[0].code == "typesafe.tool_not_whitelisted"
+        assert decision.reasons[0].code == "typesafe.tool_not_allowed"
         assert server.count == 0
 
-    def test_whitelisted_tools_still_face_the_risk_gate(self):
+    def test_allowed_tools_still_face_the_risk_gate(self):
         server = _Server(lambda request: httpx.Response(200, json=_noul(0.9)))
-        decision = _provider(server, whitelist=["bash"]).evaluate(_request("bash"))
+        decision = _provider(server, allowed_tools=["bash"]).evaluate(_request("bash"))
         assert decision.allow is False
         assert decision.reasons[0].code == "typesafe.tool_call_risky"
         assert server.count == 1
 
-    def test_whitelist_and_probe_scope_are_independent_gates(self):
-        """A whitelisted tool outside the probe scope is allowed; a tool outside
-        the whitelist is refused even though the probe scope would have skipped it."""
+    def test_allowed_tools_and_probe_scope_are_independent_gates(self):
+        """A allowed tool outside the probe scope is allowed; a tool outside
+        the allowed_tools is refused even though the probe scope would have skipped it."""
         server = _Server()
-        provider = _provider(server, tools=["bash"], whitelist=["bash", "read_file"])
+        provider = _provider(server, tools=["bash"], allowed_tools=["bash", "read_file"])
         skipped = provider.evaluate(_request("read_file", {"path": "a.txt"}))
         refused = provider.evaluate(_request("write_file", {"path": "a.txt", "content": "hi"}))
         assert (skipped.allow, skipped.reasons[0].code) == (True, "typesafe.tool_not_probed")
-        assert (refused.allow, refused.reasons[0].code) == (False, "typesafe.tool_not_whitelisted")
+        assert (refused.allow, refused.reasons[0].code) == (False, "typesafe.tool_not_allowed")
         assert server.count == 0
 
-    def test_whitelist_refusal_precedes_state_validation(self):
+    def test_allowed_tools_refusal_precedes_state_validation(self):
         """Arguments that could not be validated must not decide the answer for a
-        tool the whitelist already refuses: no state is built, nothing is sent."""
+        tool the allowed_tools already refuses: no state is built, nothing is sent."""
         server = _Server()
-        decision = _provider(server, whitelist=["read_file"], max_state_chars=64).evaluate(_request("write_file", {"path": "a.txt", "content": "x" * 500}))
-        assert decision.reasons[0].code == "typesafe.tool_not_whitelisted"
+        decision = _provider(server, allowed_tools=["read_file"], max_state_chars=64).evaluate(_request("write_file", {"path": "a.txt", "content": "x" * 500}))
+        assert decision.reasons[0].code == "typesafe.tool_not_allowed"
         assert server.count == 0
 
 
@@ -603,10 +603,10 @@ class TestClientLifecycle:
             created.append(_ClosingTransport())
             return created[-1]
 
-        provider = _provider(transport_factory=factory, tools=["bash"], whitelist=["bash", "read_file", "write_file"], max_state_chars=64)
-        provider.evaluate(_request("read_file"))  # whitelisted, not probed
-        provider.evaluate(_request("str_replace"))  # refused by the whitelist
-        provider.evaluate(_request("write_file", {"path": "a", "content": "x" * 200}))  # whitelisted, over limit
+        provider = _provider(transport_factory=factory, tools=["bash"], allowed_tools=["bash", "read_file", "write_file"], max_state_chars=64)
+        provider.evaluate(_request("read_file"))  # allowed, not probed
+        provider.evaluate(_request("str_replace"))  # refused by the allowed_tools
+        provider.evaluate(_request("write_file", {"path": "a", "content": "x" * 200}))  # allowed, over limit
         provider.evaluate(_request("bash", {"command": "ls"}))  # network
         provider.evaluate(_request("bash", {"command": "ls"}))  # cache hit
         assert len(created) == 1
@@ -658,8 +658,8 @@ class TestConfiguration:
             ({"cache_size": -1}, "cache_size"),
             ({"criteria": {"true": ""}}, "criteria.true"),
             ({"tools": ["bash", 7]}, "tools"),
-            ({"whitelist": "bash"}, "whitelist"),
-            ({"whitelist": ["bash", ""]}, "whitelist"),
+            ({"allowed_tools": "bash"}, "allowed_tools"),
+            ({"allowed_tools": ["bash", ""]}, "allowed_tools"),
         ],
     )
     def test_invalid_configuration_fails_at_construction(self, kwargs, message):
@@ -691,17 +691,17 @@ class TestConfiguration:
         assert question["criteria"] == {"true": "yes means bad", "false": "no means fine"}
 
     def test_release_policy_parameters_declares_behaviour_without_the_key(self):
-        declared = _provider(tools=["bash"], whitelist=["read_file", "bash"], deadline_seconds=3.0).release_policy_parameters()
+        declared = _provider(tools=["bash"], allowed_tools=["read_file", "bash"], deadline_seconds=3.0).release_policy_parameters()
         assert _API_KEY not in json.dumps(declared)
         assert declared["threshold"] == 0.5
         assert declared["tools"] == ["bash"]
-        assert declared["whitelist"] == ["bash", "read_file"]
+        assert declared["allowed_tools"] == ["bash", "read_file"]
         assert declared["deadline_seconds"] == 3.0
         assert declared["retry_backoff"] == 0.5
         assert declared["max_state_chars"] == 4000
         assert declared["instructions_hash"]
-        # "no whitelist configured" and "nothing whitelisted" are different policies.
-        assert _provider().release_policy_parameters()["whitelist"] is None
+        # "no allowed_tools configured" and "nothing allowed" are different policies.
+        assert _provider().release_policy_parameters()["allowed_tools"] is None
 
 
 # --- middleware integration ----------------------------------------------
@@ -757,21 +757,21 @@ class TestMiddlewareIntegration:
         assert result.status == "error"
         assert "typesafe.state_unusable" in result.content
 
-    def test_whitelist_refusal_is_not_governed_by_fail_open(self):
-        """The whitelist is a permission rule, not a provider error: fail_open only
+    def test_allowed_tools_refusal_is_not_governed_by_fail_open(self):
+        """The allowed_tools is a permission rule, not a provider error: fail_open only
         covers evaluator failures, so a refused tool must never run unevaluated."""
         journal = _FakeJournal()
-        middleware = GuardrailMiddleware(_provider(_Server(), whitelist=["bash"]), fail_closed=False)
+        middleware = GuardrailMiddleware(_provider(_Server(), allowed_tools=["bash"]), fail_closed=False)
         handler = MagicMock()
         result = middleware.wrap_tool_call(_tool_call_request(tool_name="read_file", args={"path": "/etc/shadow"}, context={"__run_journal": journal}), handler)
 
         handler.assert_not_called()
         assert result.status == "error"
-        assert "typesafe.tool_not_whitelisted" in result.content
-        assert journal.calls[0]["changes"]["reason_codes"] == ["typesafe.tool_not_whitelisted"]
+        assert "typesafe.tool_not_allowed" in result.content
+        assert journal.calls[0]["changes"]["reason_codes"] == ["typesafe.tool_not_allowed"]
 
-    def test_async_whitelist_refusal_returns_an_error_message(self):
-        middleware = GuardrailMiddleware(_provider(_Server(), whitelist=["bash"]), fail_closed=False)
+    def test_async_allowed_tools_refusal_returns_an_error_message(self):
+        middleware = GuardrailMiddleware(_provider(_Server(), allowed_tools=["bash"]), fail_closed=False)
 
         async def run():
             handler = AsyncMock()
@@ -781,7 +781,7 @@ class TestMiddlewareIntegration:
 
         result = asyncio.run(run())
         assert result.status == "error"
-        assert "typesafe.tool_not_whitelisted" in result.content
+        assert "typesafe.tool_not_allowed" in result.content
 
     def test_async_denial_returns_an_error_message(self):
         server = _Server(lambda request: httpx.Response(200, json=_noul(0.97)))

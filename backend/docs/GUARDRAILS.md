@@ -450,7 +450,7 @@ guardrails:
                                # decisions must stay traceable across releases
       threshold: 0.5           # example value; calibrate with the online evaluation
       tools: ["bash"]          # SMOKE-TEST scope only -- see "Coverage" below
-      # whitelist: ["bash", "read_file", "write_file"]   # permission list; see "Tool whitelist" below
+      # allowed_tools: ["bash", "read_file", "write_file"]   # permission list; see "Allowed tools" below
 ```
 
 | Setting | Default | Notes |
@@ -460,7 +460,7 @@ guardrails:
 | `model` | `jev-latest` | A rolling server-side alias; pin a version for reproducibility. |
 | `threshold` | `0.5` | Deny when `probability >= threshold`. |
 | `tools` | omitted = **every** tool | Probing every tool matches the "every call passes the gate" contract; narrowing it shrinks protection (see Coverage). |
-| `whitelist` | omitted = **not enforced** | Hard permission list. Tools outside it are refused locally (`typesafe.tool_not_whitelisted`) before the probe scope and before any state is built; `[]` refuses every tool; whitelisted tools still face the risk gate (see "Tool whitelist"). |
+| `allowed_tools` | omitted = **not enforced** | Hard permission list. Tools outside it are refused locally (`typesafe.tool_not_allowed`) before the probe scope and before any state is built; `[]` refuses every tool; tools in the list still face the risk gate (see "Allowed tools"). |
 | `instructions` / `criteria` | risk rubric (below) | The default rubric judges the call text alone. |
 | `timeout` | `5.0` | Per-attempt sub-limit (connect/read/write/pool) -- **not** a total budget. |
 | `deadline_seconds` | `10.0` | Whole-evaluation budget, including retries and backoff. |
@@ -468,7 +468,7 @@ guardrails:
 | `max_state_chars` | `4000` | Argument text above this is denied locally. |
 | `cache_size` / `cache_ttl_seconds` | `256` / `300` | FIFO cache keyed by `(tool, arguments)`; `0` disables it. |
 
-**Tool whitelist.** `whitelist` is a hard permission list, not an exemption from evaluation. Omitted, no whitelist is enforced (the probe scope decides what is evaluated). Set to `[]`, no tool may run. Set to a list, only those tools may run — a call to any other tool is refused locally (`typesafe.tool_not_whitelisted`) with no state built, no request and no cache entry, and the refusal is a guardrail decision, so `fail_closed: false` cannot reopen it. A whitelisted tool is **still** probed and still denied when its risk probability reaches `threshold`; the whitelist answers "may this tool run at all", the risk gate answers "is this particular call safe". It is checked before `tools`, so a tool outside the whitelist is refused even when `tools` would have skipped probing it — an unlisted tool must not inherit an allow from being out of probe scope. The provider has no denylist: express deny rules and per-role limits in `authorization.*`.
+**Allowed tools (`allowed_tools`).** A hard permission list, not an exemption from evaluation. Omitted, no list is enforced (the probe scope decides what is evaluated). Set to `[]`, no tool may run. Set to a list, only those tools may run — a call to any other tool is refused locally (`typesafe.tool_not_allowed`) with no state built, no request and no cache entry, and the refusal is a guardrail decision, so `fail_closed: false` cannot reopen it. A listed tool is **still** probed and still denied when its risk probability reaches `threshold`; the list answers "may this tool run at all", the risk gate answers "is this particular call safe". It is checked before `tools`, so a tool outside the list is refused even when `tools` would have skipped probing it — an unlisted tool must not inherit an allow from being out of probe scope. The provider has no denylist: express deny rules and per-role limits in `authorization.*`.
 
 **What is sent.** The tool name plus the call's full argument JSON, under `state.tool_call`. The provider does **not** redact: arguments can carry user content, file paths, shell commands or secrets, and `pii_redaction_middleware` does not apply on this path. Narrow `tools` to the tools that can cause side effects, and clear the egress with your data-protection owner before enabling.
 
@@ -480,13 +480,13 @@ guardrails:
 
 **Coverage -- read before narrowing `tools`.** A denial does not stop the operation: the agent can retry the same effect through an unprobed tool, an MCP tool, a subagent or a shell wrapper. `tools: ["bash"]` above is a smoke-test scope, not a production recommendation. Inventory the equivalent capabilities reachable from the main agent and its subagents, probe those paths, or forbid them through `authorization.*` / the sandbox. Moving a tool out of `tools` removes it from the gate -- that is a reduction in protection, not a fix for false positives. The provider never propagates one denial to semantically equivalent later calls.
 
-**Replacing the built-in AllowlistProvider.** `guardrails.provider` is a single slot: pointing it at TypeSafe **replaces** the allowlist provider and its rules stop applying. The allow half moves into the provider's `whitelist`; deny rules have no in-provider equivalent and still belong to `authorization.*`.
+**Replacing the built-in AllowlistProvider.** `guardrails.provider` is a single slot: pointing it at TypeSafe **replaces** the allowlist provider and its rules stop applying. The allow half moves into the provider's `allowed_tools`; deny rules have no in-provider equivalent and still belong to `authorization.*`.
 
 | Old `AllowlistProvider.config` | TypeSafe equivalent |
 |---|---|
-| `allowed_tools: [a, b]` | `whitelist: [a, b]` — listed tools still face the risk gate, every other tool is refused locally |
-| `allowed_tools: []` | `whitelist: []` (refuse everything) |
-| `allowed_tools` omitted or null | omit `whitelist` (not enforced) — do not write `whitelist: []` unless "no tool may run" is intended |
+| `allowed_tools: [a, b]` | `allowed_tools: [a, b]` — listed tools still face the risk gate, every other tool is refused locally |
+| `allowed_tools: []` | `allowed_tools: []` (refuse everything) |
+| `allowed_tools` omitted or null | omit `allowed_tools` (not enforced) — do not write `allowed_tools: []` unless "no tool may run" is intended |
 | `denied_tools: [a]` | no in-provider equivalent: `authorization.*` `deny: [a]`, which wins over allow |
 | `denied_tools` omitted or null | nothing to migrate |
 
@@ -503,10 +503,10 @@ authorization:
       roles:
         user:
           tools:
-            deny: ["write_file"]   # the allow half lives in the provider's whitelist
+            deny: ["write_file"]   # the allow half lives in the provider's allowed_tools
 ```
 
-Only the deny half needs RBAC now: the provider's `whitelist` carries the allow half for every caller, subagents included. Apply the migrated limits to **every role the old global guardrail covered**, admin/internal roles included; `default_role` only fills missing roles and never overrides an authenticated principal's role, and unknown roles fail closed. The mapping covers tool permissions only -- RBAC sets no limit on resources a known role has no policy for, and an OAP provider may carry semantics this mapping does not express. Verify allow, deny, omitted list, empty list, allow/deny overlap, the default role and real roles, including from a subagent, before switching. Rollback means restoring the old provider; keep the migrated RBAC limits until that restore is verified. RBAC also filters tool visibility at assembly time, so identical tool permissions do not guarantee identical model behavior.
+Only the deny half needs RBAC now: the provider's `allowed_tools` carries the allow half for every caller, subagents included. Apply the migrated limits to **every role the old global guardrail covered**, admin/internal roles included; `default_role` only fills missing roles and never overrides an authenticated principal's role, and unknown roles fail closed. The mapping covers tool permissions only -- RBAC sets no limit on resources a known role has no policy for, and an OAP provider may carry semantics this mapping does not express. Verify allow, deny, omitted list, empty list, allow/deny overlap, the default role and real roles, including from a subagent, before switching. Rollback means restoring the old provider; keep the migrated RBAC limits until that restore is verified. RBAC also filters tool visibility at assembly time, so identical tool permissions do not guarantee identical model behavior.
 
 **Failure surface.** When TypeSafe is unreachable, only probed calls that miss the cache are affected (blocked while `fail_closed: true`). Unprobed tools and cache hits keep working. Every failure raises: it is never silently downgraded to an allow. Provider errors report the status code or the offending field's type — never the response body, the HTTP reason phrase, or the tool arguments, all of which a malformed or hostile response can control or echo back.
 
@@ -643,8 +643,8 @@ uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 
 `tests/test_typesafe_guardrail_provider.py` -- the TypeSafe provider over `httpx.MockTransport`:
 - Threshold boundary, request shape and state digest
-- Local denials with zero requests: over-limit arguments, unserialisable arguments, unprobed tools, whitelist refusals (`[]` refuses everything; a refusal outranks the probe scope and state validation)
-- Whitelisted tools still reaching the risk gate, and whitelist refusals surviving `fail_closed: false`
+- Local denials with zero requests: over-limit arguments, unserialisable arguments, unprobed tools, allowed_tools refusals (`[]` refuses everything; a refusal outranks the probe scope and state validation)
+- Allowed tools still reaching the risk gate, and allowed_tools refusals surviving `fail_closed: false`
 - Response validation (`noul` type/range/finiteness, `answers`, `model`) and non-retryable vs retryable failures
 - Cache hits, TTL expiry, FIFO eviction, failures and local denials never cached
 - Deadline behaviour on both paths, including late results that must not be adopted

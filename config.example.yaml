@@ -2869,7 +2869,7 @@ run_ownership:
 #   argument text exceeds max_state_chars. Probe every tool that can perform the
 #   risky work instead of narrowing the gate. Pointing `guardrails.provider` at
 #   TypeSafe REPLACES the allowlist/OAP provider: the allow half of an old
-#   allowlist moves into `whitelist` below, while deny rules still belong to
+#   allowlist moves into `allowed_tools` below, while deny rules still belong to
 #   `authorization.*` (see backend/docs/GUARDRAILS.md, Option 4).
 # guardrails:
 #   enabled: true
@@ -2881,7 +2881,7 @@ run_ownership:
 #                                   # decisions must stay traceable across releases
 #       threshold: 0.5              # example value; calibrate with the online evaluation
 #       tools: ["bash"]
-#       # whitelist: ["bash", "read_file", "write_file"]   # hard permission list:
+#       # allowed_tools: ["bash", "read_file", "write_file"]   # hard permission list:
 #       #   unlisted tools are refused locally before any state is built, and
 #       #   listed tools still have to pass the risk gate. Omit to enforce none;
 #       #   [] refuses every tool.

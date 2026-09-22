@@ -64,7 +64,7 @@ def _args(**overrides) -> argparse.Namespace:
         "model": "jev-test",
         "threshold": 0.5,
         "tools": "",
-        "whitelist": "",
+        "allowed_tools": "",
         "max_state_chars": 4000,
         "timeout": 5.0,
         "deadline_seconds": 10.0,
@@ -122,29 +122,32 @@ def _loopback_peer() -> Iterator[int]:
         thread.join(timeout=5)
 
 
-def test_whitelist_refusals_get_their_own_population_and_stay_out_of_the_score(monkeypatch):
+def test_allowed_tools_refusals_get_their_own_population_and_stay_out_of_the_score(monkeypatch):
     """A permission refusal is neither a network sample nor a local state failure."""
     refusal = GuardrailDecision(
         allow=False,
-        reasons=[GuardrailReason(code="typesafe.tool_not_whitelisted", message="typesafe.tool_not_whitelisted: tool='read_file' not in configured whitelist")],
-        metadata={"tool_not_whitelisted": True},
+        reasons=[GuardrailReason(code="typesafe.tool_not_allowed", message="typesafe.tool_not_allowed: tool='read_file' not in configured allowed_tools")],
+        metadata={"tool_not_allowed": True},
     )
     collection = _collect(monkeypatch, main_script=[refusal], cache_script=[])
 
     outcome = collection.outcomes[0]
-    assert (outcome.population, outcome.verdict) == (eval_script.NOT_WHITELISTED, "deny")
+    assert (outcome.population, outcome.verdict) == (eval_script.NOT_ALLOWED, "deny")
+    # The population name is a report/JSON field: pin the literal so a rename
+    # cannot ship a mangled value unnoticed.
+    assert eval_script.NOT_ALLOWED == "not_allowed"
     assert eval_script._score(collection.outcomes, fail_open=False)["safe_cases"] == 0
 
 
-def test_tool_and_whitelist_lists_ignore_surrounding_whitespace(monkeypatch):
+def test_tool_and_allowed_tools_lists_ignore_surrounding_whitespace(monkeypatch):
     """``--tools "bash, write_file"`` must probe both tools, not silently treat
     ``" write_file"`` as an unknown name."""
     monkeypatch.setenv("TYPESAFE_TEST_KEY", "key")
-    provider = eval_script._provider(_args(api_key_env="TYPESAFE_TEST_KEY", tools="bash, write_file", whitelist=" bash , read_file "), cache_enabled=False)
+    provider = eval_script._provider(_args(api_key_env="TYPESAFE_TEST_KEY", tools="bash, write_file", allowed_tools=" bash , read_file "), cache_enabled=False)
 
     declared = provider.release_policy_parameters()
     assert declared["tools"] == ["bash", "write_file"]
-    assert declared["whitelist"] == ["bash", "read_file"]
+    assert declared["allowed_tools"] == ["bash", "read_file"]
 
 
 def test_failed_warming_leaves_the_next_call_a_network_evaluation(monkeypatch):
