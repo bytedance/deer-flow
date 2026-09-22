@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.todo_middleware import (
+    TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
     _format_todos,
     _has_tool_call_intent_or_error,
@@ -25,7 +26,7 @@ def _ai_with_write_todos():
 
 
 def _reminder_msg():
-    return HumanMessage(name="todo_reminder", content="reminder")
+    return HumanMessage(name=TODO_REMINDER_MESSAGE_NAME, content="reminder")
 
 
 class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -170,7 +171,7 @@ class TestBeforeModel:
         msgs = result["messages"]
         assert len(msgs) == 1
         assert isinstance(msgs[0], HumanMessage)
-        assert msgs[0].name == "todo_reminder"
+        assert msgs[0].name == TODO_REMINDER_MESSAGE_NAME
 
     def test_reminder_contains_formatted_todos(self):
         mw = TodoMiddleware()
@@ -195,7 +196,7 @@ class TestAbeforeModel:
         }
         result = asyncio.run(mw.abefore_model(state, _make_runtime()))
         assert result is not None
-        assert result["messages"][0].name == "todo_reminder"
+        assert result["messages"][0].name == TODO_REMINDER_MESSAGE_NAME
 
 
 def _todo_completion_reminders(messages):

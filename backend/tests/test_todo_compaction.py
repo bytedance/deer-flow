@@ -13,14 +13,14 @@ from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
-from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME, TodoMiddleware
 from deerflow.agents.thread_state import ThreadState
 
 
 def _reminder(msg_id: str) -> HumanMessage:
     return HumanMessage(
         id=msg_id,
-        name="todo_reminder",
+        name=TODO_REMINDER_MESSAGE_NAME,
         content="STALE TODO: [pending] Inspect the Gateway routes",
         additional_kwargs={"hide_from_ui": True},
     )
@@ -139,8 +139,8 @@ async def test_next_model_gets_current_todos_after_compaction(asynchronous, cont
     assert len(model._seen) == 1
     request = model._seen[0]
     assert all("STALE TODO" not in str(m.content) for m in request)
-    reminders = [m for m in request if isinstance(m, HumanMessage) and m.name == "todo_reminder"]
-    persisted = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.name == "todo_reminder"]
+    reminders = [m for m in request if isinstance(m, HumanMessage) and m.name == TODO_REMINDER_MESSAGE_NAME]
+    persisted = [m for m in result["messages"] if isinstance(m, HumanMessage) and m.name == TODO_REMINDER_MESSAGE_NAME]
     assert len(reminders) == len(persisted) == (1 if context == "rebuild" else 0)
     if reminders:
         assert "[completed] Inspect the Gateway routes" in reminders[0].content

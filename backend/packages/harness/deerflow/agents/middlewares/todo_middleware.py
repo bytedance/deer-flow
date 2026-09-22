@@ -27,6 +27,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadState
 
+TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+
 
 def _todos_in_messages(messages: list[Any]) -> bool:
     """Return True if any AIMessage in *messages* contains a write_todos tool call."""
@@ -41,7 +43,7 @@ def _todos_in_messages(messages: list[Any]) -> bool:
 def _reminder_in_messages(messages: list[Any]) -> bool:
     """Return True if a todo_reminder HumanMessage is already present in *messages*."""
     for msg in messages:
-        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_reminder":
+        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == TODO_REMINDER_MESSAGE_NAME:
             return True
     return False
 
@@ -145,7 +147,7 @@ class TodoMiddleware(TodoListMiddleware):
         # Inject a reminder as a HumanMessage so the model stays aware.
         formatted = _format_todos(todos)
         reminder = HumanMessage(
-            name="todo_reminder",
+            name=TODO_REMINDER_MESSAGE_NAME,
             additional_kwargs={"hide_from_ui": True},
             content=(
                 "<system_reminder>\n"
