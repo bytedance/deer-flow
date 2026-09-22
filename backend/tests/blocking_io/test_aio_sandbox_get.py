@@ -133,7 +133,6 @@ async def test_async_acquire_offloads_ownership_publish(tmp_path, monkeypatch):
     these two were called directly, putting a Redis round trip on the event loop
     for every discover/create.
     """
-    import deerflow.community.aio_sandbox.aio_sandbox_provider as aio_mod
     from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 
     provider = _make_provider(tmp_path)
@@ -145,14 +144,40 @@ async def test_async_acquire_offloads_ownership_publish(tmp_path, monkeypatch):
     )
     provider._backend.discover = MagicMock(return_value=info)
 
-    # Stub the path layer: `get_paths()` resolves the base dir via os.getcwd on
-    # the event loop, which is a pre-existing blocking call in this coroutine and
-    # not what this anchor is about. Scoping it out keeps the test pinned to the
-    # ownership publish this diff added.
-    fake_paths = MagicMock()
-    fake_paths.thread_dir.return_value = tmp_path
-    monkeypatch.setattr(aio_mod, "get_paths", lambda: fake_paths)
+    # The lock path is resolved in a worker thread, so the real `Paths` object can
+    # stay in place; DEER_FLOW_HOME keeps the thread directories and the lock file
+    # inside the test's own tmp_path.
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
 
     sandbox_id = await provider._discover_or_create_with_lock_async("t-async", "sb-async", user_id="u1")
 
     assert sandbox_id == "sb-async"
+
+
+async def test_async_lock_path_resolution_stays_off_the_loop(tmp_path, monkeypatch) -> None:
+    """The lock path of the async acquire is resolved from ``Paths.base_dir``.
+
+    The anchor above documents that resolution as "a pre-existing blocking call in
+    this coroutine" and stubs the path layer out to get around it. This one pins
+    the fix instead: every other step of the coroutine is offloaded, so the path
+    resolution has to join them, and the stub above can then go away.
+    """
+    import deerflow.community.aio_sandbox.aio_sandbox_provider as aio_mod
+
+    provider = _make_provider(tmp_path)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    class _ReachedLockFile(Exception):
+        pass
+
+    def _stop_at_lock_file(_lock_path):
+        raise _ReachedLockFile
+
+    monkeypatch.setattr(aio_mod, "_open_lock_file", _stop_at_lock_file)
+
+    # Red before the fix: the gate raises BlockingError from the inline
+    # ``paths.thread_dir(...)`` before the sentinel is ever reached.
+    with pytest.raises(_ReachedLockFile):
+        await provider._discover_or_create_with_lock_async("t-lock", "sb-lock", user_id="u1")
