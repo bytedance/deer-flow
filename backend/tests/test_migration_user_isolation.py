@@ -192,6 +192,50 @@ class TestMigrateAgents:
         assert report == []
 
 
+class TestMigrateUserProfile:
+    def test_moves_legacy_profile_into_user_layout(self, base_dir: Path, paths: Paths):
+        paths.user_md_file.write_text("# From before user isolation", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        report = migrate_user_profile(paths, user_id="default")
+
+        assert report is not None
+        assert "moved -> " in report["action"]
+        assert paths.user_profile_file("default").read_text(encoding="utf-8") == "# From before user isolation"
+        assert not paths.user_md_file.exists()
+
+    def test_dry_run_does_not_move(self, base_dir: Path, paths: Paths):
+        paths.user_md_file.write_text("# profile", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default", dry_run=True)
+
+        assert paths.user_md_file.exists()
+        assert not paths.user_profile_file("default").exists()
+
+    def test_existing_destination_is_treated_as_conflict(self, base_dir: Path, paths: Paths):
+        paths.user_md_file.write_text("# legacy", encoding="utf-8")
+        dest = paths.user_profile_file("default")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("# already migrated", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        report = migrate_user_profile(paths, user_id="default")
+
+        assert "conflict -> " in report["action"]
+        assert dest.read_text(encoding="utf-8") == "# already migrated"
+        assert (base_dir / "migration-conflicts" / "USER.md").read_text(encoding="utf-8") == "# legacy"
+        assert not paths.user_md_file.exists()
+
+    def test_no_legacy_profile_is_noop(self, base_dir: Path, paths: Paths):
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        assert migrate_user_profile(paths, user_id="default") is None
+
+
 class TestMigrateSkills:
     @staticmethod
     def _seed_legacy_skill(base_dir: Path, name: str, *, content: str = "skill doc") -> Path:

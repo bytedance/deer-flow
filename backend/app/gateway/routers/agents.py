@@ -18,6 +18,7 @@ from deerflow.config.agents_config import (
     load_agent_config,
     load_agent_soul,
     preserve_non_managed_fields,
+    resolve_user_profile_file,
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
@@ -511,13 +512,13 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
 
 class UserProfileResponse(BaseModel):
-    """Response model for the global user profile (USER.md)."""
+    """Response model for the calling user's profile (USER.md)."""
 
     content: str | None = Field(default=None, description="USER.md content, or null if not yet created")
 
 
 class UserProfileUpdateRequest(BaseModel):
-    """Request body for setting the global user profile."""
+    """Request body for setting the calling user's profile."""
 
     content: str = Field(default="", description="USER.md content — describes the user's background and preferences")
 
@@ -526,18 +527,18 @@ class UserProfileUpdateRequest(BaseModel):
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Get User Profile",
-    description="Read the global USER.md file that is injected into all custom agents.",
+    description="Read the calling user's USER.md file.",
 )
 async def get_user_profile() -> UserProfileResponse:
-    """Return the current USER.md content.
+    """Return the calling user's USER.md content.
 
     Returns:
-        UserProfileResponse with content=None if USER.md does not exist yet.
+        UserProfileResponse with content=None if that user has no USER.md yet.
     """
     _require_agents_api_enabled()
 
     try:
-        user_md_path = get_paths().user_md_file
+        user_md_path = resolve_user_profile_file(user_id=get_effective_user_id())
         if not user_md_path.exists():
             return UserProfileResponse(content=None)
         raw = user_md_path.read_text(encoding="utf-8").strip()
@@ -551,10 +552,14 @@ async def get_user_profile() -> UserProfileResponse:
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Update User Profile",
-    description="Write the global USER.md file that is injected into all custom agents.",
+    description="Write the calling user's USER.md file.",
 )
 async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileResponse:
-    """Create or overwrite the global USER.md.
+    """Create or overwrite the calling user's USER.md.
+
+    Writes the per-user layout even when a legacy shared USER.md is what the
+    caller has been reading, so one user's save never lands in a file another
+    user reads.
 
     Args:
         request: The update request with the new USER.md content.
@@ -565,10 +570,10 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     _require_agents_api_enabled()
 
     try:
-        paths = get_paths()
-        paths.base_dir.mkdir(parents=True, exist_ok=True)
-        paths.user_md_file.write_text(request.content, encoding="utf-8")
-        logger.info(f"Updated USER.md at {paths.user_md_file}")
+        user_md_path = get_paths().user_profile_file(get_effective_user_id())
+        user_md_path.parent.mkdir(parents=True, exist_ok=True)
+        user_md_path.write_text(request.content, encoding="utf-8")
+        logger.info(f"Updated USER.md at {user_md_path}")
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)

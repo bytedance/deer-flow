@@ -1,4 +1,4 @@
-"""One-time migration: move legacy thread dirs, memory, agents, and skills into per-user layout.
+"""One-time migration: move legacy thread dirs, memory, agents, skills, and the user profile into per-user layout.
 
 Usage:
     PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
@@ -128,6 +128,55 @@ def migrate_agents(
         legacy_agents.rmdir()
 
     return report
+
+
+def migrate_user_profile(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> dict | None:
+    """Move a legacy shared user profile into the per-user layout.
+
+    Legacy layout:  ``{base_dir}/USER.md``
+    Per-user layout: ``{base_dir}/users/{user_id}/USER.md``
+
+    A pre-existing per-user profile takes precedence: the legacy copy is moved
+    to ``{base_dir}/migration-conflicts/USER.md`` for manual review, the way a
+    conflicting agent directory is handled.
+
+    Args:
+        paths: Paths instance.
+        user_id: User to receive the legacy profile (defaults to ``"default"``,
+            matching ``DEFAULT_USER_ID`` for no-auth setups).
+        dry_run: If True, only log what would happen.
+
+    Returns:
+        A migration report entry, or None when there is no legacy profile.
+    """
+    legacy_profile = paths.user_md_file
+    if not legacy_profile.exists():
+        logger.info("No legacy USER.md found — nothing to migrate.")
+        return None
+
+    dest = paths.user_profile_file(user_id)
+    entry = {"file": legacy_profile.name, "user_id": user_id, "action": ""}
+
+    if dest.exists():
+        conflicts_path = paths.base_dir / "migration-conflicts" / "USER.md"
+        entry["action"] = f"conflict -> {conflicts_path}"
+        if not dry_run:
+            conflicts_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_profile), str(conflicts_path))
+        logger.warning("Conflict for USER.md: moved legacy copy to %s", conflicts_path)
+    else:
+        entry["action"] = f"moved -> {dest}"
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_profile), str(dest))
+        logger.info("Migrated USER.md -> user %s", user_id)
+
+    return entry
 
 
 def migrate_skills(
@@ -292,6 +341,7 @@ def main() -> None:
     migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
     agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
     skill_report = migrate_skills(paths, user_id=args.user_id, dry_run=args.dry_run)
+    profile_entry = migrate_user_profile(paths, user_id=args.user_id, dry_run=args.dry_run)
 
     if report:
         logger.info("Thread migration report:")
@@ -313,6 +363,16 @@ def main() -> None:
             logger.info("  skill=%s user=%s action=%s", entry["skill"], entry["user_id"], entry["action"])
     else:
         logger.info("No skills to migrate.")
+
+    if profile_entry:
+        logger.info("User profile migration report:")
+        logger.info("  file=%s user=%s action=%s", profile_entry["file"], profile_entry["user_id"], profile_entry["action"])
+        logger.warning(
+            "The legacy USER.md was assigned to '%s'. It described one person, so check it belongs to that account.",
+            profile_entry["user_id"],
+        )
+    else:
+        logger.info("No user profile to migrate.")
 
     unowned = [e for e in report if e["user_id"] == "default"]
     if unowned:

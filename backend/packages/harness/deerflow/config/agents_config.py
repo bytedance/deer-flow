@@ -320,6 +320,36 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     return user_path
 
 
+def resolve_user_profile_file(*, user_id: str | None = None) -> Path:
+    """Return the on-disk path of a user's profile, preferring the per-user layout.
+
+    Resolution order:
+    1. ``{base_dir}/users/{user_id}/USER.md`` (per-user, current layout).
+    2. ``{base_dir}/USER.md`` (legacy shared layout — read-only fallback).
+
+    If neither exists, the per-user path is returned, so a caller that intends
+    to write creates the file in the new layout and never adds to the shared
+    one. The profile describes one person, so it is never resolved across
+    users: an installation that has not migrated keeps reading the legacy file
+    until that user saves their own.
+
+    Args:
+        user_id: Owner of the profile. Defaults to the effective user from the
+            request context (or ``"default"`` in no-auth mode).
+    """
+    paths = get_paths()
+    effective_user = user_id or get_effective_user_id()
+    user_path = paths.user_profile_file(effective_user)
+    if user_path.exists():
+        return user_path
+
+    legacy_path = paths.user_md_file
+    if legacy_path.exists():
+        return legacy_path
+
+    return user_path
+
+
 def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentConfig | None:
     """Load the custom or default agent's config.
 

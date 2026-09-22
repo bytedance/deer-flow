@@ -70,6 +70,11 @@ class TestPaths:
         paths = _make_paths(tmp_path)
         assert paths.user_md_file == tmp_path / "USER.md"
 
+    def test_user_profile_file_is_per_user(self, tmp_path):
+        paths = _make_paths(tmp_path)
+        assert paths.user_profile_file("alice") == tmp_path / "users" / "alice" / "USER.md"
+        assert paths.user_profile_file("alice") != paths.user_profile_file("bob")
+
     def test_paths_are_different_from_global(self, tmp_path):
         paths = _make_paths(tmp_path)
         assert paths.memory_file != paths.agent_memory_file("my-agent")
@@ -881,10 +886,11 @@ class TestUserProfileAPI:
         assert response.status_code == 200
         assert response.json()["content"] == content
 
-        # File should be written to disk
-        user_md = tmp_path / "USER.md"
-        assert user_md.exists()
-        assert user_md.read_text(encoding="utf-8") == content
+        # The file lands in the calling user's own bucket, never the shared root.
+        written = list((tmp_path / "users").glob("*/USER.md"))
+        assert len(written) == 1
+        assert written[0].read_text(encoding="utf-8") == content
+        assert not (tmp_path / "USER.md").exists()
 
     def test_get_user_profile_after_put(self, agent_client):
         content = "# Profile\n\nI work on data science."
@@ -898,6 +904,88 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestUserProfileIsolation:
+    """The profile describes one person, so it must not be shared between users."""
+
+    @staticmethod
+    def _as_user(user_id: str):
+        from deerflow.runtime.user_context import set_current_user
+
+        return set_current_user(SimpleNamespace(id=user_id))
+
+    @staticmethod
+    def _run(coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    def _profile_routes(self, tmp_path):
+        """Return the router plus a context patching both paths lookups it reaches."""
+        import contextlib
+
+        import app.gateway.routers.agents as agents_router
+
+        paths_instance = _make_paths(tmp_path)
+
+        @contextlib.contextmanager
+        def _patched():
+            with (
+                patch.object(agents_router, "get_paths", return_value=paths_instance),
+                patch("deerflow.config.agents_config.get_paths", return_value=paths_instance),
+            ):
+                yield
+
+        return agents_router, _patched()
+
+    def test_one_users_profile_is_invisible_to_another(self, tmp_path):
+        from deerflow.runtime.user_context import reset_current_user
+
+        agents_router, paths_patch = self._profile_routes(tmp_path)
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        with paths_patch:
+            token = self._as_user("alice")
+            try:
+                self._run(agents_router.update_user_profile(agents_router.UserProfileUpdateRequest(content="# Alice\nMedical leave in March.")))
+            finally:
+                reset_current_user(token)
+
+            token = self._as_user("bob")
+            try:
+                assert self._run(agents_router.get_user_profile()).content is None
+                self._run(agents_router.update_user_profile(agents_router.UserProfileUpdateRequest(content="# Bob")))
+            finally:
+                reset_current_user(token)
+
+            token = self._as_user("alice")
+            try:
+                assert self._run(agents_router.get_user_profile()).content == "# Alice\nMedical leave in March."
+            finally:
+                reset_current_user(token)
+
+        assert (tmp_path / "users" / "alice" / "USER.md").exists()
+        assert (tmp_path / "users" / "bob" / "USER.md").exists()
+
+    def test_legacy_global_profile_is_still_readable_until_the_user_writes(self, tmp_path):
+        """Installations that predate user isolation keep seeing their USER.md."""
+        from deerflow.runtime.user_context import reset_current_user
+
+        (tmp_path / "USER.md").write_text("# From before user isolation", encoding="utf-8")
+        agents_router, paths_patch = self._profile_routes(tmp_path)
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        with paths_patch:
+            token = self._as_user("alice")
+            try:
+                assert self._run(agents_router.get_user_profile()).content == "# From before user isolation"
+                self._run(agents_router.update_user_profile(agents_router.UserProfileUpdateRequest(content="# Alice now")))
+                assert self._run(agents_router.get_user_profile()).content == "# Alice now"
+            finally:
+                reset_current_user(token)
+
+        # The write lands in the per-user layout and leaves the legacy file alone.
+        assert (tmp_path / "users" / "alice" / "USER.md").read_text(encoding="utf-8") == "# Alice now"
+        assert (tmp_path / "USER.md").read_text(encoding="utf-8") == "# From before user isolation"
 
 
 class TestAgentsApiDisabled:
