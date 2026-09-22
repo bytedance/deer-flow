@@ -637,8 +637,11 @@ For AIO images on the supported semver line (`1.9.3` through the recommended
 `1.11.0` image), `sandbox.bash_command_timeout` is enforced server-side through
 the `hard_timeout` API when the image exposes it. DeerFlow's legacy frozen
 `all-in-one-sandbox:latest` image predates that API, so only the host-side
-request is bounded there. Timed-out or otherwise ambiguous commands are never
-replayed.
+request is bounded there. On supported semver AIO images, `list_dir` uses a 60
+second server-side hard timeout with a 65 second no-retry host envelope; the
+frozen legacy image only gets the bounded host wait. Timed-out or otherwise
+ambiguous commands are never replayed, and a partial `list_dir` result is never
+returned as a complete listing.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

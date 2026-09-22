@@ -557,6 +557,14 @@ class AioSandbox(Sandbox):
     _REQUEST_TIMEOUT_GRACE_SECONDS = 5.0
     _CLEANUP_REQUEST_TIMEOUT_SECONDS = 5
 
+    # Directory-operation deadline for ``list_dir`` (#5644). ``list_dir`` is an
+    # independent operation, not a shell command: it must not inherit
+    # ``bash_command_timeout`` (600s default), or a wedged ``find`` holds
+    # ``self._lock`` for the full SDK budget. 60s is far above a real
+    # ``max_depth=2`` traversal and far below the SDK's 600s, and stays a
+    # private constant rather than new operator config.
+    _LIST_DIR_TIMEOUT_SECONDS = 60.0
+
     def _effective_command_timeout(self, timeout: float | None) -> float:
         return timeout if timeout is not None else (getattr(self, "_default_command_timeout", None) or self._DEFAULT_HARD_TIMEOUT)
 
@@ -911,28 +919,73 @@ class AioSandbox(Sandbox):
             The contents of the directory.
         """
         resolved = path
+        timeout = self._LIST_DIR_TIMEOUT_SECONDS
         with self._lock:
+            client = self._client
+            session_id: str | None = None
             try:
-                client = self._client
                 session_id = self._ensure_default_shell_session_id(client)
 
                 kwargs = {
                     "command": remote_list_dir_command(resolved, max_depth),
-                    "no_change_timeout": self._DEFAULT_NO_CHANGE_TIMEOUT,
+                    "no_change_timeout": self._effective_no_change_timeout(timeout),
+                    "hard_timeout": timeout,
+                    "request_options": self._command_request_options(timeout),
                 }
                 if session_id is not None:
                     kwargs["id"] = session_id
 
                 result = client.shell.exec_command(**kwargs)
+            except httpx.TimeoutException as exc:
+                # The response never arrived, so we cannot tell whether ``find``
+                # is still running on the targeted shell generation. Fence that
+                # generation and replay nothing. Local recovery ownership is
+                # dropped before the cleanup attempt, so a failed cleanup can
+                # never leave the ambiguous session reusable.
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(
+                        client,
+                        session_id,
+                        context="list_dir after transport timeout",
+                        request_options=self._bounded_cleanup_request_options(),
+                    )
+                logger.error(f"Failed to list directory in sandbox: {exc}")
+                raise OSError(f"Failed to list directory '{resolved}': request timed out; directory result is unknown") from exc
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
                 raise OSError(f"Failed to list directory '{resolved}' in sandbox: {e}") from e
-            if result.data is None:
+
+            data = result.data if result else None
+            if data is None:
                 raise OSError(f"Failed to list directory '{resolved}' in sandbox: empty response")
+
+            # Only a completed listing is a listing. ``list_dir`` returns
+            # ``list[str]`` or raises; it never surfaces a partial ``find`` as
+            # the directory's contents.
+            status = getattr(data, "status", None)
+            if status == "hard_timeout":
+                raise TimeoutError(f"Failed to list directory '{resolved}': find timed out after {timeout:g} seconds; directory result may be incomplete")
+            if self._is_session_invalidating_shell_status(status):
+                # Same contract as an ambiguous transport timeout: fence the
+                # generation that actually executed this listing, dropping local
+                # recovery ownership before the bounded cleanup attempt.
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(
+                        client,
+                        session_id,
+                        context=f"list_dir after ambiguous status {status}",
+                        request_options=self._bounded_cleanup_request_options(),
+                    )
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: command status '{status}'; directory result is unknown")
+
             return parse_remote_list_dir_output(
-                result.data.output or "",
+                data.output or "",
                 resolved,
-                pipeline_exit_code=getattr(result.data, "exit_code", None),
+                pipeline_exit_code=getattr(data, "exit_code", None),
             )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
