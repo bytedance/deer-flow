@@ -51,7 +51,7 @@ function isAgentsApiDisabledDetail(detail: string | undefined): boolean {
 }
 
 export async function getAgentsApiStatus(): Promise<{ enabled: boolean }> {
-  const res = await fetch(`${getBackendBaseURL()}/api/agents/status`);
+  const res = await fetch(`${getBackendBaseURL()}/api/agents-api/status`);
   if (!res.ok) {
     throw new Error(`Failed to load agents API status: ${res.statusText}`);
   }

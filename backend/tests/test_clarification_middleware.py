@@ -730,9 +730,9 @@ class TestClarificationDisabled:
         result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
         content = result.content.lower()
         assert "disabled" in content
-        assert "minimal-risk, reversible assumptions" in content
-        assert "do not perform" in content
-        assert "structured blocked outcome" in content
+        assert "low-risk and reversible work" in content
+        assert "do not guess or act" in content
+        assert "structured blocked result" in content
         assert "carry out the requested action" not in content
 
     @pytest.mark.parametrize("mode", ["autonomous", "webhook", "scheduled"])

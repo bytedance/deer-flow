@@ -624,8 +624,9 @@ class TestAgentsAPI:
         assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 100}).status_code == 201
         assert agent_client.put("/api/agents/reviewer", json={"display_name": "名" * 101}).status_code == 422
         assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "名" * 100
+
     def test_agents_api_status_returns_enabled(self, agent_client):
-        response = agent_client.get("/api/agents/status")
+        response = agent_client.get("/api/agents-api/status")
         assert response.status_code == 200
         assert response.json() == {"enabled": True}
 
@@ -647,6 +648,15 @@ class TestAgentsAPI:
         assert data["name"] == "code-reviewer"
         assert data["description"] == "Reviews code"
         assert data["soul"] == "You are a code reviewer."
+
+    def test_status_agent_name_is_not_shadowed_by_api_status(self, agent_client):
+        response = agent_client.post("/api/agents", json={"name": "status", "soul": "Status agent"})
+        assert response.status_code == 201
+        assert agent_client.get("/api/agents-api/status").json() == {"enabled": True}
+        agent = agent_client.get("/api/agents/status")
+        assert agent.status_code == 200
+        assert agent.json()["name"] == "status"
+        assert agent.json()["soul"] == "Status agent"
 
     def test_create_agent_invalid_name(self, agent_client):
         payload = {"name": "Code Reviewer!", "soul": "test"}
@@ -906,7 +916,7 @@ class TestUserProfileAPI:
 
 class TestAgentsApiDisabled:
     def test_agents_api_status_returns_disabled(self, disabled_agent_client):
-        response = disabled_agent_client.get("/api/agents/status")
+        response = disabled_agent_client.get("/api/agents-api/status")
         assert response.status_code == 200
         assert response.json() == {"enabled": False}
 

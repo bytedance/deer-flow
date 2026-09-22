@@ -58,7 +58,7 @@ export function useAgentsApiEnabled() {
 
 export function useAgentsApiStatus() {
   const { data, isLoading, error } = useQuery({
-    queryKey: ["agents", "status"],
+    queryKey: ["agents-api", "status"],
     queryFn: () => getAgentsApiStatus(),
   });
   return { status: data ?? null, isLoading, error };

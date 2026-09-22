@@ -284,7 +284,7 @@ async def check_agent_name(name: str) -> dict:
 
 
 @router.get(
-    "/agents/status",
+    "/agents-api/status",
     response_model=AgentsApiStatusResponse,
     summary="Get Agents API Status",
     description="Return whether the protected custom-agent management API is enabled.",
