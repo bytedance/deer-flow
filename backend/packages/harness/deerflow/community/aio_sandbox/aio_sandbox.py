@@ -154,6 +154,7 @@ class AioSandbox(Sandbox):
                         self._client,
                         scoped.session_id,
                         context=f"execution scope {scope_id}",
+                        request_options=self._bounded_cleanup_request_options(),
                     )
                     scoped.session_id = None
 
@@ -163,6 +164,7 @@ class AioSandbox(Sandbox):
                     self._client,
                     self._recovery_session_id,
                     context="default recovery session",
+                    request_options=self._bounded_cleanup_request_options(),
                 )
                 self._recovery_session_id = None
             client = self._client
@@ -462,6 +464,7 @@ class AioSandbox(Sandbox):
                 self._client,
                 scoped.session_id,
                 context=f"execution scope {scope_id}",
+                request_options=self._bounded_cleanup_request_options(),
             )
             scoped.session_id = None
 

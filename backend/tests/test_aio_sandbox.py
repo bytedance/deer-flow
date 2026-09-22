@@ -1266,6 +1266,22 @@ class TestScopedShellSessions:
         assert sandbox._scoped_shell_sessions == {}
         client.shell.create_session.assert_not_called()
 
+    def test_release_command_scope_uses_bounded_cleanup(self, sandbox):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ScopedShellSession
+
+        sandbox._scoped_shell_sessions["scope-a"] = _ScopedShellSession(session_id="session-a")
+        sandbox._client.shell.cleanup_session = MagicMock()
+
+        sandbox.release_command_scope("scope-a")
+
+        sandbox._client.shell.cleanup_session.assert_called_once_with(
+            "session-a",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
 
 class TestBashExecUnsupportedFailFast:
     """Regression tests for #3921: sandbox images older than all-in-one-sandbox
@@ -2060,6 +2076,38 @@ class TestClose:
         sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
         sandbox.close()  # must not raise
         assert sandbox._client is None
+
+    def test_close_scoped_session_cleanup_uses_bounded_request(self, sandbox):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ScopedShellSession
+
+        sandbox._scoped_shell_sessions["scope-a"] = _ScopedShellSession(session_id="session-a")
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+
+        sandbox.close()
+
+        cleanup_session.assert_called_once_with(
+            "session-a",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
+
+    def test_close_recovery_session_cleanup_uses_bounded_request(self, sandbox):
+        sandbox._recovery_session_id = "recovery-session"
+        cleanup_session = MagicMock()
+        sandbox._client.shell.cleanup_session = cleanup_session
+
+        sandbox.close()
+
+        cleanup_session.assert_called_once_with(
+            "recovery-session",
+            request_options={
+                "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            },
+        )
 
 
 def test_list_dir_preserves_trailing_space_in_filename(sandbox):
