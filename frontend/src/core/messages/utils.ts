@@ -1021,6 +1021,7 @@ export interface FileInMessage {
   filename: string;
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
+  markdown_file?: string; // exact conversion companion returned by the upload API
   status?: "uploading" | "uploaded";
 }
 

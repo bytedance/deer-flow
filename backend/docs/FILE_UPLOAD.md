@@ -141,6 +141,13 @@ To work with these files:
 `extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
+历史文件列表保留与其他文件同名主干的 Markdown，例如 `report.pdf` 与
+`report.md` 会同时列出。文件名不足以证明 Markdown 是转换产物，因此列表也可能包含
+自动转换生成的 Markdown；可用 `query` 和 `extensions` 缩小查询范围。
+前端会保留上传响应中的 `markdown_file`，中间件校验后将其传入本轮状态，
+因此本轮上传及明确标记的转换文件不会占用历史列表名额。旧客户端未传递该字段时，
+转换文件仍可能出现在列表中；不会仅凭同名主干隐藏文件。
+
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
