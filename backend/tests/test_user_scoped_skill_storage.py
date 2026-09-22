@@ -258,6 +258,37 @@ class TestSkillLoading:
 
         assert names == {"global-skill"}
 
+    def test_integration_orphan_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage):
+        """Regression for issue #4095: the managed-integration walk excludes
+        orphan evals/fixtures support trees too.  That walk site predates the
+        PR's other three and is covered here so every discovery walk prunes
+        support data."""
+        integration_root = user_storage.get_integrations_root()
+        integration_dir = integration_root / "provider" / "managed-skill"
+        integration_dir.mkdir(parents=True)
+        (integration_dir / "SKILL.md").write_text(_skill_content("managed-skill"), encoding="utf-8")
+        # Two-level orphan: evals/ has no SKILL.md and fixtures/ (its only child)
+        # also has no SKILL.md — no immediate-child package to treat as namespace.
+        orphan_fixture_dir = integration_root / "evals" / "fixtures" / "stale"
+        orphan_fixture_dir.mkdir(parents=True)
+        (orphan_fixture_dir / "SKILL.md").write_text(_skill_content("stale-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"managed-skill"}
+
+    def test_integration_namespace_dirs_named_evals_or_fixtures_are_recursed(self, user_storage: UserScopedSkillStorage):
+        """The integration walk also keeps a namespace directory named
+        ``evals``/``fixtures`` discoverable when it holds a real package."""
+        integration_root = user_storage.get_integrations_root()
+        namespace_skill = integration_root / "fixtures" / "team-helper"
+        namespace_skill.mkdir(parents=True)
+        (namespace_skill / "SKILL.md").write_text(_skill_content("team-helper", "Team helper under fixtures ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "team-helper" in names
+
     def test_skill_packages_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         """``evals`` and ``fixtures`` are not reserved skill names (PR #4164
         review): packages whose own directory carries SKILL.md are discovered

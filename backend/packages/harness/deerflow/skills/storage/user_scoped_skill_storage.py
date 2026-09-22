@@ -286,7 +286,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         integration_path = self._integrations_root
         if integration_path.exists() and integration_path.is_dir():
             for current_root, dir_names, file_names in os.walk(integration_path, followlinks=True):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name, category_root=integration_path))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 dir_names.clear()
