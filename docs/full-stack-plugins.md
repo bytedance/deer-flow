@@ -149,8 +149,13 @@ listing or unlisted file is served. Limits: 64 KiB manifest, 256 files, 4 MiB pe
 file and 16 MiB total per plugin. These limits bound the in-memory startup snapshot.
 
 Supported types are JS/MJS, CSS, JSON/source maps, WASM, PNG/JPEG/GIF/WebP/SVG/ICO
-and WOFF/WOFF2/TTF/OTF. HTML and executable server files are not served. Do not list
-secrets or private build sources; any authenticated user can download listed assets,
+and WOFF/WOFF2/TTF/OTF. HTML and executable server files are not served. SVG can
+contain active document content, so asset responses carry
+`Content-Security-Policy: sandbox`: direct navigation cannot execute scripts or
+retain the Gateway's origin.
+This document restriction preserves image, stylesheet and module subresource use;
+it does not sandbox the plugin JavaScript deliberately loaded into the host page.
+Do not list secrets or private build sources; any authenticated user can download listed assets,
 including source maps, even when the contribution is disabled.
 
 The host snapshots all listed bytes during registration and computes a SHA-256
@@ -224,3 +229,11 @@ and SQLite, with synthetic authentication and scripted LangGraph ToolNode calls.
 It covers persistence, owner isolation, read-only deployment management and the full
 page workflow. It does not claim live model behavior or a full production deployment.
 The example uses single-host storage, not a multi-node persistence contract.
+
+`plugin-assets.spec.ts` also checks authenticated static/lazy imports, CSS and images,
+plus direct SVG navigation through the real Gateway asset route. Its script-execution
+control removes the sandbox header from the same SVG to verify the restriction.
+To exercise the actual Turbopack development build, start the frontend with
+`DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
+`PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
+Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.

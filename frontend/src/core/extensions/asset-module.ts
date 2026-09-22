@@ -28,13 +28,12 @@ export function importAssetModule(url: string): Promise<{ default: unknown }> {
     script.onload = () => {
       // The credentialed script populated the document's module map. Reuse that
       // module instance to obtain its exports; do not fetch it as a Blob.
-      void import(/* webpackIgnore: true */ absoluteURL).then(
-        (module: { default: unknown }) => {
-          cleanup();
-          resolve(module);
-        },
-        fail,
-      );
+      void import(
+        /* webpackIgnore: true */ /* turbopackIgnore: true */ absoluteURL
+      ).then((module: { default: unknown }) => {
+        cleanup();
+        resolve(module);
+      }, fail);
     };
     script.onerror = () => fail(new Error("Plugin module unavailable"));
     document.head.append(script);

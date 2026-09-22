@@ -55,6 +55,7 @@ def test_routes_snapshot_all_files_and_keep_inline_compatibility(package):
             assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
             assert response.headers["vary"] == "Cookie, Authorization"
             assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.headers["content-security-policy"] == "sandbox"
         for file in ["private.json", "missing.mjs", "%2e%2e%2fui_manifest.json", "%252e%252e/secret", "icon.svg/extra"]:
             assert client.get(base + file).status_code == 404
         original = client.get(descriptor["entry"]).content

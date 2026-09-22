@@ -83,6 +83,8 @@ async def plugin_asset(request: Request, namespace: str, revision: str, path: st
                             "Cache-Control": "private, max-age=31536000, immutable",
                             "Vary": "Cookie, Authorization",
                             "X-Content-Type-Options": "nosniff",
+                            # Assets can also be opened as documents (notably SVG).
+                            "Content-Security-Policy": "sandbox",
                         },
                     )
     raise HTTPException(404, "Plugin asset unavailable; reload the page.", headers={"Cache-Control": "private, no-store"})

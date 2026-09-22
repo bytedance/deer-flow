@@ -1,6 +1,8 @@
 /** Run the production importer in Chromium, including authenticated lazy chunks. */
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server, type RequestListener } from "node:http";
+import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 import { ScriptTarget, ModuleKind, transpileModule } from "typescript";
@@ -25,6 +27,8 @@ let frontend: Server;
 let backend: Server;
 let frontendURL: string;
 let backendURL: string;
+let gateway: ChildProcess;
+let svgURL: string;
 const requests: { path: string; cookie: string }[] = [];
 async function listen(server: Server) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -32,7 +36,7 @@ async function listen(server: Server) {
   if (!address || typeof address === "string") throw new Error("Missing port");
   return `http://127.0.0.1:${address.port}`;
 }
-test.beforeAll(async () => {
+test.beforeAll(async ({ request }) => {
   const source = await readFile("src/core/extensions/asset-module.ts", "utf8");
   const loader = transpileModule(source, {
     compilerOptions: { target: ScriptTarget.ES2022, module: ModuleKind.ESNext },
@@ -97,18 +101,92 @@ test.beforeAll(async () => {
     }
     res.setHeader("Content-Type", file[0]);
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "sandbox");
     res.end(file[1]);
   };
   frontend = createServer(handler);
   frontendURL = await listen(frontend);
   backend = createServer(handler);
   backendURL = await listen(backend);
+  const probe = createServer();
+  const gatewayURL = await listen(probe);
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  const backendDirectory = path.resolve("../backend");
+  gateway = spawn(
+    path.join(backendDirectory, ".venv/bin/python"),
+    [
+      "-m",
+      "extension_test_fixtures.browser_asset_gateway",
+      new URL(gatewayURL).port,
+    ],
+    { cwd: backendDirectory, stdio: "pipe" },
+  );
+  let diagnostics = "";
+  gateway.stderr?.on("data", (chunk) => {
+    diagnostics += String(chunk);
+  });
+  const headers = { cookie: "plugin_session=synthetic" };
+  await expect
+    .poll(
+      async () => {
+        if (gateway.exitCode !== null) throw new Error(diagnostics);
+        return request
+          .get(`${gatewayURL}/api/plugins`, { headers })
+          .then((r) => r.status())
+          .catch(() => 0);
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(200);
+  const response = await request.get(`${gatewayURL}/api/plugins`, { headers });
+  const [plugin] = (await response.json()) as { entry: string }[];
+  svgURL = `${gatewayURL}${plugin!.entry.replace("index.mjs", "active.svg")}`;
 });
 test.afterAll(async () => {
+  if (gateway?.exitCode === null) {
+    const exited = new Promise<void>((resolve) =>
+      gateway.once("exit", () => resolve()),
+    );
+    gateway.kill("SIGTERM");
+    await exited;
+  }
   for (const server of [frontend, backend]) {
     server?.closeAllConnections();
     await new Promise<void>((resolve) => server?.close(() => resolve()));
   }
+});
+
+test("Gateway SVG renders as an image but direct navigation cannot execute its script", async ({
+  page,
+  context,
+}) => {
+  await context.addCookies([
+    { name: "plugin_session", value: "synthetic", url: svgURL },
+  ]);
+  await page.goto(frontendURL);
+  const width = await page.evaluate(async (url) => {
+    const image = new Image();
+    image.src = url;
+    document.body.append(image);
+    await image.decode();
+    return image.naturalWidth;
+  }, svgURL);
+  expect(width).toBe(20);
+
+  const response = await page.goto(svgURL);
+  await expect(page.locator("svg")).toBeVisible();
+  expect(await page.locator("svg").getAttribute("data-executed")).toBeNull();
+  expect(response?.headers()["content-security-policy"]).toBe("sandbox");
+
+  // Positive control: the same SVG really executes if its response loses the sandbox.
+  await page.route(svgURL, async (route) => {
+    const original = await route.fetch();
+    const headers = original.headers();
+    delete headers["content-security-policy"];
+    await route.fulfill({ response: original, headers });
+  });
+  await page.goto(svgURL);
+  await expect(page.locator("svg")).toHaveAttribute("data-executed", "yes");
 });
 for (const origin of ["same", "split"]) {
   test(`native ${origin}-origin graph loads static/lazy chunks, CSS and images with credentials`, async ({
