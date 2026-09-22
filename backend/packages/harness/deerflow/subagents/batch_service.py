@@ -136,8 +136,11 @@ class SubagentBatchService:
         total = len(request.items)
         if total < 1 or total > self._config.max_items_per_batch:
             raise ValueError(f"Batch item count must be between 1 and {self._config.max_items_per_batch}")
-        max_live = request.max_live_items or self._config.default_max_live_items
-        max_running = request.max_running_items or self._config.default_max_running_items
+        # `or` would read an explicit 0 as "unset", substitute the configured
+        # default, and hide the caller's value from the range guards below --
+        # a negative already fails there, so 0 was the asymmetric case.
+        max_live = self._config.default_max_live_items if request.max_live_items is None else request.max_live_items
+        max_running = self._config.default_max_running_items if request.max_running_items is None else request.max_running_items
         if not 1 <= max_live <= self._config.max_live_items_per_batch:
             raise ValueError(f"max_live_items must be between 1 and {self._config.max_live_items_per_batch}")
         if not 1 <= max_running <= self._config.max_running_items_per_batch:

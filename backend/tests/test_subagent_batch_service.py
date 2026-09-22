@@ -70,6 +70,52 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 1, "max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 0}, "max_live_items must be between 1 and 1000"),
+    ],
+)
+async def test_submit_reports_an_explicit_zero_limit_by_name(overrides: dict[str, int], expected: str) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await service.submit(_request(**overrides))
+
+    repository.create_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "live", "running"),
+    [
+        ({}, 100, 3),
+        ({"max_live_items": 40}, 40, 3),
+        ({"max_live_items": 40, "max_running_items": 5}, 40, 5),
+    ],
+)
+async def test_submit_defaults_only_the_limits_the_caller_omitted(overrides: dict[str, int], live: int, running: int) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    await service.submit(_request(**overrides))
+
+    kwargs = repository.create_batch.await_args.kwargs
+    assert (kwargs["max_live_items"], kwargs["max_running_items"]) == (live, running)
+
+
+@pytest.mark.asyncio
 async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,

@@ -333,6 +333,73 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
     return dest
 
 
+def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_bits: int) -> None:
+    """Apply sandbox permission bits to an upload, bound to its validated inode.
+
+    The gateway writes uploads as root with ``0o600``. In AIO/Docker sandbox mode
+    the sandbox runs as a non-root user on the bind-mounted path, so it needs
+    extra group/other (and, for the writable variant, write) bits.
+
+    The change is applied with ``os.fchmod`` on a descriptor opened with
+    ``O_NOFOLLOW`` (and ``O_NONBLOCK`` where available) and validated as a
+    regular file via ``os.fstat``. That binds the permission change to the exact
+    inode that was validated instead of re-resolving the pathname, so a sandbox
+    process that swaps the upload for a symlink after validation cannot redirect
+    the change to a target outside the uploads directory. ``O_NONBLOCK`` stops a
+    swapped-in FIFO from blocking the open before the type check. On platforms
+    without ``O_NOFOLLOW``/``os.fchmod`` (Windows) the ``os.chmod`` path (with
+    the lstat symlink guard) is retained. A path that disappears or becomes a
+    symlink during validation is skipped; other permission errors propagate so
+    callers do not report an upload the sandbox still cannot access.
+    """
+    try:
+        file_stat = os.lstat(file_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    if stat.S_ISLNK(file_stat.st_mode):
+        return
+
+    if hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod"):
+        open_flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            # The uploads directory is sandbox-writable, so the sandbox can swap
+            # the just-written file for a FIFO before this open. Without
+            # O_NONBLOCK an O_RDONLY open on a FIFO blocks in the kernel waiting
+            # for a writer (before the fstat regular-file check below), hanging
+            # ingestion and occupying a Gateway file-IO executor thread that
+            # coroutine cancellation cannot interrupt. O_NONBLOCK returns
+            # immediately; the S_ISREG check then skips the non-regular inode.
+            open_flags |= os.O_NONBLOCK
+        try:
+            fd = os.open(file_path, open_flags)
+        except OSError as exc:
+            # The path disappeared, stopped resolving, or became a symlink
+            # after lstat. Leave permissions untouched for these expected
+            # replacement races, but surface operational failures such as
+            # EACCES so callers cannot report an unreadable upload as ready.
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                return
+            raise
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return
+            os.fchmod(fd, stat.S_IMODE(opened.st_mode) | extra_mode_bits)
+        finally:
+            os.close(fd)
+        return
+
+    # Windows / platforms without O_NOFOLLOW + fchmod: retain the lstat-guarded
+    # chmod fallback. Expected replacement races are no-ops; permission errors
+    # must still reach the caller.
+    try:
+        os.chmod(file_path, stat.S_IMODE(file_stat.st_mode) | extra_mode_bits)
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            return
+        raise
+
+
 def list_files_in_dir(directory: Path) -> dict:
     """List files (not directories) in *directory*.
 

@@ -11,6 +11,7 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
     copy_upload_file_no_symlink,
@@ -20,6 +21,31 @@ from deerflow.uploads.manager import (
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
+
+
+@pytest.mark.skipif(not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")), reason="POSIX-only: O_NOFOLLOW + fchmod")
+def test_apply_upload_sandbox_permits_propagates_permission_errors(tmp_path):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+
+    with patch.object(os, "fchmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
+    assert stat.S_IMODE(upload.stat().st_mode) == 0o600
+
+
+def test_apply_upload_sandbox_permits_fallback_propagates_permission_errors(tmp_path, monkeypatch):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    with patch.object(os, "chmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
 
 # ---------------------------------------------------------------------------
 # normalize_filename
