@@ -21,7 +21,7 @@ from typing import Any
 
 from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
@@ -359,13 +359,13 @@ def _strip_external_message_metadata(message: Any) -> Any:
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
-    """Strip server-owned keys from a message, in object or raw-dict form, and
-    stamp ``untrusted_input`` where a caller's markers would skip the guardrail.
+    """Strip server-owned keys from message-like values outside ``messages``.
 
-    Callers reach the checkpoint by two different routes and the message is a
-    ``BaseMessage`` on one and a plain dict on the other, so both shapes have
-    to be handled here rather than coercing — coercion would change what the
-    caller asked to be written.
+    The top-level ``messages`` channel is canonicalized and role-checked by
+    ``_normalize_input_messages``. Other middleware-contributed channels may
+    still carry either ``BaseMessage`` objects or raw dictionaries, so this
+    helper preserves those shapes while stripping metadata and stamping
+    ``untrusted_input`` where caller-owned markers would skip the guardrail.
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
@@ -409,23 +409,60 @@ def _strip_external_delegation_verdict(entry: Any) -> Any:
     return entry
 
 
+def _normalize_input_messages(
+    value: Any,
+    *,
+    location: str,
+    trusted_internal: bool = False,
+) -> list[BaseMessage]:
+    """Coerce once, then check the actual role before any checkpoint write.
+
+    Match add_messages' list-or-single convention. Checking raw ``role`` keys
+    misses type aliases, (role, content) pairs, constructor envelopes and chunks.
+    The normalized objects are also the ones forwarded to the graph: there is
+    no second, unchecked interpretation of an accepted wire representation.
+    """
+    messages = value if isinstance(value, list) else [value]
+    converted: list[BaseMessage] = []
+    for index, item in enumerate(messages):
+        try:
+            message = convert_to_messages([item])[0]
+        except (ValueError, TypeError, NotImplementedError, KeyError) as exc:
+            # LangChain's error may contain the complete caller message.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid message at {location}[{index}]",
+            ) from exc
+        if not trusted_internal:
+            if isinstance(message, SystemMessage) or (isinstance(message, ChatMessage) and message.role.strip().lower() in {"system", "developer"}):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"External system/developer messages are not allowed at {location}[{index}]"),
+                )
+            message = _strip_external_message_metadata(message)
+        converted.append(message)
+    return converted
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove server-owned message metadata from caller-supplied state values,
-    and mark messages whose caller-owned markers would skip the input guardrail.
+    """Validate and sanitize caller-supplied state values before checkpointing.
 
-    ``normalize_input`` does this for the run path. The thread-state mutation
-    route writes its values straight into a checkpoint, so without the same
-    treatment an authenticated client can persist forged provenance and
-    transform trails — and those keys exist precisely so a later reader can
-    treat them as facts about what the host did.
+    The ``messages`` channel is canonicalized to a list of ``BaseMessage``
+    objects, rejects external system/developer roles with HTTP 400, and strips
+    server-owned metadata. Other channels keep their existing shapes while
+    forged metadata and delegation verdicts are removed. ``normalize_input``
+    applies the same message boundary to run input.
 
-    Every channel is walked, not just ``messages``: middleware-contributed
-    channels can carry messages too, and popping a key that was never there
-    costs nothing.
+    The thread-state mutation route writes values straight into a checkpoint,
+    so an authenticated client must not be able to persist forged provenance,
+    transform trails, or privileged message roles. Every channel is walked
+    because middleware-contributed channels can also carry message-like values.
     """
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
-        if channel == "delegations" and isinstance(value, list):
+        if channel == "messages" and value is not None:
+            stripped[channel] = _normalize_input_messages(value, location="values.messages")
+        elif channel == "delegations" and isinstance(value, list):
             stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
@@ -439,7 +476,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
 
     Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
     so that ``additional_kwargs`` (e.g. uploaded-file metadata — gh #3132), ``id``,
-    ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
+    ``name``, and history roles (ai/tool) survive unchanged. System/developer
+    messages require authenticated internal admission; ordinary API credentials
+    (including admin and PAT callers) do not grant system-prompt authority. An earlier
     hand-rolled version only forwarded ``content`` and collapsed every role to
     ``HumanMessage``, which silently stripped frontend-supplied attachments.
 
@@ -472,23 +511,8 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         return {}
     result = raw_input
     messages = raw_input.get("messages")
-    if messages and isinstance(messages, list):
-        converted: list[Any] = []
-        for index, msg in enumerate(messages):
-            if isinstance(msg, BaseMessage):
-                converted.append(msg)
-            elif isinstance(msg, dict):
-                try:
-                    converted.extend(convert_to_messages([msg]))
-                except (ValueError, TypeError, NotImplementedError) as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid message at input.messages[{index}]: {exc}",
-                    ) from exc
-            else:
-                converted.append(msg)
-        if not trusted_internal:
-            converted = [_strip_external_message_metadata(message) for message in converted]
+    if messages is not None:
+        converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
         delegations = result.get("delegations")
@@ -1726,13 +1750,16 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
-        agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+        # Validate even when resume takes precedence, so ignored input cannot
+        # appear to have been admitted or persist as unchecked run audit data.
+        normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
+        agent_factory = resolve_agent_factory(body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
+            graph_input = normalized_input
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker
@@ -1841,11 +1868,16 @@ async def start_run(
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)
             if isinstance(graph_input, dict):
+                # Keep this endpoint's list-only wire contract even though
+                # message admission canonicalizes single-message shorthand.
+                raw_messages = (body.input or {}).get("messages")
+                if raw_messages is not None and not isinstance(raw_messages, list):
+                    raise HTTPException(status_code=422, detail="input.messages must be a list")
                 reference_messages = graph_input.get("messages")
                 if reference_messages is None:
                     reference_messages = []
-                if not isinstance(reference_messages, list):
-                    raise HTTPException(status_code=422, detail="input.messages must be a list")
+                # ``normalize_input`` guarantees a list here. The raw-input
+                # check above is the authoritative list-only wire validation.
                 # Reference IDs are user-selected data. Keep them out of the
                 # system prompt and grant no authority from this persisted hint.
                 graph_input = {

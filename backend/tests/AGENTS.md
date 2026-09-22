@@ -19,6 +19,15 @@ metacharacters (#5627), and exactly-full local caps (#5491) have separate owners
 Add those shared scenarios after their fixes land; do not encode known bugs as
 expected successful behavior or hide them with permanent xfails.
 
+## External system-role admission
+
+`poc_external_system_message_injection.py --help` is the opt-in live reproduction
+and post-fix verifier; never run it automatically against an existing user's chat.
+`test_poc_external_system_message_injection.py` tests that CLI offline.
+`test_external_system_message_boundary.py` records model inputs with a fake model:
+the same regression must fail on unfixed admission and pass after rejection,
+without production-provider logging or interpreting model obedience as proof.
+
 ## Scope-isolation benchmark
 
 `test_bench_deermem_scope_isolation.py` exercises production admission and storage.
