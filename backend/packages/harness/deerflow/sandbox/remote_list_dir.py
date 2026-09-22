@@ -35,6 +35,7 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     # Match the parser's host-platform case policy. Prune ignored descendants
     # before head so they cannot consume the visible listing's output budget.
     name_test = "-iname" if os.path.normcase("A") == "a" else "-name"
+    # IGNORE_PATTERNS must contain basename patterns (no '/'); -name/-iname do not match paths.
     ignored = " -o ".join(f"{name_test} {shlex.quote(pattern)}" for pattern in IGNORE_PATTERNS)
     prune = f"\\( {ignored} \\) -prune -o " if ignored else ""
     # Status file is written by the find side of the pipe, then printed AFTER
@@ -131,8 +132,7 @@ def parse_remote_list_dir_output(
             if not should_ignore_path(entry[len(prefix) :]):
                 kept.append(entry)
         else:
-            # ``find -H`` prints the resolved target when the root is a symlink,
-            # so an entry may not carry the requested prefix. Keep it: a path
-            # that cannot be placed relative to the root must not disappear.
+            # Defensive fallback for unexpected entries outside the requested
+            # prefix: root-relative ignore matching cannot classify them.
             kept.append(entry)
     return kept
