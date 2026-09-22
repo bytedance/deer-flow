@@ -173,8 +173,8 @@ def build_subagent_step(
     ``truncated`` flag set accordingly.
     """
     kind = "tool" if message.get("type") == "tool" else "ai"
-    # ``... or ""`` keeps a tool-call-only turn's content=None rendering as ""
-    # (message_content_to_text would otherwise str()-ify it to "None").
+    # Keep local falsey-content normalization for tool-call-only turns as a
+    # defensive guard; message_content_to_text also handles None directly.
     text, truncated = truncate_step_text(message_content_to_text(message.get("content") or ""), max_chars)
 
     step: dict[str, Any] = {

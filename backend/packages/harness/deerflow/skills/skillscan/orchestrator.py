@@ -114,6 +114,10 @@ _HIDDEN_SENSITIVE_FILES = {
     "config",
 }
 _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
+# `name[:=]value` sweep for line-oriented text (config, shell, YAML, Markdown). Python is
+# analyzed from its AST instead, because a regex cannot tell an annotation from a value.
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
+_SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
@@ -323,13 +327,67 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
 
-    assignment_re = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
-    for match in assignment_re.finditer(text):
+    if _is_python_path(rel_path, text):
+        findings.extend(_scan_python_secret_assignments(rel_path, text))
+        return findings
+
+    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    return findings
+
+
+def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityFinding]:
+    """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
+    for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
         if not _looks_like_placeholder(value):
-            findings.append(_finding_from_match("secret-env-assignment", rel_path, text, match))
-            break
-    return findings
+            return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
+    return []
+
+
+def _python_secret_assignment_target(node: ast.expr) -> str | None:
+    """Final identifier bound by a simple assignment target, else None."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+        return node.slice.value
+    return None
+
+
+def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
+    """Report embedded Python secrets from real literal assignments, not from raw text.
+
+    A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
+    statement colon (``if not api_key:``), or this rule's own remediation
+    (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
+    assignment's annotation rather than at its value.
+
+    A file Python cannot parse falls back to that sweep: the AST is only an
+    improvement, and returning nothing would let one syntax error (or a NUL byte)
+    silence a HIGH-severity rule for the whole file.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _scan_secret_assignments_by_text(rel_path, text)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign):
+            # A bare annotation binds no value at all, so `value` stays None.
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
+            continue
+        literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
+        if _looks_like_placeholder(literal):
+            continue
+        if any(_SECRET_ASSIGNMENT_NAME_RE.match(_python_secret_assignment_target(target) or "") for target in targets):
+            return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
+    return []
 
 
 def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:

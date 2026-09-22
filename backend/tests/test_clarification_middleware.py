@@ -730,6 +730,37 @@ class TestClarificationDisabled:
         assert "disabled" in result.content.lower()
         assert "proceed" in result.content.lower()
 
+    @pytest.mark.parametrize("mode", ["autonomous", "webhook", "scheduled"])
+    @pytest.mark.parametrize("async_path", [False, True])
+    def test_unattended_fallback_preserves_risk_and_authorization_boundaries(self, middleware, mode, async_path):
+        import asyncio
+
+        from langchain_core.messages import ToolMessage
+
+        request = self._request(runtime_context={"interaction_mode": mode})
+        request.tool_call["args"]["question"] = "May I delete the production database?"
+
+        async def handler(_req):
+            return pytest.fail("handler should not be called")
+
+        if async_path:
+            result = asyncio.run(middleware.awrap_tool_call(request, handler))
+        else:
+            result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert isinstance(result, ToolMessage)
+        assert result.artifact is None
+        assert result.tool_call_id == "call-clarify-1"
+        assert "low-risk" in result.content
+        assert "reversible" in result.content
+        assert "high-risk" in result.content
+        assert "irreversible" in result.content
+        assert "authorization" in result.content
+        assert "BLOCKED" in result.content
+        assert "missing decision" in result.content
+        assert "assumptions" in result.content
+        assert "carry out the requested action" not in result.content
+
     def test_disabled_async_path(self, middleware):
         request = self._request(runtime_context={"disable_clarification": True})
 

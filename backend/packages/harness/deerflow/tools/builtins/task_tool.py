@@ -904,10 +904,14 @@ async def task_tool(
         "subagent_enabled": False,
         "include_upload_tool": upload_state_available,
     }
+    if metadata.get("mcp_plugins") is not None:
+        available_tools_kwargs["mcp_plugins"] = metadata["mcp_plugins"]
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
     # Assemble off-loop: tool assembly may block on MCP cache initialization,
     # which must not stall the calling event loop (issue #5172).
+    if run_extensions is not None:
+        available_tools_kwargs["extensions"] = run_extensions
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor

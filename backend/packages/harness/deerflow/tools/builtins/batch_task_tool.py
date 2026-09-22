@@ -162,8 +162,8 @@ async def batch_task(
         title: Short batch name shown to the user.
         items: Stable item keys, self-contained prompts, and optional per-item acceptance_criteria.
         subagent_type: Native subagent definition used for every item.
-        max_live_items: Optional queued-plus-running item window.
-        max_running_items: Optional per-batch real execution concurrency.
+        max_live_items: Optional queued-plus-running item window; when set it must be >= 1.
+        max_running_items: Optional per-batch real execution concurrency; when set it must be >= 1.
     """
     submitter = _batch_submitter()
     if submitter is None:
@@ -206,6 +206,7 @@ async def batch_task(
         "subagent_config": asdict(config),
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
+        "mcp_plugins": metadata.get("mcp_plugins"),
         "user_role": context.get("user_role"),
         "oauth_provider": context.get("oauth_provider"),
         "oauth_id": context.get("oauth_id"),

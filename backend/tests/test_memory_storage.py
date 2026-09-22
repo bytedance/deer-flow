@@ -1,11 +1,14 @@
 """Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
+import json
 import threading
 from unittest.mock import patch
 
 import pytest
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core import markdown_format as mf
+from deerflow.agents.memory.backends.deermem.deermem.core.markdown_storage import MarkdownMemoryStorage
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_agent_name
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
@@ -178,3 +181,102 @@ class TestCreateStorage:
     def test_dotted_storage_class_resolves(self):
         storage = create_storage(DeerMemConfig(storage_class="deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage"))
         assert isinstance(storage, FileMemoryStorage)
+
+
+class TestMarkdownMemoryStorage:
+    """Opt-in ``storage_class="markdown"``: tolerant load path (issue #3124)."""
+
+    def _markdown_storage_at(self, memory_file) -> MarkdownMemoryStorage:
+        return MarkdownMemoryStorage(DeerMemConfig(storage_path=str(memory_file.parent.resolve())))
+
+    def test_markdown_alias_resolves(self):
+        storage = create_storage(DeerMemConfig(storage_class="markdown"))
+        assert isinstance(storage, MarkdownMemoryStorage)
+        assert isinstance(storage, FileMemoryStorage)
+
+    @pytest.mark.parametrize(("version", "expected_revision"), [("1.0", 8), ("2.0", 7)])
+    def test_corrupt_json_with_fenced_block_recovers(self, tmp_path, version, expected_revision):
+        """A partially written JSON summary that still carries a fenced
+        ```memory-json block is recovered losslessly instead of crashing."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = version
+        if version == "2.0":
+            manifest.pop("facts")  # v2 manifests keep facts in separate files.
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "recovered"}
+        fenced = '{"version": 1, "revision": 7, "user": {"lang": "zh"}\n```memory-json\n' + json.dumps(manifest, ensure_ascii=False) + "\n```"
+        memory_file.write_text(fenced, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        # Legacy manifests migrate to v2 on load and advance the revision.
+        assert loaded["version"] == "2.0"
+        assert loaded["revision"] == expected_revision
+        assert loaded["user"]["workContext"]["summary"] == "recovered"
+
+    def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
+        """Markdown without a fenced block cannot be mapped onto the manifest
+        schema losslessly: load() must not crash AND must not return an
+        invalid shape -- the file is quarantined so nothing is silently lost."""
+        memory_file = tmp_path / "memory.json"
+        body = "# DeerFlow Memory\n\n- version: 2\n- revision: 5\n\n## User\n- summary: likes tea\n"
+        memory_file.write_text(body, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()  # must not raise
+        assert isinstance(loaded, dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "unreadable file must be preserved via quarantine"
+        assert quarantined[0].read_text(encoding="utf-8") == body
+
+    def test_truncated_json_is_quarantined_before_rebuild(self, tmp_path):
+        """A truncated manifest must not be silently erased by the next save:
+        the unreadable file is quarantined (revision reset is then safe)."""
+        memory_file = tmp_path / "memory.json"
+        truncated = '{"version": "2.0", "revision": 41, "user": {"work'
+        memory_file.write_text(truncated, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == truncated
+
+    def test_fenced_block_containing_backticks_parses_losslessly(self):
+        """Remembered code snippets must not terminate the JSON block."""
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "prefers ```python\nprint('hi')\n``` snippets"}
+        rendered = "# DeerFlow Memory\n\n```memory-json\n" + json.dumps(manifest, ensure_ascii=False) + "\n```\n"
+        parsed = mf._parse_markdown_memory(rendered)
+        assert parsed == manifest
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_fenced_summary_with_trailing_code_block_loads_without_quarantine(self, tmp_path, newline):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"]["summary"] = "prefers ```python snippets```"
+        body = newline.join(["# Memory", "```memory-json", json.dumps(manifest, indent=2), "", "```", "Notes:", "```python", "print('example')", "```", ""])
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_text(body, encoding="utf-8")
+        assert mf._parse_markdown_memory(body) == manifest
+        loaded = self._markdown_storage_at(memory_file).load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "# Memory without a fence",
+            '```memory-json\n{"user": ',
+            '```memory-json\n{"user": {}}',
+            '```memory-json\n{"user": {}} trailing garbage\n```',
+            '```memory-json\n{"user": {}}\n```python\nnotes\n```',
+            "```memory-json\n[]\n```",
+            "```memory-json\nnull\n```",
+        ],
+    )
+    def test_invalid_or_non_object_fenced_summary_rejected(self, body):
+        assert mf._parse_markdown_memory(body) is None

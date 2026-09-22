@@ -19,6 +19,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
@@ -547,6 +549,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary, new_messages_strategy=new_messages_strategy)
         if not formatted_messages:
             return None
+        # The summary model is invoked directly from before_model, outside
+        # PiiRedactionMiddleware's wrap_model_call (#3190), so the compaction
+        # input is redacted here; summaries then carry placeholders and the
+        # summary_text DurableContextMiddleware reinjects stays clean.
+        formatted_messages = redact_text(formatted_messages, getattr(self._app_config, "pii_redaction", None))
         return self.summary_prompt.format(messages=formatted_messages).rstrip()
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -569,6 +576,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         total_tokens = self.token_counter(trigger_messages)
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
+
+        # Todo reminders are snapshots of state["todos"], not conversation history.
+        # Exclude them before partitioning so neither the summary nor the retained
+        # tail contains stale task statuses. TodoMiddleware restores current context
+        # when needed before the next model call. Keep state untouched if compaction
+        # is skipped or summary generation fails.
+        messages = [message for message in messages if not (isinstance(message, HumanMessage) and message.name == TODO_REMINDER_MESSAGE_NAME)]
 
         cutoff_index = self._determine_cutoff_index(messages)
         if cutoff_index <= 0:
