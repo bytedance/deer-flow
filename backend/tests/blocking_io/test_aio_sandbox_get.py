@@ -156,12 +156,11 @@ async def test_async_acquire_offloads_ownership_publish(tmp_path, monkeypatch):
 
 
 async def test_async_lock_path_resolution_stays_off_the_loop(tmp_path, monkeypatch) -> None:
-    """The lock path of the async acquire is resolved from ``Paths.base_dir``.
+    """The async acquire resolves its lock path from ``Paths.base_dir``, which syscalls.
 
-    The anchor above documents that resolution as "a pre-existing blocking call in
-    this coroutine" and stubs the path layer out to get around it. This one pins
-    the fix instead: every other step of the coroutine is offloaded, so the path
-    resolution has to join them, and the stub above can then go away.
+    The sibling anchor used to stub the path layer out and documented why — "a
+    pre-existing blocking call in this coroutine". The resolution now runs in a
+    worker thread, so that stub is gone; this anchor keeps it from coming back.
     """
     import deerflow.community.aio_sandbox.aio_sandbox_provider as aio_mod
 
