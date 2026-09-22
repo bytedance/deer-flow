@@ -88,8 +88,21 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
 
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
-    for match in _MARKDOWN_LINK_RE.finditer(content):
+    # Do not use ``finditer`` directly here. With an unmatched ``[`` at every
+    # position, its label pattern scans the remaining input for each bracket.
+    # Starting from each possible ``](`` closer bounds this scan linearly while
+    # retaining the established regex semantics for valid links.
+    position = 0
+    while (closer := content.find("](", position)) != -1:
+        previous_closer = content.rfind("]", position, closer)
+        opener_start = position if previous_closer == -1 else previous_closer + 1
+        opener = content.find("[", opener_start, closer)
+        match = _MARKDOWN_LINK_RE.match(content, opener) if opener != -1 else None
+        if match is None:
+            position = closer + 1
+            continue
         refs.add(match.group(1).split("#", 1)[0])
+        position = match.end()
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:

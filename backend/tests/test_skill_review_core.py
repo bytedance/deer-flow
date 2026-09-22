@@ -12,6 +12,7 @@ from deerflow.skills.review import LocalDirectoryReader, analyze_skill_package, 
 from deerflow.skills.review.cli import main as review_cli_main
 from deerflow.skills.review.models import PackageLimits, normalize_relative_path
 from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
+from deerflow.skills.review.resource_graph import _extract_references
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
 
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
@@ -99,6 +100,27 @@ def test_resource_graph_tracks_referenced_resource(tmp_path):
 
     assert {"source": "SKILL.md", "target": "references/guide.md"} in facts["resources"]["edges"]
     assert "references/guide.md" not in facts["resources"]["orphans"]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("Read [guide](references/guide.md).", {"references/guide.md"}),
+        ("[[nested](nested.md)](outer.md)", {"nested.md"}),
+        ("[a](one.md][b](two.md)", {"one.md][b](two.md"}),
+        ("![[not-a-link]](not-a-resource.md)", set()),
+    ],
+)
+def test_resource_graph_extracts_markdown_links_with_existing_edge_semantics(content, expected):
+    assert _extract_references(content) == expected
+
+
+def test_resource_graph_handles_many_unmatched_brackets_within_a_bounded_time():
+    import time
+
+    started = time.perf_counter()
+    assert _extract_references("[" * (64 * 1024)) == set()
+    assert time.perf_counter() - started < 1
 
 
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
