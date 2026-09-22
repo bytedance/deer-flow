@@ -31,6 +31,7 @@ LABELS_FILE = Path(__file__).resolve().parent.parent / ".github" / "labels.yml"
 
 
 def load_labels(path: Path) -> list[dict[str, str]]:
+    """Load and validate the declarative label list from *path*."""
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     labels = data.get("labels")
     if not isinstance(labels, list) or not labels:
@@ -42,6 +43,7 @@ def load_labels(path: Path) -> list[dict[str, str]]:
 
 
 def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
+    """Create or update one label, or print its command during a dry run."""
     name = str(label["name"])
     color = str(label.get("color", "ededed")).lstrip("#")
     description = str(label.get("description", ""))
@@ -65,6 +67,7 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
 
 
 def main() -> int:
+    """Parse CLI options and synchronize every declared label."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", help="Target repository as OWNER/NAME")
     parser.add_argument(
