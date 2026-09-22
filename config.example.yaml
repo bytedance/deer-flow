@@ -316,6 +316,35 @@ models:
   # For Docker deployments, use host.docker.internal instead of localhost:
   #   base_url: http://host.docker.internal:11434
 
+  # Example: llama.cpp (OpenAI-compatible local server)
+  #
+  # llama-server exposes an OpenAI-compatible /v1/chat/completions endpoint,
+  # so use ChatOpenAI and point base_url at the server's /v1 root. --alias
+  # gives the served model a stable API name independent of the GGUF filename.
+  #
+  # Start llama.cpp, for example:
+  #   llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 --alias qwen-local
+  #
+  # Tool calling depends on the model's chat template supporting tools. Current
+  # llama.cpp enables its Jinja template engine by default; if you override the
+  # template, use one that supports function/tool calls.
+  #
+  # - name: qwen-llamacpp
+  #   display_name: Qwen (llama.cpp)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: qwen-local
+  #   api_key: no-key              # Non-empty placeholder when llama-server auth is disabled
+  #   base_url: http://localhost:8080/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   supports_vision: false
+  #
+  # If llama-server was started with --api-key, replace the placeholder with
+  # that key (prefer an environment variable). In Docker, localhost is the
+  # DeerFlow container itself; use an address reachable from the container,
+  # for example on Docker Desktop:
+  #   base_url: http://host.docker.internal:8080/v1
+
   # Example: Anthropic Claude model (with extended thinking)
   # supports_thinking: true is required — without it, DeerFlow silently falls
   # back to non-thinking mode even when the UI thinking toggle is on.
