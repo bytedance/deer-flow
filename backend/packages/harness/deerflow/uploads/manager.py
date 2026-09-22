@@ -367,11 +367,15 @@ def list_files_in_dir(directory: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
-def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: set[str] | None = None) -> dict:
+def delete_file_safe(base_dir: Path, filename: str) -> dict:
     """Delete a file inside *base_dir* after path-traversal validation.
 
-    If *convertible_extensions* is provided and the file's extension matches,
-    the companion ``.md`` file is also removed (if it exists).
+    Only the requested file is removed. A converted document's Markdown
+    companion is left in place: conversion names it after the document's stem
+    and falls back to a ``_N`` suffix when that name is taken, so the ``.md``
+    beside a document may belong to another document sharing that stem, or to
+    the user. Removing it on that guess destroyed the wrong file. It stays
+    listed and can be deleted on its own (issue #5672).
 
     Only regular files are deleted. Upload directories may be mounted into
     local sandboxes, so a sandbox process can plant a symlink under an upload
@@ -381,8 +385,6 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
-        convertible_extensions: Lowercase extensions (e.g. ``{".pdf", ".docx"}``)
-            whose companion markdown should be cleaned up.
 
     Returns:
         Dict with success and message.
@@ -398,10 +400,6 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         raise FileNotFoundError(f"File not found: {filename}")
 
     file_path.unlink()
-
-    # Clean up companion markdown generated during upload conversion.
-    if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-        file_path.with_suffix(".md").unlink(missing_ok=True)
 
     return {"success": True, "message": f"Deleted {filename}"}
 
