@@ -526,8 +526,9 @@ def test_read_file_supports_bounded_ranges() -> None:
     # "(start_line exceeds file length)" message and the truncated-read
     # continuation path both depend on that contract.
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
-    # A negative start clamps to the first line instead of wrapping around.
+    # Negative bounds clamp like LocalSandbox instead of wrapping around.
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == ("line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
 
 
 def test_download_missing_file_raises_oserror() -> None:

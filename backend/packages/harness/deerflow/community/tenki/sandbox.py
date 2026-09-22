@@ -301,7 +301,7 @@ class TenkiSandbox(Sandbox):
         # wrap around through Python's negative-index slicing instead of
         # reading from the first line.
         start = max(start_line or 1, 1)
-        end = end_line if end_line is not None else len(lines)
+        end = max(end_line, 0) if end_line is not None else len(lines)
         return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
