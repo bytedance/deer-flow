@@ -17,6 +17,10 @@ sidebar entry. The [bookmarks example](../examples/deerflow-extension-bookmarks/
 uses all three: save the last visible answer, then search, rename or delete it under
 **My bookmarks**. Existing notification and Markdown/JSON export behavior is unchanged.
 
+The [Jev context pruning example](../examples/deerflow-extension-jev-context/README.md)
+combines a catalog contribution with public middleware hooks to shorten old read-only
+tool results. It requires deployment opt-in and a separate Jev API key.
+
 ## Registration and execution
 
 `registry.plugin(...)` returns `True` when accepted. Its default public protocol
