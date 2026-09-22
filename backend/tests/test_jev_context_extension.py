@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import logging
+import runpy
 from pathlib import Path
 
 import httpx
@@ -172,7 +174,8 @@ def test_invalid_decisions_keep_history(jev, value):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_malformed_response_fails_open_without_logging_or_retry(jev, monkeypatch, caplog, asynchronous):
+def test_malformed_response_logs_only_exception_class_without_retry(jev, monkeypatch, caplog, asynchronous):
+    caplog.set_level(logging.DEBUG, logger=jev.__name__)
     requests = transport(monkeypatch, result={"answers": {}})
     middleware = jev.JevCompaction(options(jev))
     state = {"messages": history()}
@@ -182,9 +185,47 @@ def test_malformed_response_fails_open_without_logging_or_retry(jev, monkeypatch
         update = middleware.before_model(state, None)
     assert "messages" not in update
     assert len(requests) == 1
+    records = [record for record in caplog.records if record.name == jev.__name__]
+    assert [record.getMessage() for record in records] == ["Jev request failed: KeyError"]
+    assert all(record.exc_info is None for record in records)
     assert "test-only-not-a-real-key" not in caplog.text
     assert "Obsolete debug log" not in caplog.text
     assert state["messages"] == history()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, ValueError, KeyError, TypeError])
+def test_failure_diagnostic_excludes_exception_details(jev, monkeypatch, caplog, asynchronous, error_type):
+    private_details = "test-only-not-a-real-key https://private.invalid/tool Obsolete debug log"
+    requests = transport(monkeypatch, error=error_type(private_details))
+    caplog.set_level(logging.DEBUG, logger=jev.__name__)
+    middleware = jev.JevCompaction(options(jev))
+    state = {"messages": history()}
+    update = asyncio.run(middleware.abefore_model(state, None)) if asynchronous else middleware.before_model(state, None)
+    assert update == {jev.STATE_KEY: {"remaining": 3}}
+    assert state["messages"] == history()
+    assert len(requests) == 1
+    records = [record for record in caplog.records if record.name == jev.__name__]
+    assert [record.getMessage() for record in records] == [f"Jev request failed: {error_type.__name__}"]
+    assert records[0].exc_info is None and records[0].stack_info is None
+    assert private_details not in caplog.text
+
+
+@pytest.mark.parametrize("missing", ["TYPESAFE_API_KEY", "TEST_CHAT_BASE_URL", "TEST_CHAT_MODEL"])
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_live_script_checks_all_required_settings_before_requests(jev, monkeypatch, missing, value):
+    for name, configured in {"TYPESAFE_API_KEY": "test-only-not-a-real-key", "TEST_CHAT_BASE_URL": "https://chat.invalid", "TEST_CHAT_MODEL": "test-model"}.items():
+        monkeypatch.setenv(name, configured)
+    if value is None:
+        monkeypatch.delenv(missing)
+    else:
+        monkeypatch.setenv(missing, value)
+    requests = transport(monkeypatch)
+    script = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-context/scripts/verify_live.py"
+    main = runpy.run_path(str(script))["main"]
+    with pytest.raises(SystemExit, match=f"^Set {missing} before running this opt-in smoke test$"):
+        asyncio.run(main())
+    assert not requests
 
 
 def test_uncertain_or_low_yield_decisions_keep_history(jev):

@@ -70,8 +70,10 @@ def wire(messages):
 
 
 async def main():
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        raise SystemExit("Set TYPESAFE_API_KEY before running this opt-in smoke test")
+    required = ("TYPESAFE_API_KEY", "TEST_CHAT_BASE_URL", "TEST_CHAT_MODEL")
+    missing = [name for name in required if not os.environ.get(name, "").strip()]
+    if missing:
+        raise SystemExit(f"Set {', '.join(missing)} before running this opt-in smoke test")
     base = os.environ["TEST_CHAT_BASE_URL"].rstrip("/")
     model = os.environ["TEST_CHAT_MODEL"]
     original = history()

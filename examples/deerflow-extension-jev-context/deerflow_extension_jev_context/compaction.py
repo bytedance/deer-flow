@@ -1,6 +1,7 @@
 """Lossy, checkpointed tool-result pruning through public middleware hooks."""
 
 import json
+import logging
 import math
 import os
 from collections import Counter
@@ -18,6 +19,7 @@ MARKER = "jev_context_shortened"
 STATE_KEY = "jev_context_compaction"
 READ_TOOLS = frozenset({"read_file", "grep", "glob", "ls"})
 MAX_REQUEST_BYTES = 24000
+logger = logging.getLogger(__name__)
 
 
 class Options(BaseModel):
@@ -215,9 +217,10 @@ class JevCompaction(AgentMiddleware):
                 response = client.post(ENDPOINT, json=body, headers={"Authorization": f"Bearer {os.environ[self.options.api_key_env]}"})
                 response.raise_for_status()
                 return self.finish(state, update, selected, response.json())
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             # Never log provider payloads, transcript data, or credentials. Failure
             # leaves history intact; the host's normal summarization still runs.
+            logger.debug("Jev request failed: %s", type(exc).__name__)
             return update
 
     async def abefore_model(self, state, runtime):
@@ -231,5 +234,6 @@ class JevCompaction(AgentMiddleware):
                 response = await client.post(ENDPOINT, json=body, headers={"Authorization": f"Bearer {os.environ[self.options.api_key_env]}"})
                 response.raise_for_status()
                 return self.finish(state, update, selected, response.json())
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            logger.debug("Jev request failed: %s", type(exc).__name__)
             return update

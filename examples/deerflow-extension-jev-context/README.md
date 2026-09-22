@@ -34,6 +34,8 @@ switch loads the package; `config.enabled` enables its middleware and contributi
 It is disabled by default. The plugin catalog is read-only; there is no online
 key editor, custom browser page, or new slash command. The authenticated `status`
 backend action reports enabled/configured/threshold without exposing credentials.
+`configured` means the key environment variable is nonempty, not that authentication
+or connectivity has been verified.
 No frontend rebuild is required.
 
 **Deployment opt-in sends bounded conversation excerpts, recent user goals,
@@ -66,9 +68,20 @@ only from the named environment variable, never from plugin settings or messages
 - Replaces result contents under their existing IDs in the **persisted graph
   state**. Disabling the plugin does not restore omitted text. It creates no
   transcript archive. Existing message metadata and call/result pairing remain.
+  Replacements carry `jev_context_shortened: true` in their additional metadata,
+  but no original-to-replacement hash mapping or detailed audit event is retained.
+  Extension API 0.2.2 exposes `CompactionEvent` and observer registration, but no
+  public event-emission API for this middleware; this plugin does not notify those
+  observers through host internals. The marker identifies a shortened message but
+  cannot reconstruct omitted facts or explain the classifier's decision.
 - HTTP failures, missing/invalid answers, missing keys or insufficient reduction
   leave messages unchanged. The host's usual summarization remains available.
   Cancellation propagates. There are no automatic Jev retries or payload logs.
+  For caught request/response failures, the
+  `deerflow_extension_jev_context.compaction` logger emits a DEBUG message containing
+  only the exception class. Enable that logger to diagnose failures; the plugin
+  never includes exception text, tracebacks, URLs, credentials or conversation data
+  in these diagnostics.
 - After an attempt (including failure/no change), skips the next 16 logical model
   calls before trying again (attempts at calls 1, 18, 35, ...). This cooldown is
   checkpointed per thread, so a shared agent instance does not mix users' state. Already shortened results
