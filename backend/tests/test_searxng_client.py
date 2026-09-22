@@ -144,6 +144,79 @@ class TestSearxngClient:
             params = mock_ctx.get.call_args.kwargs["params"]
             assert "time_range" not in params
 
+    @staticmethod
+    def _page_response(entries):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"results": entries}
+        resp.raise_for_status.return_value = None
+        return resp
+
+    @staticmethod
+    def _page_entries(page_number, count=10):
+        return [{"title": f"P{page_number} Result {i}", "url": f"https://example.com/p{page_number}/{i}", "content": f"Snippet {page_number}-{i}"} for i in range(count)]
+
+    async def test_search_paginates_until_max_results(self):
+        """max_results beyond one page size walks pageno instead of truncating."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            # Simulate a SearXNG instance with results_per_page=10: every page
+            # returns 10 fresh results.
+            mock_ctx.get = AsyncMock(side_effect=[self._page_response(self._page_entries(1)), self._page_response(self._page_entries(2))])
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("broad topic", max_results=20)
+
+            assert len(result) == 20
+            assert mock_ctx.get.call_count == 2
+            first_params = mock_ctx.get.call_args_list[0].kwargs["params"]
+            second_params = mock_ctx.get.call_args_list[1].kwargs["params"]
+            assert first_params["pageno"] == 1
+            assert second_params["pageno"] == 2
+            for call in mock_ctx.get.call_args_list:
+                assert "limit" not in call.kwargs["params"]
+
+    async def test_search_stops_on_empty_page(self):
+        """Pagination stops once a page comes back empty."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            mock_ctx.get = AsyncMock(side_effect=[self._page_response(self._page_entries(1)), self._page_response([])])
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("narrow topic", max_results=20)
+
+            assert len(result) == 10
+            assert mock_ctx.get.call_count == 2
+
+    async def test_search_stops_when_page_adds_nothing_new(self):
+        """Pagination stops when a page only repeats already-collected results."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            page_one = self._page_entries(1)
+            mock_ctx.get = AsyncMock(side_effect=[self._page_response(page_one), self._page_response(list(page_one))])
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("repetitive topic", max_results=20)
+
+            assert len(result) == 10
+            assert mock_ctx.get.call_count == 2
+
+    async def test_search_without_max_results_fetches_single_page(self):
+        """Without a cap the client keeps the single-request shape."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            mock_ctx.get = AsyncMock(side_effect=[self._page_response(self._page_entries(1)), self._page_response(self._page_entries(2))])
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("uncapped query", max_results=0)
+
+            assert len(result) == 10
+            assert mock_ctx.get.call_count == 1
+
 
 @pytest.mark.asyncio
 class TestSearxngTools:
