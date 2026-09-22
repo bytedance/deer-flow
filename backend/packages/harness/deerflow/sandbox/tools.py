@@ -2192,8 +2192,10 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
 
             sandbox_cfg = get_app_config().sandbox
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+            command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
         except Exception:
             max_chars = 20000
+            command_timeout = None
         return _truncate_bash_output(
             mask_secret_values(
                 _execute_bash_command(
@@ -2201,6 +2203,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                     command,
                     runtime=runtime,
                     env=injected_env,
+                    timeout=command_timeout,
                 ),
                 injected_env,
             ),

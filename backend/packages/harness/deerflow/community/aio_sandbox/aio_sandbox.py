@@ -296,7 +296,6 @@ class AioSandbox(Sandbox):
         """
         if env or scope_id is None:
             return self.execute_command(command, env=env, timeout=timeout)
-        del timeout
         _validate_extra_env(env)
 
         try:
@@ -322,30 +321,39 @@ class AioSandbox(Sandbox):
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
-                    output, exit_code, _status = self._exec_shell(
+                    output, exit_code, status = self._exec_shell(
                         client,
                         command,
                         session_id=scoped.session_id,
+                        hard_timeout=timeout,
                     )
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
                     logger.warning("Execution-scoped sandbox shell session is missing; recreating it once")
                     scoped.session_id = None
-                    output, exit_code, _status, scoped.session_id = self._rotate_and_retry_shell(
+                    output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=None,
                         context="execution scope after missing session",
+                        hard_timeout=timeout,
                     )
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
                 if scoped.session_id is not None and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
-                    output, exit_code, _status, scoped.session_id = self._rotate_and_retry_shell(
+                    output, exit_code, status, scoped.session_id = self._rotate_and_retry_shell(
                         client,
                         command,
                         corrupted_session_id=scoped.session_id,
                         context="execution scope",
+                        hard_timeout=timeout,
                     )
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
                 return self._render_shell_output(output, exit_code)
         except Exception as e:
             logger.error(f"Failed to execute command in sandbox: {e}")
@@ -372,6 +380,15 @@ class AioSandbox(Sandbox):
         if exit_code not in (0, None):
             output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
         return output if output else "(no output)"
+
+    @staticmethod
+    def _timeout_result(partial_output: str, timeout: float) -> str:
+        """Timeout result: keep whatever the command already printed, then the
+        LocalSandbox-style notice and the coreutils ``timeout`` status marker,
+        so a killed command never reads as a successful empty one."""
+        notice = LocalSandbox._format_timeout_notice(timeout)
+        output = f"{partial_output}\n{notice}" if partial_output else notice
+        return f"{output}\nExit Code: 124"
 
     @property
     def home_dir(self) -> str:
@@ -456,8 +473,8 @@ class AioSandbox(Sandbox):
                         session_id=self._recovery_session_id,
                         hard_timeout=timeout,
                     )
-                    if status == "hard_timeout":
-                        return LocalSandbox._format_timeout_notice(timeout)
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
                 except ApiError as error:
                     if not self._is_missing_shell_session_error(error):
                         raise
@@ -472,8 +489,8 @@ class AioSandbox(Sandbox):
                         context="default shell after missing session",
                         hard_timeout=timeout,
                     )
-                    if status == "hard_timeout":
-                        return LocalSandbox._format_timeout_notice(timeout)
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
 
                 if not recovered_missing_session and output and _ERROR_OBSERVATION_SIGNATURE in output:
                     self._default_shell_corrupted = True
@@ -485,8 +502,8 @@ class AioSandbox(Sandbox):
                         context="default shell",
                         hard_timeout=timeout,
                     )
-                    if status == "hard_timeout":
-                        return LocalSandbox._format_timeout_notice(timeout)
+                    if timeout is not None and status == "hard_timeout":
+                        return self._timeout_result(output, timeout)
 
                 return self._render_shell_output(output, exit_code)
             except Exception as e:
@@ -549,7 +566,10 @@ class AioSandbox(Sandbox):
                     )
                     data = result.data if result else None
                     if data is not None and timeout is not None and getattr(data, "status", None) in ("timed_out", "killed"):
-                        return LocalSandbox._format_timeout_notice(timeout)
+                        partial = data.stdout or ""
+                        if data.stderr:
+                            partial += f"\nStd Error:\n{data.stderr}" if partial else data.stderr
+                        return self._timeout_result(partial, timeout)
                     stdout = (data.stdout or "") if data else ""
                     stderr = (data.stderr or "") if data else ""
                     exit_code = getattr(data, "exit_code", None) if data else None
