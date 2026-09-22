@@ -2792,6 +2792,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **agents:** `GET`/`PUT /api/user-profile` now read and write the calling
+  user's profile instead of a single `{base_dir}/USER.md` shared by the whole
+  installation. With `agents_api.enabled=true` and more than one account, any
+  authenticated caller could read every other user's profile and overwrite it,
+  even though agents and their `SOUL.md` were already per-user. The profile
+  lives at `users/{user_id}/USER.md`; a legacy shared file stays readable until
+  that user saves, and `migrate_user_isolation.py` moves it. ([#5706])
 - **uploads:** Document conversion no longer re-opens the upload by name. The
   Gateway converted the committed file and the embedded client converted the
   copy it had just placed in the thread's uploads directory, so a sandbox that
@@ -4339,3 +4346,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5706]: https://github.com/bytedance/deer-flow/pull/5706

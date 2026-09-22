@@ -2095,6 +2095,11 @@
 
 ### 安全
 
+- **智能体：** `GET`/`PUT /api/user-profile` 现在读写调用者本人的档案，而不是整个部署共用的
+  单个 `{base_dir}/USER.md`。此前在 `agents_api.enabled=true` 且存在多个账号时，任何已认证的
+  调用者都能读取并覆盖其他用户的档案，而智能体及其 `SOUL.md` 早已按用户隔离。档案现位于
+  `users/{user_id}/USER.md`；旧的共享文件在该用户保存前仍可读取，`migrate_user_isolation.py`
+  会将其迁移。([#5706])
 - **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
   客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
   宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
@@ -3527,3 +3532,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5706]: https://github.com/bytedance/deer-flow/pull/5706
