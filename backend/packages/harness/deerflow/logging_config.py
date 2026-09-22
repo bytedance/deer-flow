@@ -218,7 +218,15 @@ class UrlRedactionFilter(logging.Filter):
             # either pass could otherwise see, and the slash-less forms
             # kept their signed queries verbatim (round 15).
             def _slot(target: str) -> str:
-                return target if _SLOT_ABSOLUTE_URL_RE.match(target) else "/<redacted>"
+                if not _SLOT_ABSOLUTE_URL_RE.match(target):
+                    return "/<redacted>"
+                # The generic pass consumes an absolute URL only up to the
+                # first whitespace, so a space-carrying slot would otherwise
+                # keep everything after the space verbatim (round 16). Trim
+                # there and let that pass redact the parseable head; the
+                # dropped tail goes away with the replaced slot span.
+                space = re.search(r"\s", target)
+                return target[: space.start()] if space else target
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 

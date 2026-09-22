@@ -711,8 +711,11 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
     assert spacey_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
     assert "QuerySecret" not in spacey_t1.getMessage()
 
-    # An absolute Location with an interior space stays whole for the
-    # generic absolute-URL pass (which stops its rest at whitespace).
+    # An absolute Location with an interior space is trimmed at the space:
+    # the generic absolute-URL pass cannot consume the URL whole, so an
+    # untrimmed slot kept everything after the first space verbatim
+    # (round 16). The parseable head redacts to scheme + host; the tail
+    # goes away with the replaced slot span.
     spacey_absolute = logging.LogRecord(
         "urllib3.connectionpool",
         logging.DEBUG,
@@ -723,8 +726,24 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
         None,
     )
     assert filt.filter(spacey_absolute) is True
-    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted> page?sig=OtherSecret"
+    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted>"
+    assert "OtherSecret" not in spacey_absolute.getMessage()
     assert "BearerSecret" not in spacey_absolute.getMessage()
+
+    # The first slot is the recursive frame's previous raw Location, so the
+    # space-carrying absolute shape can sit there too.
+    spacey_t1_absolute = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("https://origin.example/first page?sig=FirstSecret", "/other/BearerSecret?sig=OtherSecret"),
+        None,
+    )
+    assert filt.filter(spacey_t1_absolute) is True
+    assert spacey_t1_absolute.getMessage() == "Redirecting https://origin.example/<redacted> -> /<redacted>"
+    assert "FirstSecret" not in spacey_t1_absolute.getMessage()
 
     # The sandbox arrow false positive stays excluded: the prefix anchor,
     # not a strict tail, is what keeps non-Redirecting messages untouched.
