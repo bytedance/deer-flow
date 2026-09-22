@@ -98,6 +98,29 @@ _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<
 # form, and non-hierarchical schemes) collapses — see _redact_redirecting_origin.
 _SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
 
+# urllib3's header-parse warning (connection.py:576, WARNING, so it clears the
+# Gateway's INFO root) renders "Failed to parse headers (url=%s): %s", and its
+# second argument is a HeaderParsingError whose repr embeds ``headers_received``
+# - the raw header block of the response that failed to parse. The absolute URL
+# in the first argument is the generic pass's business; the dump is not, because
+# a ``Set-Cookie: session=…`` or ``WWW-Authenticate: Bearer …`` line carries no
+# scheme for ``_URL_REDACT_RE`` to anchor on and reached the log whole. Only the
+# values of credential-bearing field names collapse, the names stay for
+# operator legibility, and the pass runs only on a record that opens with
+# urllib3's own literal, so a header-looking line in any other log keeps its
+# text. ``location`` is in the list because that field value is the same
+# origin-form signed target the Redirecting and retry passes collapse.
+_CREDENTIAL_HEADER_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|location)[ \t]*:[ \t]*\S.*$")
+_HEADER_DUMP_PREFIX = "Failed to parse headers (url="
+
+
+def _redact_credential_headers(message: str) -> str:
+    def _collapse(match: re.Match[str]) -> str:
+        return match.group("indent") + match.group("name") + ": <redacted>"
+
+    return _CREDENTIAL_HEADER_RE.sub(_collapse, message)
+
+
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
 # ``://`` makes each attempt walk to the end of the run, which is quadratic
@@ -230,6 +253,15 @@ class UrlRedactionFilter(logging.Filter):
         # two scheme-bearing passes scan from ``://`` occurrences (see
         # _scheme_starts) instead of re.sub, so long letter runs in any
         # record — URL paths or URL-free error bodies — stay linear-time.
+        # The dump pass runs first: the absolute-URL rewrite consumes the
+        # ``): `` closer that separates the url argument from the error repr
+        # (see the note on _URL_REDACT_RE's ``rest`` class), and after that the
+        # first header line of the dump no longer starts a line, so a
+        # line-anchored collapse could not see it.
+        if message.startswith(_HEADER_DUMP_PREFIX):
+            # The record's own second argument, not a URL line: the response
+            # header block that urllib3 echoes when it could not parse it.
+            redacted = _redact_credential_headers(redacted)
         redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, message)
         redacted = _URLLIB3_INCREMENT_RETRY_RE.sub(_redact_increment, redacted)
         redacted = _URLLIB3_RETRY_TARGET_RE.sub(_redact_retry_target, redacted)
@@ -259,8 +291,9 @@ class UrlRedactionFilter(logging.Filter):
 # The enumeration of urllib3's URL-bearing lines is closed against the
 # installed source (2.7.0): every other emitter logs host:port only
 # (connection establishment/reset) or an absolute URL in one piece
-# (``connection.py``'s header-parse warning), which the generic absolute-URL
-# pass rewrites without a dedicated shape. The closure is version-anchored:
+# (``connection.py``'s header-parse warning, whose second argument is a raw
+# response header block rather than a URL, and goes through
+# _redact_credential_headers). The closure is version-anchored:
 # a urllib3 upgrade can change these format strings and silently reopen it —
 # re-run the emitter enumeration when bumping the dependency.
 _REDACTED_LOGGER_NAMES = ("httpx",)

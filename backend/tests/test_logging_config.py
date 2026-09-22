@@ -765,3 +765,73 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
         assert record.getMessage() == expected, (t1, t2)
         assert "LeakedSig" not in record.getMessage()
         assert "token=QuerySecret" not in record.getMessage()
+
+
+def test_url_redaction_filter_collapses_credentials_in_a_header_parse_dump() -> None:
+    """urllib3's header-parse warning embeds the raw response header block.
+
+    ``connection.py:576`` logs ``Failed to parse headers (url=%s): %s`` at
+    WARNING with a ``HeaderParsingError``, whose repr carries
+    ``headers_received`` - every field value of the response that failed to
+    parse. The absolute URL in the first argument belongs to the generic
+    pass; a scheme-less ``Set-Cookie`` or ``WWW-Authenticate`` line inside the
+    dump belongs to no URL pass at all, and reached the log whole.
+    """
+    from email.message import Message
+
+    from urllib3.exceptions import HeaderParsingError
+
+    from deerflow.logging_config import UrlRedactionFilter
+
+    headers = Message()
+    headers.add_header("Location", "/tenant-42/reports/q1?sig=SignedPathSecret")
+    headers.add_header("Set-Cookie", "session=CookieSecret; Path=/")
+    headers.add_header("WWW-Authenticate", "Bearer TokenSecret")
+    headers.add_header("Content-Type", "application/json")
+    record = logging.LogRecord(
+        "urllib3.connection",
+        logging.WARNING,
+        __file__,
+        1,
+        "Failed to parse headers (url=%s): %s",
+        (
+            "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret",
+            HeaderParsingError(headers, {"defect": [("bad line", 4)]}),
+        ),
+        None,
+    )
+
+    assert UrlRedactionFilter().filter(record) is True
+    formatted = record.getMessage()
+
+    for secret in ("CookieSecret", "TokenSecret", "SignedPathSecret", "UrlSecret", "session=", "Bearer "):
+        assert secret not in formatted, secret
+
+    # Field names, the non-sensitive fields and the parse defect itself stay.
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "WWW-Authenticate: <redacted>" in formatted
+    assert "Content-Type: application/json" in formatted
+    assert "bad line" in formatted
+
+
+def test_url_redaction_filter_leaves_header_looking_text_outside_the_dump_alone() -> None:
+    """The dump pass is gated on urllib3's own literal, not on header syntax.
+
+    A ``Set-Cookie:`` shaped line in some other component's log is that
+    component's data, and rewriting it here would silently widen a URL
+    redactor into a general PII filter.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    record = logging.LogRecord(
+        "deerflow.something",
+        logging.INFO,
+        __file__,
+        1,
+        "parsed upstream reply: Set-Cookie: session=OtherCookieSecret",
+        (),
+        None,
+    )
+
+    assert UrlRedactionFilter().filter(record) is True
+    assert "OtherCookieSecret" in record.getMessage()
