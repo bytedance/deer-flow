@@ -611,7 +611,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
 
     Branch dispatch is documented at module top. ``alembic.command.stamp`` and
     ``alembic.command.upgrade`` are synchronous and would block the event
-    loop; both are wrapped in ``asyncio.to_thread``.
+    loop; both are wrapped in ``await_drained(asyncio.to_thread(...))`` so the
+    worker finishes before the bootstrap lock is released on cancellation.
 
     *postgres_schema*, when set, is forwarded to the alembic config so the
     alembic-spawned engine pins its ``search_path`` to that schema. The target
