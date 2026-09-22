@@ -1472,12 +1472,13 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     """Update the MCP configuration.
 
     This will:
-    1. Save the new configuration to the mcp_config.json file
+    1. Save the updated MCP configuration to the active extensions configuration file
     2. Reload the configuration cache
     3. Reset MCP tools cache to trigger reinitialization
 
     Args:
-        request: The new MCP configuration to save.
+        request: Incoming HTTP request used for admin authorization.
+        body: MCP server configuration payload to save.
 
     Returns:
         The updated MCP configuration.
