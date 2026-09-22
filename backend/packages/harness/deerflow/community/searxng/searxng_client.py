@@ -63,7 +63,7 @@ class SearxngClient:
 
             # A page that adds nothing new means the instance is repeating
             # itself or the query is exhausted -- ask for no more.
-            if added == 0 or limit is None:
+            if added == 0:
                 break
 
         return collected
