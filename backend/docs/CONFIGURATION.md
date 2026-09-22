@@ -633,6 +633,25 @@ sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
 
+For AIO images on the supported semver line (`1.9.3` through the recommended
+`1.11.0` image), `sandbox.bash_command_timeout` is enforced server-side through
+the `hard_timeout` API when the image exposes it. DeerFlow's legacy frozen
+`all-in-one-sandbox:latest` image predates that API, so only the host-side
+request is bounded there. On supported semver AIO images, `list_dir` uses a 60
+second server-side hard timeout with a 65 second no-retry host envelope; the
+frozen legacy image only gets the bounded host wait. Timed-out or otherwise
+ambiguous commands are never replayed, and a partial `list_dir` result is never
+returned as a complete listing.
+
+Explicit AIO shell/bash session creation is a separate control-plane
+operation. DeerFlow bounds those create requests to 5 seconds with SDK
+retries disabled. If a response cannot prove whether creation committed,
+DeerFlow does not replay the create or execute on that session id. The
+affected creation plane is quarantined, bounded best-effort session cleanup
+is attempted, and the container is recycled instead of being returned to the
+warm pool. Session-level cleanup does not clear that quarantine because a
+timed-out create may commit after cleanup has already returned.
+
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml
 sandbox:

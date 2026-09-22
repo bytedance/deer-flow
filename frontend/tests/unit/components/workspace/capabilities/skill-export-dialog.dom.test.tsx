@@ -66,6 +66,55 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("export dialog lifecycle", () => {
+  it.each([
+    {
+      name: "undeclared",
+      allowedTools: null,
+      requiredSecrets: null,
+      expectedTools: "Not declared",
+      expectedSecrets: "Not declared",
+    },
+    {
+      name: "explicitly empty",
+      allowedTools: [],
+      requiredSecrets: [],
+      expectedTools: "None",
+      expectedSecrets: "None",
+    },
+    {
+      name: "declared values",
+      allowedTools: ["read_file"],
+      requiredSecrets: [{ name: "API_KEY", optional: false }],
+      expectedTools: "read_file",
+      expectedSecrets: "API_KEY (required)",
+    },
+  ])(
+    "renders $name requirements",
+    async ({
+      allowedTools,
+      requiredSecrets,
+      expectedTools,
+      expectedSecrets,
+    }) => {
+      mocks.load.mockResolvedValue({
+        ...manifest,
+        requirements: {
+          ...manifest.requirements,
+          allowed_tools: allowedTools,
+          required_secrets: requiredSecrets,
+        },
+      });
+      render(<SkillExportDialog name="demo" onClose={rs.fn()} />);
+      await screen.findByText("Declared requirements");
+      expect(
+        screen.getByText("Allowed tools").nextElementSibling?.textContent,
+      ).toBe(expectedTools);
+      expect(
+        screen.getByText("Credential names").nextElementSibling?.textContent,
+      ).toBe(expectedSecrets);
+    },
+  );
+
   it("pages the file list and distinguishes undeclared dependencies", async () => {
     render(<SkillExportDialog name="demo" onClose={rs.fn()} />);
     await screen.findByText("DEMO_KEY (optional)");

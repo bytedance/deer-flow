@@ -62,6 +62,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Running the Application](#running-the-application)
       - [Deployment Sizing](#deployment-sizing)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
+      - [Upgrading an existing checkout](#upgrading-an-existing-checkout)
       - [Option 2: Local Development](#option-2-local-development)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
@@ -161,7 +162,30 @@ It is disabled by default; see the linked guide to enable it.
    saving refreshes the chat model list. Connection testing sends a short streaming
    tool-call request and may incur provider charges. It does not save the draft or
    verify image support; set image support and token limits from provider documentation.
-   Native provider adapters and advanced reasoning settings remain YAML-configured.
+   Official DeepSeek models at `https://api.deepseek.com` or
+   `https://api.deepseek.com/v1` (default HTTPS port) automatically use DeerFlow's
+   DeepSeek adapter, preserving reasoning content across tool calls and honoring
+   output token limits. Chat uses the selected thinking mode; the connection test
+   temporarily disables thinking because DeepSeek rejects forced tool selection
+   in thinking mode. The test checks streaming tool connectivity, not every agent
+   workflow or thinking-mode behavior. Existing saved DeepSeek profiles receive
+   this adapter without re-entering credentials. DeepSeek-specific settings for
+   third-party proxies, other native adapters, and advanced reasoning settings
+   remain YAML-configured.
+
+   DeepSeek regression tests run offline with the normal backend suite. To verify
+   the real provider explicitly, set `DEEPSEEK_TEST_API_KEY` in your environment
+   and run from `backend/`:
+
+   ```bash
+   DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_deepseek_live.py -q
+   ```
+
+   These opt-in tests send short requests to DeepSeek and may incur charges;
+   they use temporary state, never save credentials to the deployment catalog,
+   and are skipped in CI. `DEEPSEEK_TEST_MODEL` optionally selects a different
+   DeepSeek model ID (default: `deepseek-flash`). The same tests can be run on
+   unfixed and fixed revisions; success is always the expected result.
 
    YAML models remain read-only in this page and take precedence on name conflicts.
    Managed models are appended after YAML models; edits apply to new configuration
@@ -383,6 +407,8 @@ Existing valid JSONL records remain readable without rewriting the files.
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
+When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.
+
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
@@ -403,6 +429,15 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
+
+#### Upgrading an existing checkout
+
+Keep `config.yaml`, `.env`, and `extensions_config.json`. Stop the services you
+currently use, run `git pull --ff-only`, then start the same mode again. Do not run
+`make config` or `make docker-init` again for a routine source upgrade. If the new
+version requires configuration changes, run `make config-upgrade` before restarting.
+See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
+for the commands for each mode.
 
 #### Option 2: Local Development
 
@@ -609,7 +644,7 @@ OpenViking memory backend; it does not replace automatic turn capture or recall.
 
 The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` tools into durable background tasks. The Agent sees only the configured submit tool and a DeerFlow-local task ID; remote IDs are persisted before the submit call returns, while status and cancel stay internal to the runtime. Polling uses cross-worker leases, exponential retry backoff, scoped MCP sessions, bounded result storage, and restart recovery. A status-tool `isError` is retained as a bounded diagnostic and retried; servers report a permanent remote-task outcome through a normal structured result with `status: "failed"`. Remote poll hints are finite positive numbers capped at 24 hours, artifact-reference JSON is limited to 64 KiB, and task/server identifiers are validated against their durable SQL column limits before persistence. Input-required and terminal updates wake the current chat through idempotent Agent runs, while `list_background_tasks` and `cancel_background_task` let the Agent manage tasks without asking users for remote handles. Current-thread tasks are available through `GET /api/threads/{thread_id}/mcp-tasks`, its detail endpoint, and `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel`; when the task runtime actually starts, the Web UI exposes the same safe local view from the chat header with live status refresh, cancellation, and on-demand result, artifact, input-request, status-error, and cancellation-retry details. Default-disabled and memory-backend deployments hide that UI and do not poll the task endpoints. A failed remote cancellation remains queued with backoff, and its latest bounded error and attempt count stay visible in the expanded task card. Enable `mcp_tasks` in `config.yaml`, configure `task_toolsets` with exact raw tool names in `extensions_config.json`, and use a SQL database backend (`sqlite` or `postgres`). Task-enabled server connection, authentication, interceptor, timeout, or binding changes require a Gateway restart so Agent tool discovery and background calls cannot use different configuration versions. `input_required` is notification-only for now: DeerFlow can display the request but cannot yet submit the user's answer back to the remote task.
 
-Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
+Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. When a bounded ordinary release exceeds its drain deadline, the service retains ownership until it settles. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
 
 Notification runs keep their trusted delivery instruction separate from the framed, untrusted remote event payload. The process-started task runtime—not a hot config read—controls whether the task-management tools are exposed, so changing `mcp_tasks` requires a Gateway restart. When a skill's `allowed-tools` policy is active, `list_background_tasks` and `cancel_background_task` must be declared explicitly like other business tools.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
@@ -1118,6 +1153,11 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
+Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
+or data files depend on a specific working directory. The setting applies to
+both discovery and tool calls; see [MCP configuration](backend/docs/MCP_SERVER.md#stdio-working-directory).
+Omitted, `null`, or empty values keep the default working directories.
+
 Tavily `web_search` also accepts optional `include_domains` and `exclude_domains`
 lists in its `config.yaml` tool entry to control search sources. Non-empty
 `include_domains` uses Tavily's `filter` mode to restrict results to those domains.
@@ -1128,6 +1168,9 @@ empty list is forwarded and imposes no restriction of that kind. See the
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
+Chat tool-step titles accept leading blank lines and up to three spaces before
+a page's first H1 heading. Indented code, including mixed spaces and tabs, is
+not used as a title; the tool step falls back to the URL.
 Tavily search and fetch each read `api_key` from their own tool entry in
 `config.yaml`, falling back to `TAVILY_API_KEY` when omitted. Fetch does not
 reuse the search entry's key, so search can use a different provider. If you
@@ -1260,13 +1303,25 @@ A managed package declares exactly one standard PEP 621 entry point:
 acme = "acme_deerflow_extension:install"
 ```
 
-That callable uses the standalone `deerflow-extension-api` contract and can register five
+That callable uses the standalone `deerflow-extension-api` contract and can register several
 contribution kinds: isolated middleware at semantic lead/subagent model or tool positions,
 lead and subagent task-lifecycle hooks, observers for DeerFlow-owned model calls that are
 not wrapped by middleware model-call hooks (goal, memory, title, and summarization),
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+
+Full-stack contributions can additionally provide browser pages, conversation actions,
+authenticated backend operations and model tools through the
+[plugin APIs](docs/full-stack-plugins.md). The independent
+[bookmarks example](examples/deerflow-extension-bookmarks/README.md) demonstrates
+one package with persistent user data, its own sidebar page and a read-only search tool.
+Reopening a bookmark resolves the conversation's current agent through the host, so
+custom-agent conversations retain their original chat entry point, including older bookmarks.
+Installation and activation remain deployment-controlled; Capability Center shows plugin
+information and status. Browser code runs as trusted same-origin code.
+The browser API and inline `BrowserModule.code` transport are experimental. The
+plugin guide describes an additive path to manifests and packaged static resources.
 
 DeerFlow allocates a task-scoped extension store only for middleware, lifecycle, or
 system-model observation. Services receive app-scoped runtime dependencies after Gateway
@@ -1463,6 +1518,12 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+Automatic and manual compaction exclude old todo reminder messages from both the
+summary input and retained context. The current todo list stays in thread state.
+In planning mode, if the original `write_todos` call is no longer visible,
+DeerFlow adds a reminder using the latest task statuses before the next model
+call. Skipped or failed compaction leaves the existing messages unchanged.
+
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
 LLM title input. It is off by default. Existing summary placeholders reserve
@@ -1527,9 +1588,13 @@ may still appear in progress; their outcome is not inferred from their text.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
+For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+
 Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
+
+Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; full stored result text is available only through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
@@ -1578,6 +1643,17 @@ The Hash counts remote VMs and in-flight creates, repairs interrupted creates
 from E2B metadata, grace-protects stale inventory omissions, and blocks new
 creates while Redis or initial inventory is unavailable. Run Redis with persistence, non-evicting memory, and HA.
 
+E2B reconciliation renews active VMs with a positive timeout covering its
+configured cadence, even when `idle_timeout` is zero or shorter than that
+cadence. Warm VMs retain the configured idle-timeout behavior. Expired local
+warm entries do not directly free shared capacity: remote inventory must
+confirm disappearance through the existing grace period first.
+Active renewal completes before release sets the warm timeout, so a concurrent
+maintenance pass cannot extend an idle VM's lifetime. Warm-entry cleanup also
+preserves ownership acquired by a new request during the sweep.
+Ownership heartbeats remain independent of slow E2B timeout requests, preventing
+control-plane delays from making active sandbox leases expire.
+
 E2B snapshots `skills.container_path` when the provider starts and includes the
 canonical root in its thread identity, warm-pool seed, and remote metadata. A
 VM created for a different root is never adopted; reconciliation reaps it after
@@ -1607,6 +1683,12 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
+Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
+
+AIO directory listings discard missing shell sessions so the next request can recover.
+After a dropped connection, directory listings and persistent shell commands report an
+unknown outcome without replaying the operation; later calls use a fresh session.
+
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
 UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
@@ -1629,6 +1711,8 @@ an explicit **Load full file** action before fetching the remainder or mounting
 the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
 downloads at the Gateway boundary.
 
+The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
+
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
 
 Docker AIO sandboxes default to their existing open egress behavior for
@@ -1636,8 +1720,12 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
-unapprovable. Denied hostnames are rejected before DNS resolution, and
-scheduled or otherwise non-interactive runs auto-deny without opening a card.
+unapprovable. Denied hostnames are rejected before DNS resolution.
+Runs in `scheduled`, `webhook`, or `autonomous` interaction mode auto-deny
+without opening a card. These unattended runs proceed with minimal assumptions
+only for low-risk, reversible work; high-risk or irreversible work without
+sufficient authorization returns a structured `BLOCKED` result naming the
+missing decision, even if the model attempts to ask for clarification.
 The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
 Docker's shared default bridge, and rejects ambiguous HTTP field names before
 forwarding. See
@@ -1716,6 +1804,10 @@ in the composer and in the transcript. There is no automatic history search. See
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
+
+The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
+checks semantic safety across facts and summaries, and fact routing across users
+and agents. Failed extraction attempts are retryable execution errors, not safety passes.
 
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
@@ -1821,6 +1913,12 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Strong tool-use** for reliable function calling and structured outputs
 
 ## Embedded Python Client
+
+For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`
+selection applies to both the lead agent and its `task` / `batch_task`
+delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
+installation IDs select only those plugins. Call `client.reset_agent()` after
+editing the saved agent configuration to refresh the selection.
 
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
@@ -2063,6 +2161,40 @@ environment variables that would evaluate arbitrary code. That is defense in
 depth, not a boundary: these launchers exist to fetch and run remote packages,
 so **treat Gateway admin as equivalent to code execution on the host** and grant
 it accordingly.
+
+### External Chat Message Roles
+
+Gateway run requests and manual thread-state updates reject client-supplied
+`system` / `developer` messages with HTTP 400, including equivalent serialized
+message forms. Ordinary chat, attachments, and assistant/tool history replay
+remain supported. Session or PAT authentication does not grant system-prompt
+authority; trusted internal run producers retain that ability.
+
+This check prevents new role injection; it does not rewrite existing
+checkpoints. If an older version accepted an injected system message, use a
+fresh thread or have an operator review and clean the affected state. Restarting
+the service does not remove persisted instructions, and restoring an older
+checkpoint can restore them.
+
+For local verification, run `python backend/tests/poc_external_system_message_injection.py --help`.
+The same opt-in PoC supports `--expect vulnerable` on an isolated old revision
+and `--expect blocked` after the fix. Its help includes PAT creation, thread-ID
+selection, browser follow-up, and the distinction between persistence and model
+obedience. Use a fresh disposable thread for each run; the test appends messages.
+
+On an isolated unfixed checkout, `--expect vulnerable` demonstrates acceptance
+only when the request returns 200 and the exact injected message remains in the
+checkpoint as `type=system` across a normal follow-up. A marker in a web answer
+is model-dependent and is not evidence by itself that the role was promoted.
+After applying the fix, run the same script with `--expect blocked`: it requires
+the specific role-rejection 400, an unchanged checkpoint, a successful ordinary
+follow-up, and absence of the rejected message IDs. Other 400 responses and
+authentication, conflict, or server errors are inconclusive rather than passes.
+
+The PoC does not clean up automatically. When verification is complete, delete
+the disposable chat with the web sidebar's delete action and revoke the
+short-lived PAT if one was created. Restarting the service does not remove a
+persisted injected instruction.
 
 ### Deployment Defaults
 

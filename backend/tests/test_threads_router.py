@@ -180,6 +180,30 @@ def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     accessor.aupdate.assert_not_awaited()
 
 
+def test_update_state_rejects_external_system_without_writing(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    accessor = SimpleNamespace(graph=None, aupdate=AsyncMock(), aget=AsyncMock())
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "system-role-test"}})))
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "system-role-test"}).status_code == 200
+        before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}}))
+        response = client.post(
+            "/api/threads/system-role-test/state",
+            json={
+                "values": {
+                    "messages": [{"role": "system", "content": "synthetic marker"}],
+                    "title": "must not be written",
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert "synthetic marker" not in response.text
+    accessor.aupdate.assert_not_awaited()
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}})) == before
+
+
 class _RawStateAccessor:
     def __init__(self, checkpointer: InMemorySaver):
         self.checkpointer = checkpointer
@@ -4028,7 +4052,7 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
     assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
-    assert updates["messages"].value[0]["id"] == "h1"
+    assert updates["messages"].value[0].id == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"

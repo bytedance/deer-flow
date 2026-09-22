@@ -93,6 +93,11 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # line was constructed left to right.
 _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
 
+# A Redirecting slot is kept only when it starts with an absolute
+# hierarchical URL; everything else (every RFC 3986 relative-reference
+# form, and non-hierarchical schemes) collapses — see _redact_redirecting_origin.
+_SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
+
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
 # ``://`` makes each attempt walk to the end of the run, which is quadratic
@@ -161,8 +166,9 @@ class UrlRedactionFilter(logging.Filter):
     per-request ``scheme://host:port "METHOD target HTTP/x.x"`` line, the
     retry lines that log a bare origin-form target (``Retry: <target>``,
     ``Incremented Retry for (url='<target>')``, ``Retrying (…) after
-    connection broken by '…': <target>``), and origin-form halves of
-    ``Redirecting <target> -> <target>``. The record is rewritten in place
+    connection broken by '…': <target>``), and every non-absolute slot of
+    ``Redirecting <target> -> <target>`` (kept whole only when a scheme
+    starts the slot, for the generic pass to rewrite). The record is rewritten in place
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
@@ -201,10 +207,18 @@ class UrlRedactionFilter(logging.Filter):
             return match.group("head") + ": /<redacted>"
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
-            # Origin-form slots collapse; absolute slots stay for the generic
-            # absolute-URL pass (which runs after this one).
+            # A slot stays verbatim ONLY when it is an absolute URL (a
+            # scheme at position 0), so the generic absolute-URL pass —
+            # which runs after this one — rewrites it. Everything else
+            # collapses: the Location field-value grammar (RFC 3986
+            # relative-part) also admits slash-less relative references
+            # (``download?sign=…``, ``?sign=…``, ``#frag``), network-path
+            # references (``//host/x``, whose userinfo collapses with it),
+            # and non-hierarchical schemes (``data:…``) — none of which
+            # either pass could otherwise see, and the slash-less forms
+            # kept their signed queries verbatim (round 15).
             def _slot(target: str) -> str:
-                return "/<redacted>" if target.startswith("/") else target
+                return target if _SLOT_ABSOLUTE_URL_RE.match(target) else "/<redacted>"
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 
