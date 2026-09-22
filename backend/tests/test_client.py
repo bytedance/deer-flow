@@ -2959,6 +2959,21 @@ class TestUploads:
             assert "delete-me.txt" in result["message"]
             assert not (uploads_dir / "delete-me.txt").exists()
 
+    def test_delete_upload_keeps_the_converted_markdown(self, client):
+        """A .md sharing the document's stem may belong to another document."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp)
+            (uploads_dir / "report.docx").write_bytes(b"docx-bytes")
+            (uploads_dir / "report.md").write_text("converted from the docx", encoding="utf-8")
+            (uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                result = client.delete_upload("thread-1", "report.pdf")
+
+            assert result["success"] is True
+            assert not (uploads_dir / "report.pdf").exists()
+            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "converted from the docx"
+
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)):
