@@ -1476,12 +1476,9 @@ safety_finish_reason:
   #       error_codes: [336003, 17, 18]
 
 # ============================================================================
-# Sandbox Configuration
+# Uploads
 # ============================================================================
-# Choose between local sandbox (direct execution) or Docker-based AIO sandbox
-
-# Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Limits and conversion settings for files attached to a conversation.
 uploads:
   # Application-level upload limits enforced by the gateway and exposed to the
   # frontend before file selection.
@@ -1502,6 +1499,13 @@ uploads:
   # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
   pdf_converter: auto
 
+# ============================================================================
+# Sandbox Configuration
+# ============================================================================
+# Choose between local sandbox (direct execution), Docker-based AIO sandbox, 
+# or BoxLite micro-VM sandbox
+# Option 1: Local Sandbox (Default)
+# Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
