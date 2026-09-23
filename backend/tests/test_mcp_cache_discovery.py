@@ -821,16 +821,38 @@ def test_a_update_fetches_only_a_oauth_and_reuses_b_client_tools(cache_globals, 
     assert created_connections[-1]["A"]["url"] == "https://a-v2.example/mcp"
 
 
-def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discovery(cache_globals, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "metadata_case",
+    ["description", "tool_name_prefix", "routing_and_tools"],
+    ids=["description-only", "tool-name-prefix-only", "routing-and-tools-only"],
+)
+def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discovery(
+    cache_globals,
+    monkeypatch,
+    tmp_path,
+    metadata_case,
+):
     cfg = tmp_path / "extensions_config.json"
+    old_routing = {"mode": "prefer", "priority": 1, "keywords": ["old"]}
+    old_tools = {"search": {"routing": {"priority": 2}}}
+    new_routing = {"mode": "prefer", "priority": 9, "keywords": ["new"]}
+    new_tools = {"search": {"routing": {"priority": 17}}}
+    old_effective_routing = {"mode": "prefer", "priority": 2, "keywords": ["old"]}
+    updated_effective_routing = {"mode": "prefer", "priority": 17, "keywords": ["new"]}
+    updated_description = "A new description" if metadata_case == "description" else "A old description"
+    updated_prefix = metadata_case != "tool_name_prefix"
+    updated_routing = new_routing if metadata_case == "routing_and_tools" else old_routing
+    updated_tools = new_tools if metadata_case == "routing_and_tools" else old_tools
+    expected_routing = updated_effective_routing if metadata_case == "routing_and_tools" else old_effective_routing
     _write_config(
         cfg,
         {
             "A": {
                 **_stdio("a-server"),
                 "description": "A old description",
-                "routing": {"mode": "prefer", "priority": 1, "keywords": ["old"]},
-                "tools": {"search": {"routing": {"priority": 2}}},
+                "routing": old_routing,
+                "tools": old_tools,
+                "tool_name_prefix": True,
             },
             "B": _stdio("b-server"),
         },
@@ -838,6 +860,20 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
     discovery_counts = {"A": 0, "B": 0}
+    discovery_state = {"description": "A old description", "tool_name_prefix": True}
+
+    async def make_a_tool(name: str, description: str, use_term: bool):
+        if not use_term:
+
+            async def query_tool(query: str) -> str:
+                return query
+
+            return StructuredTool.from_function(coroutine=query_tool, name=name, description=description)
+
+        async def term_tool(term: str) -> str:
+            return term
+
+        return StructuredTool.from_function(coroutine=term_tool, name=name, description=description)
 
     class FakeClient:
         def __init__(self, connections, **kwargs):
@@ -847,24 +883,30 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
 
         async def get_tools(self, *, server_name=None):
             discovery_counts[server_name] += 1
-            count = discovery_counts[server_name]
-            if server_name == "A" and count == 1:
+            if server_name == "B":
 
-                async def initial_tool(query: str) -> str:
+                async def b_tool(query: str) -> str:
                     return query
 
-                return [StructuredTool.from_function(coroutine=initial_tool, name="A_search", description="A initial tool")]
-            if server_name == "A":
+                return [StructuredTool.from_function(coroutine=b_tool, name="B_search", description="B tool")]
+            name = "A_search" if discovery_state["tool_name_prefix"] else "search"
+            description = discovery_state["description"]
+            use_term = metadata_case == "routing_and_tools" and discovery_counts["A"] == 2
+            return [await make_a_tool(name, description, use_term)]
 
-                async def rebuilt_tool(term: str) -> str:
-                    return term
-
-                return [StructuredTool.from_function(coroutine=rebuilt_tool, name="A_search", description="A rebuilt tool")]
-
-            async def b_tool(query: str) -> str:
-                return query
-
-            return [StructuredTool.from_function(coroutine=b_tool, name="B_search", description="B tool")]
+    async def fake_load_mcp_tools(
+        _session,
+        *,
+        connection,
+        callbacks=None,
+        tool_interceptors=None,
+        server_name=None,
+        tool_name_prefix=False,
+    ):
+        assert server_name == "A"
+        assert tool_name_prefix is False
+        discovery_counts[server_name] += 1
+        return [await make_a_tool("search", discovery_state["description"], metadata_case == "routing_and_tools")]
 
     class SessionContext:
         def __init__(self, session):
@@ -880,13 +922,18 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
         async def initialize(self):
             return None
 
-    sessions: dict[str, object] = {}
+    session_factory_calls: dict[str, int] = {}
+    sessions_created: dict[str, list[object]] = {}
 
     def fake_create_session(connection, **_kwargs):
-        session = sessions.setdefault(connection["command"], FakeSession())
+        command = connection["command"]
+        session_factory_calls[command] = session_factory_calls.get(command, 0) + 1
+        session = FakeSession()
+        sessions_created.setdefault(command, []).append(session)
         return SessionContext(session)
 
     monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("langchain_mcp_adapters.tools.load_mcp_tools", fake_load_mcp_tools)
     monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
     monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
     monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", fake_create_session)
@@ -899,12 +946,6 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
         first_entry_b = c._server_tool_cache["B"]
         first_a, first_b = first
         first_config = ExtensionsConfig.from_file()
-        assert first_a.metadata["deerflow_mcp_routing"] == {
-            "mode": "prefer",
-            "priority": 2,
-            "keywords": ["old"],
-        }
-        b_discovery_count_before_update = discovery_counts["B"]
         first_a_session = await first_entry_a.result.pool.get_session(
             "A",
             "metadata-test",
@@ -917,15 +958,23 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
             build_server_params("B", first_config.mcp_servers["B"]),
             binding=first_entry_b.result.binding,
         )
+        assert first_a.description == "A old description"
+        assert first_a.name == "A_search"
+        assert set(first_a.args_schema.model_fields) == {"query"}
+        assert first_a.metadata["deerflow_mcp_routing"] == old_effective_routing
+        b_discovery_count_before_update = discovery_counts["B"]
 
+        discovery_state["description"] = updated_description
+        discovery_state["tool_name_prefix"] = updated_prefix
         _write_config(
             cfg,
             {
                 "A": {
                     **_stdio("a-server"),
-                    "description": "A new description",
-                    "routing": {"mode": "prefer", "priority": 9, "keywords": ["new"]},
-                    "tools": {"search": {"routing": {"priority": 17}}},
+                    "description": updated_description,
+                    "routing": updated_routing,
+                    "tools": updated_tools,
+                    "tool_name_prefix": updated_prefix,
                 },
                 "B": _stdio("b-server"),
             },
@@ -950,13 +999,10 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
         )
 
         assert second_a is not first_a
-        assert second_a.description == "A rebuilt tool"
-        assert set(second_a.args_schema.model_fields) == {"term"}
-        assert second_a.metadata["deerflow_mcp_routing"] == {
-            "mode": "prefer",
-            "priority": 17,
-            "keywords": ["new"],
-        }
+        assert second_a.description == updated_description
+        assert second_a.name == ("search" if metadata_case == "tool_name_prefix" else "A_search")
+        assert set(second_a.args_schema.model_fields) == ({"term"} if metadata_case == "routing_and_tools" else {"query"})
+        assert second_a.metadata["deerflow_mcp_routing"] == expected_routing
         assert second_b is first_b
         assert first_entry_a.result.pool is second_entry_a.result.pool
         assert first_entry_b.result.pool is second_entry_b.result.pool
@@ -964,6 +1010,11 @@ def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discove
         assert first_entry_b.result.binding is second_entry_b.result.binding
         assert second_a_session is first_a_session
         assert second_b_session is first_b_session
+        assert session_factory_calls == {"a-server": 1, "b-server": 1}
+        assert len(sessions_created["a-server"]) == 1
+        assert sessions_created["a-server"][0] is first_a_session
+        assert len(sessions_created["b-server"]) == 1
+        assert sessions_created["b-server"][0] is first_b_session
         assert discovery_counts["B"] == b_discovery_count_before_update
         assert discovery_counts == {"A": 2, "B": 1}
 
