@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TypeVar
-
-from deerflow.utils.file_io import await_drained
 
 T = TypeVar("T")
 
@@ -28,6 +26,27 @@ async def wait_for_task_until(  # noqa: UP047
     return True
 
 
+async def _drain_context_exit(awaitable: Awaitable[bool | None]) -> bool | None:
+    """Drain an async context exit without hiding a teardown failure.
+
+    If caller cancellation arrives while __aexit__ is running, keep waiting
+    through repeated cancellation. A later exit failure replaces/chains the
+    cancellation, matching normal context-manager semantics; only a successful
+    exit re-raises the caller cancellation.
+    """
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
+
+
 @asynccontextmanager
 async def drained_async_context[T](
     manager: AbstractAsyncContextManager[T],
@@ -37,8 +56,8 @@ async def drained_async_context[T](
     try:
         yield value
     except BaseException as exc:
-        suppressed = await await_drained(manager.__aexit__(type(exc), exc, exc.__traceback__))
+        suppressed = await _drain_context_exit(manager.__aexit__(type(exc), exc, exc.__traceback__))
         if not suppressed:
             raise
     else:
-        await await_drained(manager.__aexit__(None, None, None))
+        await _drain_context_exit(manager.__aexit__(None, None, None))

@@ -182,3 +182,44 @@ async def test_drained_async_context_drains_repeated_cancellation_during_exit():
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+@pytest.mark.anyio
+async def test_drained_async_context_exit_failure_replaces_cancellation_during_exit():
+    exit_started = asyncio.Event()
+    allow_exit = asyncio.Event()
+    entered = asyncio.Event()
+    leave = asyncio.Event()
+
+    class _FailingExitContext:
+        async def __aenter__(self):
+            return "resource"
+
+        async def __aexit__(self, _exc_type, _exc, _tb) -> bool:
+            exit_started.set()
+            await allow_exit.wait()
+            raise RuntimeError("exit failed")
+
+    async def owner() -> None:
+        async with drained_async_context(_FailingExitContext()):
+            entered.set()
+            await leave.wait()
+
+    task = asyncio.create_task(owner())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        leave.set()
+        await asyncio.wait_for(exit_started.wait(), timeout=1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        allow_exit.set()
+        with pytest.raises(RuntimeError, match="exit failed") as exc_info:
+            await task
+        assert isinstance(exc_info.value.__context__, asyncio.CancelledError)
+    finally:
+        allow_exit.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
