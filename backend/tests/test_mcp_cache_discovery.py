@@ -440,6 +440,58 @@ def test_absent_failed_group_stays_absent_until_a_later_discovery(cache_globals,
     assert [tool.name for tool in second] == ["A", "B"]
 
 
+def test_stdio_candidate_invalidated_before_publication_is_discarded(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    discovery_started = threading.Event()
+    release_discovery = threading.Event()
+    calls = 0
+    worker_results: list[list[StructuredTool]] = []
+    worker_errors: list[BaseException] = []
+
+    async def fake_group_discovery(config, *, server_names=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            stale_result = _stdio_result(config, "A", test_tool("stale"))
+            discovery_started.set()
+            assert release_discovery.wait(timeout=5)
+            return {"A": stale_result}
+        return {"A": _stdio_result(config, "A", test_tool("fresh"))}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_group_discovery)
+
+    def initialize_in_worker() -> None:
+        try:
+            worker_results.append(asyncio.run(cache_module.initialize_mcp_tools()))
+        except BaseException as exc:  # pragma: no cover - only reports worker failures
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=initialize_in_worker)
+    worker.start()
+    try:
+        assert discovery_started.wait(timeout=5)
+        pool = get_session_pool()
+        pool.bind_server("A", "publication-invalidated")
+    finally:
+        release_discovery.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert worker_errors == []
+    assert worker_results == [[]]
+    assert c._cache_initialized is False
+    assert c._server_tool_cache == {}
+
+    second = asyncio.run(cache_module.initialize_mcp_tools())
+
+    assert calls == 2
+    assert [tool.name for tool in second] == ["fresh"]
+    assert c._server_tool_cache["A"].result.tools[0].name == "fresh"
+
+
 def test_present_empty_group_is_cached_and_reused(cache_globals, monkeypatch, tmp_path):
     cfg = tmp_path / "extensions_config.json"
     _write_config(cfg, {"A": _http("https://A.example/mcp")})
