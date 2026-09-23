@@ -319,6 +319,21 @@ When the config schema changes, `config_version` is bumped. To merge new fields 
 make config-upgrade
 ```
 
+## Runtime environment variables
+
+Set these in the DeerFlow process — via a `.env` file, the Docker environment, or the shell:
+
+| Variable                | Default         | Description                                               |
+| ----------------------- | --------------- | --------------------------------------------------------- |
+| `DEER_FLOW_CONFIG_PATH` | auto-discovered | Absolute path to `config.yaml`                            |
+| `DEER_FLOW_ROOT`        | repository root | Base directory used for skill and thread mounts in Docker |
+| `LOG_LEVEL`             | `info`          | Log verbosity (`debug`/`info`/`warning`/`error`)          |
+| `AUTH_JWT_SECRET`       | auto-generated  | JWT signing secret for the Gateway                        |
+
+When `AUTH_JWT_SECRET` is unset, DeerFlow generates a secret on first start and
+persists it to `.jwt_secret`, so sessions survive restarts. Set it explicitly in
+production to keep a stable, secret value.
+
 <Cards num={2}>
   <Cards.Card
     title="Deployment Guide"

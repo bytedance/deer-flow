@@ -271,6 +271,7 @@ BETTER_AUTH_SECRET=local-dev-secret-at-least-32-chars
 | `DEER_FLOW_CONFIG_PATH` | 自动发现         | `config.yaml` 的绝对路径                         |
 | `LOG_LEVEL`             | `info`           | 日志详细程度（`debug`/`info`/`warning`/`error`） |
 | `DEER_FLOW_ROOT`        | 仓库根目录       | 用于 Docker 中的技能和线程挂载                   |
+| `AUTH_JWT_SECRET`       | 自动生成         | Gateway 的 JWT 签名密钥。未设置时 DeerFlow 会自动生成并持久化到 `.jwt_secret`，重启后会话仍然有效；生产环境请显式设置一个稳定的随机值 |
 
 <Cards num={2}>
   <Cards.Card title="Harness 配置" href="/docs/harness/configuration" />
