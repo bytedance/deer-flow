@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -813,6 +814,36 @@ def _resolve_discovery_binding(
     concurrently can never be overwritten by this discovery.
     """
     return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection))
+
+
+@dataclass(frozen=True, slots=True)
+class ServerDiscoveryResult:
+    """Successful tool discovery for a single MCP server.
+
+    A present entry with ``tools=()`` is a successful discovery of zero tools;
+    a failed discovery is represented by the server's absence from the grouped
+    mapping. ``pool``/``binding`` identify the exact session owner a stdio
+    result was produced against, and stay out of ``repr`` because they are
+    secret-adjacent ownership handles.
+    """
+
+    tools: tuple[BaseTool, ...]
+    pool: MCPSessionPool | None = field(default=None, repr=False)
+    binding: ServerBinding | None = field(default=None, repr=False)
+
+
+def _flatten_server_tool_groups(
+    enabled_order: Collection[str],
+    groups: Mapping[str, ServerDiscoveryResult],
+) -> list[BaseTool]:
+    """Flatten grouped results in *enabled_order*, preserving tool identity.
+
+    Servers absent from *groups* (failed discovery) contribute nothing; servers
+    present with an empty ``tools`` tuple are successful empty results and are
+    likewise skipped. Ordering follows the latest enabled-server declaration
+    order rather than ``groups`` insertion order.
+    """
+    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
 
 
 async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
