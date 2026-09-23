@@ -303,6 +303,8 @@ make down   # 停止并移除容器
    make install  # 安装 backend + frontend 依赖
    ```
 
+   pre-commit 由 uv 调用，不要求其工具目录在 `PATH` 中。
+
 3. **（可选）预拉取 sandbox 镜像**：
    ```bash
    # 如果使用 Docker / Container sandbox，建议先执行

@@ -463,6 +463,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
+   Hook setup calls pre-commit through uv, so uv's tool directory need not be on `PATH`.
+
 3. **(Optional) Pre-pull sandbox image**:
    ```bash
    # Recommended if using Docker/Container-based sandbox
