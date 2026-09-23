@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import override
 from uuid import uuid4
@@ -365,7 +365,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             },
         )
 
-    def _inject(self, request: ModelRequest) -> ModelRequest:
+    @staticmethod
+    def _authorization_context(request: ModelRequest) -> Mapping:
+        context = getattr(request.runtime, "context", None)
+        return context if isinstance(context, Mapping) else {}
+
+    def _requires_image_authorization(self, request: ModelRequest) -> bool:
+        messages = [message for message in request.messages if not self._is_image_context_message(message)]
+        return bool((request.state or {}).get("viewed_images")) and self._should_inject_image_message(messages)
+
+    def _inject(self, request: ModelRequest, *, authorization_checked: bool = False) -> ModelRequest:
         """Rebuild the request's image context from ``viewed_images``.
 
         Args:
@@ -391,6 +400,17 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
         if not self._should_inject_image_message(messages):
             return request.override(messages=messages) if dropped_stranded else request
+
+        if (request.state or {}).get("viewed_images") and not authorization_checked:
+            from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+            from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+            try:
+                authorize_sandbox_execution(context=self._authorization_context(request), app_config=safe_app_config())
+            except SandboxAuthorizationError:
+                # A restored view may predate a role/policy change. Never read
+                # its host mirror or remote sandbox for an unauthorized request.
+                return request.override(messages=messages) if dropped_stranded else request
 
         # Mixed content (text + images) for the model only, so hide it from the
         # chat UI and IM channels (matches the other middleware-injected context
@@ -421,5 +441,17 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # blocking work without allowing cancellation to outlive a sandbox
         # client operation. The outer run lease may release the client as soon as
         # cancellation propagates.
-        injected_request = await run_sync_lifecycle_operation(self._inject, request)
+        if self._requires_image_authorization(request):
+            from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async, safe_app_config_async
+            from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+            try:
+                await authorize_sandbox_execution_async(context=self._authorization_context(request), app_config=await safe_app_config_async())
+            except SandboxAuthorizationError:
+                # Still sweep any old model-only image context before handing
+                # the request on; do not schedule a read in a worker.
+                messages = [message for message in request.messages if not self._is_image_context_message(message)]
+                return await handler(request.override(messages=messages))
+
+        injected_request = await run_sync_lifecycle_operation(self._inject, request, authorization_checked=True)
         return await handler(injected_request)
