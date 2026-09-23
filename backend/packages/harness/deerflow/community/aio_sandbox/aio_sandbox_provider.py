@@ -2398,6 +2398,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._last_activity[sandbox_id] = time.time()
         return sandbox
 
+    def get_scoped(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> Sandbox | None:
+        """Return a cached client only for its recorded user/thread identity."""
+        key = self._thread_key(thread_id, user_id)
+        with self._lock:
+            if self._thread_sandboxes.get(key) != sandbox_id:
+                return None
+            if self._active_sandbox_identity.get(sandbox_id) != key:
+                return None
+            sandbox = self._sandboxes.get(sandbox_id)
+            if sandbox is not None:
+                self._last_activity[sandbox_id] = time.time()
+            return sandbox
+
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use.
 

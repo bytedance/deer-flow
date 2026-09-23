@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from collections.abc import Coroutine
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -54,6 +54,16 @@ def _remote_config(transport: str = "http") -> ExtensionsConfig:
     )
 
 
+def _remote_status_call(config: ExtensionsConfig) -> Coroutine[Any, Any, Any]:
+    return McpTaskToolCaller(config).call_tool(
+        server_name="reports",
+        tool_name="status_report",
+        arguments={"task_id": "remote-1"},
+        user_id="user-1",
+        thread_id="thread-1",
+    )
+
+
 class _SessionContext:
     def __init__(self, session):
         self.session = session
@@ -65,13 +75,15 @@ class _SessionContext:
         return None
 
 
-async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any]) -> None:
+async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any], *, wait_timeout: float = 0.25, expected_message: str | None = None) -> None:
     task = asyncio.create_task(awaitable)
     try:
-        done, _pending = await asyncio.wait({task}, timeout=0.25)
+        done, _pending = await asyncio.wait({task}, timeout=wait_timeout)
         assert task in done, "configured timeout was ignored"
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError) as error:
             await task
+        if expected_message is not None:
+            assert str(error.value) == expected_message
     finally:
         if not task.done():
             task.cancel()
@@ -437,14 +449,15 @@ async def test_remote_task_session_initialization_respects_configured_timeout(tr
         MagicMock(return_value=_SessionContext(session)),
     ):
         await _assert_configured_timeout(
-            caller.call_tool(
+            expected_message="MCP task session initialization for server 'reports' timed out after 0.01s",
+            awaitable=caller.call_tool(
                 server_name="reports",
                 tool_name="status_report",
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
                 thread_incarnation=None,
-            )
+            ),
         )
 
     session.call_tool.assert_not_awaited()
@@ -476,14 +489,15 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
         MagicMock(return_value=_SessionContext(session)),
     ):
         await _assert_configured_timeout(
-            caller.call_tool(
+            expected_message="",
+            awaitable=caller.call_tool(
                 server_name="reports",
                 tool_name="status_report",
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
                 thread_incarnation=None,
-            )
+            ),
         )
 
     session.call_tool.assert_awaited_once_with(
@@ -491,3 +505,218 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
         {"task_id": "remote-1"},
         read_timeout_seconds=timedelta(seconds=0.01),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("phase", ["connect", "initialize", "call", "cleanup"])
+async def test_remote_task_unrelated_timeout_is_not_relabelled(transport: str, phase: str) -> None:
+    config = _remote_config(transport)
+    config.mcp_servers["reports"].session_init_timeout = 1.0
+    original = TimeoutError(f"original {phase} timeout")
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value={"ok": True}))
+    if phase == "initialize":
+        session.initialize.side_effect = original
+    elif phase == "call":
+        session.call_tool.side_effect = original
+
+    @asynccontextmanager
+    async def fake_session(_connection):
+        if phase == "connect":
+            raise original
+        yield session
+        if phase == "cleanup":
+            raise original
+
+    with patch("langchain_mcp_adapters.sessions.create_session", fake_session):
+        with pytest.raises(TimeoutError) as error:
+            await _remote_status_call(config)
+    assert error.value is original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+async def test_remote_task_session_open_respects_configured_timeout(transport: str) -> None:
+    config = _remote_config(transport)
+    config.mcp_servers["reports"].session_init_timeout = 0.01
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock())
+    closed = asyncio.Event()
+
+    @asynccontextmanager
+    async def slow_session(_connection):
+        try:
+            async with anyio.create_task_group():
+                await asyncio.Event().wait()
+                yield session
+        finally:
+            closed.set()
+
+    with patch("langchain_mcp_adapters.sessions.create_session", slow_session):
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.01s", awaitable=_remote_status_call(config))
+
+    assert closed.is_set()
+    session.initialize.assert_not_awaited()
+    session.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+async def test_remote_task_connection_and_initialize_share_timeout(transport: str) -> None:
+    config = _remote_config(transport)
+    config.mcp_servers["reports"].session_init_timeout = 0.5
+
+    async def slow_initialize():
+        await asyncio.sleep(0.3)
+
+    session = SimpleNamespace(initialize=AsyncMock(side_effect=slow_initialize), call_tool=AsyncMock())
+
+    @asynccontextmanager
+    async def slow_session(_connection):
+        async with anyio.create_task_group():
+            await asyncio.sleep(0.3)
+            yield session
+
+    with patch("langchain_mcp_adapters.sessions.create_session", slow_session):
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.5s", awaitable=_remote_status_call(config), wait_timeout=2)
+
+    session.initialize.assert_awaited_once()
+    session.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("init_timeout", [None, 0.01])
+async def test_remote_task_initialization_timeout_does_not_limit_tool_call(transport: str, init_timeout: float | None) -> None:
+    config = _remote_config(transport)
+    config.mcp_servers["reports"].session_init_timeout = init_timeout
+    config.mcp_servers["reports"].tool_call_timeout = 1.0
+    result = SimpleNamespace(structuredContent={"status": "completed"}, isError=False)
+    closed = asyncio.Event()
+
+    async def slow_call(*_args, **_kwargs):
+        await asyncio.sleep(0.04)
+        return result
+
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(side_effect=slow_call))
+
+    @asynccontextmanager
+    async def task_group_session(_connection):
+        owner = asyncio.current_task()
+        async with anyio.create_task_group():
+            try:
+                yield session
+            finally:
+                assert asyncio.current_task() is owner
+                closed.set()
+
+    with patch("langchain_mcp_adapters.sessions.create_session", task_group_session):
+        assert await _remote_status_call(config) is result
+
+    assert closed.is_set()
+    session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"}, read_timeout_seconds=timedelta(seconds=1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("phase", ["connect", "initialize", "call"])
+async def test_remote_task_session_preserves_external_cancellation(transport: str, phase: str) -> None:
+    config = _remote_config(transport)
+    reached = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def pause_at(current_phase):
+        if current_phase == phase:
+            reached.set()
+            await asyncio.Event().wait()
+
+    async def initialize():
+        await pause_at("initialize")
+
+    async def call_tool(*_args, **_kwargs):
+        await pause_at("call")
+
+    session = SimpleNamespace(initialize=AsyncMock(side_effect=initialize), call_tool=AsyncMock(side_effect=call_tool))
+
+    @asynccontextmanager
+    async def task_group_session(_connection):
+        owner = asyncio.current_task()
+        try:
+            async with anyio.create_task_group():
+                await pause_at("connect")
+                yield session
+        finally:
+            assert asyncio.current_task() is owner
+            closed.set()
+
+    with patch("langchain_mcp_adapters.sessions.create_session", task_group_session):
+        task = asyncio.create_task(_remote_status_call(config))
+        try:
+            await asyncio.wait_for(reached.wait(), 1)
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=1)
+            assert task in done, "external cancellation did not finish session cleanup"
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert closed.is_set()
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["endpoint", "initialize"])
+async def test_sse_task_session_timeout_closes_real_connection(monkeypatch, phase: str) -> None:
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    connected = asyncio.Event()
+    initialized = asyncio.Event()
+    disconnected = asyncio.Event()
+    handlers: set[asyncio.Task] = set()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        handlers.add(asyncio.current_task())
+        is_sse = False
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            is_sse = request.startswith(b"GET /sse ")
+            if is_sse:
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: connected\n\n")
+                if phase == "initialize":
+                    writer.write(b"event: endpoint\ndata: /messages/\n\n")
+                await writer.drain()
+                connected.set()
+                await reader.read()
+            else:
+                assert request.startswith(b"POST /messages/ ")
+                for header in request.split(b"\r\n"):
+                    if header.lower().startswith(b"content-length:"):
+                        await reader.readexactly(int(header.split(b":", 1)[1]))
+                        break
+                writer.write(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+                initialized.set()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            if is_sse:
+                disconnected.set()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    config = _remote_config("sse")
+    config.mcp_servers["reports"].url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/sse"
+    config.mcp_servers["reports"].session_init_timeout = 0.5
+    try:
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.5s", awaitable=_remote_status_call(config), wait_timeout=3)
+        assert connected.is_set()
+        assert initialized.is_set() == (phase == "initialize")
+        await asyncio.wait_for(disconnected.wait(), 1)
+    finally:
+        server.close()
+        for handler in handlers:
+            if not handler.done():
+                handler.cancel()
+        results = await asyncio.gather(*handlers, return_exceptions=True)
+        await server.wait_closed()
+        assert all(not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError) for result in results), results

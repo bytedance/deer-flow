@@ -156,7 +156,17 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
             name, optional = item.strip(), False
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
-            optional = bool(item.get("optional", False))
+            raw_optional = item.get("optional", False)
+            if isinstance(raw_optional, bool):
+                optional = raw_optional
+            else:
+                logger.warning(
+                    "Treating non-boolean optional value of type %s for required-secrets entry %r as required in %s",
+                    type(raw_optional).__name__,
+                    name,
+                    skill_file,
+                )
+                optional = False
         else:
             logger.warning("Ignoring malformed required-secrets entry in %s: %r", skill_file, item)
             continue
