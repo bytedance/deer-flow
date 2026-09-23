@@ -37,6 +37,9 @@ const meta: MetaRecord = {
   mcp: {
     title: "MCP Integration",
   },
+  extensions: {
+    title: "Extensions",
+  },
   customization: {
     title: "Customization",
   },
