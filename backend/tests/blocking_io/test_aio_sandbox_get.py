@@ -180,3 +180,22 @@ async def test_async_lock_path_resolution_stays_off_the_loop(tmp_path, monkeypat
     # ``paths.thread_dir(...)`` before the sentinel is ever reached.
     with pytest.raises(_ReachedLockFile):
         await provider._discover_or_create_with_lock_async("t-lock", "sb-lock", user_id="u1")
+
+
+async def test_blocking_probe_thread_dir_actually_trips_the_gate(tmp_path, monkeypatch) -> None:
+    """Meta-check: prove the gate still catches an inline ``thread_dir`` call.
+
+    The anchor above only asserts execution reached the lock file, so if the gate
+    went blind to the syscalls behind ``Path.resolve()`` the anchor would pass with
+    the inline call restored. Calling ``thread_dir`` straight from the event loop
+    pins that the same isolation is armed and blocking here.
+    """
+    from blockbuster import BlockingError
+
+    from deerflow.config.paths import get_paths
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    with pytest.raises(BlockingError):
+        get_paths().thread_dir("aio-sandbox-lock-wait")
