@@ -94,7 +94,7 @@ resume, (c) branch from an older visible turn, and (d) orphan row counts.
   `parent_config` converts a cleanup into a thread-level outage (branch and
   regenerate fail loudly for every later turn).
 - Measurement first: proposals must include before/after numbers from
-  `scripts/benchmark/checkpoint/bench_channels.py` (per-thread rows/bytes,
+  `../scripts/benchmark/checkpoint/bench_channels.py` (per-thread rows/bytes,
   SQLite and Postgres) plus the contract test suite passing.
 
 ## History fast-path interaction (wiring requirement)
@@ -138,7 +138,7 @@ alist path without re-implementing the writer's merge semantics.
 reach state (preview + file reference under `.tool-results/`), so the
 "50 KB result re-snapshotted every step" scenario from the original report
 depends on which tools/paths bypass it. The probe
-(`scripts/benchmark/checkpoint/bench_tool_result_probe.py`) measures the
+(`../scripts/benchmark/checkpoint/bench_tool_result_probe.py`) measures the
 on-disk checkpoint delta for the wrapped vs unwrapped paths on the lead
 graph; subagent chains instantiate the same middleware by default. Any PR
 claiming a residual gap must name the concrete bypassing path and show its
