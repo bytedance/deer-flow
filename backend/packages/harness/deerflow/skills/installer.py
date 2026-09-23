@@ -228,7 +228,7 @@ def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[Sta
     return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None, app_config=None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -237,7 +237,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
+        result = await scan_skill_content(content, executable=executable, location=location, app_config=app_config, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -289,7 +289,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
 
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"), app_config=app_config)
 
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
@@ -305,6 +305,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=True,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
         elif _should_scan_support_file(rel_path):
             await _scan_skill_file_or_raise(
@@ -313,6 +314,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=False,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
     return static_findings
 

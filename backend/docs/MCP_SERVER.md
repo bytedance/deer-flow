@@ -253,9 +253,12 @@ cannot finish transport cleanup on a loop that has already closed.
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task
 calls. `session_init_timeout` covers server bring-up — tool discovery
 (subprocess spawn + `initialize` + `tools/list`) and persistent-session
-initialization — plus ephemeral HTTP/SSE task-session initialization. It
-defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
-a server that never answers `initialize`) cannot block agent construction or
+initialization — plus ephemeral HTTP/SSE task-session connection setup and
+initialization under a single deadline. This includes waiting for an SSE
+`endpoint` event. Once initialization succeeds, this deadline is disabled;
+the tool call uses its independent `tool_call_timeout`.
+The initialization timeout defaults to 60s so a hung server (e.g. `npx` blocked
+on a package download, or a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
 ```json

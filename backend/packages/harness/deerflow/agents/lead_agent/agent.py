@@ -1117,6 +1117,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             middleware=normalize_middleware_state_schemas(middlewares, mode),
             system_prompt=system_prompt,
             state_schema=get_thread_state_schema(mode),
+            context_schema=dict,
         )
         return _complete_assembly(
             config=config,
@@ -1249,6 +1250,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         middleware=normalize_middleware_state_schemas(middlewares, mode),
         system_prompt=system_prompt,
         state_schema=get_thread_state_schema(mode),
+        context_schema=dict,
     )
     return _complete_assembly(
         config=config,

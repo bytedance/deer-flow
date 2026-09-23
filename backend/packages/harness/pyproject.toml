@@ -46,6 +46,12 @@ dependencies = [
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
     "langchain-google-genai>=4.2.1",
+    # Floor matters: the InMemorySaver delta-history patch was removed once
+    # 4.2.0 fixed the dropped first post-migration write upstream (#8526) and
+    # kept its own override, so a 4.1.x resolution would silently reintroduce
+    # the bug. langgraph's own constraint (langgraph-checkpoint>=4.1.0) does
+    # not exclude that version.
+    "langgraph-checkpoint>=4.2.0,<5.0",
     "langgraph-checkpoint-sqlite>=3.1.1,<3.2",
     "langgraph-sdk>=0.1.51",
     "sqlalchemy[asyncio]>=2.0,<3.0",
@@ -73,7 +79,9 @@ groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",
-    "langgraph-checkpoint-postgres>=3.1.1,<3.2",
+    # 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.1 walks past
+    # them to the thread root instead.
+    "langgraph-checkpoint-postgres>=3.1.2,<3.2",
     "psycopg[binary]>=3.3.3",
     "psycopg-pool>=3.3.0",
 ]

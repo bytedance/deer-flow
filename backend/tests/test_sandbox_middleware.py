@@ -158,6 +158,10 @@ class _AsyncOnlyProvider(SandboxProvider):
             return self.sandbox
         return None
 
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id: str) -> None:
         self.released_ids.append(sandbox_id)
         return None
@@ -335,7 +339,7 @@ def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_de
     [
         (SandboxMiddleware(lazy_init=True), {}, Runtime(context={"thread_id": "thread-lazy"})),
         (SandboxMiddleware(lazy_init=False), {}, Runtime(context={})),
-        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "existing"}}, Runtime(context={"thread_id": "thread-existing"})),
+        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "async-sandbox"}}, Runtime(context={"thread_id": "thread-existing"})),
     ],
 )
 async def test_abefore_agent_delegates_to_super_when_not_acquiring(
@@ -597,6 +601,46 @@ def test_wrap_tool_call_passthrough_when_sandbox_already_in_state() -> None:
     result = middleware.wrap_tool_call(request, handler)
 
     assert result is original
+
+
+def test_wrap_tool_call_overwrites_a_repaired_checkpoint_sandbox() -> None:
+    middleware = SandboxMiddleware()
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="ok", tool_call_id="call-1", name="bash")
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert isinstance(result, Command)
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
+
+
+def test_network_prompt_preserves_repaired_checkpoint_overwrite() -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+
+    set_sandbox_provider(provider)
+    try:
+        result = SandboxMiddleware().wrap_tool_call(request, handler)
+    finally:
+        reset_sandbox_provider()
+
+    assert isinstance(result, Command)
+    assert result.goto == END
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
 
 
 @pytest.mark.parametrize("async_path", [False, True])

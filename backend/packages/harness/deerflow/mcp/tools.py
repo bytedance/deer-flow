@@ -29,6 +29,7 @@ from deerflow.mcp.tasks.runtime import (
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
+from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
@@ -488,7 +489,7 @@ def _make_session_pool_tool(
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user_id:thread_id)``.  This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -513,7 +514,12 @@ def _make_session_pool_tool(
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        scope_key = f"{user_id}:{thread_id}"
+        thread_incarnation = runtime_thread_incarnation(runtime)
+        scope_key = mcp_session_scope_key(
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+        )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.
@@ -676,6 +682,7 @@ def _make_background_submit_tool(
         submitter = get_mcp_task_submitter()
         thread_id = _extract_thread_id(runtime)
         user_id = resolve_runtime_user_id(runtime)
+        thread_incarnation = runtime_thread_incarnation(runtime)
         context = runtime.context if runtime is not None and runtime.context else {}
         run_id = context.get("run_id")
         tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
@@ -684,6 +691,7 @@ def _make_background_submit_tool(
             request=TaskSubmitRequest(
                 user_id=user_id,
                 thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
                 run_id=str(run_id) if run_id is not None else None,
                 tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
                 server_name=server_name,
