@@ -139,6 +139,8 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            "skill_usage",
+            "skill_usages",
             # Attached when a values frame is serialized, for display ordering only.
             # A replayed message carrying it back would write a thread-scoped seq
             # into the checkpoint, which a fork then re-seeds and reassigns (#4380).

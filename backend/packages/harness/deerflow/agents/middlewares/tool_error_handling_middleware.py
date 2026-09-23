@@ -17,7 +17,9 @@ from deerflow.agents.middlewares.skill_context import (
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage, record_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
     normalize_tool_result,
     stamp_exception_meta,
 )
@@ -98,6 +100,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         if getattr(message, "status", "success") == "error":
             return message
+        tool_meta = message.additional_kwargs.get(TOOL_META_KEY)
+        if isinstance(tool_meta, dict) and tool_meta.get("status") == "error":
+            return message
         content = message.content if isinstance(message.content, str) else None
         if content is None:
             return message
@@ -109,6 +114,16 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        args = request.tool_call.get("args") or {}
+        usage = build_skill_usage(
+            path,
+            content,
+            skills_root=self._skills_root,
+            partial=args.get("start_line") is not None or args.get("end_line") is not None,
+        )
+        if usage is not None:
+            existing[SKILL_USAGE_KEY] = usage
+            record_skill_usage(getattr(request, "runtime", None), usage)
         message.additional_kwargs = existing
         return message
 
@@ -133,9 +148,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
     @override
@@ -152,9 +167,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
 

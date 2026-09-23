@@ -74,6 +74,10 @@ import {
   buildMessageSidecarContext,
   type SidecarContext,
 } from "@/core/sidecar";
+import {
+  getSkillUsageByGroupIndex,
+  type SkillUsage,
+} from "@/core/skills/usage";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import { resolveSubtaskDescription } from "@/core/tasks/presentation";
@@ -88,6 +92,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { useMaybeBrowserView } from "../browser-view";
 import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
+import { SkillUsageMenu } from "../skill-usage/skill-usage-menu";
 import { Tooltip } from "../tooltip";
 
 import { ConversationOutline } from "./conversation-outline";
@@ -526,6 +531,10 @@ export function MessageList({
     () => getWorkspaceChangeAnchorGroupIndices(groupedMessages),
     [groupedMessages],
   );
+  const skillUsageByGroupIndex = useMemo(
+    () => getSkillUsageByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
   useEffect(() => {
     setClientDurationsByGroupId((current) => {
       let next: Map<string, number> | undefined;
@@ -872,6 +881,7 @@ export function MessageList({
       isStreaming: boolean,
       enableBranchForTurn: boolean,
       enableRegenerateForTurn: boolean,
+      skills?: SkillUsage[],
     ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
       const actionTarget = [...messages]
@@ -886,8 +896,9 @@ export function MessageList({
       }
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div className="mt-2 flex justify-start gap-1 opacity-100 transition-opacity delay-200 duration-300 focus-within:opacity-100 has-[[data-state=open]]:opacity-100 sm:opacity-0 sm:group-hover/assistant-turn:opacity-100">
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
+          {!isStreaming && skills && <SkillUsageMenu skills={skills} />}
           {enableBranchForTurn &&
             !isStreaming &&
             actionTarget?.id &&
@@ -954,7 +965,7 @@ export function MessageList({
                 >
                   <RefreshCcwIcon
                     className={cn(
-                      "size-3",
+                      "size-4",
                       regeneratingMessageId === actionTarget.id &&
                         "animate-spin",
                     )}
@@ -1207,6 +1218,9 @@ export function MessageList({
                         group.id !== undefined &&
                           branchableAssistantGroupIds.has(group.id),
                         group.id === latestAssistantGroupId,
+                        sidecarSurface
+                          ? undefined
+                          : skillUsageByGroupIndex.get(groupIndex),
                       )}
                   </div>,
                 );

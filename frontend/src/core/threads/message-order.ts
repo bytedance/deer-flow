@@ -220,6 +220,7 @@ export function mergeMessages(
   const anySeqByIdentity = new Map<string, number>();
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
+  const savedSkillUsages = new Map<string, unknown[]>();
   const collectTrustedSeq = (message: Message) => {
     const identity = messageIdentity(message);
     if (!identity) {
@@ -250,6 +251,9 @@ export function mergeMessages(
     const runId = getMessageRunId(message);
     if (identity && runId) {
       savedRunIds.set(identity, runId);
+    }
+    if (identity && Array.isArray(message.additional_kwargs?.skill_usages)) {
+      savedSkillUsages.set(identity, message.additional_kwargs.skill_usages);
     }
     if (identity && message.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
@@ -413,10 +417,14 @@ export function mergeMessages(
     const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
+    const shouldRestoreSkillUsages =
+      savedSkillUsages.has(identity) &&
+      message.additional_kwargs?.skill_usages === undefined;
     if (
       !shouldRestoreSeq &&
       !shouldRestoreRunId &&
-      !shouldRestoreTurnDuration
+      !shouldRestoreTurnDuration &&
+      !shouldRestoreSkillUsages
     ) {
       return message;
     }
@@ -428,6 +436,9 @@ export function mergeMessages(
         ...(shouldRestoreSeq ? { [MESSAGE_SEQ_KEY]: trustedSeq } : {}),
         ...(shouldRestoreTurnDuration
           ? { turn_duration: savedTurnDurations.get(identity) }
+          : {}),
+        ...(shouldRestoreSkillUsages
+          ? { skill_usages: savedSkillUsages.get(identity) }
           : {}),
       },
     } as Message;

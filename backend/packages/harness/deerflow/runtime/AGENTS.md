@@ -80,6 +80,9 @@ authoritative run token summary, but it cannot mutate the append-only message ev
 caller attribution, fallback state, or tool-call bookkeeping. Closed journals return
 from `on_llm_end` before inspecting the response or touching any run state.
 
+**Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
+answers for paginated history. See `docs/skill-usage-ui.md`.
+
 **Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
 `RunJournal` records each non-empty artifact update once per tool `Command` for
 the terminal `run.delivery` event. When a command contains multiple messages, a
