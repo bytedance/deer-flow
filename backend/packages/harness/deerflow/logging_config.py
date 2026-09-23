@@ -98,29 +98,50 @@ _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<
 # form, and non-hierarchical schemes) collapses — see _redact_redirecting_origin.
 _SLOT_ABSOLUTE_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
 
-# urllib3's header-parse warning (connection.py:576, WARNING, so it clears the
-# Gateway's INFO root) renders "Failed to parse headers (url=%s): %s", and its
-# second argument is a HeaderParsingError whose repr embeds ``headers_received``
-# - the raw header block of the response that failed to parse. The absolute URL
-# in the first argument is the generic pass's business; the dump is not, because
-# a ``Set-Cookie: session=…`` or ``WWW-Authenticate: Bearer …`` line carries no
-# scheme for ``_URL_REDACT_RE`` to anchor on and reached the log whole. Only the
-# values of credential-bearing field names collapse, the names stay for
-# operator legibility, and the pass runs only on a record that opens with
-# urllib3's own literal, so a header-looking line in any other log keeps its
-# text. ``location`` is in the list because that field value is the same
-# origin-form signed target the Redirecting and retry passes collapse. The
-# pattern is deliberately not line-anchored: the dump's first field follows the
-# ``url=`` argument on the same physical line, so ``^`` could never see it.
-_CREDENTIAL_HEADER_RE = re.compile(r"(?i)\b(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|location)[ \t]*:[ \t]*[^\r\n]*")
+# urllib3's header-parse warning (connection.py:575-581, WARNING, so it clears
+# the Gateway's INFO root) renders "Failed to parse headers (url=%s): %s". In
+# the pinned 2.7.0 the second argument stringifies as ``<defects>, unparsed
+# data: <payload!r>`` (exceptions.py:324) — there is no ``headers_received``.
+# The raw header block arrives through ``unparsed_data``: assert_header_parsing
+# sets it to ``headers.get_payload()``, and the email parser routes everything
+# after the FIRST malformed line into that payload, so the credential fields
+# that leak are the ones trailing the break — repr-escaped onto ONE physical
+# line whose logical breaks are the four characters ``\r\n``, not real newlines.
+# A pattern that ignores that shape cannot hold: with a ``[^\r\n]*`` value class
+# the first anchorable field swallowed the rest of the message, so exactly one
+# field ever collapsed while a signed ``Location`` ahead of it stayed whole (its
+# ``\b`` never fired at all, since the escape's literal ``n`` leaves no word
+# boundary before ``Location``). So this pass splits the dump on its logical
+# breaks and anchors one field per segment: every credential-bearing name
+# collapses, the names stay for operator legibility, a non-sensitive field keeps
+# its value, and a header-looking line in any other log is untouched, because
+# the pass runs only on text carrying urllib3's own literals. ``location`` is in
+# the list because that field value is the same origin-form signed target the
+# Redirecting and retry passes collapse.
+_CREDENTIAL_FIELD_RE = re.compile(r"(?i)^(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|location)[ \t]*:[ \t]*(?P<value>.*)$")
+# The payload's line breaks as they appear in the log: escaped inside a repr,
+# and real if a future format ever stops quoting the block. The repr's opening
+# quote is a break too — the dump's first field follows ``unparsed data: `` and
+# its ``b?`` bytes form on the same segment as the warning's own scaffolding, so
+# without it that first field would never start a segment and never be anchored.
+_DUMP_LOGICAL_BREAK_RE = re.compile(r"(\\r\\n|\\n|\r\n|\r|\n|unparsed data: b?['\"])")
 _HEADER_DUMP_PREFIX = "Failed to parse headers (url="
+# HeaderParsingError's own message, so a record's exception text — which repeats
+# the dump verbatim — is recognised as the same shape rather than as free text.
+_HEADER_DUMP_MARKER = "unparsed data: "
 
 
 def _redact_credential_headers(message: str) -> str:
-    def _collapse(match: re.Match[str]) -> str:
-        return match.group("name") + ": <redacted>"
-
-    return _CREDENTIAL_HEADER_RE.sub(_collapse, message)
+    parts = _DUMP_LOGICAL_BREAK_RE.split(message)
+    # A capturing split returns [text, break, text, break, ...]; only the
+    # even-indexed segments are header lines.
+    for index in range(0, len(parts), 2):
+        match = _CREDENTIAL_FIELD_RE.match(parts[index])
+        # An empty value hides nothing, and rewriting it would claim a redaction
+        # that never happened.
+        if match is not None and match.group("value"):
+            parts[index] = match.group("name") + ": <redacted>"
+    return "".join(parts)
 
 
 # The two scheme-bearing patterns start with a character class, so re.sub
@@ -197,6 +218,10 @@ class UrlRedactionFilter(logging.Filter):
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
+    Where a record's exception repeats a secret the message pass collapsed
+    (urllib3's header-parse warning logs with ``exc_info=True``), ``exc_text``
+    is produced through the same passes, because a formatter appends that text
+    to the output whatever the format string says.
     The scheme-bearing patterns are attempted only at ``://``-anchored
     scheme starts, so filtering a record costs linear time in its message
     length. A URL is rewritten only when it carries something to hide
@@ -204,9 +229,7 @@ class UrlRedactionFilter(logging.Filter):
     records without any URL pass through untouched.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-
+    def _redact_message(self, message: str) -> str:
         def _redact(match: re.Match[str]) -> str:
             if not (match.group("userinfo") or match.group("rest")):
                 return match.group(0)  # bare origin: nothing to redact
@@ -260,9 +283,11 @@ class UrlRedactionFilter(logging.Filter):
         # ``): `` closer and the repr scaffolding that separate the url
         # argument from the header dump, which would blur the two together and
         # leave a value whose only boundary was the consumed closer behind.
-        if message.startswith(_HEADER_DUMP_PREFIX):
+        if message.startswith(_HEADER_DUMP_PREFIX) or _HEADER_DUMP_MARKER in message:
             # The record's own second argument, not a URL line: the response
-            # header block that urllib3 echoes when it could not parse it.
+            # header block that urllib3 echoes when it could not parse it. The
+            # marker branch covers the exception text, whose last line repeats
+            # that block outside the warning's prefix.
             redacted = _redact_credential_headers(redacted)
         redacted = _redact_scheme_bearing(_URLLIB3_REQUEST_LINE_RE, _redact_request_line, redacted)
         redacted = _URLLIB3_INCREMENT_RETRY_RE.sub(_redact_increment, redacted)
@@ -270,9 +295,26 @@ class UrlRedactionFilter(logging.Filter):
         redacted = _URLLIB3_RETRYING_RE.sub(_redact_retrying, redacted)
         redacted = _URLLIB3_REDIRECTING_ORIGIN_RE.sub(_redact_redirecting_origin, redacted)
         redacted = _redact_scheme_bearing(_URL_REDACT_RE, _redact, redacted)
+        return redacted
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = self._redact_message(message)
         if redacted != message:
             record.msg = redacted
             record.args = None
+        if record.exc_info and _HEADER_DUMP_MARKER in message:
+            # urllib3 emits the header-parse warning with exc_info=True, and
+            # Formatter.format appends formatException() to any record carrying
+            # one — independently of the format string — so the traceback's last
+            # line is a second whole copy of the dump the message pass just
+            # collapsed. Pre-populating exc_text is what wins, because the
+            # Formatter recomputes it only when unset. The gate reads the
+            # already-formatted message rather than the exception: that warning
+            # interpolates the exception into it, so the marker is the same
+            # signal, and no other error record pays for formatting a traceback
+            # this filter would leave untouched anyway.
+            record.exc_text = self._redact_message(logging.Formatter().formatException(record.exc_info))
         return True
 
 
@@ -352,7 +394,13 @@ class JsonTraceFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            # Follow logging.Formatter in caching and reusing exc_text: a filter
+            # that already redacted it (UrlRedactionFilter, for urllib3's
+            # header-parse warning) would otherwise be recomputed here and its
+            # result discarded, re-emitting the exception's own text in full.
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+            payload["exc_info"] = record.exc_text
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False)

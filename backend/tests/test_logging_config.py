@@ -767,51 +767,202 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
         assert "token=QuerySecret" not in record.getMessage()
 
 
+def _emit_real_header_parse_warning(url: str, raw: bytes, *, json_format: bool = False) -> str:
+    """Drive urllib3's own header-parse warning end to end and return the log line.
+
+    ``http.client.parse_headers`` + ``assert_header_parsing`` build the real
+    ``HeaderParsingError``, and the emission copies ``connection.py`` including
+    ``exc_info=True``, so the result is what a handler's formatter writes - not
+    just ``record.getMessage()``.
+    """
+    import http.client
+    import io
+
+    from urllib3.exceptions import HeaderParsingError
+    from urllib3.util.response import assert_header_parsing
+
+    from deerflow.logging_config import UrlRedactionFilter
+
+    headers = http.client.parse_headers(io.BytesIO(raw))
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    if json_format:
+        from deerflow.logging_config import JsonTraceFormatter
+
+        handler.setFormatter(JsonTraceFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(UrlRedactionFilter())
+    root.handlers = [handler]
+    root.setLevel(logging.WARNING)
+    try:
+        try:
+            assert_header_parsing(headers)
+            raise AssertionError("expected HeaderParsingError")
+        except (HeaderParsingError, TypeError) as hpe:
+            logging.getLogger("urllib3.connection").warning("Failed to parse headers (url=%s): %s", url, hpe, exc_info=True)
+        return stream.getvalue()
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
 def test_url_redaction_filter_collapses_credentials_in_a_header_parse_dump() -> None:
     """urllib3's header-parse warning embeds the raw response header block.
 
-    ``connection.py:576`` logs ``Failed to parse headers (url=%s): %s`` at
-    WARNING with a ``HeaderParsingError``, whose repr carries
-    ``headers_received`` - every field value of the response that failed to
-    parse. The absolute URL in the first argument belongs to the generic
-    pass; a scheme-less ``Set-Cookie`` or ``WWW-Authenticate`` line inside the
-    dump belongs to no URL pass at all, and reached the log whole.
+    ``connection.py:575-581`` logs ``Failed to parse headers (url=%s): %s`` at
+    WARNING with ``exc_info=True``, and the pinned 2.7.0 ``HeaderParsingError``
+    stringifies as ``"<defects>, unparsed data: <payload!r>"`` - the payload
+    being everything after the FIRST malformed line of the response. Every
+    credential-bearing field therefore sits behind that break, repr-escaped onto
+    one physical line whose breaks are the literal four characters ``\\r\\n``.
+    Field order is the response's choice, so both a leading ``Location`` and a
+    leading ``Set-Cookie`` must collapse, and the emitted traceback must not
+    re-carry the block the message line just lost.
     """
-    from email.message import Message
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    secrets = ("SignedPathSecret", "CookieSecret", "TokenSecret", "UrlSecret", "session=", "Bearer ")
+    blocks = (
+        # Location first: the signed origin-form target leads the payload.
+        b"bad line\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\nSet-Cookie: session=CookieSecret; Path=/\r\nWWW-Authenticate: Bearer TokenSecret\r\nContent-Type: application/json\r\n\r\n",
+        # Set-Cookie first: the credentials trail it.
+        b"bad line\r\nSet-Cookie: session=CookieSecret; Path=/\r\nWWW-Authenticate: Bearer TokenSecret\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\nContent-Type: application/json\r\n\r\n",
+    )
 
+    for raw in blocks:
+        formatted = _emit_real_header_parse_warning(url, raw)
+        for secret in secrets:
+            assert secret not in formatted, secret
+        # Field names, the non-sensitive field and the defect itself stay.
+        assert "Set-Cookie: <redacted>" in formatted
+        assert "WWW-Authenticate: <redacted>" in formatted
+        assert "Location: <redacted>" in formatted
+        assert "Content-Type: application/json" in formatted
+        assert "bad line" in formatted
+
+
+def test_url_redaction_filter_collapses_dump_credentials_in_json_logging_too() -> None:
+    """JSON output must not reopen the leak the text path closes.
+
+    ``JsonTraceFormatter`` renders the exception itself rather than going
+    through ``logging.Formatter.format``, so it can discard a filter's redacted
+    ``exc_text`` and re-emit the payload; the Gateway runs with
+    ``logging.enhance.format=json``, which makes that the deployed path.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie: session=CookieSecret; Path=/\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw, json_format=True)
+    for secret in ("SignedPathSecret", "CookieSecret", "UrlSecret", "session="):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "unparsed data:" in formatted  # the shape stays diagnosable
+
+
+def test_url_redaction_filter_collapses_credentials_carried_by_the_traceback() -> None:
+    """The warning's traceback text is a second copy of the dump.
+
+    ``logging.Formatter.format`` appends ``formatException`` to any record that
+    carries ``exc_info``, independently of the format string, and that text ends
+    with the exception's own ``unparsed data: '<payload>'`` line. Redacting the
+    message alone leaves the credentials in the log whole, so the filter
+    pre-populates ``exc_text`` - the Formatter only recomputes it when unset.
+    """
     from urllib3.exceptions import HeaderParsingError
 
     from deerflow.logging_config import UrlRedactionFilter
 
-    headers = Message()
-    headers.add_header("Location", "/tenant-42/reports/q1?sig=SignedPathSecret")
-    headers.add_header("Set-Cookie", "session=CookieSecret; Path=/")
-    headers.add_header("WWW-Authenticate", "Bearer TokenSecret")
-    headers.add_header("Content-Type", "application/json")
-    record = logging.LogRecord(
-        "urllib3.connection",
-        logging.WARNING,
-        __file__,
-        1,
-        "Failed to parse headers (url=%s): %s",
-        (
-            "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret",
-            HeaderParsingError(headers, {"defect": [("bad line", 4)]}),
-        ),
-        None,
-    )
+    payload = "Set-Cookie: session=CookieSecret\\r\\n"
+    record = logging.LogRecord("urllib3.connection", logging.WARNING, __file__, 1, "Failed to parse headers (url=%s): %s", ("https://cdn.example.com/tenant-42/x?sig=UrlSecret", HeaderParsingError([], payload)), None)
+    record.exc_info = (HeaderParsingError, HeaderParsingError([], "Set-Cookie: session=CookieSecret\r\n"), None)
 
     assert UrlRedactionFilter().filter(record) is True
-    formatted = record.getMessage()
+    assert record.exc_text is not None
+    assert "CookieSecret" not in record.getMessage() + record.exc_text
+    assert "Set-Cookie: <redacted>" in record.exc_text
+    assert "unparsed data:" in record.exc_text
 
-    for secret in ("CookieSecret", "TokenSecret", "SignedPathSecret", "UrlSecret", "session=", "Bearer "):
-        assert secret not in formatted, secret
 
-    # Field names, the non-sensitive fields and the parse defect itself stay.
-    assert "Set-Cookie: <redacted>" in formatted
-    assert "WWW-Authenticate: <redacted>" in formatted
-    assert "Content-Type: application/json" in formatted
-    assert "bad line" in formatted
+def test_url_redaction_filter_does_not_format_exceptions_of_other_records() -> None:
+    """The traceback pass is gated on urllib3's own literal, like the dump pass.
+
+    Formatting an arbitrary record's exception to scan it would cost every error
+    log a ``linecache`` read for no redaction benefit, so a record that is not
+    urllib3's header-parse warning keeps its ``exc_text`` unset.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    record = logging.LogRecord("deerflow.something", logging.ERROR, __file__, 1, "upstream call failed", (), None)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        import sys
+
+        record.exc_info = sys.exc_info()
+
+    assert UrlRedactionFilter().filter(record) is True
+    assert record.exc_text is None
+
+
+def test_url_redaction_filter_anchors_every_repr_form_of_the_payload() -> None:
+    """The dump pass anchors on the payload's own delimiters, not on guesses.
+
+    ``HeaderParsingError`` renders ``unparsed_data`` through ``!r``, so the field
+    lines are separated by the four characters ``\\r\\n`` and the first field
+    follows the repr's opening quote - which is ``'``, ``"``, ``b'`` or ``b"``
+    depending on the payload's type and on whether the value holds a quote. Each
+    of those is an anchor this pass must recognise, or the field glued to it
+    stays whole.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    cases = [
+        # First field glued to the repr's opening quote.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'Set-Cookie: session=CookieSecret\\r\\nContent-Type: text/plain\\r\\n'""",
+            "Set-Cookie: <redacted>",
+            "Content-Type: text/plain",
+        ),
+        # The payload holds an apostrophe, so repr switches to double quotes.
+        (
+            '''Failed to parse headers (url=https://h/p): [D], unparsed data: "Set-Cookie: it's-CookieSecret\\r\\n"''',
+            "Set-Cookie: <redacted>",
+            None,
+        ),
+        # Bytes payload.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: b'Set-Cookie: session=CookieSecret\\r\\n'""",
+            "Set-Cookie: <redacted>",
+            None,
+        ),
+        # A later field carries an absolute URL: its secret is the credential
+        # field's own, and the field collapses before the URL pass could need it.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'bad\\r\\nLocation: https://cdn.example/tenant-42/x?sig=SignedPathSecret\\r\\n'""",
+            "Location: <redacted>",
+            None,
+        ),
+        # Single-character escape break instead of the CRLF pair.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'bad\\nWWW-Authenticate: Bearer TokenSecret\\n'""",
+            "WWW-Authenticate: <redacted>",
+            None,
+        ),
+    ]
+    secrets = ("CookieSecret", "SignedPathSecret", "TokenSecret")
+
+    for message, collapsed, kept_field in cases:
+        record = logging.LogRecord("urllib3.connection", logging.WARNING, __file__, 1, message, (), None)
+        assert UrlRedactionFilter().filter(record) is True
+        formatted = record.getMessage()
+        for secret in secrets:
+            assert secret not in formatted, (message, secret)
+        assert "unparsed data:" in formatted
+        assert collapsed in formatted, formatted
+        if kept_field:
+            assert kept_field in formatted, formatted
 
 
 def test_url_redaction_filter_leaves_header_looking_text_outside_the_dump_alone() -> None:
