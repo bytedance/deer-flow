@@ -732,6 +732,75 @@ def test_cancelled_initializer_releases_generation_claim(cache_globals, monkeypa
     assert calls == 2
 
 
+def test_concurrent_cold_start_callers_share_first_initialization(cache_globals, monkeypatch, tmp_path):
+    """A read racing the first initializer must wait, not void its work."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    started = threading.Event()
+    release = threading.Event()
+    second_planning = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    async def _gated_tools(**_kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        started.set()
+        await asyncio.to_thread(release.wait)
+        return ["cold-start-tool"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _gated_tools)
+
+    real_plan = cache_module._plan_cache_transition
+    plan_calls = 0
+    plan_lock = threading.Lock()
+
+    def _tracked_plan(*args, **kwargs):
+        nonlocal plan_calls
+        with plan_lock:
+            plan_calls += 1
+            if plan_calls == 2:
+                second_planning.set()
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(cache_module, "_plan_cache_transition", _tracked_plan)
+
+    results: list[list] = []
+    errors: list[BaseException] = []
+    results_lock = threading.Lock()
+
+    def _call() -> None:
+        try:
+            result = cache_module.get_cached_mcp_tools()
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion
+            with results_lock:
+                errors.append(exc)
+        else:
+            with results_lock:
+                results.append(result)
+
+    first = threading.Thread(target=_call, name="cold-start-1")
+    second = threading.Thread(target=_call, name="cold-start-2")
+    first.start()
+    assert started.wait(timeout=2), "first initializer did not reach discovery"
+    second.start()
+    assert second_planning.wait(timeout=2), "second caller did not enter transition planning"
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert calls == 1
+    assert results == [["cold-start-tool"], ["cold-start-tool"]]
+    assert cache_module._cache_initialized is True
+    assert cache_module._mcp_tools_cache == ["cold-start-tool"]
+
+
 # ---------------------------------------------------------------------------
 # Effective-MCP-config invalidation
 #
