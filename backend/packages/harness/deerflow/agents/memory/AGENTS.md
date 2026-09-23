@@ -129,6 +129,10 @@ Every destructive migration first writes a verified `{manifest_filename}.v1.bak`
 Missing or mismatched backups abort migration without changing v1 data.
 Delete legacy agent JSON only after safe summary adoption or equality checks.
 Summary conflicts keep the source file and return an error.
+Compare both summary operands after additive normalization; preserve extension
+fields and keep fact migration validation strict. Replacement imports reject
+invalid fact containers or unusable content before normalization or storage
+access; recoverable metadata may default, but malformed facts never mean clear.
 
 Run the proactive migration from `backend/`:
 
@@ -353,3 +357,5 @@ runs by default.
   Attachment-only messages with an empty preserved request stay query-less.
 - Ranking must be deterministic, network-free, and mutation-free: caller-owned
   fact dicts are read-only inputs.
+
+Legacy fact normalization in DeerMem and `frontend/src/core/memory/import-memory.ts` uses neutral confidence `0.5` for missing or invalid values, clamps finite confidence to `[0, 1]`, trims content, and defaults blank or missing sources to `unknown`. Keep these compatibility defaults aligned.
