@@ -1,12 +1,12 @@
 import json
 
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
 
 
-def _get_firecrawl_client(tool_name: str = "web_search") -> FirecrawlApp:
+def _get_firecrawl_client(tool_name: str = "web_search") -> AsyncFirecrawlApp:
     config = get_app_config().get_tool_config(tool_name)
     api_key = None
     api_url = None
@@ -18,11 +18,11 @@ def _get_firecrawl_client(tool_name: str = "web_search") -> FirecrawlApp:
     kwargs = {"api_key": api_key}
     if api_url:
         kwargs["api_url"] = api_url
-    return FirecrawlApp(**kwargs)  # type: ignore[arg-type]
+    return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+async def web_search_tool(query: str) -> str:
     """Search the web.
 
     Args:
@@ -35,7 +35,7 @@ def web_search_tool(query: str) -> str:
             max_results = config.model_extra.get("max_results", max_results)
 
         client = _get_firecrawl_client("web_search")
-        result = client.search(query, limit=max_results)
+        result = await client.search(query, limit=max_results)
 
         # result.web contains list of SearchResultWeb objects
         web_results = result.web or []
@@ -54,7 +54,7 @@ def web_search_tool(query: str) -> str:
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -66,7 +66,7 @@ def web_fetch_tool(url: str) -> str:
     """
     try:
         client = _get_firecrawl_client("web_fetch")
-        result = client.scrape(url, formats=["markdown"])
+        result = await client.scrape(url, formats=["markdown"])
 
         markdown_content = result.markdown or ""
         metadata = result.metadata
