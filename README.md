@@ -1369,6 +1369,18 @@ custom lifespans, Mounts, and WebSocket routes are not accepted; lifetime resour
 `ExtensionService`, and WebSocket contributions require a future host-owned
 authentication/Origin wrapper. Lifecycle and system-model callbacks use the Gateway's
 canonical notification loop, including subagents on isolated loops.
+
+User-facing extension routes can call
+`deerflow_extension_api.require_run_evidence_reader(request)` (extension API 0.2.2+).
+The Gateway requires authenticated `runs:read` permission and fixes the reader's scope
+to that user, including administrators and internal callers. Caller-supplied IDs cannot
+change that scope. Invisible and missing runs return the same result; changed-run cursors
+cannot be reused directly across users. The optional `resolve_run_evidence_reader(request)`
+returns `None` when the host does not support the capability; the required helper raises
+`NotImplementedError` instead. Denied access raises `PermissionError`. Routes should map
+these exceptions to HTTP 503 and 403 respectively; resolver failures never fall back to
+the global service reader.
+
 Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
 `required: true` makes load failure abort startup; otherwise failures are reported and
 skipped. `enabled: false` skips resolution and import. The manager preserves the extension's
