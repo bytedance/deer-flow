@@ -167,8 +167,8 @@ async def test_requests_are_packed_under_the_size_limit_when_categories_or_texts
 
 @pytest.mark.parametrize("config", [{}, LLM], ids=["jev", "llm"])
 @pytest.mark.asyncio
-async def test_packing_measures_the_escaped_wire_size_for_non_ascii_text(load, monkeypatch, config):
-    # httpx escapes non-ASCII JSON as six-byte sequences, so a CJK request is about twice its UTF-8 size.
+async def test_packing_uses_compact_utf8_wire_size_for_non_ascii_text(load, monkeypatch, config):
+    # httpx sends compact UTF-8 JSON; CJK text must not be budgeted as Unicode escapes.
     def jev_billing(request, body):
         return httpx.Response(200, json={"model": "jev", "answers": jev_answers(body, lambda text: "billing")})
 
@@ -184,9 +184,35 @@ async def test_packing_measures_the_escaped_wire_size_for_non_ascii_text(load, m
     assert result["counts"] == {"ok": 40}
     # Measured on the bytes the mock transport actually received, not on the estimate.
     assert all(len(r.content) <= 256 * 1024 for r in requests)
-    # Jev repeats the criteria per question (two items fit), chat sends them once (all ten fit).
-    assert len(requests) == (4 if config else 20)
+    # Jev repeats the criteria per question (four items fit), chat sends them once (all ten fit).
+    assert len(requests) == (4 if config else 10)
     assert sum(len(json.loads(r.content)["state"]) if not config else len(json.loads(json.loads(r.content)["messages"][-1]["content"])["items"]) for r in requests) == 40
+
+
+@pytest.mark.parametrize("value", [{"text": "plain"}, {"text": "中文🙂"}, {"message": 'quote"\\\n\t'}], ids=["ascii", "unicode", "escapes"])
+def test_wire_size_matches_httpx_json_encoding(load, value):
+    load()
+    from deerflow_extension_jev_classify.classify import _wire_size
+
+    request = httpx.Request("POST", "https://classifier.example", json=value)
+    assert _wire_size(value) == len(request.content)
+
+
+@pytest.mark.parametrize(("text", "count"), [('"' * 20000, 6), ("\\" * 20000, 6), ("a\n" * 10000, 8)], ids=["quotes", "backslashes", "newlines"])
+@pytest.mark.asyncio
+async def test_chat_packing_counts_embedded_json_escaping(load, monkeypatch, text, count):
+    requests = transport(monkeypatch, chat_ok)
+    data = {"items": [{"id": str(index), "text": text} for index in range(count)], "categories": CATEGORIES}
+    # This is valid under the host's separate input-byte limit.
+    assert len(json.dumps(data, allow_nan=False).encode("utf-8")) <= 256 * 1024
+
+    result = await handler(load(batch_size=10, max_text_chars=20000, **LLM))(data, context())
+
+    assert result["counts"] == {"ok": count}
+    assert len(requests) == 2
+    assert all(len(request.content) <= 256 * 1024 for request in requests)
+    sent = [item["text"] for request in requests for item in json.loads(json.loads(request.content)["messages"][-1]["content"])["items"]]
+    assert sent == [text] * count
 
 
 @pytest.mark.asyncio

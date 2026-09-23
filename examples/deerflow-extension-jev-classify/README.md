@@ -88,8 +88,10 @@ carries a code such as `http_401`, `timeout`, `network`, `invalid_response`,
 
 - Items are grouped up to `batch_size` per request (default 10) and each
   request is kept under 256 KiB, so large category descriptions or long texts
-  simply produce more requests. Requests run with bounded concurrency (default
-  4). Caller ids are reconciled by position; they never become wire ids,
+  simply produce more requests. Outbound sizes use httpx's compact UTF-8 JSON,
+  including the extra escaping of JSON embedded in chat messages.
+  Requests run with bounded concurrency (default 4). Caller ids are reconciled
+  by position; they never become wire ids,
   question keys or prompt text.
 - Jev sends one `choice` question per item over the shared batch state, so the
   classifier sees the batch context, and each item's answer is checked on its

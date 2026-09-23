@@ -143,8 +143,8 @@ async def _post(client: httpx.AsyncClient, url: str, body: dict[str, Any], heade
 
 
 def _wire_size(value: Any) -> int:
-    """Bytes ``httpx`` sends for ``json=value``: the ``json.dumps`` default, non-ASCII escaped."""
-    return len(json.dumps(value).encode())
+    """Bytes ``httpx`` sends for ``json=value`` using compact UTF-8 JSON."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
 def _model_name(payload: Any) -> str | None:
@@ -181,8 +181,8 @@ class JevBackend:
         self.headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
         self.labels = labels
         self.instruction = instruction
-        # Estimates measure what httpx puts on the wire for ``json=``: ``json.dumps`` with its
-        # defaults, so every non-ASCII character counts as a six-byte escape.
+        # Match httpx's compact UTF-8 encoding; per-item structural margins
+        # below keep the packing estimate conservative.
         self.base = _wire_size({"model": self.model, "state": [], "questions": {}})
         self.overhead = _wire_size({f"item_{MAX_ITEMS}": self.question(MAX_ITEMS)}) + 8
 
@@ -220,13 +220,16 @@ class ChatBackend:
         self.system = (
             f'{instruction} Return only a JSON object of the form {{"labels": [{{"id": "<item id>", "label": "<category name>"}}]}} with exactly one entry for every item. Categories: {json.dumps(labels.categories, ensure_ascii=False)}'
         )
-        self.base = _wire_size(self.body("")) + 8
+        self.base = _wire_size(self.body(json.dumps({"items": []}, ensure_ascii=False)))
 
     def body(self, user: str) -> dict[str, Any]:
         return {"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": self.system}, {"role": "user", "content": user}]}
 
     def cost(self, text: str) -> int:
-        return _wire_size({"id": str(MAX_ITEMS), "text": text}) + 2
+        # Each item is JSON embedded in a message string: count the outer
+        # escaping too. The surrounding quotes budget the ", " separator.
+        item = json.dumps({"id": str(MAX_ITEMS), "text": text}, ensure_ascii=False)
+        return _wire_size(item)
 
     async def classify(self, client: httpx.AsyncClient, texts: list[str]) -> tuple[list[str | None], str | None]:
         expected = [str(index) for index in range(1, len(texts) + 1)]
