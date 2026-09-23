@@ -165,6 +165,32 @@ async def test_cancellation_while_waiting_for_lock_never_starts_write(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_cancelled_snapshot_keeps_thread_lock_until_read_finishes(tmp_path, monkeypatch):
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**_event())
+    paused = _PausedIO(store._read_thread_events)
+    monkeypatch.setattr(store, "_read_thread_events", paused)
+    lookup = asyncio.create_task(store.find_latest_ai_message_run_ids("t1", {"missing"}))
+    writer = None
+    try:
+        await asyncio.wait_for(paused.entered.wait(), 5)
+        lookup.cancel()
+        await _checkpoint()
+        writer = asyncio.create_task(store.put(**_event("r2", "later")))
+        await _checkpoint()
+        assert not lookup.done()
+        assert not writer.done()
+        paused.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await lookup
+        assert (await writer)["seq"] == 2
+    finally:
+        paused.release.set()
+        await asyncio.gather(lookup, *([writer] if writer is not None else []), return_exceptions=True)
+        await asyncio.wait_for(paused.finished.wait(), 5)
+
+
+@pytest.mark.anyio
 async def test_cancelled_idempotent_write_is_visible_to_retry_and_other_threads_progress(tmp_path, monkeypatch):
     store = JsonlRunEventStore(tmp_path)
     write = store._write_record
