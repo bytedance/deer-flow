@@ -117,8 +117,8 @@ The shadow check is conservative. It rejects a route only when an earlier route 
 
 Contributed routes sit behind the same middleware as the host API, and they cannot opt out:
 
-- **Authentication.** A request without a valid session or personal access token gets `401` before your handler runs.
-- **CSRF.** A `POST`, `PUT`, `PATCH`, or `DELETE` from a browser session must carry the `csrf_token` cookie value in an `X-CSRF-Token` header, as the DeerFlow frontend already does. Without it the request gets `403` before your handler runs. Requests authenticated with an `Authorization: Bearer` header skip this check.
+- **Authentication.** An unauthenticated request gets `401` before your handler runs. A personal access token (PAT) cannot access contributed routes: even a valid PAT gets `403 {"detail": "PAT credentials are not permitted on this route"}` from the host before your handler runs.
+- **CSRF.** A `POST`, `PUT`, `PATCH`, or `DELETE` from a browser session must carry the `csrf_token` cookie value in an `X-CSRF-Token` header, as the DeerFlow frontend already does. Without it the request gets `403` before your handler runs. A Bearer header skips the CSRF check, but does not grant PAT access to contributed routes.
 
 When the Gateway runs with `DEER_FLOW_AUTH_DISABLED=1`, a local-development switch that is ignored when `DEER_FLOW_ENV` or `ENVIRONMENT` is `prod` or `production`, every request runs as a synthetic admin user and neither check applies.
 
@@ -140,7 +140,7 @@ class ExtensionPrincipal:
 | `resolve_principal(request)` | The caller's `ExtensionPrincipal`, or `None` when the host cannot determine it             |
 | `require_admin(request)`     | The principal when it is an admin. Otherwise raises `PermissionError`, including when the identity is unknown |
 
-`roles` holds the caller's single system role, such as `("admin",)` or `("user",)`. `is_internal` is `true` for requests the Gateway's own components send with its internal service token, such as the IM channel bridge; those callers carry the role `internal` and are not admins. A request authenticated with a **personal access token** never carries admin rights: `is_admin` is `False` and `roles` is empty even when the token belongs to an admin.
+`roles` holds the caller's single system role, such as `("admin",)` or `("user",)`. `is_internal` is `true` for requests the Gateway's own components send with its internal service token, such as the IM channel bridge; those callers carry the role `internal` and are not admins. PAT requests are rejected before contributed route handlers run, so these helpers do not receive a PAT principal here.
 
 Both helpers are synchronous, so they work in sync and async handlers alike. They are framework-neutral, so map their results to HTTP status codes yourself: `None` to `401`, `PermissionError` to `403`.
 
@@ -244,7 +244,8 @@ Against a Gateway with the memory database backend, the routes answer:
 | `GET /me`, no session                                  | `401 {"detail": {"code": "not_authenticated", ...}}` from the host        |
 | `POST /reset`, signed in, no `X-CSRF-Token`            | `403 {"detail": "CSRF token missing. Include X-CSRF-Token header."}` from the host |
 | `GET /me`, signed in as a regular user                 | `200 {"user_id": "...", "is_admin": false, "database": false, "evidence": true}` |
-| `POST /reset`, regular user or personal access token   | `403 {"detail": "this endpoint requires an administrator account"}`       |
+| `POST /reset`, regular user                            | `403 {"detail": "this endpoint requires an administrator account"}`       |
+| `GET /me` or `POST /reset`, personal access token       | `403 {"detail": "PAT credentials are not permitted on this route"}` from the host |
 | `POST /reset`, admin session with CSRF header          | `200 {"resets": 1}`                                                      |
 
 ## Common pitfalls
