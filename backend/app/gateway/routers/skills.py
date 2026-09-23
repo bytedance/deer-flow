@@ -506,7 +506,7 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 
-        def _load_response_parts() -> tuple[object, str | None]:
+        def _load_response_parts() -> tuple[Skill | None, str | None]:
             # Worker thread: load_skills walks every skill directory and
             # read_custom_skill opens SKILL.md — blocking filesystem IO that
             # scales with the number of installed skills (#5747).
