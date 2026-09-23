@@ -2988,6 +2988,13 @@ This release closes that milestone with **765 merged pull requests**.
   and a reference of every public name with the contract's version history.
   Also correct stale descriptions of the contribution kinds and of run
   evidence metadata redaction in `AGENTS.md`.
+- **docs:** Bring the extension developer manual up to the
+  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
+  covering `registry.plugin()`, browser modules and packaged assets, backend
+  actions, model tools and settings; the request-scoped run evidence reader
+  with a per-user route example; and plugin troubleshooting and operations
+  notes. Also correct the plugin `mount` return value in
+  `docs/full-stack-plugins.md`.
 
 ### Internal
 

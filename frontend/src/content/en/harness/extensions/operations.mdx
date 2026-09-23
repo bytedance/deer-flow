@@ -156,6 +156,18 @@ These checks catch packaging accidents. They are not a malware scan.
 
 Because the snapshot is a copy, edits to your working directory reach DeerFlow only through `make extension-upgrade SOURCE=<same path>` followed by a restart.
 
+### Plugins with browser assets
+
+A plugin that declares `BrowserAssets` ships a `ui_manifest.json` and the static files it lists inside its Python package. The [bookmarks example](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks) keeps them under `deerflow_extension_bookmarks/static/dist/`. For operators this means:
+
+- **The files must be in what gets installed.** A local directory is snapshotted as-is, so build any JavaScript bundle before `install` or `upgrade`: the manager runs the Python build backend, not a JavaScript build. For an index or Git source, the files must be inside the built wheel.
+- **The snapshot rules still apply.** A local directory containing symlinks or secret-looking files is rejected by the manager before the Gateway ever reads the manifest.
+- **The Gateway reads the files once**, when `install()` registers the plugin at startup, and serves them from memory under a content-derived revision. Changing an asset needs `upgrade` and a restart, like any code change. Browsers may keep cached code from the previous revision until the page is reloaded.
+- **Listed files are readable by any signed-in user**, including source maps, even while the plugin is disabled. Do not ship private sources or secrets in the manifest.
+- Deploy the Gateway and the frontend from the same release. An older frontend does not understand the `assets-v1` transport.
+
+Manifest errors are listed in [Troubleshooting](/docs/harness/extensions/troubleshooting).
+
 ## Upgrading
 
 `upgrade` replaces the source of an extension that is already installed and keeps its record: `config`, `required`, and `enabled` stay as they are.

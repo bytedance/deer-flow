@@ -1,11 +1,13 @@
 ---
 title: Reference
-description: Every public name in deerflow-extension-api 0.2.1, grouped by topic, with signatures, fields, and defaults. Also covers the compatibility rules and the contract's version history.
+description: Every public name in deerflow-extension-api 0.2.3, grouped by topic, with signatures, fields, and defaults. Also covers the compatibility rules and the contract's version history.
 ---
+
+import { Callout } from "nextra/components";
 
 # Reference
 
-This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.1**. Import them from the package root:
+This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.3**. Import them from the package root:
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -34,7 +36,7 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
 
 ### `ExtensionRegistry`
 
-A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Every method has a default implementation that registers nothing. A host whose registry predates a method inherits that default, so the call succeeds but the contribution is not registered. The version marker and package metadata are how you prevent that.
+A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Every method has a default implementation that registers nothing. A host whose registry predates a method inherits that default, so the call succeeds but the contribution is not registered. `plugin()` is the one method that reports this, by returning `False`; the version marker and package metadata are how you prevent it for the others.
 
 | Method                                                     | Returns | Registers                                                                                |
 | ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
@@ -45,6 +47,7 @@ A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Ev
 | `context_compaction_observer(observer: ContextCompactionObserver)` | `None` | An observer of summarization                                                       |
 | `service(service: ExtensionService)`                       | `None`  | A Gateway-lifetime service                                                               |
 | `routers(routers: Sequence[Any])`                          | `None`  | FastAPI routers, built during `install()`                                                |
+| `plugin(contribution: PluginContribution)`                 | `bool`  | A full-stack plugin. `True` when accepted, `False` on a host without plugin support. Experimental |
 
 ## Middleware
 
@@ -309,6 +312,18 @@ Frozen dataclass: `thread_id: str = ""`, `run_id: str = ""`, `seq: int = 0` (mon
 
 Frozen dataclasses. `RunPage`: `items: tuple[RunStatusView, ...] = ()`, `next_cursor: str | None = None`, `has_more: bool = False`. `RunEventPage`: `items: tuple[RunEventView, ...] = ()`, `next_after_seq: int | None = None`, `has_more: bool = False`.
 
+### `resolve_run_evidence_reader(request: object) -> RunEvidenceReader | None`
+
+Return a reader bound to the authenticated caller of a contributed route. Use it in user-facing routes instead of the global `ExtensionRuntimeDeps.run_evidence_reader`, which sees every user's runs. `request` is duck-typed. Returns `None` on a host without request-scoped evidence. The Gateway raises `PermissionError("run evidence requires an authenticated user with runs:read")` when the caller is unauthenticated or lacks the `runs:read` permission; it never widens an admin or internal caller to global visibility. Any other resolver error propagates.
+
+### `require_run_evidence_reader(request: object) -> RunEvidenceReader`
+
+Like `resolve_run_evidence_reader()`, but raises `NotImplementedError("request-scoped run evidence is unavailable")` instead of returning `None`. Map `NotImplementedError` to HTTP 503 and `PermissionError` to 403. It never falls back to the global reader.
+
+### `RUN_EVIDENCE_READER_RESOLVER_KEY`
+
+`"deerflow_extension_run_evidence_reader_resolver"`. The `app.state` attribute the host installs its request-scoped resolver under. Host-owned.
+
 ### `InvalidRunEvidenceCursor`
 
 Subclass of `ValueError`, raised for a malformed or unsupported cursor, or a cursor from another scope.
@@ -382,18 +397,99 @@ Deterministic JSON: sorted keys, `(",", ":")` separators, `ensure_ascii=False`. 
 
 SHA-256 hex digest of `canonical_json(value)` encoded as UTF-8.
 
+## Full-stack plugins (experimental)
+
+<Callout type="warning">
+  The plugin contract is experimental in 0.2.3. Always check the return value of
+  `registry.plugin(...)`. See [Plugins](/docs/harness/extensions/plugins).
+</Callout>
+
+### `PluginContribution`
+
+Frozen dataclass.
+
+| Field         | Type                           | Default |
+| ------------- | ------------------------------ | ------- |
+| `namespace`   | `str`                          | required |
+| `title`       | `str`                          | required |
+| `description` | `str`                          | `""`    |
+| `enabled`     | `bool`                         | `False` |
+| `fields`      | `tuple[SettingsField, ...]`    | `()`    |
+| `frontend`    | `BrowserModule \| BrowserAssets \| None` | `None`  |
+| `backend`     | `tuple[BackendAction, ...]`    | `()`    |
+| `api_version` | `int`                          | `1`     |
+| `tools`       | `tuple[ModelTool, ...]`        | `()`    |
+
+The host accepts only `api_version == 1` and requires at least one of `frontend`, `backend`, or `tools`. Namespaces must be unique.
+
+### `BrowserModule`
+
+Frozen dataclass: `module: str`, `code: str` (a self-contained ES module, non-empty and at most 512 KiB), `public_fields: tuple[str, ...] = ()`. Discovery labels this transport `inline-v1`. Use `BrowserAssets` when the module needs relative imports, stylesheets, or images.
+
+### `BrowserAssets`
+
+Frozen dataclass declaring a manifest and static files inside the installed package. Discovery labels this transport `assets-v1`.
+
+| Field           | Type              | Default              |
+| --------------- | ----------------- | -------------------- |
+| `module`        | `str`             | required             |
+| `root`          | `str \| Path`     | required             |
+| `manifest`      | `str`             | `"ui_manifest.json"` |
+| `public_fields` | `tuple[str, ...]` | `()`                 |
+
+`root` is usually `Path(__file__).parent`. The manifest, relative to `root`, must be a JSON object with exactly the keys `schema_version` (the integer `1`), `entry`, and `files`:
+
+```json
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": ["static/dist/index.mjs", "static/dist/styles.css"]
+}
+```
+
+`files` lists 1 to 256 unique paths and `entry` must be one of them, ending in `.js` or `.mjs`. Paths use ASCII letters, digits, `_`, `-`, and `.`, separated by `/`, and each segment must start with a letter, digit, `_`, or `-`. The root must not be a symlink, and no listed path may pass through one. Limits: 64 KiB for the manifest, 4 MiB per file, 16 MiB in total. Accepted file types: `.js`, `.mjs`, `.css`, `.json`, `.map`, `.wasm`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.woff`, `.woff2`, `.ttf`, `.otf`.
+
+`registry.plugin()` validates the manifest and reads every listed file into an in-memory snapshot. A validation error raises from `registry.plugin()`, so `install()` fails. The snapshot's revision is a SHA-256 over the manifest, the paths, and the file contents, and the Gateway serves the files from that snapshot at `GET /api/plugins/{namespace}/assets/{revision}/{path}`. Any authenticated user can download listed files, including source maps, even while the plugin is disabled, so never list secrets.
+
+### `BackendAction`
+
+Frozen dataclass: `name: str`, `handler: Callable[[Mapping[str, Any], ActionContext], Awaitable[Any]]`. Names must be unique and handlers async.
+
+### `ModelTool`
+
+Frozen dataclass: `name: str`, `description: str`, `input_schema: Mapping[str, Any]` (an inline object schema), `handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]`, `group: str = "extensions"`.
+
+### `ActionContext` / `ToolContext`
+
+Frozen dataclasses. `ActionContext`: `principal: ExtensionPrincipal`, `settings: Mapping[str, bool | int | str]`. `ToolContext` extends it with `thread_id: str | None`.
+
+### `SettingsField`
+
+Frozen dataclass describing one non-secret deployment setting.
+
+| Field         | Type                                         | Default |
+| ------------- | -------------------------------------------- | ------- |
+| `key`         | `str`                                        | required |
+| `title`       | `str`                                        | required |
+| `kind`        | `Literal["boolean", "integer", "string"]`    | required |
+| `default`     | `bool \| int \| str`                         | required |
+| `description` | `str`                                        | `""`    |
+| `minimum`     | `int \| None`                                | `None`  |
+| `maximum`     | `int \| None`                                | `None`  |
+| `max_length`  | `int`                                        | `256`   |
+
 ## Version constant
 
 ### `API_VERSION`
 
-The host's contract version as a dotted string, `"0.2.1"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
+The host's contract version as a dotted string, `"0.2.3"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
 
 ## Compatibility rules
 
 - **Additive growth.** Every Protocol method has a default implementation and every optional dataclass field has a default. A contract release that adds a method or field does not break extensions built against an earlier one.
 - **Before 1.0**, a minor release may break extensions and a patch release is additive. **From 1.0 on**, breaking changes bump the major.
 - **The `@extension(api=...)` check.** When an install function carries a marker, the host refuses it unless:
-  - before 1.0: the same major and minor, and the host's version is at least the declared one (a `0.2.1` host accepts `0.2.0` and `0.2.1`, and rejects `0.2.2`, `0.1.x`, and `0.3.x`);
+  - before 1.0: the same major and minor, and the host's version is at least the declared one (a `0.2.3` host accepts `0.2.0` through `0.2.3`, and rejects `0.2.4`, `0.1.x`, and `0.3.x`);
   - from 1.0: the same major, and the host's version is at least the declared one.
 
   A marker that is not a dotted numeric string is refused. An install function without a marker is not checked.
@@ -409,5 +505,7 @@ The host's contract version as a dotted string, `"0.2.1"` for the contract this 
 | 0.1.2 | [#4780](https://github.com/bytedance/deer-flow/pull/4780) | `service` and `routers` registrations with `ExtensionService` and `ExtensionRuntimeDeps`; the packaged-extension manager |
 | 0.2.0 | [#4863](https://github.com/bytedance/deer-flow/pull/4863) | `agent_assembly_observer` and `context_compaction_observer` with `AgentAssemblyDescriptor`, `ToolDescriptor`, `MiddlewareDescriptor`, `CompactionEvent`; message provenance; release policies and canonical hashing; `ExtensionPrincipal`, `resolve_principal`, `require_admin` |
 | 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader` with `RunEvidenceReader`, `RunPage`, `RunEventPage`, `RunStatusView`, `RunEventView`, `InvalidRunEvidenceCursor` |
+| 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | Experimental `registry.plugin()` with `PluginContribution`, `BrowserModule`, `BackendAction`, `ModelTool`, `ActionContext`, `ToolContext`, `SettingsField` |
+| 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727), [#5685](https://github.com/bytedance/deer-flow/pull/5685) | Request-scoped run evidence: `resolve_run_evidence_reader`, `require_run_evidence_reader`, `RUN_EVIDENCE_READER_RESOLVER_KEY` (#5727). Packaged browser resources: `BrowserAssets`, and `PluginContribution.frontend` also accepts it (#5685) |
 
 No release has removed a public name.

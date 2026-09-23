@@ -163,6 +163,30 @@ Gateway 的环境里没有安装这个模块。请通过管理器安装，而不
 
 你的组装观察者抛出了异常。它在 Agent 构建期间同步运行；保持轻量并且不要抛异常。
 
+## 插件与浏览器资源
+
+`registry.plugin(...)` 内部的校验错误会直接抛出，因此会以该扩展的 `install() failed: <消息>` 出现，而该扩展的所有贡献都不会被加载。
+
+| `install() failed:` 之后的消息                                                | 原因与修复                                                                                             |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `[Errno 2] No such file or directory: '<path>'`                               | 清单或它列出的某个文件不在已安装的包里。检查 wheel 是否包含它；对于从索引或 Git 安装的包，要检查构建出的 wheel，而不是你的源码目录 |
+| `Unsupported browser asset manifest; expected schema_version 1`               | 清单必须是恰好包含 `schema_version: 1`、`entry` 和 `files` 的对象                                       |
+| `Duplicate browser manifest key`                                              | `ui_manifest.json` 中某个键出现了两次                                                                   |
+| `Browser manifest must list unique asset paths`                               | `files` 为空、超过 256 项、有重复路径，或包含非法路径                                                   |
+| `Browser manifest entry must be a listed JavaScript module`                   | `entry` 不在 `files` 中，或不以 `.js` / `.mjs` 结尾                                                     |
+| `Invalid browser asset path`                                                  | 路径中含有 `..`、点号段或点文件、空段，或 `A-Z a-z 0-9 _ - .` 以外的字符                                 |
+| `Unsupported browser asset file type`                                         | 列出的某个文件扩展名不在接受的类型中。HTML 永远不会被提供                                               |
+| `Browser assets must not contain symlinks` / `Browser asset root must not be a symlink` | 把链接替换成真实文件                                                                   |
+| `Browser asset size limit exceeded`                                           | 清单超过 64 KiB、单个文件超过 4 MiB，或总计超过 16 MiB                                                  |
+| `Browser code must be nonempty and at most 512 KiB`                           | 内联的 `BrowserModule` 为空或过大；改用 `BrowserAssets`                                                 |
+| `Unsupported browser transport`                                               | `frontend` 既不是 `BrowserModule` 也不是 `BrowserAssets`                                                |
+
+插件的文件在 Gateway 启动时做快照。修改这些文件后，要升级扩展并重启 Gateway。浏览器可能会保留旧 revision 中已缓存的代码，直到页面重新加载。
+
+### 面向用户的路由无法读取运行证据
+
+调用者未认证或缺少 `runs:read` 时，`resolve_run_evidence_reader(request)` 会抛出 `PermissionError("run evidence requires an authenticated user with runs:read")`，应返回 403。宿主不支持请求级运行证据时，`require_run_evidence_reader(request)` 会抛出 `NotImplementedError("request-scoped run evidence is unavailable")`，应返回 503。见[运行证据](/docs/harness/extensions/run-evidence)。
+
 ## 服务与路由
 
 | `Extension <use>:` 之后的日志行                                                              | 原因与修复                                                                                                      |

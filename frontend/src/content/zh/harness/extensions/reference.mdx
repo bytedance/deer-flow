@@ -1,11 +1,13 @@
 ---
 title: 参考
-description: deerflow-extension-api 0.2.1 中的每一个公开名称，按主题分组，附签名、字段和默认值。另含兼容性规则和契约的版本历史。
+description: deerflow-extension-api 0.2.3 中的每一个公开名称，按主题分组，附签名、字段和默认值。另含兼容性规则和契约的版本历史。
 ---
+
+import { Callout } from "nextra/components";
 
 # 参考
 
-本页列出契约版本 **0.2.1** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
+本页列出契约版本 **0.2.3** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -34,7 +36,7 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
 
 ### `ExtensionRegistry`
 
-一个 `runtime_checkable` 的 Protocol：传给 `install()` 的只写接口。每个方法都有一个什么都不注册的默认实现。如果宿主的注册表早于某个方法，就会继承这个默认实现，于是调用成功，但贡献并没有被注册。要靠版本标记和包元数据来防止这种情况。
+一个 `runtime_checkable` 的 Protocol：传给 `install()` 的只写接口。每个方法都有一个什么都不注册的默认实现。如果宿主的注册表早于某个方法，就会继承这个默认实现，于是调用成功，但贡献并没有被注册。只有 `plugin()` 会通过返回 `False` 报告这一点；对其他方法，要靠版本标记和包元数据来防止这种情况。
 
 | 方法                                                       | 返回值  | 注册内容                                                                     |
 | ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------- |
@@ -45,6 +47,7 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
 | `context_compaction_observer(observer: ContextCompactionObserver)` | `None` | 摘要压缩的观察者                                                     |
 | `service(service: ExtensionService)`                       | `None`  | 与 Gateway 同寿的服务                                                        |
 | `routers(routers: Sequence[Any])`                          | `None`  | 在 `install()` 期间构建的 FastAPI 路由器                                      |
+| `plugin(contribution: PluginContribution)`                 | `bool`  | 全栈插件。被接受时返回 `True`，宿主不支持插件时返回 `False`。实验性           |
 
 ## 中间件
 
@@ -309,6 +312,18 @@ Gateway 的实现接受 1 到 2000 的 `limit` 和非负的 `after_seq`，否则
 
 冻结的 dataclass。`RunPage`：`items: tuple[RunStatusView, ...] = ()`、`next_cursor: str | None = None`、`has_more: bool = False`。`RunEventPage`：`items: tuple[RunEventView, ...] = ()`、`next_after_seq: int | None = None`、`has_more: bool = False`。
 
+### `resolve_run_evidence_reader(request: object) -> RunEvidenceReader | None`
+
+返回绑定到贡献路由已认证调用者的读取器。面向用户的路由应使用它，而不是能看到所有用户运行的全局 `ExtensionRuntimeDeps.run_evidence_reader`。`request` 是鸭子类型。宿主不支持请求级运行证据时返回 `None`。调用者未认证或缺少 `runs:read` 权限时，Gateway 抛出 `PermissionError("run evidence requires an authenticated user with runs:read")`；它从不把管理员或内部调用者放宽到全局可见。其他解析器错误会直接传播。
+
+### `require_run_evidence_reader(request: object) -> RunEvidenceReader`
+
+与 `resolve_run_evidence_reader()` 相同，但在不支持时抛出 `NotImplementedError("request-scoped run evidence is unavailable")`，而不是返回 `None`。把 `NotImplementedError` 映射为 HTTP 503，把 `PermissionError` 映射为 403。它从不回退到全局读取器。
+
+### `RUN_EVIDENCE_READER_RESOLVER_KEY`
+
+`"deerflow_extension_run_evidence_reader_resolver"`。宿主安装请求级解析器所用的 `app.state` 属性名，由宿主拥有。
+
 ### `InvalidRunEvidenceCursor`
 
 `ValueError` 的子类，游标格式错误、不受支持或属于另一个作用域时抛出。
@@ -382,18 +397,98 @@ class ReleasePolicyProvider(Protocol):
 
 对 `canonical_json(value)` 以 UTF-8 编码后计算的 SHA-256 十六进制摘要。
 
+## 全栈插件（实验性）
+
+<Callout type="warning">
+  插件契约在 0.2.3 中是实验性的。务必检查 `registry.plugin(...)` 的返回值。见[插件](/docs/harness/extensions/plugins)。
+</Callout>
+
+### `PluginContribution`
+
+冻结的 dataclass。
+
+| 字段          | 类型                           | 默认值  |
+| ------------- | ------------------------------ | ------- |
+| `namespace`   | `str`                          | 必填    |
+| `title`       | `str`                          | 必填    |
+| `description` | `str`                          | `""`    |
+| `enabled`     | `bool`                         | `False` |
+| `fields`      | `tuple[SettingsField, ...]`    | `()`    |
+| `frontend`    | `BrowserModule \| BrowserAssets \| None` | `None`  |
+| `backend`     | `tuple[BackendAction, ...]`    | `()`    |
+| `api_version` | `int`                          | `1`     |
+| `tools`       | `tuple[ModelTool, ...]`        | `()`    |
+
+宿主只接受 `api_version == 1`，并要求 `frontend`、`backend`、`tools` 至少有一项。命名空间必须唯一。
+
+### `BrowserModule`
+
+冻结的 dataclass：`module: str`、`code: str`（一个自包含的 ES 模块，非空且不超过 512 KiB）、`public_fields: tuple[str, ...] = ()`。发现接口把这种传输方式标记为 `inline-v1`。模块需要相对导入、样式表或图片时，请使用 `BrowserAssets`。
+
+### `BrowserAssets`
+
+冻结的 dataclass，声明已安装包内的清单和静态文件。发现接口把这种传输方式标记为 `assets-v1`。
+
+| 字段            | 类型              | 默认值               |
+| --------------- | ----------------- | -------------------- |
+| `module`        | `str`             | 必填                 |
+| `root`          | `str \| Path`     | 必填                 |
+| `manifest`      | `str`             | `"ui_manifest.json"` |
+| `public_fields` | `tuple[str, ...]` | `()`                 |
+
+`root` 通常是 `Path(__file__).parent`。清单相对于 `root`，必须是恰好包含 `schema_version`（整数 `1`）、`entry` 和 `files` 三个键的 JSON 对象：
+
+```json
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": ["static/dist/index.mjs", "static/dist/styles.css"]
+}
+```
+
+`files` 列出 1 到 256 个不重复的路径，`entry` 必须是其中之一，并以 `.js` 或 `.mjs` 结尾。路径只能使用 ASCII 字母、数字、`_`、`-` 和 `.`，以 `/` 分隔，每一段必须以字母、数字、`_` 或 `-` 开头。`root` 本身不能是符号链接，列出的路径也不能经过符号链接。限制：清单 64 KiB，单个文件 4 MiB，总计 16 MiB。接受的文件类型：`.js`、`.mjs`、`.css`、`.json`、`.map`、`.wasm`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.ico`、`.woff`、`.woff2`、`.ttf`、`.otf`。
+
+`registry.plugin()` 会校验清单，并把列出的每个文件读入内存快照。校验错误会从 `registry.plugin()` 抛出，于是 `install()` 失败。快照的 revision 是对清单、路径和文件内容计算的 SHA-256，Gateway 从这个快照在 `GET /api/plugins/{namespace}/assets/{revision}/{path}` 提供文件。任何已认证用户都能下载列出的文件（包括 source map），即使插件处于禁用状态，所以绝不要列出机密。
+
+### `BackendAction`
+
+冻结的 dataclass：`name: str`、`handler: Callable[[Mapping[str, Any], ActionContext], Awaitable[Any]]`。名称必须唯一，handler 必须是异步的。
+
+### `ModelTool`
+
+冻结的 dataclass：`name: str`、`description: str`、`input_schema: Mapping[str, Any]`（内联的对象 schema）、`handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]`、`group: str = "extensions"`。
+
+### `ActionContext` / `ToolContext`
+
+冻结的 dataclass。`ActionContext`：`principal: ExtensionPrincipal`、`settings: Mapping[str, bool | int | str]`。`ToolContext` 在其基础上增加 `thread_id: str | None`。
+
+### `SettingsField`
+
+描述一项非机密部署设置的冻结 dataclass。
+
+| 字段          | 类型                                         | 默认值  |
+| ------------- | -------------------------------------------- | ------- |
+| `key`         | `str`                                        | 必填    |
+| `title`       | `str`                                        | 必填    |
+| `kind`        | `Literal["boolean", "integer", "string"]`    | 必填    |
+| `default`     | `bool \| int \| str`                         | 必填    |
+| `description` | `str`                                        | `""`    |
+| `minimum`     | `int \| None`                                | `None`  |
+| `maximum`     | `int \| None`                                | `None`  |
+| `max_length`  | `int`                                        | `256`   |
+
 ## 版本常量
 
 ### `API_VERSION`
 
-宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.1"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
+宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.3"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
 
 ## 兼容性规则
 
 - **增量演进。** 每个 Protocol 方法都有默认实现，每个可选的 dataclass 字段都有默认值。新增方法或字段的契约发布不会破坏基于更早版本构建的扩展。
 - **1.0 之前**，minor 版本可以有不兼容变更，patch 版本只做增量。**1.0 之后**，不兼容变更会升 major。
 - **`@extension(api=...)` 检查。** install 函数带有标记时，宿主只在以下情况接受它：
-  - 1.0 之前：major 和 minor 相同，且宿主版本不低于声明版本（`0.2.1` 宿主接受 `0.2.0` 和 `0.2.1`，拒绝 `0.2.2`、`0.1.x` 和 `0.3.x`）；
+  - 1.0 之前：major 和 minor 相同，且宿主版本不低于声明版本（`0.2.3` 宿主接受 `0.2.0` 到 `0.2.3`，拒绝 `0.2.4`、`0.1.x` 和 `0.3.x`）；
   - 1.0 之后：major 相同，且宿主版本不低于声明版本。
 
   不是点分数字字符串的标记会被拒绝。没有标记的 install 函数不做检查。
@@ -409,5 +504,7 @@ class ReleasePolicyProvider(Protocol):
 | 0.1.2 | [#4780](https://github.com/bytedance/deer-flow/pull/4780) | `service` 和 `routers` 注册，以及 `ExtensionService` 和 `ExtensionRuntimeDeps`；打包扩展管理器 |
 | 0.2.0 | [#4863](https://github.com/bytedance/deer-flow/pull/4863) | `agent_assembly_observer` 和 `context_compaction_observer`，以及 `AgentAssemblyDescriptor`、`ToolDescriptor`、`MiddlewareDescriptor`、`CompactionEvent`；消息来源标记；发布策略与规范哈希；`ExtensionPrincipal`、`resolve_principal`、`require_admin` |
 | 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader`，以及 `RunEvidenceReader`、`RunPage`、`RunEventPage`、`RunStatusView`、`RunEventView`、`InvalidRunEvidenceCursor` |
+| 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | 实验性的 `registry.plugin()`，以及 `PluginContribution`、`BrowserModule`、`BackendAction`、`ModelTool`、`ActionContext`、`ToolContext`、`SettingsField` |
+| 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727)、[#5685](https://github.com/bytedance/deer-flow/pull/5685) | 请求级运行证据：`resolve_run_evidence_reader`、`require_run_evidence_reader`、`RUN_EVIDENCE_READER_RESOLVER_KEY`（#5727）。打包的浏览器资源：`BrowserAssets`，`PluginContribution.frontend` 也接受它（#5685） |
 
 至今没有任何版本移除过公开名称。

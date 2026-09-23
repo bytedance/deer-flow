@@ -1,6 +1,6 @@
 ---
 title: Run Evidence
-description: The read-only reader that lets a service find runs that changed and read their persisted events. Covers getting the reader, its three methods and their return types, cursor semantics, deletions, redaction, backend differences, and a polling service.
+description: The read-only readers that let a service or a route find runs that changed and read their persisted events. Covers the global service reader and the caller-scoped request reader, the three reader methods and their return types, cursor semantics, deletions, redaction, backend differences, a polling service, and a per-user route.
 ---
 
 import { Callout } from "nextra/components";
@@ -11,9 +11,20 @@ Middleware and lifecycle hooks see a run while it happens. A **run evidence read
 
 The reader is read-only. No method writes to the host.
 
-## Getting the reader
+## Getting a reader
 
-The Gateway hands one reader to every service, as `ExtensionRuntimeDeps.run_evidence_reader`:
+There are two readers, and they differ only in what they can see:
+
+| Reader           | How you get it                                                            | Sees                                           | Use it in                   |
+| ---------------- | ------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------- |
+| Service reader   | `ExtensionRuntimeDeps.run_evidence_reader`, passed to `start()`            | Every user's runs and events                   | Services: exporters, indexes |
+| Request reader   | `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)` | Only the authenticated caller's own runs and events | Contributed routes          |
+
+Both implement the same `RunEvidenceReader` interface described below.
+
+### The service reader
+
+The Gateway hands one reader to every service:
 
 ```python
 class MyService:
@@ -26,11 +37,30 @@ class MyService:
 The Gateway always provides it. `None` means the extension is running on a host that does not implement the reader. Treat that as "unsupported", never as "no runs". Service lifetime and ordering are covered in [Services and Routes](/docs/harness/extensions/services-and-routes); the reader is usable from the moment `start()` is called until `stop()` returns.
 
 <Callout type="warning">
-  The reader has **global** visibility: it sees every user's runs and events.
-  Services have no request principal, so the Gateway binds this reader to no
-  user on purpose. Event content is returned as stored. Never return data from
-  it to the caller of a route.
+  The service reader has **global** visibility: it sees every user's runs and
+  events. Services have no request principal, so the Gateway binds this reader
+  to no user on purpose. Event content is returned as stored. Never return data
+  from it to a caller; route handlers use the request reader instead.
 </Callout>
+
+### The request reader
+
+A route handler asks the host for a reader bound to the current request:
+
+| Helper                                  | Host supports it | Caller lacks access   | Host does not support it |
+| --------------------------------------- | ---------------- | --------------------- | ------------------------ |
+| `resolve_run_evidence_reader(request)`  | Returns a reader | Raises `PermissionError` | Returns `None`        |
+| `require_run_evidence_reader(request)`  | Returns a reader | Raises `PermissionError` | Raises `NotImplementedError` |
+
+Map them at your HTTP boundary: `PermissionError` to `403`, and `None` or `NotImplementedError` to `503`. Any other exception from the host's resolver propagates unchanged. Neither helper ever falls back to the service reader.
+
+The Gateway binds the reader from the request's authentication, never from anything the caller sends:
+
+- The caller must be authenticated and hold the **`runs:read`** permission. By default every signed-in user has it. When `authorization.enabled` is set in `config.yaml`, the configured provider decides. A personal access token must also carry the `runs:read` scope.
+- The reader is scoped to the caller's own user ID: it sees the runs recorded with that user as owner, and nothing else.
+- Admins and internal callers are **not** widened: an admin's request reader sees the admin's own runs, not everyone's.
+
+A cursor from one reader is rejected by a reader with a different scope, so a cursor issued to one user cannot be replayed by another. See [Cursor rules](#cursor-rules).
 
 ## The reader interface
 
@@ -231,10 +261,78 @@ Points worth copying:
 - `InvalidRunEvidenceCursor` resets the cursor to `None` instead of stopping the service.
 - An exception in one sync is logged, and the next poll resumes from the last committed cursor.
 
+## Example: the caller's own runs
+
+This route returns the signed-in user's recently changed runs, one page at a time. It uses the request reader, so the host guarantees each caller sees only their own runs. It declares `api="0.2.3"` because the request-reader helpers first shipped in that contract version.
+
+```python filename="deerflow_extension_myruns/__init__.py"
+"""List the caller's own recently changed runs."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from deerflow_extension_api import (
+    ExtensionRegistry,
+    InvalidRunEvidenceCursor,
+    RunEvidenceReader,
+    extension,
+    require_run_evidence_reader,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+
+def caller_reader(request: Request) -> RunEvidenceReader:
+    try:
+        return require_run_evidence_reader(request)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=503, detail="run evidence is not available on this host") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def build_router() -> APIRouter:
+    router = APIRouter(prefix="/api/ext-myruns", tags=["ext-myruns"])
+
+    @router.get("/runs")
+    async def my_runs(
+        cursor: str | None = None,
+        limit: int = 50,
+        reader: RunEvidenceReader = Depends(caller_reader),
+    ) -> dict[str, Any]:
+        try:
+            page = await reader.list_changed_runs(cursor=cursor, limit=min(max(limit, 1), 200))
+        except InvalidRunEvidenceCursor as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "runs": [{"thread_id": run.thread_id, "run_id": run.run_id, "status": run.status} for run in page.items],
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
+
+    return router
+
+
+@extension(api="0.2.3", name="myruns")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.routers((build_router(),))
+```
+
+| Request                                                    | Response                                                                 |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------ |
+| No session                                                 | `401` from the host, before the handler runs                              |
+| Signed in, without `runs:read`                             | `403 {"detail": "run evidence requires an authenticated user with runs:read"}` |
+| Signed in                                                  | `200` with only the caller's runs, plus `next_cursor` and `has_more`      |
+| `?cursor=` not issued to this caller                       | `400 {"detail": "invalid run evidence cursor"}`, or `run evidence cursor scope does not match this reader` for another user's cursor |
+| On a host without request-scoped evidence                  | `503 {"detail": "run evidence is not available on this host"}`          |
+
+The client stores `next_cursor` and passes it back as `?cursor=` to continue. The cursor is bound to the caller, so leaking it to another user gains them nothing.
+
 ## Common pitfalls
 
 - **Treating an empty page as unsupported.** Empty means caught up. Unsupported is `run_evidence_reader is None`.
 - **Advancing the cursor before the work is saved.** A crash then skips a page permanently. Save after.
 - **Expecting one entry per run.** A run reappears each time it changes. Key your output by `run_id`.
 - **Waiting for a deletion event.** There is none. Reconcile with `get_run_status`.
-- **Serving reader data to users.** The reader sees every user. Never return its data from a route.
+- **Serving the service reader to users.** It sees every user. Route handlers use `require_run_evidence_reader(request)`, which the host scopes to the caller.

@@ -19,6 +19,9 @@ const meta: MetaRecord = {
   "run-evidence": {
     title: "运行证据",
   },
+  plugins: {
+    title: "全栈插件",
+  },
   operations: {
     title: "运维扩展",
   },

@@ -51,6 +51,7 @@ The two middleware paths are easy to confuse. `extensions.middlewares` inserts a
 | `registry.context_compaction_observer(obs)` | A `CompactionEvent` each time summarization removes messages from context. See [Lifecycle and Observers](/docs/harness/extensions/observers) |
 | `registry.service(service)`             | An object started after the Gateway's persistence layer is ready and stopped at shutdown. May read runs through the [Run Evidence](/docs/harness/extensions/run-evidence) reader. See [Services and Routes](/docs/harness/extensions/services-and-routes) |
 | `registry.routers(routers)`             | FastAPI routers mounted after every host route, behind Gateway authentication. See [Services and Routes](/docs/harness/extensions/services-and-routes) |
+| `registry.plugin(contribution)`         | Experimental. Browser modules, authenticated backend actions, and model tools. Returns `False` on a host without plugin support. See [Full-Stack Plugins](/docs/harness/extensions/plugins) |
 
 A single extension may register any combination. The [bundled example](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example) registers a middleware, a task-lifecycle contributor, a system-model observer, a service, and a router.
 
@@ -102,7 +103,7 @@ The extension manager asks for confirmation before installing, rejects source UR
 
 ## Versioning
 
-The contract package is versioned separately from DeerFlow, and a host exposes its version as `deerflow_extension_api.API_VERSION`. This manual covers `deerflow-extension-api` **0.2.1**.
+The contract package is versioned separately from DeerFlow, and a host exposes its version as `deerflow_extension_api.API_VERSION`. This manual covers `deerflow-extension-api` **0.2.3**.
 
 - Before 1.0, a minor release may break extensions and a patch release only adds. From 1.0 on, breaking changes bump the major.
 - Every Protocol method has a default implementation and every optional dataclass field has a default, so additive releases do not break already-released extensions.
@@ -113,7 +114,7 @@ Declare the matching range in your package metadata as well, for example `deerfl
 ## Terminology
 
 - **Host**: the DeerFlow Gateway process that loads extensions.
-- **Contribution**: one object registered through the registry: a contributor, observer, service, or router.
+- **Contribution**: one object registered through the registry: a contributor, observer, service, router, or plugin.
 - **Contributor**: an object the host calls back to obtain contributions, such as a `MiddlewareContributor` that returns middleware for each agent it builds.
 - **Scope**: the lifetime a piece of state belongs to. The **app scope** lives as long as the Gateway; a **task scope** lives for one lead run or one subagent execution.
 - **`ExtensionData`**: the typed store attached to a scope, keyed by Python type so two extensions cannot collide.

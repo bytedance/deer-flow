@@ -163,6 +163,30 @@ A system-model or compaction observation arrived while no Gateway notification l
 
 Your assembly observer raised. It runs synchronously during agent construction; keep it cheap and non-raising.
 
+## Plugins and browser assets
+
+A validation error inside `registry.plugin(...)` raises, so it surfaces as `install() failed: <message>` for that extension, which then loads without any of its contributions.
+
+| Message after `install() failed:`                                             | Cause and fix                                                                                          |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `[Errno 2] No such file or directory: '<path>'`                               | The manifest, or a file it lists, is not in the installed package. Check that the wheel includes it; for an index or Git install, look inside the built wheel, not your source tree |
+| `Unsupported browser asset manifest; expected schema_version 1`               | The manifest must be an object with exactly `schema_version: 1`, `entry`, and `files`                  |
+| `Duplicate browser manifest key`                                              | A key appears twice in `ui_manifest.json`                                                              |
+| `Browser manifest must list unique asset paths`                               | `files` is empty, has more than 256 entries, repeats a path, or contains an invalid path              |
+| `Browser manifest entry must be a listed JavaScript module`                   | `entry` is missing from `files` or does not end in `.js` or `.mjs`                                     |
+| `Invalid browser asset path`                                                  | A path contains `..`, a dot segment or dotfile, an empty segment, or a character outside `A-Z a-z 0-9 _ - .` |
+| `Unsupported browser asset file type`                                         | A listed file's extension is not an accepted type. HTML is never served                                 |
+| `Browser assets must not contain symlinks` / `Browser asset root must not be a symlink` | Replace links with real files                                                          |
+| `Browser asset size limit exceeded`                                           | Over 64 KiB for the manifest, 4 MiB for one file, or 16 MiB in total                                   |
+| `Browser code must be nonempty and at most 512 KiB`                           | An inline `BrowserModule` is empty or too large; switch to `BrowserAssets`                             |
+| `Unsupported browser transport`                                               | `frontend` is neither a `BrowserModule` nor a `BrowserAssets`                                          |
+
+The plugin's files are snapshotted when the Gateway starts. After changing them, upgrade the extension and restart the Gateway. Browsers may keep already-cached code from the old revision until the page is reloaded.
+
+### A user-facing route cannot read run evidence
+
+`resolve_run_evidence_reader(request)` raises `PermissionError("run evidence requires an authenticated user with runs:read")` when the caller is not authenticated or lacks `runs:read`; return 403. `require_run_evidence_reader(request)` raises `NotImplementedError("request-scoped run evidence is unavailable")` on a host without request-scoped evidence; return 503. See [Run Evidence](/docs/harness/extensions/run-evidence).
+
 ## Services and routes
 
 | Log line after `Extension <use>:`                                                          | Cause and fix                                                                                                  |

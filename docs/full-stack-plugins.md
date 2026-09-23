@@ -79,7 +79,7 @@ allow credentialed CORS from the frontend, as for other host API calls.
 A page surface declares `id`, `slot: "page"`, `title`, `mount(root, context)` and
 optional `navigation: { label, labelZh?, icon? }`. The host generates the URL
 `/workspace/extensions/{namespace}/{id}` and mounts only that registered page.
-`mount` returns a synchronous `dispose()` callback. The context includes locale,
+`mount` runs synchronously and returns an object `{ dispose }`, whose `dispose()` is called on unmount. The context includes locale,
 public settings, an abort signal and a namespace-bound `callBackend` helper.
 The optional `openConversation(threadId)` host helper reads current conversation
 metadata through the authenticated API and uses the host's normal/custom-agent

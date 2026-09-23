@@ -156,6 +156,18 @@ extension table_prefix 'runs' would hide host-owned table(s) ['runs'] from alemb
 
 因为快照是一份拷贝，对工作目录的修改只能通过 `make extension-upgrade SOURCE=<同一路径>` 再重启才能到达 DeerFlow。
 
+### 带浏览器资源的插件
+
+声明了 `BrowserAssets` 的插件，会在其 Python 包内附带一个 `ui_manifest.json` 以及它列出的静态文件。[书签示例](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks)把它们放在 `deerflow_extension_bookmarks/static/dist/` 下。对运维人员来说，这意味着：
+
+- **文件必须包含在安装内容里。** 本地目录按原样做快照，所以请在 `install` 或 `upgrade` 之前构建好 JavaScript 产物：管理器运行的是 Python 构建后端，不会执行 JavaScript 构建。对于从索引或 Git 安装的来源，这些文件必须在构建出的 wheel 里。
+- **快照规则同样适用。** 包含符号链接或疑似机密文件的本地目录会先被管理器拒绝，Gateway 根本读不到清单。
+- **Gateway 只读取一次这些文件**：在启动时 `install()` 注册插件的时候读取，之后从内存中以基于内容的 revision 提供。修改资源和修改代码一样，需要 `upgrade` 并重启。浏览器可能会保留旧 revision 中已缓存的代码，直到页面重新加载。
+- **列出的文件任何已登录用户都能读取**，包括 source map，即使插件处于禁用状态。不要在清单中发布私有源码或机密。
+- Gateway 和前端请从同一个版本部署。较旧的前端不认识 `assets-v1` 传输方式。
+
+清单错误见[故障排查](/docs/harness/extensions/troubleshooting)。
+
 ## 升级
 
 `upgrade` 替换一个已安装扩展的来源，并保留它的记录：`config`、`required`、`enabled` 都保持不变。
