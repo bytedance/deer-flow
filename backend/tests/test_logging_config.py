@@ -843,6 +843,32 @@ def test_url_redaction_filter_collapses_credentials_in_a_header_parse_dump() -> 
         assert "bad line" in formatted
 
 
+def test_url_redaction_filter_collapses_folded_continuations_and_proxy_auth_info() -> None:
+    """A collapsed field's value can continue on the following line, and
+    ``Proxy-Authentication-Info`` is the proxy-side twin of a field already on
+    the list.
+
+    RFC 5322 obs-fold marks a continuation with a leading SP/HTAB, and this
+    warning dumps malformed upstream bytes, so folded lines cannot be assumed
+    absent: replacing only the matched segment would log ``Set-Cookie:
+    <redacted>`` followed by the still-plain ``CookieSecret; Path=/``. A
+    non-sensitive field keeps its own continuation, which is what bounds the
+    rewrite to the fields this pass actually collapses.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b'bad line\r\nSet-Cookie: session=\r\n CookieSecret; Path=/\r\nProxy-Authentication-Info: nextnonce="ProxySecret"\r\nContent-Type: application/json\r\n\tcharset=utf-8\r\n\r\n'
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("CookieSecret", "ProxySecret", "session=", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "Proxy-Authentication-Info: <redacted>" in formatted
+    # The continuation is part of the collapsed field, so it goes too.
+    assert "Set-Cookie: <redacted>\\r\\n<redacted>" in formatted
+    assert "Content-Type: application/json" in formatted
+    assert "charset=utf-8" in formatted
+
+
 def test_url_redaction_filter_collapses_dump_credentials_in_json_logging_too() -> None:
     """JSON output must not reopen the leak the text path closes.
 
