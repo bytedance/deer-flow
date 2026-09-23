@@ -205,6 +205,28 @@ def test_to_langgraph_stream_modes_maps_alias_and_deduplicates(raw, expected):
     assert to_langgraph_stream_modes(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ["values"]),
+        ("messages-tuple", ["messages"]),
+        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages"]),
+        (["updates", "custom"], ["updates", "custom"]),
+        (["messages-tuple", "updates", "custom"], ["messages", "updates", "custom"]),
+    ],
+)
+def test_caller_langgraph_stream_modes_excludes_always_on_internal_channels(raw, expected):
+    """Stream *shape* (fast path, file-tool batching) keys off the caller's modes.
+
+    ``to_langgraph_stream_modes`` appends the internal ``custom`` channel to
+    every request, so only this mapping still distinguishes a single-mode
+    caller from a multi-mode one (#4150).
+    """
+    from deerflow.runtime.stream_modes import caller_langgraph_stream_modes
+
+    assert caller_langgraph_stream_modes(raw) == expected
+
+
 def test_normalize_input_none():
     from app.gateway.services import normalize_input
 

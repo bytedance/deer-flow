@@ -16,6 +16,13 @@ type RunStreamMode = Literal[
 
 SUPPORTED_RUN_STREAM_MODES: frozenset[str] = frozenset(get_args(RunStreamMode.__value__))
 
+#: Channels subscribed for every run regardless of what the caller asked for.
+#: Middlewares and tools report progress through
+#: ``langgraph.config.get_stream_writer()``; subscribing a channel nobody
+#: writes to costs nothing. Because callers cannot opt out of them, they must
+#: never be counted when deciding how the caller's *own* modes are streamed.
+INTERNAL_LANGGRAPH_STREAM_MODES: tuple[str, ...] = ("custom",)
+
 
 class UnsupportedStreamModeError(ValueError):
     """Raised when a caller requests a stream mode DeerFlow cannot honor."""
@@ -40,6 +47,11 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
     return modes
 
 
+def _map_caller_modes(modes: list[str]) -> list[str]:
+    """Map normalized public modes to their ``graph.astream`` names, deduplicated."""
+    return list(dict.fromkeys("messages" if mode == "messages-tuple" else mode for mode in modes))
+
+
 def to_langgraph_stream_modes(raw: list[str] | str | None) -> list[str]:
     """Map public run modes to ``graph.astream`` modes without silent fallback.
 
@@ -51,6 +63,17 @@ def to_langgraph_stream_modes(raw: list[str] | str | None) -> list[str]:
     writer when get_stream_writer() is called.
     """
     modes = normalize_stream_modes(raw)
-    mapped = ["messages" if mode == "messages-tuple" else mode for mode in modes]
-    mapped.append("custom")
-    return list(dict.fromkeys(mapped))
+    return list(dict.fromkeys((*_map_caller_modes(modes), *INTERNAL_LANGGRAPH_STREAM_MODES)))
+
+
+def caller_langgraph_stream_modes(raw: list[str] | str | None) -> list[str]:
+    """``graph.astream`` modes the caller itself asked for.
+
+    :func:`to_langgraph_stream_modes` always appends the internal channels, so
+    its result can no longer tell a single-mode request from a multi-mode one.
+    Stream-*shape* decisions — the raw-chunk fast path and the file-tool chunk
+    batcher — key off this list instead, which keeps a lone ``messages-tuple``
+    caller on the per-chunk contract (#4354, backend/AGENTS.md) even though
+    ``custom`` now rides along with it (#4150).
+    """
+    return _map_caller_modes(normalize_stream_modes(raw))

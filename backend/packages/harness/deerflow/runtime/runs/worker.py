@@ -88,7 +88,7 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
+from deerflow.runtime.stream_modes import caller_langgraph_stream_modes, normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
@@ -938,6 +938,10 @@ async def run_agent(
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
+        # ``lg_modes`` carries the internal channels we subscribe for every run
+        # (``custom``), so it is not a measure of what the caller asked for.
+        # Stream *shape* stays keyed to the caller's own modes.
+        caller_lg_modes = caller_langgraph_stream_modes(normalized_stream_modes)
         # Initialize the run-scoped journal before any fallible or cancellable
         # preflight work. Every terminal run with an event store must reach the
         # shared finally block with a journal available for its run.delivery
@@ -1264,13 +1268,22 @@ async def run_agent(
         # re-enter the stream and would otherwise discard the resolved seqs.
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
+        # File-tool argument batching targets multi-mode incremental consumers:
+        # a caller that asked for one mode only, with no subgraph frames, keeps
+        # the per-chunk contract (backend/AGENTS.md) even though the internal
+        # ``custom`` channel puts it on the tuple path like everyone else.
+        batches_file_tool_chunks = "messages-tuple" in requested_modes and (len(caller_lg_modes) > 1 or stream_subgraphs)
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if batches_file_tool_chunks else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
-                        # Single mode, no subgraphs: astream yields raw chunks
+                        # Single mode, no subgraphs: astream yields raw chunks.
+                        # Every caller-visible mode now rides with the internal
+                        # ``custom`` channel, so this branch only serves a caller
+                        # that asked for ``custom`` itself.
                         single_mode = lg_modes[0]
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
