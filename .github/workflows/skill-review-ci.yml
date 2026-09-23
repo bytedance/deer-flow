@@ -2,7 +2,7 @@ name: Skill Review CI
 
 on:
   push:
-    branches: ["main", "2.0.x-dev"]
+    branches: ["main", "*-dev"]
     paths:
       - "skills/public/**"
       - "backend/packages/harness/deerflow/skills/review/**"
