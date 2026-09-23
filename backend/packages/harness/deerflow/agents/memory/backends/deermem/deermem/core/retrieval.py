@@ -582,7 +582,7 @@ class FTS5RetrievalAdapter:
             "fact_id": self._document_id(fact_id, scope),
             "content": content,
             "category": str(payload.get("category") or "context"),
-            "confidence": float(payload.get("confidence") or 0.5),
+            "confidence": float(payload.get("confidence") if payload.get("confidence") is not None else 0.5),
             "created_at": payload.get("createdAt") if isinstance(payload.get("createdAt"), str) else None,
             "scope_user": scope_user,
             "scope_agent": scope_agent,

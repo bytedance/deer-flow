@@ -117,7 +117,20 @@ class TestDeerMemSearch:
         # between the 0.9 and 0.2 facts.
         assert results[0]["content"] == "Fact high"
         assert {r["content"] for r in results} == {"Fact high", "Fact with null confidence", "Fact low"}
+    def test_zero_confidence_is_preserved_not_defaulted(self):
+        """A fact stored with confidence 0.0 must score as 0.0, not the 0.5 default (issue #5585)."""
+        facts = [
+            _make_fact("Zero confidence fact", confidence=0.0),
+            _make_fact("Mid confidence fact", confidence=0.5),
+        ]
+        mgr = _deer_mem_with_facts(facts)
 
+        results = mgr.search("confidence")
+        zero = [r for r in results if "Zero" in r["content"]]
+        mid = [r for r in results if "Mid" in r["content"]]
+        assert zero, "zero-confidence fact should be returned"
+        assert zero[0]["confidence"] == 0.0
+        assert mid[0]["confidence"] == 0.5
     def test_non_positive_top_k_returns_empty(self):
         """Should return empty for top_k <= 0 (no negative-slice expansion)."""
         mgr = _deer_mem_with_facts([_make_fact(f"Fact {i}", confidence=0.5) for i in range(3)])
