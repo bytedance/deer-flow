@@ -4,7 +4,35 @@ import subprocess
 
 import pytest
 
-from deerflow.utils.readability import ReadabilityExtractor
+from deerflow.utils.readability import Article, ReadabilityExtractor
+
+
+def test_article_to_message_handles_images_without_source_url():
+    article = Article("Image", "<img src='https://example.com/photo.png'>")
+
+    assert article.to_message() == [
+        {"type": "text", "text": "# Image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+    ]
+
+
+def test_extract_article_preserves_source_url_for_relative_images(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.utils.readability.simple_json_from_html_string",
+        lambda html, use_readability: {
+            "title": "Image",
+            "content": "<p>Body</p><img src='photo.png'>",
+        },
+    )
+
+    article = ReadabilityExtractor().extract_article(
+        "<html><body>test</body></html>", url="https://example.com/articles/one"
+    )
+
+    assert article.to_message()[-1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://example.com/articles/photo.png"},
+    }
 
 
 def test_extract_article_falls_back_when_readability_js_fails(monkeypatch):
