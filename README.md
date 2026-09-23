@@ -547,6 +547,11 @@ warning if the persisted-store contract no longer matches its expectations.
 The documented command uses LangGraph's file-based custom-app loader, which is
 also covered directly by DeerFlow's regression tests.
 
+Standalone runs using `if_not_exists="create"` retain config and run metadata
+on the newly created thread, including searchable tags; run metadata takes
+precedence for duplicate keys. Thread ownership and MCP incarnation remain
+server-owned, and later runs do not replace the thread's creation metadata.
+
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity
 published by that runtime and uses it for custom-agent configuration/SOUL, user
@@ -586,6 +591,12 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Sandbox references in conversation state are server-owned. External run and
+thread-state APIs reject caller-supplied `sandbox` values; when restoring a
+checkpoint, the runtime resolves the reference against the authenticated user
+and thread before a tool can reuse it. A missing runtime thread ID raises an
+error even when the referenced sandbox is cached.
+
 When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
 
 For Docker development, service startup follows `config.yaml` sandbox mode. In Local/Docker modes, `provisioner` is not started.
@@ -613,6 +624,7 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
+Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
 
@@ -1685,6 +1697,10 @@ Each task gets its own execution environment with a full filesystem view — ski
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
+
+AIO directory listings discard missing shell sessions so the next request can recover.
+After a dropped connection, directory listings and persistent shell commands report an
+unknown outcome without replaying the operation; later calls use a fresh session.
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview.
