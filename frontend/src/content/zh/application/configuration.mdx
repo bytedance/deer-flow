@@ -152,7 +152,7 @@ models:
       history: clear                # preserve | clear
       effort:
         values: [low, high, max]    # provider 自己的取值
-        default: max                # 调用方未指定时使用
+        default: high               # 调用方未指定时使用
         aliases:                    # DeerFlow 通用取值 -> provider 取值
           minimal: low
           medium: high
@@ -161,7 +161,8 @@ models:
 ```
 
 - `thinking: required` 会在后台调用请求关闭 thinking 时仍保持开启；设置 `on_disable_request: reject` 则改为让这类调用直接失败。
-- 不在 `values` 中的 effort 取值会先经 `aliases` 映射，否则回退到 `default`，绝不会原样发给 provider。
+- 不在 `values` 中的 effort 取值会先经 `aliases` 映射，否则回退到 `default`，绝不会原样发给 provider。出于同样的原因，写在 profile 或 `when_thinking_enabled` / `when_thinking_disabled` 模板里的 effort 取值也会在启动时对照 `values` 校验。
+- `default` 同样作用于从不指定 effort 的调用方——总结、标题生成和子代理——所以请选一个你愿意为每次后台调用付费的档位（上例用 `high`，`max` 仍可在输入框里手动选择）。
 - `dialect: auto`（默认值）会根据 `when_thinking_enabled` 推断开关 payload，因此已有配置可以直接加上 `reasoning` 而无需改写模板。未声明 `reasoning` 块的配置行为完全不变。
 - 自相矛盾的配置（例如 `required` 同时配置了 `when_thinking_disabled`）会在启动时报错。
 

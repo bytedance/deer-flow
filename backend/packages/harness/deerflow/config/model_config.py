@@ -14,6 +14,22 @@ class RequestAdmissionConfig(BaseModel):
 
 
 _EFFORT_TOKEN_PATTERN = r"^[A-Za-z0-9_.-]{1,32}$"
+# Dotted identifiers only: the factory writes the effort value at this path by
+# creating nested dicts, so it must never be able to address arbitrary keys.
+_EFFORT_PATH_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
+# Single-segment paths that would replace a whole dict-valued provider setting
+# with the effort string (``path: extra_body`` would clobber ``extra_body``).
+_EFFORT_PATH_RESERVED_ROOTS = frozenset({"extra_body", "thinking", "model_kwargs", "default_headers", "default_query"})
+
+
+def _lookup_dotted(mapping: object, path: str) -> object | None:
+    """Return the value at a dotted *path* inside nested dicts, or ``None``."""
+    cursor = mapping
+    for part in path.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            return None
+        cursor = cursor[part]
+    return cursor
 
 
 class ReasoningEffortCapabilities(BaseModel):
@@ -31,7 +47,14 @@ class ReasoningEffortCapabilities(BaseModel):
     values: list[str] = Field(..., min_length=1, description="Accepted effort values, in display order")
     default: str | None = Field(default=None, description="Effort used when the caller does not choose one")
     aliases: dict[str, str] = Field(default_factory=dict, description="Generic DeerFlow value -> provider value")
-    path: str = Field(default="reasoning_effort", min_length=1, description="Dotted model-settings path the value is written to")
+    path: str = Field(default="reasoning_effort", pattern=_EFFORT_PATH_PATTERN, description="Dotted model-settings path the value is written to")
+
+    @field_validator("path")
+    @classmethod
+    def _path_must_not_shadow_a_container(cls, path: str) -> str:
+        if path in _EFFORT_PATH_RESERVED_ROOTS:
+            raise ValueError(f"effort path {path!r} would replace the whole {path!r} mapping; address a key inside it instead (e.g. {path}.effort)")
+        return path
 
     @field_validator("values")
     @classmethod
@@ -175,12 +198,27 @@ class ModelConfig(BaseModel):
         if "supports_reasoning_effort" in self.model_fields_set and self.supports_reasoning_effort != derived_effort:
             raise ValueError(f"supports_reasoning_effort={self.supports_reasoning_effort} contradicts the reasoning.effort contract; drop the legacy flag or fix the contract")
 
-        profile_effort = (self.model_extra or {}).get("reasoning_effort")
-        if profile_effort is not None:
+        # Operator-supplied effort values — the profile itself and the thinking
+        # templates — are forwarded when the caller chooses nothing, so they
+        # must satisfy the contract too; otherwise an out-of-vocabulary value
+        # could still reach the provider despite the contract.
+        effort_path = contract.effort.path if contract.effort is not None else "reasoning_effort"
+        sources: list[tuple[str, object]] = [
+            ("profile-level", self.model_extra or {}),
+            ("when_thinking_enabled", self.when_thinking_enabled),
+            ("when_thinking_disabled", self.when_thinking_disabled),
+            ("thinking", {"thinking": self.thinking} if self.thinking is not None else None),
+        ]
+        for source, mapping in sources:
+            if mapping is None:
+                continue
+            value = _lookup_dotted(mapping, effort_path)
+            if value is None:
+                continue
             if contract.effort is None:
-                raise ValueError("profile-level reasoning_effort is set, but the reasoning contract declares no effort control")
-            if profile_effort not in contract.effort.values:
-                raise ValueError(f"profile-level reasoning_effort {profile_effort!r} is not one of the contract's accepted values {contract.effort.values}")
+                raise ValueError(f"{source} {effort_path} is set, but the reasoning contract declares no effort control")
+            if value not in contract.effort.values:
+                raise ValueError(f"{source} {effort_path} {value!r} is not one of the contract's accepted values {contract.effort.values}")
 
         # Deprecation-window projection: readers that still consult the booleans
         # (wizard, older clients, the /api/models legacy fields) stay correct.

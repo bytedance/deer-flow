@@ -28,7 +28,11 @@ vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
 When the block is present the booleans are derived from it and contradictory
 profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
 + an enable template, a `default` outside `values`, an explicit boolean that
-disagrees, a profile `reasoning_effort` the contract rejects).
+disagrees, an effort value at `effort.path` in the profile or in the
+`when_thinking_*` / `thinking` templates that the contract rejects, a `path` that
+is not a dotted identifier or would overwrite a whole mapping). `default` also
+governs callers that never choose an effort (summarization, title, subagents), so
+shipped profiles keep it below the provider's deepest level.
 
 `resolve_reasoning_contract` turns any profile (legacy or declared) into an
 immutable `ReasoningContract`, `resolve_reasoning_request` applies a caller's

@@ -232,24 +232,29 @@ models:
   #       values: [low, medium, high]  # provider vocabulary, in display order
   #       default: medium              # applied when the caller does not choose
   #       aliases: {minimal: low}      # DeerFlow generic value -> provider value
-  #       path: reasoning_effort       # dotted model-settings path (default)
+  #       path: reasoning_effort       # dotted identifier path (default)
   #
   # `required` thinking never receives a disable payload, unknown effort values
   # never reach the provider (they map through `aliases` or fall back to
   # `default`), and `dialect` lets the factory synthesize the on/off payload
   # when `when_thinking_enabled` / `when_thinking_disabled` are absent
-  # (`auto` infers it from `when_thinking_enabled`). Contradictory profiles
-  # (e.g. `required` plus `when_thinking_disabled`, or a `default` outside
-  # `values`) fail at startup. Profiles without `reasoning:` behave exactly as
-  # before.
+  # (`auto` infers it from `when_thinking_enabled`). `default` also applies to
+  # callers that never choose an effort — summarization, title generation and
+  # subagents — so pick a level you are happy to pay for on every background
+  # call. Contradictory profiles fail at startup: `required` plus
+  # `when_thinking_disabled`, a `default` outside `values`, an effort value in
+  # the profile or in `when_thinking_*` templates that the contract rejects, or
+  # a `path` that would overwrite a whole mapping such as `extra_body`.
+  # Profiles without `reasoning:` behave exactly as before.
 
   # Example: Z.AI GLM-5.3-Flash (required thinking, restricted effort)
   #
   # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
   # The contract keeps thinking on for every foreground and background call,
-  # maps DeerFlow's generic minimal/medium presets onto low/high, defaults to
-  # the provider-recommended `max`, and serializes clear_thinking=true so the
-  # model does not require exact reasoning replay after summarization.
+  # maps DeerFlow's generic minimal/medium presets onto low/high, and
+  # serializes clear_thinking=true so the model does not require exact
+  # reasoning replay after summarization. `default: high` keeps background
+  # calls off the provider's deepest budget; `max` stays selectable in the UI.
   #
   # - name: glm-5.3-flash
   #   display_name: GLM-5.3-Flash
@@ -271,7 +276,7 @@ models:
   #     history: clear
   #     effort:
   #       values: [low, high, max]
-  #       default: max
+  #       default: high
   #       aliases:
   #         minimal: low
   #         medium: high

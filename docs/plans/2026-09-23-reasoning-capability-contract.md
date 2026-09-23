@@ -50,11 +50,11 @@ models:
       history: clear                # preserve | clear | omitted (provider default)
       effort:
         values: [low, high, max]    # provider vocabulary, in display order
-        default: max                # used when the caller does not choose
+        default: high               # used when the caller does not choose (also background calls)
         aliases:                    # DeerFlow generic value -> provider value
           minimal: low
           medium: high
-        path: reasoning_effort      # where the value is serialized (dotted path)
+        path: reasoning_effort      # where the value is serialized (dotted identifier path)
 ```
 
 Every key under `reasoning` except `thinking` is optional. `effort` omitted
@@ -133,12 +133,18 @@ is present:
 
 - `effort.default` not in `effort.values`; an alias key that is already a
   value; an alias target outside `values`; empty or duplicate values.
+- `effort.path` that is not a dotted identifier, or a single segment that would
+  replace a whole mapping (`extra_body`, `thinking`, `model_kwargs`,
+  `default_headers`, `default_query`).
 - `thinking: required` together with `when_thinking_disabled`.
 - `thinking: unsupported` together with `when_thinking_enabled` or `thinking`.
 - `on_disable_request: reject` on a model whose thinking is not `required`.
 - A legacy boolean explicitly set to a value that contradicts the contract.
-- A profile-level `reasoning_effort` that the effort contract does not accept,
-  or one on a model that declares no effort control.
+- An effort value at `effort.path` in the profile, in `when_thinking_enabled`
+  / `when_thinking_disabled`, or in the `thinking` shortcut that the effort
+  contract does not accept, or any such value on a model that declares no
+  effort control. These operator-supplied values are forwarded when the caller
+  chooses nothing, so they must satisfy the contract too.
 
 When the contract is present the legacy booleans are projected from it, so
 `ModelConfig.supports_thinking` and `supports_reasoning_effort` stay correct
@@ -153,7 +159,7 @@ legacy booleans and add a `reasoning` object for every model:
 {
   "reasoning": {
     "thinking": "required",
-    "effort": {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}},
+    "effort": {"values": ["low", "high", "max"], "default": "high", "aliases": {"minimal": "low", "medium": "high"}},
     "history": "clear",
     "source": "contract"
   }
@@ -193,7 +199,10 @@ default such as `max` can be persisted.
 - Per-agent `reasoning_effort` keeps its `low/medium/high` schema; the factory
   maps it through the model's aliases at run time.
 - The wizard's Z.AI profile and `config.example.yaml` migrate GLM-5.3-Flash to
-  the contract, restoring its `low/high/max` effort control.
+  the contract, restoring its `low/high/max` effort control. Its `default` is
+  `high` rather than the provider-recommended `max` because the default also
+  governs summarization, title generation, and subagent calls, which never
+  choose an effort.
 
 ## Validation contract
 

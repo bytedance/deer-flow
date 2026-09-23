@@ -1964,6 +1964,21 @@ def test_contract_dialect_vllm_synthesizes_chat_template_kwargs(monkeypatch, thi
     assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": expected}}
 
 
+def test_contract_dialect_vllm_enable_mirrors_the_declared_template_keys(monkeypatch):
+    """A template that declares the older ``thinking`` switch must not also grow
+    ``enable_thinking`` on the enable path — the legacy path never produced that shape."""
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": True}}
+
+
 def test_contract_dialect_vllm_disable_mirrors_the_declared_template_keys(monkeypatch):
     model = _contract_model(
         reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},

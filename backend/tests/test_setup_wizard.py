@@ -75,7 +75,10 @@ class TestProviders:
             "history": "clear",
             "effort": {
                 "values": ["low", "high", "max"],
-                "default": "max",
+                # Background callers (summarization, title, subagents) never
+                # choose an effort, so the default must not be the provider's
+                # deepest and most expensive level; `max` stays selectable.
+                "default": "high",
                 "aliases": {"minimal": "low", "medium": "high"},
             },
         }
@@ -124,6 +127,8 @@ class TestProviders:
         resolved = resolve_reasoning_request(contract, thinking_enabled=False, reasoning_effort="minimal")
         assert resolved.thinking_enabled is True
         assert resolved.reasoning_effort == "low"
+        background = resolve_reasoning_request(contract, thinking_enabled=False, reasoning_effort=None)
+        assert background.reasoning_effort == "high"
 
     def test_minimax_vision_is_per_model(self):
         """M3 supports vision; M2.7 variants are text-only.

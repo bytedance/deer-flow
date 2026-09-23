@@ -566,7 +566,7 @@ GET /api/models
       "supports_reasoning_effort": true,
       "reasoning": {
         "thinking": "required",
-        "effort": {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}},
+        "effort": {"values": ["low", "high", "max"], "default": "high", "aliases": {"minimal": "low", "medium": "high"}},
         "history": "clear",
         "source": "contract"
       }

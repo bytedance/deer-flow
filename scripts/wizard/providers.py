@@ -199,13 +199,17 @@ LLM_PROVIDERS: list[LLMProvider] = [
             # call, maps DeerFlow's generic minimal/medium presets onto the
             # provider vocabulary, and serializes clear_thinking=true so the
             # model does not require exact reasoning replay after summarization.
+            # `default` also governs callers that never choose an effort
+            # (summarization, title generation, subagents), so it stays at
+            # `high` rather than the provider's deepest `max`; `max` remains
+            # selectable in the composer.
             "reasoning": {
                 "thinking": "required",
                 "dialect": "openai_extra_body",
                 "history": "clear",
                 "effort": {
                     "values": ["low", "high", "max"],
-                    "default": "max",
+                    "default": "high",
                     "aliases": {"minimal": "low", "medium": "high"},
                 },
             },

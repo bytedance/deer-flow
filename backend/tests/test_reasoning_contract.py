@@ -158,6 +158,62 @@ def test_profile_reasoning_effort_in_values_is_accepted():
     assert model.model_extra["reasoning_effort"] == "high"
 
 
+@pytest.mark.parametrize("template", ["when_thinking_enabled", "when_thinking_disabled"])
+def test_template_reasoning_effort_must_be_accepted_by_the_contract(template):
+    """A template value the caller never chose still reaches the provider when no
+    request and no default override it, so it is validated like the profile value."""
+    with pytest.raises(ValidationError, match=template):
+        _model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"]}}, **{template: {"reasoning_effort": "minimal"}})
+
+
+@pytest.mark.parametrize("template", ["when_thinking_enabled", "when_thinking_disabled"])
+def test_template_reasoning_effort_in_values_is_accepted(template):
+    model = _model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"]}}, **{template: {"reasoning_effort": "low"}})
+    assert getattr(model, template) == {"reasoning_effort": "low"}
+
+
+def test_template_reasoning_effort_rejected_when_contract_declares_no_effort():
+    with pytest.raises(ValidationError, match="when_thinking_disabled"):
+        _model(reasoning={"thinking": "optional"}, when_thinking_disabled={"reasoning_effort": "low"})
+
+
+def test_template_effort_is_validated_at_the_declared_path():
+    contract = {"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "high"], "path": "extra_body.thinking.effort"}}
+    with pytest.raises(ValidationError, match="when_thinking_enabled"):
+        _model(reasoning=contract, when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "effort": "max"}}})
+    model = _model(reasoning=contract, when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "effort": "high"}}})
+    assert model.when_thinking_enabled["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_thinking_shortcut_effort_is_validated_at_the_declared_path():
+    contract = {"thinking": "optional", "dialect": "anthropic", "effort": {"values": ["low", "high"], "path": "thinking.effort"}}
+    with pytest.raises(ValidationError, match="thinking"):
+        _model(reasoning=contract, thinking={"budget_tokens": 1024, "effort": "max"})
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("extra_body", id="shadows-extra_body"),
+        pytest.param("thinking", id="shadows-thinking"),
+        pytest.param("model_kwargs", id="shadows-model_kwargs"),
+        pytest.param("1bad", id="leading-digit"),
+        pytest.param("extra_body..effort", id="empty-segment"),
+        pytest.param("extra_body.thinking-effort", id="dash"),
+        pytest.param(".reasoning_effort", id="leading-dot"),
+    ],
+)
+def test_effort_path_rejects_unsafe_values(path):
+    with pytest.raises(ValidationError, match="path"):
+        _model(reasoning={"thinking": "optional", "effort": {"values": ["low"], "path": path}})
+
+
+@pytest.mark.parametrize("path", ["reasoning_effort", "extra_body.thinking.effort", "model_kwargs.reasoning_effort", "_private"])
+def test_effort_path_accepts_dotted_identifiers(path):
+    model = _model(reasoning={"thinking": "optional", "effort": {"values": ["low"], "path": path}})
+    assert model.reasoning.effort.path == path
+
+
 # ---------------------------------------------------------------------------
 # Normalization
 # ---------------------------------------------------------------------------

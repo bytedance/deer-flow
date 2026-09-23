@@ -201,15 +201,17 @@ def _apply_contract_thinking_settings(
       model without an effort contract never forwards ``reasoning_effort``.
     """
     dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
+    # Both directions mirror whichever vLLM switch the template declares, so a
+    # template using the older ``thinking`` key never also grows ``enable_thinking``.
+    chat_template_kwargs = (effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {}
     if thinking_enabled:
-        payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True), effective_wte)
+        payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True, chat_template_kwargs=chat_template_kwargs), effective_wte)
         if contract.history is not None and dialect == "openai_extra_body":
             payload = _deep_merge_dicts(payload, {"extra_body": {"thinking": {"clear_thinking": contract.history == "clear"}}})
         _merge_settings(settings, payload)
     elif model_config.when_thinking_disabled is not None:
         _merge_settings(settings, model_config.when_thinking_disabled)
     else:
-        chat_template_kwargs = (effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {}
         _merge_settings(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None:
         settings.pop("reasoning_effort", None)
