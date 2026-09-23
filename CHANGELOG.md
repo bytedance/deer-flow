@@ -2972,6 +2972,14 @@ This release closes that milestone with **765 merged pull requests**.
   and Chinese agents/threads/lead-agent pages: the required ASCII `name`
   request field, lowercase storage, `/api/agents/check` name-availability
   behavior, and no auto-derived slug from `display_name`. ([#4944])
+- **docs:** Restructure the subagent documentation into an eleven-chapter user
+  manual under `harness/subagents/` in both languages: concepts, quick start,
+  the catalog, delegating work, results and acceptance, limits and capacity,
+  sandbox and isolation, observability, troubleshooting by symptom, developer
+  integration, and a reference appendix with the June to September 2026
+  change log. The former single page becomes the section index, so existing
+  page links keep working; deep links to sections of the old page now land
+  on the index.
 
 ### Internal
 

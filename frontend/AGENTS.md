@@ -266,9 +266,9 @@ callbacks. Static demos and non-admin users must not query the management API.
 ## Full-stack plugin UI
 
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
-Module downloads use the configured backend base and authenticated fetch, then import
-and release a Blob URL; packages must be self-contained (no relative module/assets).
-This inline transport is experimental; packaged-asset compatibility is documented in
+Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
+native credentialed module scripts, preserving relative imports and resource URLs.
+Both honor the backend base and prefixes; transport and cache semantics are documented in
 `docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.

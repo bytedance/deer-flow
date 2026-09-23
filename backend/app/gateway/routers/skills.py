@@ -506,12 +506,22 @@ async def get_custom_skill(skill_name: str, request: Request, config: AppConfig 
 async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        skills = await asyncio.to_thread(storage.load_skills, enabled_only=False)
-        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+
+        def _load_response_parts() -> tuple[Skill | None, str | None]:
+            # Worker thread: load_skills walks every skill directory and
+            # read_custom_skill opens SKILL.md — blocking filesystem IO that
+            # scales with the number of installed skills (#5747).
+            storage = _get_user_skill_storage(config)
+            skills = storage.load_skills(enabled_only=False)
+            skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+            if skill is None:
+                return None, None
+            return skill, storage.read_custom_skill(skill_name)
+
+        skill, content = await asyncio.to_thread(_load_response_parts)
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=await asyncio.to_thread(storage.read_custom_skill, skill_name))
+        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=content)
     except HTTPException:
         raise
     except Exception as e:
@@ -638,12 +648,14 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         target_content = record.get("prev_content")
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
-        storage.validate_skill_markdown_content(skill_name, target_content)
+        await asyncio.to_thread(storage.validate_skill_markdown_content, skill_name, target_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         skill_file = storage.get_custom_skill_file(skill_name)
         from deerflow.skills.mutations.guard import read_optional_text
 
+        # Keep the post-scan read off the event loop while preserving the
+        # mutation runtime's readiness and owner-lock admission.
         current_content = await asyncio.to_thread(read_optional_text, storage, skill_file)
         history_entry = {
             "action": "rollback",
