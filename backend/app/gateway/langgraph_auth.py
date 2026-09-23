@@ -15,13 +15,21 @@ Two layers:
 """
 
 import secrets
+from contextvars import ContextVar
+from uuid import uuid4
 
 from langgraph_sdk import Auth
+from starlette.exceptions import HTTPException
 
 from app.gateway.auth.errors import TokenError
 from app.gateway.auth.jwt import decode_token
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
 from app.gateway.deps import get_local_provider
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    is_valid_thread_incarnation,
+)
 
 auth = Auth()
 
@@ -32,6 +40,160 @@ _STUDIO_USER_TYPE = getattr(Auth.types, "StudioUser", None)
 
 # Methods that require CSRF validation (state-changing per RFC 7231).
 _CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+_allow_thread_incarnation_write: ContextVar[bool] = ContextVar(
+    "deerflow_allow_standalone_thread_incarnation_write",
+    default=False,
+)
+_MISSING = object()
+
+
+def _metadata(value: dict) -> dict:
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        value["metadata"] = metadata
+    return metadata
+
+
+def _scrub_run_incarnation(value: dict) -> None:
+    lifecycle_keys = (
+        THREAD_INCARNATION_CONTEXT_KEY,
+        THREAD_INCARNATION_METADATA_GUARD_KEY,
+    )
+    metadata = _metadata(value)
+    for key in lifecycle_keys:
+        metadata.pop(key, None)
+    kwargs = value.get("kwargs")
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+        value["kwargs"] = kwargs
+    context = kwargs.get("context")
+    if not isinstance(context, dict):
+        context = {}
+        kwargs["context"] = context
+    runtime_keys = (*lifecycle_keys, "user_id", "thread_id", "run_id")
+    for key in runtime_keys:
+        context.pop(key, None)
+    config = kwargs.get("config")
+    if not isinstance(config, dict):
+        config = {}
+        kwargs["config"] = config
+    for key in ("context", "metadata", "configurable"):
+        section = config.get(key)
+        if isinstance(section, dict):
+            for protected_key in runtime_keys:
+                section.pop(protected_key, None)
+
+
+async def _read_standalone_thread(thread_id, ctx) -> dict | None:
+    from langgraph_runtime.database import connect
+    from langgraph_runtime.ops import Threads
+
+    try:
+        async with connect() as conn:
+            rows = await Threads.get(conn, thread_id, ctx=ctx)
+            return await anext(rows, None)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+
+async def _ensure_standalone_thread_incarnation(
+    thread_id,
+    ctx,
+    *,
+    create_if_missing: bool,
+    creation_metadata: dict | None = None,
+) -> str | None | object:
+    thread = await _read_standalone_thread(thread_id, ctx)
+    if thread is None:
+        if not create_if_missing:
+            return _MISSING
+        incarnation = uuid4().hex
+    else:
+        metadata = thread.get("metadata")
+        stored = metadata.get(THREAD_INCARNATION_CONTEXT_KEY, _MISSING) if isinstance(metadata, dict) else _MISSING
+        if stored is _MISSING:
+            # Match the rollout contract used by the Gateway and embedded
+            # runtime: a persisted pre-incarnation thread remains in the
+            # explicit legacy generation. A read/patch backfill cannot fence
+            # deletion plus same-ID recreation through LangGraph's public API.
+            return None
+        if not is_valid_thread_incarnation(stored):
+            raise RuntimeError("Standalone LangGraph thread has an invalid incarnation")
+        return stored
+
+    from langgraph_runtime.database import connect
+    from langgraph_runtime.ops import Threads
+
+    token = _allow_thread_incarnation_write.set(True)
+    try:
+        async with connect() as conn:
+            rows = await Threads.put(
+                conn,
+                thread_id,
+                metadata={**(creation_metadata or {}), THREAD_INCARNATION_CONTEXT_KEY: incarnation},
+                if_exists="do_nothing",
+                ctx=ctx,
+            )
+            if await anext(rows, None) is None:
+                raise RuntimeError("Standalone LangGraph thread incarnation was not persisted")
+    finally:
+        _allow_thread_incarnation_write.reset(token)
+
+    persisted = await _read_standalone_thread(thread_id, ctx)
+    if persisted is None:
+        raise RuntimeError("Standalone LangGraph thread incarnation could not be verified")
+    persisted_metadata = persisted.get("metadata")
+    value = persisted_metadata.get(THREAD_INCARNATION_CONTEXT_KEY, _MISSING) if isinstance(persisted_metadata, dict) else _MISSING
+    if value is _MISSING:
+        # A mixed-version peer may have won the do-nothing create with a
+        # legacy thread. Keep that persisted lifecycle on the legacy scope.
+        return None
+    if not is_valid_thread_incarnation(value):
+        raise RuntimeError("Standalone LangGraph thread incarnation could not be verified")
+    return value
+
+
+async def _bind_standalone_run_incarnation(ctx, value: dict) -> None:
+    _scrub_run_incarnation(value)
+    thread_id = value.get("thread_id")
+    if thread_id is None:
+        incarnation: str | None = None
+    else:
+        # Pre-creation bypasses LangGraph's implicit-create metadata merge.
+        # Preserve its precedence using only the already-sanitized metadata;
+        # the helper adds the server incarnation last and never updates an
+        # existing thread (including a concurrent creation winner).
+        config_metadata = value["kwargs"]["config"].get("metadata")
+        creation_metadata = {
+            **(config_metadata if isinstance(config_metadata, dict) else {}),
+            **value["metadata"],
+        }
+        incarnation = await _ensure_standalone_thread_incarnation(
+            thread_id,
+            ctx,
+            create_if_missing=value.get("if_not_exists") == "create",
+            creation_metadata=creation_metadata,
+        )
+        if incarnation is _MISSING:
+            return
+        assert is_valid_thread_incarnation(incarnation)
+
+    context = value["kwargs"]["context"]
+    context["user_id"] = ctx.user.identity
+    if thread_id is not None:
+        context["thread_id"] = str(thread_id)
+    else:
+        context.pop("thread_id", None)
+    run_id = value.get("run_id")
+    if run_id is not None:
+        context["run_id"] = str(run_id)
+    else:
+        context.pop("run_id", None)
+    context[THREAD_INCARNATION_CONTEXT_KEY] = incarnation
+    context[THREAD_INCARNATION_METADATA_GUARD_KEY] = True
 
 
 def _check_csrf(request) -> None:
@@ -131,8 +293,18 @@ async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
     # boundary. The standalone pre-runtime persistence repair also scrubs this
     # marker from legacy active rows and their version history before normal
     # version selection becomes available.
-    metadata = value.setdefault("metadata", {})
+    metadata = _metadata(value)
     metadata["user_id"] = ctx.user.identity
+    if ctx.resource == "threads" and ctx.action == "create_run":
+        await _bind_standalone_run_incarnation(ctx, value)
+    elif ctx.resource == "threads":
+        if ctx.action == "create":
+            if not _allow_thread_incarnation_write.get():
+                metadata[THREAD_INCARNATION_CONTEXT_KEY] = uuid4().hex
+            elif not is_valid_thread_incarnation(metadata.get(THREAD_INCARNATION_CONTEXT_KEY, _MISSING)):
+                raise RuntimeError("Standalone LangGraph internal thread create has an invalid incarnation")
+        elif ctx.action == "update" and not _allow_thread_incarnation_write.get():
+            metadata.pop(THREAD_INCARNATION_CONTEXT_KEY, None)
     if ctx.resource == "assistants" and ctx.action in {"create", "update"}:
         metadata["created_by"] = "user"
 

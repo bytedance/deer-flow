@@ -93,6 +93,7 @@ class TaskReference:
     server_name: str
     remote_task_id: str
     driver_data: dict[str, Any] = field(default_factory=dict)
+    thread_incarnation: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> TaskReference:
@@ -102,6 +103,9 @@ class TaskReference:
             thread_id=record["thread_id"],
             server_name=record["server_name"],
             remote_task_id=record["remote_task_id"],
+            # Mixed-version/custom repositories may still emit the legacy
+            # shape; preserve its explicit NULL session scope during rollout.
+            thread_incarnation=record.get("_thread_incarnation"),
             driver_data=dict(record.get("driver_data") or {}),
         )
 
@@ -119,6 +123,7 @@ class TaskSubmitRequest:
     arguments: dict[str, Any]
     driver_data: dict[str, Any] = field(default_factory=dict)
     local_task_id: str | None = None
+    thread_incarnation: str | None = None
 
     def __post_init__(self) -> None:
         _validate_storage_text(

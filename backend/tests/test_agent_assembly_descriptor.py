@@ -239,6 +239,7 @@ class TestLeadAgentAssembly:
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-1"}})
         assert isinstance(assembly, LeadAgentAssembly)
         assert assembly.graph is not None
+        assert assembly.graph["context_schema"] is dict
         assert assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
@@ -653,6 +654,7 @@ class TestCustomAgentModelSettingsReachTheDescriptor:
         TestLeadAgentAssembly._isolate_from_the_ambient_config(monkeypatch)
         with bind_agent_build_extensions(TestLeadAgentAssembly._extensions_with_an_agent_assembly_observer()):
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-bootstrap", "is_bootstrap": True}})
+        assert assembly.graph["context_schema"] is dict
         assert "temperature" not in assembly.descriptor.model_parameters
 
 

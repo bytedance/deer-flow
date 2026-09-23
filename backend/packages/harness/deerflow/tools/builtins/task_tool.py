@@ -23,6 +23,11 @@ from deerflow.community.ragflow.sources import cited_source_artifact
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -850,6 +855,8 @@ async def task_tool(
     # tool call delegated to a subagent (user_role=None).
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
+    if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
@@ -942,6 +949,10 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    # Carry the host-captured lifecycle, including legacy None, without
+    # inventing a legacy scope for missing context or re-reading thread state.
+    if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
+        executor_kwargs["thread_incarnation"] = parent_context[THREAD_INCARNATION_CONTEXT_KEY]
     if context_snapshot is not None:
         executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None

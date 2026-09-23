@@ -15,7 +15,8 @@ from mcp.types import CONNECTION_CLOSED, ErrorData
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
 from deerflow.mcp.session_pool import MCPSessionPool
-from deerflow.mcp.task_tool_caller import McpTaskToolCaller, mcp_task_session_scope_key
+from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+from deerflow.mcp_scope import mcp_session_scope_key
 
 
 def _config() -> ExtensionsConfig:
@@ -78,8 +79,21 @@ async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any]) -> Non
                 await task
 
 
-def test_task_session_scope_includes_user_and_thread() -> None:
-    assert mcp_task_session_scope_key(user_id="user-1", thread_id="thread-1") == "user-1:thread-1"
+def test_task_session_scope_includes_user_thread_and_incarnation() -> None:
+    first = mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
+    second = mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-2")
+
+    assert first == 'v2:["user-1","thread-1","incarnation-1"]'
+    assert second == 'v2:["user-1","thread-1","incarnation-2"]'
+    assert first != second
+    assert mcp_session_scope_key(user_id="a:b", thread_id="c", thread_incarnation="d") != mcp_session_scope_key(
+        user_id="a",
+        thread_id="b:c",
+        thread_incarnation="d",
+    )
+    assert mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation=None) == "user-1:thread-1"
+    with pytest.raises(RuntimeError, match="non-empty"):
+        mcp_session_scope_key(user_id="user-1", thread_id="thread-1", thread_incarnation="")
 
 
 @pytest.mark.asyncio
@@ -104,6 +118,7 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     assert actual is result
@@ -148,6 +163,7 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect(disc
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     pool.close_session_if_current.assert_awaited_once_with(
@@ -182,6 +198,7 @@ async def test_stdio_task_timeout_keeps_healthy_stateful_session() -> None:
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     pool.close_session_if_current.assert_not_awaited()
@@ -216,6 +233,7 @@ async def test_stdio_task_interceptor_failure_keeps_healthy_session() -> None:
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     session.call_tool.assert_not_awaited()
@@ -277,6 +295,7 @@ mcp.run(transport="stdio")
                 arguments={},
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation=None,
             )
 
             server_config.tool_call_timeout = 0.05
@@ -287,6 +306,7 @@ mcp.run(transport="stdio")
                     arguments={"task_id": submitted.structuredContent["task_id"]},
                     user_id="user-1",
                     thread_id="thread-1",
+                    thread_incarnation=None,
                 )
             assert exc_info.value.error.code == 408
 
@@ -298,6 +318,7 @@ mcp.run(transport="stdio")
                 arguments={"task_id": submitted.structuredContent["task_id"]},
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation=None,
             )
     finally:
         await pool.close_all()
@@ -337,6 +358,7 @@ async def test_stdio_task_session_initialization_respects_configured_timeout() -
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     pool.close_session.assert_not_awaited()
@@ -368,6 +390,7 @@ async def test_http_task_call_authenticates_session_initialization() -> None:
             arguments={"task_id": "remote-1"},
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation=None,
         )
 
     assert actual is result
@@ -420,6 +443,7 @@ async def test_remote_task_session_initialization_respects_configured_timeout(tr
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation=None,
             )
         )
 
@@ -458,6 +482,7 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation=None,
             )
         )
 
