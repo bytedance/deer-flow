@@ -1,4 +1,4 @@
-"""Tests for readability extraction fallback behavior."""
+"""Tests for readability extraction and message conversion."""
 
 import subprocess
 
@@ -64,4 +64,19 @@ def test_article_to_message_keeps_absolute_image_url():
 def test_article_to_message_resolves_relative_image_url():
     article = Article("Image", '<img src="../photo.png" alt="Photo">', url="https://example.com/posts/one")
 
+    assert {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}} in article.to_message()
+
+
+def test_extracted_article_to_message_resolves_relative_image_url():
+    html = """
+    <html><head><title>Image article</title></head>
+    <body><article><h1>Image article</h1>
+    <p>This article has a photograph and enough text to be extracted by readability.</p>
+    <img src="../photo.png" alt="Photo">
+    </article></body></html>
+    """
+
+    article = ReadabilityExtractor().extract_article(html, url="https://example.com/posts/one")
+
+    assert article.url == "https://example.com/posts/one"
     assert {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}} in article.to_message()
