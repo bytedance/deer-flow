@@ -20,7 +20,7 @@ def capability_client(tmp_path, monkeypatch):
     path.write_text(json.dumps({"mcpServers": {"legacy": {"enabled": True, "type": "http", "url": "https://private.example/mcp", "headers": {"Authorization": "Bearer private-secret"}, "capability": {"plugin_id": 42}}}, "skills": {}}))
     monkeypatch.setattr(ExtensionsConfig, "resolve_config_path", lambda *args: path)
     monkeypatch.setattr(mcp, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp, "reconcile_mcp_servers", lambda _changed: True)
     app = FastAPI()
     app.dependency_overrides[get_config] = lambda: SimpleNamespace()
 

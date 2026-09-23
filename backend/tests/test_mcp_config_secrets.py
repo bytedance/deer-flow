@@ -750,8 +750,8 @@ async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path):
-    reset_calls = 0
+async def test_update_mcp_configuration_reconciles_tools_cache(monkeypatch, tmp_path):
+    reconcile_calls: list[set[str] | None] = []
     config_path = tmp_path / "extensions_config.json"
     config_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
 
@@ -766,14 +766,14 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
         }
     )
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: reloaded_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
 
     response = await update_mcp_configuration(
         _request_with_role("admin"),
@@ -788,7 +788,7 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
         ),
     )
 
-    assert reset_calls == 1
+    assert reconcile_calls == [None]
     assert list(response.mcp_servers) == ["github"]
 
 
@@ -834,7 +834,7 @@ async def test_update_mcp_configuration_preserves_omitted_routing_and_tools(monk
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await update_mcp_configuration(
         _request_with_role("admin"),
@@ -890,7 +890,7 @@ async def test_update_mcp_configuration_preserves_server_extra_fields(monkeypatc
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await update_mcp_configuration(
         _request_with_role("admin"),
@@ -931,18 +931,18 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
         "customTopLevel": {"preserve": True},
     }
     config_path.write_text(json.dumps(original), encoding="utf-8")
-    reset_calls = 0
+    reconcile_calls: list[set[str] | None] = []
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
 
     response = await create_mcp_servers(
         _request_with_role("admin"),
@@ -960,7 +960,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
     assert persisted["mcpServers"]["sibling"] == original["mcpServers"]["sibling"]
     assert persisted["customTopLevel"] == original["customTopLevel"]
     assert response.mcp_servers["added"].command == "npx"
-    assert reset_calls == 1
+    assert reconcile_calls == [{"added"}]
 
     before_duplicate = config_path.read_text(encoding="utf-8")
     with pytest.raises(HTTPException) as exc_info:
@@ -976,7 +976,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
 
     assert exc_info.value.status_code == 409
     assert config_path.read_text(encoding="utf-8") == before_duplicate
-    assert reset_calls == 1
+    assert reconcile_calls == [{"added"}]
 
 
 @pytest.mark.asyncio
@@ -1005,7 +1005,7 @@ async def test_update_mcp_server_preserves_latest_sibling_and_masked_secret(monk
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await update_mcp_server(
         _request_with_role("admin"),
@@ -1054,7 +1054,7 @@ async def test_update_mcp_server_masks_and_restores_per_tool_override_secrets(mo
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await get_mcp_configuration(_request_with_role("admin"))
     masked_server = response.mcp_servers["target"]
@@ -1096,7 +1096,7 @@ async def test_update_mcp_server_rejects_new_masked_per_tool_override_secret_wit
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server(
@@ -1167,7 +1167,7 @@ async def test_update_mcp_server_honors_deletions_in_complete_replacement(monkey
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     await update_mcp_server(
         _request_with_role("admin"),
@@ -1219,7 +1219,7 @@ async def test_update_mcp_server_rejects_masked_array_structural_edit_without_wr
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server(
@@ -1254,7 +1254,7 @@ async def test_create_mcp_servers_rejects_masked_secret_sentinel_without_writing
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await create_mcp_servers(
@@ -1285,7 +1285,7 @@ async def test_bulk_update_rejects_masked_secret_for_new_server_without_writing(
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_configuration(
@@ -1317,7 +1317,7 @@ async def test_new_server_writes_reject_masked_headers_from_context_extra_withou
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await handler(
@@ -1346,7 +1346,7 @@ async def test_new_server_writes_reject_masked_per_tool_override_secret_without_
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await handler(
@@ -1389,7 +1389,7 @@ async def test_new_server_writes_reject_masked_oauth_secret_without_writing(hand
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await handler(
@@ -1441,7 +1441,7 @@ async def test_mcp_writes_validate_runtime_server_constraints_before_writing(ope
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", load_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     invalid_server = McpServerConfigResponse(
         type="http",
@@ -1497,7 +1497,7 @@ async def test_new_server_writes_validate_extensions_constraints_before_writing(
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", load_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         await handler(
@@ -1567,7 +1567,7 @@ async def test_mcp_writes_validate_environment_expanded_candidate_before_writing
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", load_config_like_production)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config_like_production)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     invalid_after_expansion = McpServerConfigResponse(
         type="http",
@@ -1634,7 +1634,7 @@ async def test_state_and_delete_validate_expanded_document_before_writing(operat
     monkeypatch.delenv("CODEX_PR_5022_UNSET_SIBLING_TOOLSET", raising=False)
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file(str(config_path)))
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     with pytest.raises(HTTPException) as exc_info:
         if operation == "state":
@@ -1678,7 +1678,7 @@ async def test_get_and_targeted_put_preserve_environment_placeholders_outside_se
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", load_config_like_production)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config_like_production)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     get_response = await get_mcp_configuration(_request_with_role("admin"))
     editable = get_response.mcp_servers["target"]
@@ -1732,7 +1732,7 @@ async def test_targeted_oauth_extra_round_trip_preserves_extensions_and_secrets(
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", load_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     get_response = await get_mcp_configuration(_request_with_role("admin"))
     masked = get_response.mcp_servers["target"]
@@ -1796,7 +1796,7 @@ async def test_delete_mcp_server_accepts_empty_name_and_preserves_siblings(monke
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await delete_mcp_server(
         _request_with_role("admin"),
@@ -1825,7 +1825,7 @@ async def test_mcp_create_without_existing_config_uses_resolvable_project_root(o
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", resolve_created_config)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: SimpleNamespace(skills={}))
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file(str(expected_path)))
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     body = McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")})
     if operation == "create":
@@ -1854,7 +1854,7 @@ async def test_mcp_config_endpoints_map_invalid_operator_document_to_400(endpoin
     config_path.write_text(raw_config, encoding="utf-8")
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     request = _request_with_role("admin")
     with pytest.raises(HTTPException) as exc_info:
@@ -1900,7 +1900,7 @@ async def test_mcp_config_endpoints_map_invalid_stored_server_to_400(endpoint, m
     config_path.write_text(raw_config, encoding="utf-8")
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     request = _request_with_role("admin")
     with pytest.raises(HTTPException) as exc_info:
@@ -1934,17 +1934,22 @@ async def test_mcp_config_endpoints_map_invalid_stored_server_to_400(endpoint, m
 )
 def test_delete_mcp_server_route_uses_bodyless_path_parameter(server_name, request_path, monkeypatch):
     deleted_names: list[str] = []
+    reconcile_calls: list[set[str] | None] = []
 
     async def allow_admin(_request, *, detail):
         assert detail == _ADMIN_REQUIRED_DETAIL
 
     def fake_delete(name: str):
         deleted_names.append(name)
-        return {}
+        return {}, {name}
+
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router, "require_admin_user", allow_admin)
     monkeypatch.setattr(mcp_router, "_apply_mcp_server_delete", fake_delete)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
 
     app = FastAPI()
     app.router.redirect_slashes = False
@@ -1958,6 +1963,7 @@ def test_delete_mcp_server_route_uses_bodyless_path_parameter(server_name, reque
     assert response.status_code == 200
     assert response.json() == {"mcp_servers": {}}
     assert deleted_names == [server_name]
+    assert reconcile_calls == [{server_name}]
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2020,7 @@ async def test_update_mcp_server_allows_editing_disabled_disallowed_stdio_server
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server(
@@ -2089,7 +2095,7 @@ async def test_update_mcp_server_rejects_invalid_disabled_stdio_without_writing(
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -2139,18 +2145,18 @@ async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_di
         "customTopLevel": {"preserve": True},
     }
     config_path.write_text(json.dumps(original), encoding="utf-8")
-    reset_calls = 0
+    reconcile_calls: list[set[str] | None] = []
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2166,7 +2172,7 @@ async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_di
     assert persisted["customTopLevel"] == original["customTopLevel"]
     assert response.mcp_servers["github"].enabled is enabled
     assert response.mcp_servers["semantic-scholar"].env == {"S2_API_KEY": "***"}
-    assert reset_calls == 1
+    assert reconcile_calls == [{"github"}]
 
 
 @pytest.mark.asyncio
@@ -2187,18 +2193,18 @@ async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_dis
         ),
         encoding="utf-8",
     )
-    reset_calls = 0
+    reconcile_calls: list[set[str] | None] = []
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2217,7 +2223,7 @@ async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_dis
     assert "s2-mcp-server" in exc_info.value.detail
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["mcpServers"]["semantic-scholar"]["enabled"] is False
-    assert reset_calls == 1
+    assert reconcile_calls == [{"semantic-scholar"}]
 
 
 @pytest.mark.asyncio
@@ -2250,7 +2256,7 @@ async def test_update_mcp_server_state_rejects_enabling_arbitrary_exec_args(monk
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -2288,18 +2294,18 @@ async def test_update_mcp_server_state_enables_raw_transport_alias(
         ),
         encoding="utf-8",
     )
-    reset_calls = 0
+    reconcile_calls: list[set[str] | None] = []
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2312,22 +2318,22 @@ async def test_update_mcp_server_state_enables_raw_transport_alias(
     assert "type" not in persisted_server
     assert response.mcp_servers["remote"].enabled is True
     assert response.mcp_servers["remote"].type == transport
-    assert reset_calls == 1
+    assert reconcile_calls == [{"remote"}]
 
 
 @pytest.mark.asyncio
-async def test_update_mcp_server_state_returns_404_without_writing_or_resetting_cache(monkeypatch, tmp_path):
+async def test_update_mcp_server_state_returns_404_without_writing_or_reconciling_cache(monkeypatch, tmp_path):
     config_path = tmp_path / "extensions_config.json"
     original_text = '{"mcpServers": {}, "skills": {}}'
     config_path.write_text(original_text, encoding="utf-8")
-    reset_calls = 0
+    reconcile_calls: list[set[str] | None] = []
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    def fake_reconcile_mcp_servers(changed):
+        reconcile_calls.append(changed)
+        return True
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", fake_reconcile_mcp_servers)
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server_state(
@@ -2337,7 +2343,7 @@ async def test_update_mcp_server_state_returns_404_without_writing_or_resetting_
 
     assert exc_info.value.status_code == 404
     assert config_path.read_text(encoding="utf-8") == original_text
-    assert reset_calls == 0
+    assert reconcile_calls == []
 
 
 @pytest.mark.asyncio
