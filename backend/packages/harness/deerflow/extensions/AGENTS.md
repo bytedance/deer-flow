@@ -141,9 +141,10 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes seven contribution kinds: middleware
+themselves. Its registry contract exposes eight contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers, and
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -287,8 +288,9 @@ covers creations and changes to retained rows only; synchronization consumers mu
 `get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
 is required. A DB run store preserves positions across restarts, while memory only provides
 process-lifetime ordering. Per-run events retain the event store's thread-scoped
-`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
-and status comes from the authoritative run store. The reader passes its fixed scope to
+`after_seq` semantics; metadata has only the legacy `auth_token` key removed (there is no
+other redaction), event content is returned unchanged, and status comes from the
+authoritative run store. The reader passes its fixed scope to
 event reads explicitly, including global `None`, so ambient request identity cannot
 change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
 fields are frozen, but nested containers remain locally mutable without touching host
