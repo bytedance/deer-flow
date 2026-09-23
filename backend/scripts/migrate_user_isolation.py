@@ -159,8 +159,10 @@ def migrate_user_profile(
     Per-user layout: ``{base_dir}/users/{user_id}/USER.md``
 
     A pre-existing per-user profile takes precedence: the legacy copy is moved
-    to ``{base_dir}/migration-conflicts/USER.md`` for manual review, the way a
-    conflicting agent directory is handled.
+    to the first free ``USER.md`` / ``USER_N.md`` in
+    ``{base_dir}/migration-conflicts/`` for manual review, the way a
+    conflicting agent directory is handled. ``dry_run`` reports the same
+    destination a real run would use.
 
     Args:
         paths: Paths instance.
@@ -180,11 +182,12 @@ def migrate_user_profile(
     entry = {"file": legacy_profile.name, "user_id": user_id, "action": ""}
 
     if dest.exists():
+        # Resolved before the dry-run guard: it only reads, and a preview that
+        # named the occupied USER.md would report the one path a real run avoids.
         conflicts_dir = paths.base_dir / "migration-conflicts"
-        conflicts_path = conflicts_dir / "USER.md"
+        conflicts_path = _unique_conflict_path(conflicts_dir, "USER.md")
         if not dry_run:
             conflicts_dir.mkdir(parents=True, exist_ok=True)
-            conflicts_path = _unique_conflict_path(conflicts_dir, "USER.md")
             shutil.move(str(legacy_profile), str(conflicts_path))
         entry["action"] = f"conflict -> {conflicts_path}"
         logger.warning("Conflict for USER.md: moved legacy copy to %s", conflicts_path)

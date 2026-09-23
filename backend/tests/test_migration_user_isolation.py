@@ -247,6 +247,29 @@ class TestMigrateUserProfile:
         assert kept == ["# first conflicted profile", "# second conflicted profile", "# third conflicted profile"]
         assert sorted(f.name for f in bucket.iterdir()) == ["USER.md", "USER_1.md", "USER_2.md"]
 
+    def test_dry_run_previews_the_name_a_real_run_would_use(self, base_dir: Path, paths: Paths):
+        """An operator previewing a re-run must see the destination they will get."""
+        dest = paths.user_profile_file("default")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("# already migrated", encoding="utf-8")
+        conflicts = base_dir / "migration-conflicts"
+        conflicts.mkdir(parents=True, exist_ok=True)
+        (conflicts / "USER.md").write_text("# earlier conflict", encoding="utf-8")
+        paths.user_md_file.write_text("# legacy", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        preview = migrate_user_profile(paths, user_id="default", dry_run=True)
+
+        assert preview["action"].endswith("USER_1.md")
+        assert paths.user_md_file.exists()
+        assert sorted(f.name for f in conflicts.iterdir()) == ["USER.md"]
+
+        real = migrate_user_profile(paths, user_id="default")
+
+        assert real["action"] == preview["action"]
+        assert (conflicts / "USER_1.md").read_text(encoding="utf-8") == "# legacy"
+
     def test_no_legacy_profile_is_noop(self, base_dir: Path, paths: Paths):
         from scripts.migrate_user_isolation import migrate_user_profile
 
