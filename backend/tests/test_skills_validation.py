@@ -71,6 +71,16 @@ class TestValidateSkillFrontmatter:
         assert msg == "required-secrets entry 'ERP_TOKEN' optional must be a boolean"
         assert name is None
 
+    def test_required_secrets_optional_error_identifies_unnamed_entry(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            '---\nname: my-skill\ndescription: A skill\nrequired-secrets:\n  - optional: "true"\n---\n\nBody\n',
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert msg == "required-secrets entry without a name has an optional field that must be a boolean"
+        assert name is None
+
     def test_allows_argument_hint(self, tmp_path):
         skill_dir = _write_skill(
             tmp_path,

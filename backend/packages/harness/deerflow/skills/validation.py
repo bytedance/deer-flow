@@ -90,6 +90,8 @@ def validate_skill_frontmatter_text(content: str) -> tuple[bool, str, str | None
     if required_secrets is not None:
         for item in required_secrets:
             if isinstance(item, dict) and not isinstance(item.get("optional", False), bool):
+                if item.get("name") is None:
+                    return False, "required-secrets entry without a name has an optional field that must be a boolean", None
                 return False, f"required-secrets entry {item.get('name')!r} optional must be a boolean", None
 
     secrets_autonomous = frontmatter.get("secrets-autonomous")
