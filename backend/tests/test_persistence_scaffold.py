@@ -115,6 +115,21 @@ class TestDatabaseConfig:
         assert "deerflow" not in url.replace("/db", "")
         assert url.startswith("postgresql+asyncpg://")
 
+    def test_sync_postgres_url_uses_configured_schema(self):
+        c = DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema="deerflow")
+        url = c.app_sync_sqlalchemy_url
+        assert url.startswith("postgresql+psycopg://")
+        assert "options=-c%20search_path%3Ddeerflow" in url
+
+    def test_sync_postgres_url_preserves_existing_libpq_options(self):
+        c = DatabaseConfig(
+            backend="postgres",
+            postgres_url="postgresql://u:p@h:5432/db?options=-c%20statement_timeout%3D5000",
+            postgres_schema="deerflow",
+        )
+        url = c.app_sync_sqlalchemy_url
+        assert "options=-c%20statement_timeout%3D5000%20-c%20search_path%3Ddeerflow" in url
+
 
 # -- MemoryRunStore --
 
@@ -203,6 +218,20 @@ class TestMemoryRunStore:
             await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
         rows = await store.list_by_thread("t1", limit=2)
         assert [r["run_id"] for r in rows] == ["r4", "r3"]
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_keyset_cursor(self, store):
+        for i in range(5):
+            await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
+        first = await store.list_by_thread("t1", limit=2)
+        assert [r["run_id"] for r in first] == ["r4", "r3"]
+        second = await store.list_by_thread(
+            "t1",
+            limit=2,
+            before_created_at=first[-1]["created_at"],
+            before_run_id=first[-1]["run_id"],
+        )
+        assert [r["run_id"] for r in second] == ["r2", "r1"]
 
     @pytest.mark.anyio
     async def test_delete_keeps_thread_index_consistent(self, store):

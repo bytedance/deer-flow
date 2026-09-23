@@ -3,11 +3,6 @@ import { describe, expect, test } from "@rstest/core";
 import { getDevBundler, getNextDevArgs } from "../../../scripts/dev.mjs";
 
 describe("frontend dev launcher", () => {
-  test("uses webpack on Windows to avoid Turbopack runtime instability", () => {
-    expect(getDevBundler("win32")).toBe("webpack");
-    expect(getNextDevArgs("win32")).toEqual(["dev", "--webpack"]);
-  });
-
   test("allows an explicit bundler override on every platform", () => {
     expect(getDevBundler("win32", { DEER_FLOW_DEV_BUNDLER: "turbo" })).toBe(
       "turbo",
@@ -32,9 +27,11 @@ describe("frontend dev launcher", () => {
     ]);
   });
 
-  test("keeps Turbopack for non-Windows development", () => {
-    expect(getDevBundler("linux")).toBe("turbo");
-    expect(getDevBundler("darwin")).toBe("turbo");
-    expect(getNextDevArgs("linux")).toEqual(["dev", "--turbo"]);
+  test("uses webpack by default on every platform", () => {
+    expect(getDevBundler("win32")).toBe("webpack");
+    expect(getDevBundler("linux")).toBe("webpack");
+    expect(getDevBundler("darwin")).toBe("webpack");
+    expect(getNextDevArgs("win32")).toEqual(["dev", "--webpack"]);
+    expect(getNextDevArgs("linux")).toEqual(["dev", "--webpack"]);
   });
 });

@@ -211,6 +211,93 @@ def test_convert_messages_tool_message():
     assert items[0]["output"] == "result data"
 
 
+def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():
+    """A malformed call stays on invalid_tool_calls but is answered by a placeholder
+    ToolMessage, so it must still serialize as a function_call item.
+
+    Responses rejects a function_call_output whose call_id has no matching
+    function_call item, so dropping the invalid call turns the placeholder the
+    middleware injected for recovery into the provider error it exists to prevent.
+    """
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "function_call",
+                "name": "write_file",
+                "arguments": '{"path": "report.md", "content": "unterminated',
+                "call_id": "call_bad",
+            }
+        ],
+        "usage": {},
+    }
+    ai_msg = model._parse_response(response).generations[0].message
+    assert [tc["id"] for tc in ai_msg.invalid_tool_calls] == ["call_bad"]
+
+    patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="write it"), ai_msg])
+    assert isinstance(patched[-1], ToolMessage)
+    assert patched[-1].tool_call_id == "call_bad"
+
+    _, items = model._convert_messages(patched)
+    call_ids = {item["call_id"] for item in items if item.get("type") == "function_call"}
+    output_ids = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+    assert output_ids == {"call_bad"}
+    assert output_ids <= call_ids
+
+
+def test_convert_messages_drops_invalid_calls_missing_a_name_or_call_id():
+    """A call the middleware has not repaired must not serialize as null fields.
+
+    InvalidToolCall fields are nullable, and a ``function_call`` item carrying a
+    null ``name`` or ``call_id`` is schema-invalid, so serializing one turns a
+    case the old serializer dropped into a rejected request. The middleware
+    repairs exactly these calls (see the test below), so dropping them here
+    cannot leave a placeholder ToolMessage without its call.
+    """
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        assert ai_msg.invalid_tool_calls, output_item
+
+        _, items = model._convert_messages([HumanMessage(content="hi"), ai_msg])
+        assert [i for i in items if i.get("type") == "function_call"] == []
+
+
+def test_convert_messages_serializes_invalid_calls_the_middleware_repaired():
+    """A repaired invalid call is still sent, and still paired with its result."""
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
+
+    model = _make_model()
+
+    for output_item in (
+        {"type": "function_call", "name": "write_file", "arguments": '{"a":'},
+        {"type": "function_call", "call_id": "call_x", "arguments": '{"a":'},
+        {"type": "function_call", "arguments": '{"a":'},
+    ):
+        ai_msg = model._parse_response({"output": [output_item], "usage": {}}).generations[0].message
+        patched = DanglingToolCallMiddleware()._build_patched_messages([HumanMessage(content="hi"), ai_msg])
+
+        _, items = model._convert_messages(patched)
+        call_ids = {i["call_id"] for i in items if i.get("type") == "function_call"}
+        output_ids = {i["call_id"] for i in items if i.get("type") == "function_call_output"}
+        assert output_ids == call_ids
+        assert call_ids
+        assert all(cid for cid in call_ids)
+        for item in items:
+            if item.get("type") == "function_call":
+                assert item["name"]
+                assert item["arguments"]
+
+
 # ---------------------------------------------------------------------------
 # _parse_sse_data_line
 # ---------------------------------------------------------------------------
@@ -274,3 +361,20 @@ def test_parse_tool_call_arguments_non_dict_json():
     parsed, err = model._parse_tool_call_arguments({"arguments": '["list", "not", "dict"]', "name": "t", "call_id": "c"})
     assert parsed is None
     assert err is not None
+
+
+# ---------------------------------------------------------------------------
+# Credential loading
+# ---------------------------------------------------------------------------
+
+
+def test_model_post_init_accepts_null_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"access_token": "tok-test", "account_id": None}}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    model = CodexChatModel(model="gpt-5.4", reasoning_effort="medium")
+
+    assert model._account_id == ""

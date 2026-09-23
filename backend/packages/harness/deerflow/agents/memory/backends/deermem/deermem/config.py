@@ -53,7 +53,12 @@ class DeerMemConfig(BaseModel):
     )
     storage_class: str = Field(
         default="",
-        description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
+        description=(
+            "Dotted class path for an alternative storage provider, or a built-in alias: "
+            "``file`` = FileMemoryStorage (default) or ``markdown`` = MarkdownMemoryStorage "
+            "(tolerant load path, same JSON on disk); empty (default) = FileMemoryStorage "
+            "(no importlib, portable)."
+        ),
     )
     strict_user_scope: bool = Field(
         default=False,
@@ -71,7 +76,55 @@ class DeerMemConfig(BaseModel):
     )
     retrieval_adapter: str = Field(
         default="fts5",
-        description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
+        description=(
+            "Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort. "
+            "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
+        ),
+    )
+    fact_dedup_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in deterministic near-duplicate gate for NEW facts (issue "
+            "#5252). When true, a proposed new fact whose bounded "
+            "token-Jaccard similarity to an existing fact in the same "
+            "user/agent scope AND category reaches "
+            "fact_dedup_similarity_threshold merges into that fact instead "
+            "of being appended: the existing id/content/createdAt are kept, "
+            "confidence is raised to max(old, new), and source is refreshed "
+            "only when confidence increases. Correction replacements and "
+            "proposed removal targets are excluded from near-dedup. "
+            "False preserves the legacy behavior exactly."
+        ),
+    )
+    fact_dedup_similarity_threshold: float = Field(
+        default=0.7,
+        ge=0.5,
+        le=1.0,
+        description=("Minimum bounded token-Jaccard similarity for the write-side near-duplicate merge gate. Used only when fact_dedup_enabled is true."),
+    )
+    retrieval_relevance_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in relevance-aware retrieval (issue #4495). When true, "
+            "search bypasses retrieval_adapter (including FTS5 and custom factories); "
+            "memory_search ranks all facts in scope by deterministic lexical "
+            "relevance combined with confidence, related facts are returned "
+            "even without a literal substring match, and prompt injection "
+            "ranks facts against the current query. False preserves the "
+            "legacy confidence-based behavior exactly."
+        ),
+    )
+    retrieval_relevance_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of lexical relevance vs confidence in the combined retrieval score. 0.0 = confidence only; 1.0 = relevance only. Used only when retrieval_relevance_enabled is true.",
+    )
+    retrieval_diversity_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Greedy MMR similarity penalty that demotes near-duplicate facts during relevance-aware ranking. 0.0 (default) = no diversification. Used only when retrieval_relevance_enabled is true.",
     )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(

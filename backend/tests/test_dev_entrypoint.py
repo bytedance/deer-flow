@@ -9,13 +9,56 @@ same shape — see PR #2767 / Issue #2754.
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from support.shell import require_posix_sh
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "docker" / "dev-entrypoint.sh"
+
+
+_PYTHON_SHIM_DIR: str | None = None
+
+
+def _windows_python_shim_dir() -> str | None:
+    """Return a bin dir with working python3/python shims (Windows only).
+
+    The Microsoft Store alias stubs answer `command -v python3` but exit 49
+    when exec'd — the failure mode #5179 hardened serve.sh against — which
+    would send the entrypoint's detector probe to a broken interpreter.
+    """
+    global _PYTHON_SHIM_DIR
+    if os.name != "nt":
+        return None
+    if _PYTHON_SHIM_DIR is None:
+        shim_dir = tempfile.mkdtemp(prefix="dev-entrypoint-python-shim-")
+        for name in ("python3", "python"):
+            shim = Path(shim_dir) / name
+            # newline="\n": the default newline=None would write CRLF on
+            # Windows, gluing a stray \r onto the shim's last argument.
+            shim.write_text(
+                f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            shim.chmod(0o755)
+        _PYTHON_SHIM_DIR = shim_dir
+    return _PYTHON_SHIM_DIR
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_python_shim_dir() -> Iterator[None]:
+    """Remove the session-scoped python shim directory after the module."""
+    yield
+    if _PYTHON_SHIM_DIR is not None:
+        shutil.rmtree(_PYTHON_SHIM_DIR, ignore_errors=True)
 
 
 def _run(
@@ -35,8 +78,12 @@ def _run(
         env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
     if stream_bridge_redis_url is not None:
         env["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"] = stream_bridge_redis_url
+    python_shim_dir = _windows_python_shim_dir()
+    if python_shim_dir is not None:
+        env["PATH"] = f"{python_shim_dir}{os.pathsep}{env['PATH']}"
+    sh = require_posix_sh()
     return subprocess.run(
-        ["sh", str(ENTRYPOINT), "--print-extras"],
+        [sh, str(ENTRYPOINT), "--print-extras"],
         cwd=ENTRYPOINT.parent,
         env=env,
         capture_output=True,
@@ -48,7 +95,8 @@ def _run(
 def test_entrypoint_script_exists_and_is_posix_sh():
     assert ENTRYPOINT.is_file()
     # Catch syntax errors before runtime — `sh -n` is a parse-only check.
-    proc = subprocess.run(["sh", "-n", str(ENTRYPOINT)], capture_output=True, text=True, check=False)
+    sh = require_posix_sh()
+    proc = subprocess.run([sh, "-n", str(ENTRYPOINT)], capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -218,7 +266,8 @@ def _run_sync_block(tmp_path: Path, stub_uv: str) -> subprocess.CompletedProcess
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     uv_stub = bin_dir / "uv"
-    uv_stub.write_text(stub_uv, encoding="utf-8")
+    # newline="\n": keep the stub POSIX-sh clean on Windows (no stray \r).
+    uv_stub.write_text(stub_uv, encoding="utf-8", newline="\n")
     uv_stub.chmod(0o755)
 
     state_dir = tmp_path / "state"
@@ -231,7 +280,7 @@ def _run_sync_block(tmp_path: Path, stub_uv: str) -> subprocess.CompletedProcess
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["STUB_UV_STATE"] = str(state_dir)
-    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False, env=env, cwd=tmp_path)
+    return subprocess.run([require_posix_sh(), "-c", script], capture_output=True, text=True, check=False, env=env, cwd=tmp_path)
 
 
 def test_successful_sync_reaches_the_uvicorn_handoff(tmp_path: Path):

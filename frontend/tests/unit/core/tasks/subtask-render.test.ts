@@ -59,6 +59,7 @@ describe("collectRenderedSubtasks", () => {
       groups,
       (groupIndex) => threadIsLoading && groupIndex === groups.length - 1,
       "failed",
+      "Subtask",
     );
 
     expect(rendered.tasks.get("task-1")).toMatchObject({
@@ -94,6 +95,7 @@ describe("collectRenderedSubtasks", () => {
       groups,
       () => false,
       "Subtask failed",
+      "Subtask",
     );
 
     expect(rendered.tasks.get("task-1")).toMatchObject({
@@ -133,7 +135,12 @@ describe("collectRenderedSubtasks", () => {
       ]),
     ];
 
-    const rendered = collectRenderedSubtasks(groups, () => false, "failed");
+    const rendered = collectRenderedSubtasks(
+      groups,
+      () => false,
+      "failed",
+      "Subtask",
+    );
 
     expect(rendered.tasks.get("task-1")).toMatchObject({
       id: "task-1",
@@ -144,7 +151,76 @@ describe("collectRenderedSubtasks", () => {
   });
 });
 
+describe("collectRenderedSubtasks description fallback", () => {
+  it.each([
+    [undefined, "Use the prompt", "Use the prompt"],
+    ["   ", "  Trimmed prompt  ", "Trimmed prompt"],
+    [undefined, "", "Localized subtask"],
+  ])(
+    "preserves the current-main description fallback for %s / %s",
+    (description, prompt, expected) => {
+      const rendered = collectRenderedSubtasks(
+        [
+          subagentGroup([
+            {
+              type: "ai",
+              content: "",
+              tool_calls: [
+                {
+                  id: "task-1",
+                  name: "task",
+                  args: { description, prompt, subagent_type: "researcher" },
+                },
+              ],
+            } as Message,
+          ]),
+        ],
+        () => true,
+        "failed",
+        "Localized subtask",
+      );
+      expect(rendered.tasks.get("task-1")?.description).toBe(expected);
+    },
+  );
+});
+
 describe("resolveRenderedSubtask", () => {
+  it("keeps live arguments when a partial snapshot omits them", () => {
+    const live = baseTask();
+    const fallback = { id: "task-1", status: "in_progress" } as Subtask;
+    expect(resolveRenderedSubtask(live, fallback)).toEqual(live);
+  });
+
+  it.each(["completed", "failed"] as const)(
+    "preserves %s lifecycle and runtime data while refreshing message arguments",
+    (status) => {
+      const live = baseTask({
+        status,
+        result: "done",
+        error: "failed",
+        stopReason: "token_capped",
+        modelName: "test-model",
+        usage: { inputTokens: 8, outputTokens: 2, totalTokens: 10 },
+        steps: [{ kind: "tool", message_index: 1, text: "done" }],
+        latestMessage: { id: "live", type: "ai", content: "working" },
+      });
+      const resolved = resolveRenderedSubtask(
+        live,
+        baseTask({
+          description: "Current title",
+          prompt: "Current prompt",
+          subagent_type: "general-purpose",
+        }),
+      );
+      expect(resolved).toEqual({
+        ...live,
+        description: "Current title",
+        prompt: "Current prompt",
+        subagent_type: "general-purpose",
+      });
+    },
+  );
+
   it("uses an in-progress fallback before the live task is available", () => {
     const fallbackTask = baseTask({
       status: "in_progress",
@@ -185,15 +261,22 @@ describe("resolveRenderedSubtask", () => {
     });
   });
 
-  it("keeps the live task when the fallback snapshot is still in progress", () => {
+  it("uses current message arguments while preserving live runtime state", () => {
     const resolved = resolveRenderedSubtask(
-      baseTask({ status: "in_progress", description: "live" }),
-      baseTask({ status: "in_progress", description: "fallback" }),
+      baseTask({
+        status: "in_progress",
+        description: "live",
+        modelName: "test-model",
+        prompt: "old prompt",
+      }),
+      baseTask({ status: "in_progress", description: "fallback", prompt: "" }),
     );
 
     expect(resolved).toMatchObject({
       status: "in_progress",
-      description: "live",
+      description: "fallback",
+      prompt: "",
+      modelName: "test-model",
     });
   });
 

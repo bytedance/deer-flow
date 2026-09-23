@@ -1,9 +1,63 @@
-"""Unit tests for the Tavily community web search tool."""
+"""Unit tests for the Tavily community search and fetch tools."""
 
 import json
 from unittest.mock import MagicMock, patch
 
-from deerflow.community.tavily.tools import web_search_tool
+import pytest
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from tavily import TavilyClient
+
+from deerflow.community.tavily.tools import web_fetch_tool, web_search_tool
+from deerflow.config.tool_config import ToolConfig
+
+
+@pytest.mark.parametrize(
+    ("search_provider", "fetch_key", "expected_key"),
+    [
+        ("serper", "fetch-key", "fetch-key"),
+        (None, "fetch-key", "fetch-key"),
+        ("tavily", "fetch-key", "fetch-key"),
+        ("serper", None, "env-key"),
+        ("tavily", None, "env-key"),
+        (None, None, "env-key"),
+    ],
+)
+def test_web_fetch_uses_own_credentials(monkeypatch, search_provider, fetch_key, expected_key) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "env-key")
+    fetch_config = ToolConfig(name="web_fetch", group="web", use="deerflow.community.tavily.tools:web_fetch_tool", **({"api_key": fetch_key} if fetch_key else {}))
+    configs = {"web_fetch": fetch_config}
+    if search_provider:
+        configs["web_search"] = ToolConfig(name="web_search", group="web", use=f"deerflow.community.{search_provider}.tools:web_search_tool", api_key="search-key")
+
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch.object(TavilyClient, "extract", autospec=True, return_value={"results": []}) as extract,
+    ):
+        mock_config.return_value.get_tool_config.side_effect = configs.get
+        web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    client, urls = extract.call_args.args
+    assert client.api_key == expected_key
+    assert urls == ["https://example.com/report"]
+
+
+@pytest.mark.parametrize("search_key", ["search-key", None])
+def test_web_search_preserves_own_credentials(monkeypatch, search_key) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "env-key")
+    configs = {
+        "web_search": ToolConfig(name="web_search", group="web", use="deerflow.community.tavily.tools:web_search_tool", api_key=search_key),
+        "web_fetch": ToolConfig(name="web_fetch", group="web", use="deerflow.community.tavily.tools:web_fetch_tool", api_key="fetch-key"),
+    }
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch.object(TavilyClient, "search", autospec=True, return_value={"results": []}) as search,
+    ):
+        mock_config.return_value.get_tool_config.side_effect = configs.get
+        web_search_tool.invoke({"query": "documentation"})
+
+    client, query = search.call_args.args
+    assert client.api_key == (search_key or "env-key")
+    assert query == "documentation"
 
 
 def _tavily_response() -> dict:
@@ -41,3 +95,100 @@ def test_web_search_omits_time_range_from_default_tavily_call() -> None:
             web_search_tool.invoke({"query": "stable documentation"})
 
     client.search.assert_called_once_with("stable documentation", max_results=5)
+
+
+@pytest.mark.parametrize("time_range", [None, "week"])
+@pytest.mark.parametrize(
+    "domain_config",
+    [
+        pytest.param({}, id="omitted"),
+        pytest.param({"include_domains": ["docs.example.com", "reference.example.org"], "exclude_domains": ["archive.example.com"]}, id="both"),
+        pytest.param({"include_domains": ["docs.example.com"]}, id="include-only"),
+        pytest.param({"exclude_domains": ["archive.example.com"]}, id="exclude-only"),
+        pytest.param({"include_domains": [], "exclude_domains": []}, id="empty-both"),
+        pytest.param({"include_domains": []}, id="empty-include"),
+        pytest.param({"exclude_domains": []}, id="empty-exclude"),
+    ],
+)
+def test_web_search_forwards_configured_domains(domain_config, time_range) -> None:
+    configs = {
+        "web_search": ToolConfig(name="web_search", group="web", use="deerflow.community.tavily.tools:web_search_tool", api_key="search-key", max_results=3, **domain_config),
+        "web_fetch": ToolConfig(name="web_fetch", group="web", use="deerflow.community.tavily.tools:web_fetch_tool", include_domains=["fetch.example.com"], exclude_domains=["other.example.org"]),
+    }
+    tool_args = {"query": "documentation"}
+    expected_kwargs = {"max_results": 3, **domain_config}
+    if domain_config.get("include_domains"):
+        expected_kwargs["include_domains_mode"] = "filter"
+    if time_range is not None:
+        tool_args["time_range"] = time_range
+        expected_kwargs["time_range"] = time_range
+
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch.object(TavilyClient, "search", autospec=True, return_value=_tavily_response()) as search,
+    ):
+        mock_config.return_value.get_tool_config.side_effect = configs.get
+        result = web_search_tool.invoke(tool_args)
+
+    client = search.call_args.args[0]
+    search.assert_called_once_with(client, "documentation", **expected_kwargs)
+    assert json.loads(result) == [{"title": "Release notes", "url": "https://example.com/releases", "snippet": "A recent release."}]
+
+
+def test_web_search_keeps_domain_filters_out_of_model_schema() -> None:
+    parameters = convert_to_openai_tool(web_search_tool)["function"]["parameters"]
+
+    assert set(parameters["properties"]) == {"query", "time_range"}
+    assert parameters["required"] == ["query"]
+
+
+@pytest.mark.parametrize("title", [None, "", "Report title"])
+def test_web_fetch_accepts_extract_results_with_optional_title(title) -> None:
+    result = {"url": "https://example.com/report", "raw_content": "Important findings."}
+    if title is not None:
+        result["title"] = title
+    client = MagicMock()
+    client.extract.return_value = {"results": [result], "failed_results": []}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/requested"})
+
+    assert output == f"# {title or result['url']}\n\nImportant findings."
+    client.extract.assert_called_once_with(["https://example.com/requested"])
+
+
+def test_web_fetch_falls_back_to_requested_url_without_result_metadata() -> None:
+    client = MagicMock()
+    client.extract.return_value = {"results": [{"title": None, "url": None, "raw_content": "Important findings."}]}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/requested"})
+
+    assert output == "# https://example.com/requested\n\nImportant findings."
+
+
+def test_web_fetch_preserves_content_limit_without_title() -> None:
+    client = MagicMock()
+    client.extract.return_value = {"results": [{"url": "https://example.com/report", "raw_content": "x" * 5000}]}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    assert output == "# https://example.com/report\n\n" + "x" * 4096
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"failed_results": [{"error": "Extraction failed"}]}, "Error: Extraction failed"),
+        ({"results": [], "failed_results": []}, "Error: No results found"),
+    ],
+)
+def test_web_fetch_preserves_unsuccessful_extract_results(response, expected) -> None:
+    client = MagicMock()
+    client.extract.return_value = response
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    assert output == expected

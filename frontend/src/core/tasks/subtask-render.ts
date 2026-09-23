@@ -1,5 +1,6 @@
 import { extractTextFromMessage, type MessageGroup } from "../messages/utils";
 
+import { resolveSubtaskDescription } from "./presentation";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -25,7 +26,14 @@ export function resolveRenderedSubtask(
   }
 
   if (!isTerminalSubtaskStatus(fallbackTask.status)) {
-    return liveTask.status ? liveTask : { ...fallbackTask, ...liveTask };
+    return {
+      ...fallbackTask,
+      ...liveTask,
+      subagent_type: fallbackTask.subagent_type ?? liveTask.subagent_type,
+      description: fallbackTask.description ?? liveTask.description,
+      prompt: fallbackTask.prompt ?? liveTask.prompt,
+      status: liveTask.status ?? fallbackTask.status,
+    };
   }
 
   return {
@@ -40,6 +48,7 @@ export function collectRenderedSubtasks(
   groups: MessageGroup[],
   isGroupLoading: (groupIndex: number) => boolean,
   failedLabel: string,
+  subtaskLabel: string,
 ): RenderedSubtasks {
   const tasks = new Map<string, Subtask>();
   const updates: Array<Partial<Subtask> & { id: string }> = [];
@@ -65,7 +74,11 @@ export function collectRenderedSubtasks(
           const task: Subtask = {
             id: toolCall.id,
             subagent_type: toolCall.args.subagent_type,
-            description: toolCall.args.description,
+            description: resolveSubtaskDescription(
+              toolCall.args.description,
+              toolCall.args.prompt,
+              subtaskLabel,
+            ),
             prompt: toolCall.args.prompt,
             status,
             ...(status === "failed" ? { error: failedLabel } : {}),

@@ -118,6 +118,34 @@ def test_default_user_fallback_is_denied_when_unmapped():
         asyncio.run(interceptor(_request(runtime=None), AsyncMock()))
 
 
+def test_credential_with_trailing_newline_is_denied_without_leaking_it():
+    """A credential that cannot travel as a header value (docker env-file with
+    CRLF line endings, `$ENV_VAR` set from a token file) must be rejected here:
+    h11 renders the full value into its LocalProtocolError message, which
+    ToolErrorHandlingMiddleware then copies into a model-visible ToolMessage."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer sk-secret-value\n"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException) as excinfo:
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), handler))
+    handler.assert_not_awaited()
+    assert "sk-secret-value" not in str(excinfo.value)
+    assert "u1" in str(excinfo.value)
+
+
+def test_credential_with_carriage_return_is_denied_even_with_passthrough():
+    """passthrough covers an *unmapped user*; a mapped-but-broken credential
+    must not silently fall back to the shared discovery credential."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1\r"}, on_missing="passthrough"))
+    with pytest.raises(ToolException):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), AsyncMock()))
+
+
+def test_credential_with_embedded_space_is_not_rejected():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    result = asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), _echo_handler))
+    assert result.headers["Authorization"] == "Bearer t1"
+
+
 def test_env_var_reference_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_USER_CRED", "Bearer from-env")
     config_file = tmp_path / "extensions_config.json"
@@ -284,6 +312,46 @@ def test_explicit_users_map_still_replaces_and_can_remove():
     assert merged.user_auth.users == {"u1": "Bearer s1"}  # u2 removed, u1 preserved through mask
 
 
+def test_complete_replacement_user_auth_honors_omitted_subfields():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            header="X-Api-Key",
+            users={"u1": "Bearer s1", "u2": "Bearer s2"},
+            on_missing="passthrough",
+            custom_note="remove-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            enabled=False,
+            users={"u1": "***"},
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.user_auth is not None
+    assert merged.user_auth.enabled is False
+    assert merged.user_auth.header == "Authorization"
+    assert merged.user_auth.users == {"u1": "Bearer s1"}
+    assert merged.user_auth.on_missing == "deny"
+    assert "custom_note" not in (merged.user_auth.model_extra or {})
+
+
 def test_user_auth_extra_keys_survive_parse_mask_and_merge():
     from app.gateway.routers.mcp import (
         McpServerConfigResponse,
@@ -302,6 +370,42 @@ def test_user_auth_extra_keys_survive_parse_mask_and_merge():
         server,
     )
     assert (merged.user_auth.model_extra or {}).get("custom_note") == "keep-me"
+
+
+def test_user_auth_extra_array_rejects_structural_edit_while_secrets_are_masked():
+    from fastapi import HTTPException
+
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _mask_server_config,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            providers=[
+                {"name": "alpha", "apiKey": "secret-alpha"},
+                {"name": "beta", "apiKey": "secret-beta"},
+            ]
+        ),
+    )
+    masked = _mask_server_config(existing)
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            providers=list(reversed(masked.user_auth.model_extra["providers"])),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(incoming, existing)
+
+    assert exc_info.value.status_code == 400
+    assert "providers" in exc_info.value.detail
 
 
 def test_stdio_server_user_auth_is_skipped_with_warning(caplog):

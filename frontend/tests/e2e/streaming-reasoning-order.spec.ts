@@ -13,6 +13,44 @@ const REASONING_TEXT =
   "The user asked who I am, so I will list the core capabilities.";
 const ANSWER_TEXT = "I am DeerFlow, an open-source super agent.";
 
+for (const literal of ["<think>sample reasoning</think>", "<think>"]) {
+  test(`preserves literal code ${literal} and its following explanation`, async ({
+    page,
+  }, testInfo) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "Literal reasoning tags in code",
+          messages: [
+            {
+              type: "human",
+              id: "literal-human",
+              content: "Show a reasoning-tag example.",
+            },
+            {
+              type: "ai",
+              id: "literal-ai",
+              content: `Example:\n\n\`\`\`xml\n${literal}\n\`\`\`\n\nThis is literal code, not model reasoning.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(
+      page.locator("pre").filter({ hasText: literal }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("This is literal code, not model reasoning."),
+    ).toBeVisible();
+    await expect(page.getByText("Reasoning", { exact: true })).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("literal-think-code.png"),
+    });
+  });
+}
+
 const INITIAL_MESSAGES = [
   {
     type: "human",
@@ -20,6 +58,110 @@ const INITIAL_MESSAGES = [
     content: [{ type: "text", text: "Who are you?" }],
   },
 ];
+
+for (const [opener, indent] of [
+  ["- ~~~xml", "  "],
+  ["10. ```xml", "    "],
+]) {
+  test(`separates literal and real reasoning after a list fence: ${opener}`, async ({
+    page,
+  }, testInfo) => {
+    const closer = opener!.includes("~~~") ? "~~~" : "```";
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "List-contained reasoning example",
+          messages: [
+            ...INITIAL_MESSAGES,
+            {
+              type: "ai",
+              id: "list-fence-ai",
+              content: `${opener}\n${indent}<think>literal example</think>\n${indent}${closer}\n\n<think>Actual model reasoning.</think>Visible answer after the list.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(
+      page
+        .locator("li pre")
+        .filter({ hasText: "<think>literal example</think>" }),
+    ).toBeVisible();
+    await expect(page.getByText("Reasoning", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Visible answer after the list.", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("<think>Actual model reasoning.</think>", {
+        exact: false,
+      }),
+    ).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath("list-fence-reasoning.png"),
+    });
+  });
+}
+
+for (const block of ["# Result", "- Result", "```sh\necho hi\n```"]) {
+  test(`extracts reasoning after a block interrupts inline code: ${block}`, async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: SETTLED_THREAD_ID,
+          title: "Reasoning at a block boundary",
+          messages: [
+            ...INITIAL_MESSAGES,
+            {
+              type: "ai",
+              id: "block-boundary-ai",
+              content: `Run \`this command\n${block}\n<think>Internal boundary reasoning.</think>Visible final answer.`,
+            },
+          ],
+        },
+      ],
+    });
+    await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+    await expect(page.getByText("Reasoning", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Visible final answer.", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("<think>Internal boundary reasoning.</think>", {
+        exact: false,
+      }),
+    ).toHaveCount(0);
+  });
+}
+
+test("preserves inline code after the first backtick is escaped", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: SETTLED_THREAD_ID,
+        title: "Escaped backtick run",
+        messages: [
+          ...INITIAL_MESSAGES,
+          {
+            type: "ai",
+            id: "escaped-backtick-ai",
+            content: "Use \\``<think>sample</think>` literally.",
+          },
+        ],
+      },
+    ],
+  });
+  await page.goto(`/workspace/chats/${SETTLED_THREAD_ID}`);
+  await expect(
+    page.locator("code").filter({ hasText: "<think>sample</think>" }),
+  ).toBeVisible();
+  await expect(page.getByText("Reasoning", { exact: true })).toHaveCount(0);
+});
 
 const SETTLED_AI_MESSAGE = {
   type: "ai",
@@ -145,10 +287,10 @@ test("renders reasoning above the answer text while the turn is streaming", asyn
     await textarea.fill("Summarize that briefly");
     await textarea.press("Enter");
 
-    // The streaming turn renders inside the chain-of-thought panel, whose
-    // reasoning disclosure is labelled "Thinking".
+    // The streaming turn renders inside the assistant bubble, whose
+    // reasoning disclosure is labelled "Reasoning".
     await expectRenderedAbove(
-      page.getByText("Thinking", { exact: true }),
+      page.getByText("Reasoning", { exact: true }),
       page.getByText(ANSWER_TEXT),
     );
   } finally {

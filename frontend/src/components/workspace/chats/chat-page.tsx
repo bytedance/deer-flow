@@ -1,6 +1,9 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
+import { Folder } from "lucide-react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -15,6 +18,7 @@ import {
   InputBox,
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
+import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
 import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
@@ -24,7 +28,9 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
+import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
 import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -32,8 +38,19 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
-import { useBrowserControlEnabled } from "@/core/features";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
+import {
+  useBrowserControlEnabled,
+  useKnowledgeBaseEnabled,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  ALL_KNOWLEDGE_SCOPE,
+  buildKnowledgeScopeSnapshot,
+  KNOWLEDGE_SCOPE_KEY,
+  type KnowledgeScopeSelection,
+} from "@/core/knowledge";
 import {
   buildHumanInputResponseText,
   hasOpenHumanInputRequest,
@@ -43,9 +60,13 @@ import {
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
+import { useProject } from "@/core/projects";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { resolveThreadContext } from "@/core/settings/store";
+import { createThread } from "@/core/threads/api";
 import {
   useBranchThread,
+  INFINITE_THREADS_QUERY_KEY_PREFIX,
   useThreadMetadata,
   useThreadStream,
   useThreadTokenUsage,
@@ -54,7 +75,7 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { textOfMessage } from "@/core/threads/utils";
+import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -64,15 +85,29 @@ import { useThreadChat } from "./use-thread-chat";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
+  const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // Project-scoped new chat: `/workspace/chats/new?project={id}` assigns the
+  // thread to the project on the FIRST submit — primarily via an explicit
+  // `POST /api/threads` pre-create with `project_id`, with the run-request
+  // metadata seed as the fallback channel (the SDK's own threads.create
+  // strips the reserved key, so the seed alone races the sidebar). Only
+  // meaningful while the thread is still lazy (`isNewThread`); once
+  // materialized the URL is replaced with the thread route and the param is
+  // gone. Invalid ids are dropped by backend admission.
+  const projectParam = isNewThread ? searchParams.get("project") : null;
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
+  const queryClient = useQueryClient();
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { enabled: browserControlEnabled } = useBrowserControlEnabled();
@@ -104,6 +139,41 @@ export default function ChatPage() {
   }, [isNewThread]);
 
   const { showNotification } = useNotification();
+  const { scopeSelectionEnabled } = useKnowledgeBaseEnabled();
+  const selectorVisible =
+    scopeSelectionEnabled && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true";
+  const [knowledgeScope, setKnowledgeScope] =
+    useState<KnowledgeScopeSelection | null>(null);
+  const previousConversationRef = useRef({ threadId, isNewThread });
+
+  useEffect(() => {
+    setKnowledgeScope((current) => {
+      if (!selectorVisible) return null;
+      return current ?? ALL_KNOWLEDGE_SCOPE;
+    });
+  }, [selectorVisible]);
+
+  useEffect(() => {
+    const previous = previousConversationRef.current;
+    if (
+      previous.threadId !== threadId ||
+      previous.isNewThread !== isNewThread
+    ) {
+      const isNewThreadRouteReplacement = previous.isNewThread && !isNewThread;
+      if (!isNewThreadRouteReplacement) {
+        setKnowledgeScope(selectorVisible ? ALL_KNOWLEDGE_SCOPE : null);
+      }
+    }
+    previousConversationRef.current = { threadId, isNewThread };
+  }, [isNewThread, selectorVisible, threadId]);
+
+  const currentKnowledgeScopeSnapshot = useMemo(
+    () =>
+      selectorVisible && knowledgeScope
+        ? buildKnowledgeScopeSnapshot(knowledgeScope)
+        : null,
+    [knowledgeScope, selectorVisible],
+  );
 
   const {
     thread,
@@ -177,15 +247,84 @@ export default function ChatPage() {
     threadMetadata.isLoading,
   ]);
 
+  // Born assigned: pre-create the thread row with its project so the sidebar
+  // lists it under the project immediately. Idempotent server-side on
+  // `thread_id`, so retrying the same first message (same `threadId` while
+  // `isNewThread`) reuses the existing row instead of double-creating. This
+  // is the sole membership channel — run requests never carry the project
+  // key.
+  //
+  // Also runs before InputBox issues a `/goal <condition>` PUT (via
+  // `onPrepareThread`): the goal endpoint materializes a missing thread row
+  // itself, and an unassigned row would make this later idempotent create a
+  // membership no-op.
+  const ensureProjectThread = useCallback(async () => {
+    if (!projectParam) {
+      return;
+    }
+    try {
+      await createThread(threadId, projectParam);
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+    } catch (error) {
+      // Any failure (e.g. the project was deleted/archived between page load
+      // and submit): do NOT submit unassigned. Reject so PromptInput keeps
+      // the composer's text for a retry; the send in-flight guard is never
+      // engaged on this path, so retrying works immediately.
+      toast.error(t.projects.projectUnavailable);
+      throw error;
+    }
+  }, [threadId, projectParam, queryClient, t]);
+
+  // Submission fence. The cleanup runs when `threadId` changes (conversation
+  // switch on a persisted page — sidebar navigation keeps this component
+  // mounted), when the new-chat project scope changes (the sidebar "New
+  // chat" link can drop `?project=` without a pathname change), or on
+  // unmount. handleSubmit awaits the project pre-create before sending, and
+  // a navigation during that await must not let the stale continuation
+  // start a run for the abandoned conversation: its onStart would rewrite
+  // the newly selected conversation's URL and its completion would clear
+  // the new composer.
+  const submissionEpochRef = useRef(0);
+  useEffect(() => {
+    return () => {
+      submissionEpochRef.current += 1;
+    };
+  }, [threadId, projectParam]);
+
   const handleSubmit = useCallback(
-    (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
-      const sendPromise = sendMessage(threadId, message, undefined, options);
+    async (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      const submissionEpoch = submissionEpochRef.current;
+      await ensureProjectThread();
+      // Conversation switched (or the page unmounted) while the project
+      // pre-create was pending: drop the submission. Reject silently — the
+      // user has already moved on, so a toast would land on the new
+      // conversation — and PromptInput keeps the current composer text.
+      if (submissionEpochRef.current !== submissionEpoch) {
+        throw new Error("thread-submission-stale");
+      }
+      const scopedOptions = currentKnowledgeScopeSnapshot
+        ? {
+            ...options,
+            additionalKwargs: {
+              ...options?.additionalKwargs,
+              [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot,
+            },
+          }
+        : options;
+      const sendPromise = sendMessage(
+        threadId,
+        message,
+        undefined,
+        scopedOptions,
+      );
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId, ensureProjectThread],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -201,6 +340,9 @@ export default function ChatPage() {
           additionalKwargs: {
             hide_from_ui: true,
             human_input_response: response,
+            ...(currentKnowledgeScopeSnapshot
+              ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+              : {}),
           },
           onSent: () => {
             sent = true;
@@ -209,7 +351,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [sendMessage, threadId],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -221,8 +363,15 @@ export default function ChatPage() {
   );
   const handleEditAndRegenerate = useCallback(
     (messageId: string, replacementText: string) =>
-      editAndRegenerateMessage(threadId, messageId, replacementText),
-    [editAndRegenerateMessage, threadId],
+      editAndRegenerateMessage(
+        threadId,
+        messageId,
+        replacementText,
+        currentKnowledgeScopeSnapshot
+          ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+          : undefined,
+      ),
+    [currentKnowledgeScopeSnapshot, editAndRegenerateMessage, threadId],
   );
   const handleBranchTurn = useCallback(
     async (messageId: string, messageIds: string[]) => {
@@ -269,6 +418,14 @@ export default function ChatPage() {
     [thread.messages],
   );
 
+  // Project affiliation chip: shown once the materialized thread's metadata
+  // carries `deerflow_project_id` (written by the create/move endpoints and
+  // exposed here read-only).
+  const affiliatedProjectId =
+    !isNewThread && !isMock && threadMetadata.data
+      ? projectIdOfThread(threadMetadata.data)
+      : null;
+
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
       <SidecarProvider
@@ -280,15 +437,30 @@ export default function ChatPage() {
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(
-                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+                "absolute top-0 right-0 left-0 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
                 isWelcomeMode
-                  ? "bg-background/0 backdrop-blur-none"
-                  : "bg-background/80 shadow-xs backdrop-blur",
+                  ? "bg-background/0 z-40 backdrop-blur-none"
+                  : "bg-background/80 z-30 shadow-xs backdrop-blur",
               )}
             >
               {!isMock && <SidebarTrigger className="md:hidden" />}
-              <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-                <ThreadTitle threadId={threadId} thread={thread} />
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
+                <ThreadTitle
+                  threadId={threadId}
+                  thread={thread}
+                  canonicalTitle={threadMetadata.data?.values?.title}
+                />
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadArchiveStatus
+                      threadId={threadId}
+                      metadata={threadMetadata.data?.metadata}
+                    />
+                  )}
+                {affiliatedProjectId && (
+                  <ProjectAffiliationBadge projectId={affiliatedProjectId} />
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {!isNewThread &&
@@ -323,12 +495,16 @@ export default function ChatPage() {
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
                 <ExportTrigger threadId={threadId} />
+                <ThreadExtensionActions threadId={threadId} />
                 <ArtifactTrigger />
               </div>
             </header>
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  archiveDownloadsEnabled={
+                    isNewThread || isMock || threadMetadata.data != null
+                  }
                   className={cn("size-full", !isWelcomeMode && "pt-10")}
                   testId="main-message-list"
                   threadId={threadId}
@@ -423,6 +599,16 @@ export default function ChatPage() {
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
                       draftThreadId={isNewThread ? "new" : threadId}
+                      knowledgeScopeControl={
+                        selectorVisible && knowledgeScope ? (
+                          <KnowledgeScopeSelector
+                            agentName="lead_agent"
+                            disabled={thread.isLoading || isUploading}
+                            selection={knowledgeScope}
+                            onChange={setKnowledgeScope}
+                          />
+                        ) : undefined
+                      }
                       autoFocus={isWelcomeMode}
                       status={
                         thread.error
@@ -443,12 +629,17 @@ export default function ChatPage() {
                         isUploading ||
                         (!isNewThread && isHistoryLoading)
                       }
-                      onContextChange={(context) =>
-                        setSettings("context", context)
-                      }
+                      onContextChange={(context, options) => {
+                        if (options?.automatic)
+                          resolveThreadContext(threadId, context);
+                        else setSettings("context", context);
+                      }}
                       onGoalChange={setLocalGoal}
+                      onPrepareThread={ensureProjectThread}
                       onSubmit={handleSubmit}
                       onStop={handleStop}
+                      canStopStreaming={canStopStreaming}
+                      canCreateRuns={canCreateRuns}
                     />
                   ) : (
                     <div
@@ -471,5 +662,26 @@ export default function ChatPage() {
         </ChatBox>
       </SidecarProvider>
     </ThreadContext.Provider>
+  );
+}
+
+/**
+ * Small chip in the chat header linking to the thread's project. Hidden
+ * while the project lookup is pending or when it fails (e.g. the project
+ * was deleted) — an unresolvable affiliation degrades silently.
+ */
+function ProjectAffiliationBadge({ projectId }: { projectId: string }) {
+  const { data: project } = useProject(projectId);
+  if (!project) {
+    return null;
+  }
+  return (
+    <Link
+      href={`/workspace/projects/${encodeURIComponent(project.id)}`}
+      className="text-muted-foreground hover:text-foreground inline-flex max-w-40 shrink-0 items-center gap-1 truncate rounded-full border px-2 py-0.5 text-xs font-normal transition-colors"
+    >
+      <Folder className="size-3 shrink-0" />
+      <span className="truncate">{project.name}</span>
+    </Link>
   );
 }

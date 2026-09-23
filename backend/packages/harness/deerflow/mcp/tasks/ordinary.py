@@ -32,6 +32,7 @@ class McpTaskToolCaller(Protocol):
         arguments: dict[str, Any],
         user_id: str,
         thread_id: str,
+        thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
     ) -> Any: ...
 
@@ -159,6 +160,7 @@ class OrdinaryMcpTaskDriver:
             arguments=request.arguments,
             user_id=request.user_id,
             thread_id=request.thread_id,
+            thread_incarnation=request.thread_incarnation,
             # Submit alone is awaited inside the Agent run, so it is the one
             # durable-task call that can carry the run's request-scoped
             # credentials; status and cancel run after that run ended.
@@ -184,6 +186,7 @@ class OrdinaryMcpTaskDriver:
             arguments={"task_id": task.remote_task_id},
             user_id=task.user_id,
             thread_id=task.thread_id,
+            thread_incarnation=task.thread_incarnation,
         )
         payload = _parse(
             _StatusPayload,
@@ -202,6 +205,7 @@ class OrdinaryMcpTaskDriver:
             arguments={"task_id": task.remote_task_id},
             user_id=task.user_id,
             thread_id=task.thread_id,
+            thread_incarnation=task.thread_incarnation,
         )
         payload = _parse(
             _CancelPayload,

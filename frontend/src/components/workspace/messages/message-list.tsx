@@ -25,8 +25,10 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
 import {
   buildConversationChapters,
   CONVERSATION_OUTLINE_MIN_TURNS,
@@ -274,6 +276,7 @@ function LoadMoreHistoryIndicator({
 }
 
 export function MessageList({
+  archiveDownloadsEnabled = true,
   className,
   testId,
   threadId,
@@ -296,6 +299,7 @@ export function MessageList({
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
+  archiveDownloadsEnabled?: boolean;
   className?: string;
   testId?: string;
   threadId: string;
@@ -500,8 +504,15 @@ export function MessageList({
         groupedMessages,
         (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
         t.subtasks.failed,
+        t.subtasks.subtask,
       ),
-    [groupedMessages, lastGroupIndex, t.subtasks.failed, thread.isLoading],
+    [
+      groupedMessages,
+      lastGroupIndex,
+      t.subtasks.failed,
+      t.subtasks.subtask,
+      thread.isLoading,
+    ],
   );
 
   useEffect(() => {
@@ -524,6 +535,10 @@ export function MessageList({
   }, [groupedMessages]);
   const runDurationDisplaysByGroupIndex = useMemo(
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
+  const artifactArchiveCandidatesByGroupIndex = useMemo(
+    () => getArtifactArchiveCandidatesByGroupIndex(groupedMessages),
     [groupedMessages],
   );
   const workspaceChangeAnchorGroupIndices = useMemo(
@@ -1083,7 +1098,7 @@ export function MessageList({
     );
   };
   return (
-    <>
+    <KnowledgeSourcesProvider messages={thread.messages}>
       <Conversation
         className={cn("flex size-full flex-col justify-center", className)}
         data-testid={testId}
@@ -1281,14 +1296,17 @@ export function MessageList({
                 }
                 return withRunDuration(group, groupIndex, null);
               } else if (group.type === "assistant:present-files") {
-                const files: string[] = [];
+                const files = new Set<string>();
                 for (const message of group.messages) {
                   if (hasPresentFiles(message)) {
                     const presentFiles =
                       extractPresentFilesFromMessage(message);
-                    files.push(...presentFiles);
+                    for (const file of presentFiles) files.add(file);
                   }
                 }
+                const presentedFiles = [...files];
+                const archiveCandidate =
+                  artifactArchiveCandidatesByGroupIndex[groupIndex];
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1300,7 +1318,14 @@ export function MessageList({
                         className="mb-4"
                       />
                     )}
-                    <ArtifactFileList files={files} threadId={threadId} />
+                    <ArtifactFileList
+                      archiveDownloadsEnabled={
+                        archiveDownloadsEnabled && !thread.isLoading
+                      }
+                      files={presentedFiles}
+                      runId={archiveCandidate?.runId}
+                      threadId={threadId}
+                    />
                     {renderTokenUsage({
                       messages: group.messages,
                       turnUsageMessages,
@@ -1475,6 +1500,6 @@ export function MessageList({
           </Button>
         </div>
       )}
-    </>
+    </KnowledgeSourcesProvider>
   );
 }

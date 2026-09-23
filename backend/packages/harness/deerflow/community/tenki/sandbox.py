@@ -29,6 +29,8 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -88,6 +90,10 @@ class TenkiSandbox(Sandbox):
             when an operation fails with a terminal Tenki error, so the provider
             can evict the dead sandbox.
     """
+
+    #: Every call is a fresh ``sh -lc`` exec in the sandbox — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
 
     def __init__(
         self,
@@ -268,19 +274,35 @@ class TenkiSandbox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
-            return self._fs_op(lambda fs: fs.read_text(resolved))
+            content = self._fs_op(lambda fs: fs.read_text(resolved))
         except Exception as e:
             logger.error("read_file %s failed: %s", resolved, e)
             return f"Error: {e}"
+        if start_line is None and end_line is None:
+            return content
+        lines = (content or "").splitlines()
+        # Clamp like LocalSandbox.read_file: a negative start would otherwise
+        # wrap around through Python's negative-index slicing instead of
+        # reading from the first line.
+        start = max(start_line or 1, 1)
+        end = max(end_line, 0) if end_line is not None else len(lines)
+        return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)
@@ -362,8 +384,13 @@ class TenkiSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [self._virtual_path(line.strip()) for line in (r.stdout_text or "").splitlines() if line.strip()]
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        entries = parse_remote_list_dir_output(
+            r.stdout_text or "",
+            resolved,
+            pipeline_exit_code=getattr(r, "exit_code", None),
+        )
+        return [self._virtual_path(line) for line in entries]
 
     def glob(
         self,
@@ -377,13 +404,17 @@ class TenkiSandbox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {t}" for t in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        r = self._sh(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(r.stdout_text, resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in (r.stdout_text or "").splitlines():
-            entry = entry.strip()
+        for entry in output.text.splitlines():
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
             if should_ignore_path(entry):
@@ -393,9 +424,13 @@ class TenkiSandbox(Sandbox):
                 continue
             if path_matches(pattern, rel_path):
                 matches.append(self._virtual_path(entry))
-                if len(matches) >= max_results:
-                    return matches, True
-        return matches, False
+                # Look one match past the cap before deciding: returning on the
+                # max-th match cannot tell a search that held exactly
+                # ``max_results`` from one that held more, so an exhausted tree
+                # was reported as truncated.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
+        return matches, output.truncated
 
     def grep(
         self,
@@ -425,14 +460,16 @@ class TenkiSandbox(Sandbox):
             flags.append("-i")
         flags.append("-F" if literal else "-E")
         total_cap = max(max_results * 4, max_results + 50)
-        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
-        r = self._sh(cmd)
+        search = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=total_cap))
+        # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
+        output = parse_remote_search_output(r.stdout_text, resolved, tool="grep", limit=total_cap)
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
-        truncated = False
-        for raw in (r.stdout_text or "").splitlines():
+        truncated = output.truncated
+        for raw in output.text.splitlines():
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:
@@ -453,9 +490,9 @@ class TenkiSandbox(Sandbox):
                 if not path_matches(glob, rel_path):
                     continue
             matches.append(GrepMatch(path=self._virtual_path(file_path), line_number=line_number, line=truncate_line(line_text)))
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Same one-match-past-the-cap rule as glob() above.
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, truncated
 
 

@@ -140,6 +140,9 @@ After generation:
 
 ## Providers (Gemini / MiniMax)
 
+Provider credentials are read from the runtime environment, not embedded in the
+script. Do not put their values in prompt files or command-line arguments.
+
 Auto-selected by environment variables (CLI unchanged):
 
 - `GEMINI_API_KEY` set → Gemini Veo (default, unchanged).

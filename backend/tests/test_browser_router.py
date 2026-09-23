@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 from types import SimpleNamespace
@@ -17,6 +18,13 @@ from app.gateway.routers.browser import (
     _should_apply_browser_seed,
     _ws_origin_allowed,
 )
+from deerflow.config.authorization_config import AuthorizationConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolate_route_authorization(monkeypatch):
+    # Existing routing/ownership tests must not inherit local operator policies.
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
 
 
 class _FakeWebSocket:
@@ -64,10 +72,11 @@ def test_browser_stream_closes_4404_when_thread_store_missing():
         _expect_ws_close(app, 4404)
 
 
-def test_browser_stream_rejects_legacy_null_owner_thread():
+@pytest.mark.parametrize("record", [None, {"user_id": None}, {"user_id": "another-user"}])
+def test_browser_stream_rejects_missing_or_unowned_thread(record):
     store = MagicMock()
     store.check_access = AsyncMock(return_value=True)
-    store.get = AsyncMock(return_value={"thread_id": "thread-1", "user_id": None})
+    store.get = AsyncMock(return_value=record)
     app = _browser_ws_app(store)
     with (
         patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
@@ -332,4 +341,5 @@ def test_validate_browser_url_rejects_private_and_non_http(monkeypatch):
     assert validate_browser_url("file:///etc/passwd") is not None
     assert validate_browser_url("ftp://example.com") is not None
     # A normal public URL passes (returns None = allowed).
+    monkeypatch.setattr(browser_tools, "_resolve_host_addresses", lambda _host: [ipaddress.ip_address("93.184.215.14")])
     assert validate_browser_url("https://github.com/bytedance/deer-flow") is None

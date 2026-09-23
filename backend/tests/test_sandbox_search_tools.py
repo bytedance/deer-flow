@@ -2,6 +2,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from support.symlinks import symlink_or_skip
+
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
@@ -119,6 +122,40 @@ def test_grep_tool_accepts_single_file_path(tmp_path, monkeypatch) -> None:
     assert "/mnt/user-data/uploads/report.md:1: Revenue grew 20%" in result
     assert "Path is not a directory" not in result
     assert str(uploads) not in result
+
+
+def _remote_search_runtime():
+    return SimpleNamespace(state={"sandbox": {"sandbox_id": "remote-1"}}, context={"thread_id": "thread-1"})
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (glob_tool, {"pattern": "src/*.py"}),
+        (grep_tool, {"pattern": "needle", "glob": "src/*.py"}),
+    ],
+)
+def test_search_tools_do_not_report_a_truncated_empty_result_as_no_matches(monkeypatch, tool, arguments) -> None:
+    """A remote search whose output hit its cap before any line survived the glob
+    filter has no results to show, but it has not proven there are none."""
+    sandbox = SimpleNamespace(glob=lambda *args, **kwargs: ([], True), grep=lambda *args, **kwargs: ([], True))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    result = tool.func(runtime=_remote_search_runtime(), description="scoped search", path="/mnt/user-data/workspace", **arguments)
+
+    assert not result.startswith(("No files matched", "No matches found"))
+    assert "incomplete" in result
+    assert "/mnt/user-data/workspace" in result
+
+
+@pytest.mark.parametrize(("tool", "arguments", "expected"), [(glob_tool, {"pattern": "*.py"}, "No files matched under"), (grep_tool, {"pattern": "needle"}, "No matches found under")])
+def test_search_tools_keep_the_no_match_message_for_a_complete_empty_result(monkeypatch, tool, arguments, expected) -> None:
+    sandbox = SimpleNamespace(glob=lambda *args, **kwargs: ([], False), grep=lambda *args, **kwargs: ([], False))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    result = tool.func(runtime=_remote_search_runtime(), description="search", path="/mnt/user-data/workspace", **arguments)
+
+    assert result == f"{expected} /mnt/user-data/workspace"
 
 
 def test_grep_tool_truncates_results(tmp_path, monkeypatch) -> None:
@@ -247,6 +284,115 @@ def test_aio_sandbox_glob_include_dirs_filters_nested_ignored(monkeypatch) -> No
     assert truncated is False
 
 
+def test_aio_sandbox_glob_include_dirs_exactly_full_is_not_truncated(monkeypatch) -> None:
+    """A listing whose matches exactly fill max_results is complete.
+
+    The branch used to return as soon as it had collected ``max_results``
+    matches, without looking at the remaining entries, so a listing that held
+    exactly that many was reported as cut off even though every entry was
+    seen. It now scans one eligible match past the cap, the same rule the
+    sibling ``include_dirs=False`` branch has always applied to the full list.
+    """
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "list_path",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(name="a", path="/mnt/workspace/a"),
+                    SimpleNamespace(name="b", path="/mnt/workspace/b"),
+                ]
+            )
+        ),
+    )
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a", "/mnt/workspace/b"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_reports_a_dropped_match_as_truncated(monkeypatch) -> None:
+    """The counterpart: a match past the cap still reports truncated."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "list_path",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(name="a", path="/mnt/workspace/a"),
+                    SimpleNamespace(name="b", path="/mnt/workspace/b"),
+                    SimpleNamespace(name="c", path="/mnt/workspace/c"),
+                ]
+            )
+        ),
+    )
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a", "/mnt/workspace/b"]
+    assert truncated is True
+
+
+def _filtered_tail_entries(*, second_eligible: bool):
+    """Two eligible matches, then entries only the ignore rules, the pattern or
+    the root scope reject — a tail that must not count toward the cap."""
+    entries = [
+        SimpleNamespace(name="a.py", path="/mnt/workspace/a.py"),
+        SimpleNamespace(name="b.py", path="/mnt/workspace/b.py"),
+        # ignored directory
+        SimpleNamespace(name="lib.py", path="/mnt/workspace/node_modules/lib.py"),
+        # outside the search root
+        SimpleNamespace(name="c.py", path="/mnt/elsewhere/c.py"),
+        # inside the root but not matched by the pattern
+        SimpleNamespace(name="notes.txt", path="/mnt/workspace/notes.txt"),
+    ]
+    if second_eligible:
+        entries.append(SimpleNamespace(name="c.py", path="/mnt/workspace/c.py"))
+    return entries
+
+
+def _patched_sandbox(monkeypatch, entries):
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "list_path",
+        lambda **kwargs: SimpleNamespace(data=SimpleNamespace(files=entries)),
+    )
+    return sandbox
+
+
+def test_aio_sandbox_glob_include_dirs_looks_past_a_filtered_tail(monkeypatch) -> None:
+    """Trailing entries the filters reject do not make a full result truncated.
+
+    The cap counts *eligible* matches, so the branch has to keep scanning
+    rather than assume the max-th match was the last one: here two matches fill
+    ``max_results`` and everything after them is ignored, out of root, or a
+    pattern miss, which leaves the result complete.
+    """
+    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=False))
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_reports_a_match_after_a_filtered_tail(monkeypatch) -> None:
+    """An eligible match beyond that filtered tail still reports truncation."""
+    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=True))
+
+    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+
+    assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
+    assert truncated is True
+
+
 def test_aio_sandbox_grep_invalid_regex_raises() -> None:
     with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
         sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
@@ -358,7 +504,7 @@ def test_find_grep_matches_skips_symlink_outside_root(tmp_path) -> None:
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("TODO outside\n", encoding="utf-8")
-    (workspace / "outside-link.txt").symlink_to(outside)
+    symlink_or_skip(workspace / "outside-link.txt", outside)
 
     matches, truncated = find_grep_matches(workspace, "TODO")
 
@@ -442,6 +588,46 @@ def test_aio_sandbox_grep_drops_matches_outside_requested_root(monkeypatch) -> N
 
     assert matches == [GrepMatch(path="/mnt/user-data/workspace/app.py", line_number=7, line="TODO = True")]
     assert truncated is False
+
+
+def _grep_files_returning(count: int):
+    """Provider reply holding ``count`` matching lines, none of them cut off."""
+    return lambda **kwargs: SimpleNamespace(
+        data=SimpleNamespace(
+            matches=[SimpleNamespace(file=f"/mnt/user-data/workspace/f{index}.py", line_number=index + 1, line_content="TODO = True") for index in range(count)],
+            truncated=False,
+        )
+    )
+
+
+def test_aio_sandbox_grep_exactly_full_is_not_truncated(monkeypatch) -> None:
+    """A grep whose matches exactly fill max_results is complete.
+
+    The loop used to return as soon as it had collected ``max_results``
+    matches, without looking at the remaining lines, so a search that found
+    exactly that many was reported as cut off even though every line was seen.
+    It now scans one eligible match past the cap, as the ``glob`` branches do.
+    """
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(sandbox._client.file, "grep_files", _grep_files_returning(2))
+
+    matches, truncated = sandbox.grep("/mnt/user-data/workspace", "TODO", max_results=2)
+
+    assert [match.path for match in matches] == ["/mnt/user-data/workspace/f0.py", "/mnt/user-data/workspace/f1.py"]
+    assert truncated is False
+
+
+def test_aio_sandbox_grep_reports_a_dropped_match_as_truncated(monkeypatch) -> None:
+    """The counterpart: a match past the cap still reports truncated."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(sandbox._client.file, "grep_files", _grep_files_returning(3))
+
+    matches, truncated = sandbox.grep("/mnt/user-data/workspace", "TODO", max_results=2)
+
+    assert [match.path for match in matches] == ["/mnt/user-data/workspace/f0.py", "/mnt/user-data/workspace/f1.py"]
+    assert truncated is True
 
 
 # ---------------------------------------------------------------------------

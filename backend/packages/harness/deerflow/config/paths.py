@@ -48,6 +48,13 @@ def _validate_integration_id(integration_id: str) -> str:
     return integration_id
 
 
+def _validate_project_id(project_id: str) -> str:
+    """Validate a project ID before using it in filesystem paths."""
+    if not _SAFE_USER_ID_RE.match(project_id):
+        raise ValueError(f"Invalid project_id {project_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return project_id
+
+
 def make_safe_user_id(raw: str) -> str:
     """Normalize an external identity into the user-id charset (``[A-Za-z0-9_-]``).
 
@@ -295,6 +302,18 @@ class Paths:
         """Enabled managed integration skills exposed to one user's sandboxes."""
         return self.user_skills_view_dir(user_id) / "integrations"
 
+    def thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> Path:
+        """Sandbox-visible skill projection scoped to one user/thread.
+
+        The directory lives below the thread root so ordinary thread deletion
+        also removes its policy projection.
+        """
+        return self.thread_dir(thread_id, user_id=user_id) / "skills_view"
+
+    def host_thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> str:
+        """Host path for a thread-scoped skill projection."""
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "skills_view")
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.
@@ -338,6 +357,43 @@ class Paths:
         Sandbox: `/mnt/user-data/outputs/`
         """
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
+
+    def user_projects_dir(self, user_id: str) -> Path:
+        """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        return self.user_dir(user_id) / "projects"
+
+    def user_project_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for one project: ``users/{user_id}/projects/{project_id}/``."""
+        return self.user_projects_dir(user_id) / _validate_project_id(project_id)
+
+    def project_documents_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for a project's document shelf.
+
+        Layout (Phase-2 spec §6.2): ``.staging/{uuid}`` for in-flight bytes,
+        then one exclusive namespace per row at
+        ``{sha256[:2]}/{sha256}/{document_id}/original/{name}`` with an
+        optional ``derived/converted.md`` companion.
+        """
+        return self.user_project_dir(user_id, project_id) / "documents"
+
+    def project_document_path(self, user_id: str, relpath: str) -> Path:
+        """Resolve a shelf ``stored_relpath`` to its absolute host path.
+
+        ``stored_relpath`` is stored relative to ``users/{user_id}/projects/``
+        (it begins with ``{project_id}/documents/``) so a restore can re-point
+        a row without moving bytes. Resolution mirrors
+        :meth:`resolve_virtual_path`: join under the user projects root,
+        resolve, then re-check confinement — a relpath that escapes the root
+        is rejected. Relpaths only ever come from server-generated content
+        addresses, never from request text (§12).
+        """
+        base = self.user_projects_dir(user_id).resolve()
+        actual = (base / relpath).resolve()
+        try:
+            actual.relative_to(base)
+        except ValueError:
+            raise ValueError("Access denied: path traversal detected") from None
+        return actual
 
     def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """

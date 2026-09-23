@@ -70,6 +70,18 @@ distinguishes it from a release.
    ```
    Pushing the tag triggers the publishing workflows (below).
 
+### Release candidates
+
+Release-candidate tags must include the same prerelease suffix in all four
+version fields. For example, before tagging `v2.1.0-rc0`, run
+`bash scripts/bump_version.sh 2.1.0-rc0`, refresh `backend/uv.lock` with
+`cd backend && uv lock`, and run `bash scripts/verify_versions.sh 2.1.0-rc0`
+from the repository root. Commit the version and lockfile changes before
+creating the tag. Python lockfiles normalize this version to `2.1.0rc0`;
+the source version fields checked by the release gate retain `2.1.0-rc0`.
+Re-running a failed workflow on an unchanged tag does not pick up a later
+version-fix commit.
+
 ## What CI publishes on a `v*` tag
 
 - `.github/workflows/container.yaml` — builds and pushes `backend`,

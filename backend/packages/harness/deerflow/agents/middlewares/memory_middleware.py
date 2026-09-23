@@ -12,7 +12,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory import get_memory_manager
 from deerflow.config.memory_config import get_memory_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -50,7 +50,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         self._agent_name = agent_name
         self._memory_config = memory_config
 
-    def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str | None] | None:
+    def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str] | None:
         """Resolve one write request without invoking the manager."""
         config = self._memory_config or get_memory_config()
         if not config.enabled:
@@ -75,17 +75,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # threading.Timer fires on a different thread where ContextVar values are not
         # propagated, so we must store user_id explicitly in ConversationContext.
         user_id = resolve_runtime_user_id(runtime)
+        # The memory update fires on a threading.Timer thread that inherits no
+        # ContextVars, so the id is captured here, while the request context is
+        # still alive, and carried as data. The runtime context is authoritative
+        # (worker._bind_trace_id always fills it); the ambient fallback covers
+        # embedded callers driving the agent outside a Gateway run.
         runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
-        trace_id = normalize_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
-        if trace_id is None:
-            try:
-                config_data = get_config()
-            except RuntimeError:
-                config_data = {}
-            config_metadata = config_data.get("metadata", {}) if isinstance(config_data.get("metadata"), dict) else {}
-            trace_id = normalize_trace_id(config_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
-        if trace_id is None:
-            trace_id = get_current_trace_id()
+        trace_id = resolve_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
         return thread_id, messages, user_id, trace_id
 

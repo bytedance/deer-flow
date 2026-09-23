@@ -156,6 +156,95 @@ async def test_reject_blocks_reentrant_same_thread_locally():
 
 
 # ---------------------------------------------------------------------------
+# create_or_reject — cross-worker idempotent reuse
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_peer_idempotent_reuse_does_not_block_thread_after_owner_completes():
+    """A peer's reuse handle must not stay behind as a local inflight record.
+
+    The peer never runs the task, so nothing on it would finalize or clean up
+    a registered copy: that copy keeps its admission-time status and rejects
+    every later admission for the thread until the worker restarts.
+    """
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    peer = _make_manager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+    await owner.set_status(first.run_id, RunStatus.running)
+
+    reused = await peer.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+
+    assert reused.run_id == first.run_id
+    assert reused.store_only is True
+    assert reused.idempotency_reused is True
+
+    await owner.set_status(first.run_id, RunStatus.success)
+    await owner.cleanup(first.run_id, delay=0)
+
+    assert await peer.has_inflight("thread-1") is False
+    hydrated = await peer.get(first.run_id)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    retried = await peer.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+    assert retried.run_id == first.run_id
+    assert retried.status == RunStatus.success
+    follow_up = await peer.create_or_reject("thread-1")
+    assert follow_up.run_id != first.run_id
+
+
+@pytest.mark.anyio
+async def test_peer_idempotent_reuse_does_not_shield_crashed_owner_from_reconciliation():
+    """Reconciliation skips locally live records, so a reuse handle must not look like one."""
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    peer = _make_manager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject("thread-1", idempotency_key="mcp-task:task-1:1:0")
+    await owner.set_status(first.run_id, RunStatus.running)
+    await peer.create_or_reject("thread-1", idempotency_key="mcp-task:task-1:1:0")
+
+    # The owner crashes: its lease lapses past the grace window without renewal.
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    assert await store.update_lease(first.run_id, owner_worker_id="worker-a", lease_expires_at=expired_lease)
+
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="owner expired")
+
+    assert [record.run_id for record in recovered] == [first.run_id]
+    stored = await store.get(first.run_id)
+    assert stored is not None
+    assert stored["status"] == "error"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("heartbeat_enabled", "expected_outcome", "expected_cancel_action"),
+    [(False, CancelOutcome.not_active_locally, None), (True, CancelOutcome.requested, "interrupt")],
+)
+async def test_peer_cancel_of_reused_run_leaves_live_owner_status_to_the_owner(heartbeat_enabled, expected_outcome, expected_cancel_action):
+    """A reuse handle must not route the peer's cancel through the local-owner path.
+
+    That path would mark the owner's still-running row ``interrupted`` from a
+    worker that has no task to stop, releasing the thread while the owner runs.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=heartbeat_enabled)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+    first = await owner.create_or_reject("thread-1", idempotency_key="http-run:retry")
+    await owner.set_status(first.run_id, RunStatus.running)
+    await peer.create_or_reject("thread-1", idempotency_key="http-run:retry")
+
+    outcome = await peer.cancel(first.run_id)
+
+    assert outcome == expected_outcome
+    stored = await store.get(first.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored.get("cancel_action") == expected_cancel_action
+
+
+# ---------------------------------------------------------------------------
 # create_or_reject — interrupt strategy
 # ---------------------------------------------------------------------------
 
@@ -1205,6 +1294,97 @@ async def test_create_thread_operation_atomic_interrupt_claims_and_creates():
     # Old run must be interrupted in-store
     old_row = await store.get("run-old")
     assert old_row["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_create_thread_operation_atomic_uses_one_change_position():
+    """One atomic thread operation advances the change cursor once.
+
+    ``runtime/AGENTS.md`` documents that an atomic thread operation uses one
+    position for its interrupted rows and its new row, with ``run_id``
+    ordering ties, and ``test_run_evidence_reader`` pins that for the SQL
+    store. The memory store must agree: it is the backend an install runs
+    whenever no durable database is configured. Advancing once per row splits
+    a single interrupt-and-replace into two positions in the
+    ``(change_seq, run_id)`` cursor extensions page with.
+    """
+    store = MemoryRunStore()
+    config = _lease_config()
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+
+    await store.create_thread_operation_atomic(
+        run_id="run-old",
+        thread_id="thread-1",
+        owner_worker_id="w1",
+        lease_expires_at=expired_lease,
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    new_row, claimed = await store.create_thread_operation_atomic(
+        run_id="run-new",
+        thread_id="thread-1",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="interrupt",
+        grace_seconds=config.grace_seconds,
+    )
+
+    assert [row["run_id"] for row in claimed] == ["run-old"]
+    assert claimed[0]["change_seq"] == new_row["change_seq"]
+
+    # The shared position is what a paging consumer observes: the interrupted
+    # row and its replacement surface under one cursor value, ordered by
+    # ``run_id``, exactly as the SQL store reports them.
+    changed = await store.list_changed(after_change_seq=-1, after_run_id="")
+    positions = {row["run_id"]: row["change_seq"] for row in changed}
+    assert positions["run-old"] == positions["run-new"]
+    assert [row["run_id"] for row in changed if row["change_seq"] == positions["run-new"]] == ["run-new", "run-old"]
+
+
+@pytest.mark.anyio
+async def test_create_thread_operation_atomic_rejection_consumes_no_change_position():
+    """A ``ConflictError``-rejected operation advances no change position.
+
+    ``create_thread_operation_atomic`` allocates its position only after the
+    raise-only candidate scan, so a rejected operation consumes nothing — the
+    memory-store counterpart of the SQL store's rollback leaving the clock
+    untouched. A consumed-but-unused position leaves no trace in the rows
+    themselves, so the assertion is on the position the next accepted
+    operation lands on. Hoisting the allocation above the scan keeps every
+    other test in this file green and shows up here as a gap.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(grace_seconds=10)
+
+    accepted, _ = await store.create_thread_operation_atomic(
+        run_id="valid-lease-run",
+        thread_id="thread-1",
+        owner_worker_id="other-worker",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    with pytest.raises(ConflictError, match="another worker"):
+        await store.create_thread_operation_atomic(
+            run_id="run-new",
+            thread_id="thread-1",
+            owner_worker_id="w2",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+            multitask_strategy="interrupt",
+            grace_seconds=config.grace_seconds,
+        )
+
+    next_row, _ = await store.create_thread_operation_atomic(
+        run_id="run-after",
+        thread_id="thread-2",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+    assert next_row["change_seq"] == accepted["change_seq"] + 1
 
 
 @pytest.mark.anyio

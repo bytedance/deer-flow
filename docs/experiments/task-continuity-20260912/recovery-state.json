@@ -1,0 +1,13 @@
+{
+  "closed": true,
+  "pending": [],
+  "reason": "Primary run and all bounded recovery attempts finished. Two payloads still returned RemoteProtocolError after repeated low-load retries; retain as operational failures without changing protocol or cases.",
+  "recovered": [
+    "6cb6f249"
+  ],
+  "unresolved": [
+    "60d45044",
+    "60472f9c"
+  ],
+  "closed_at_utc": "2026-09-11T21:11:02.929626+00:00"
+}
