@@ -12,8 +12,10 @@ backends can be configured independently:
   (memory/sqlite/postgres).
 
 Both probes run concurrently beneath a single endpoint-wide deadline
-(:data:`_READINESS_DEADLINE_SECONDS`), so a healthy response completes within
-one probe window rather than the sum of both budgets. The checkpointer config
+(:data:`_READINESS_DEADLINE_SECONDS`), so normal probe work completes within
+one probe window rather than the sum of both budgets. Connection teardown is
+ownership-critical and is drained to completion after cancellation, so a
+stalled close may outlive the probe/deadline budget. The checkpointer config
 is resolved once at startup from the same snapshot ``langgraph_runtime`` builds
 its resources from and is stored on ``app.state``; probing a hot-reloaded
 config instead could check a backend the running process is not using. A
@@ -36,6 +38,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import text
 
 from deerflow.persistence.engine import get_engine
+from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -43,16 +46,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Upper bound for a single probe attempt. The endpoint must never hang behind
-# a dead database (for example a TCP connect timeout to Postgres).
+# Upper bound for connection/open/query work in a single probe attempt. Cleanup
+# is ownership-critical: once a probe owns a connection, close is drained even
+# if this timeout expires, so a stalled teardown may outlive this bound.
 _PROBE_TIMEOUT_SECONDS = 2.0
 
-# Whole-endpoint deadline covering both probes. They run concurrently, so a
-# healthy response completes within a single probe window; the extra margin
-# absorbs scheduling/cancellation overhead without letting the request
-# approach the sum of both probe budgets. Orchestrator timeouts (Helm
-# readinessProbe ``timeoutSeconds``, the docker-compose healthcheck client
-# timeout) must be configured above this bound.
+# Whole-endpoint deadline for ordinary probe work. They run concurrently, so a
+# healthy response normally completes within a single probe window; the extra
+# margin absorbs scheduling/cancellation overhead. Owned connection teardown is
+# intentionally exempt: ``await_drained`` defers cancellation until close
+# finishes, so a wedged close can outlive this deadline while preserving
+# resource ownership. Waiting requests are still shed by their own deadline.
+# Orchestrator timeouts should therefore exceed this bound and may still fire
+# first if teardown itself stalls.
 _READINESS_DEADLINE_SECONDS = 3.0
 
 # ``app.state`` attribute under which :func:`app.gateway.deps.langgraph_runtime`
@@ -160,7 +166,7 @@ def _sqlite_disk_uri(conn_str: str) -> str:
 
 
 async def _probe_sqlite_backend(conn_string: str | None) -> str:
-    """Probe a SQLite checkpointer/Store database with a bounded SELECT 1.
+    """Probe a SQLite checkpointer/Store database with bounded open/query work.
 
     Disk-backed databases are opened non-creating (``mode=rw``): a missing
     file stays missing and fails the probe instead of being recreated empty.
@@ -184,7 +190,7 @@ async def _probe_sqlite_backend(conn_string: str | None) -> str:
             try:
                 await connection.execute("SELECT 1")
             finally:
-                await connection.close()
+                await await_drained(connection.close())
     except Exception:
         logger.warning("Readiness sqlite checkpointer probe failed", exc_info=True)
         return DATABASE_UNREACHABLE
@@ -192,7 +198,7 @@ async def _probe_sqlite_backend(conn_string: str | None) -> str:
 
 
 async def _probe_postgres_backend(conn_string: str, schema: str) -> str:
-    """Probe a PostgreSQL checkpointer/Store database with a bounded SELECT 1."""
+    """Probe PostgreSQL with bounded open/query work and drained connection teardown."""
     try:
         from psycopg import AsyncConnection
     except ImportError:
@@ -208,7 +214,7 @@ async def _probe_postgres_backend(conn_string: str, schema: str) -> str:
                 async with connection.cursor() as cursor:
                     await cursor.execute("SELECT 1")
             finally:
-                await connection.close()
+                await await_drained(connection.close())
     except Exception:
         logger.warning("Readiness postgres checkpointer probe failed", exc_info=True)
         return DATABASE_UNREACHABLE
@@ -244,8 +250,10 @@ async def readiness_payload(checkpointer_config: CheckpointerConfig | None = Non
     behind ``database:`` (repositories) and the effective LangGraph
     checkpointer/Store backend (the legacy ``checkpointer:`` section, otherwise
     derived from ``database:``). The probes run concurrently beneath one
-    endpoint-wide deadline so the request duration is bounded by the slowest
-    single probe, not their sum. ``checkpointer_config`` is the startup
+    endpoint-wide deadline, so normal probe work is bounded by the slowest
+    single probe rather than their sum. Connection teardown is drained after
+    cancellation to preserve ownership and can therefore extend the in-flight
+    request beyond that deadline if close itself stalls. ``checkpointer_config`` is the startup
     snapshot recorded by ``langgraph_runtime``; None means no snapshot could be
     resolved, which fails closed as an unreachable backend rather than
     reporting ready. Either backend can be configured independently of the

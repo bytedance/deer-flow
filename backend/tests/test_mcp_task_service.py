@@ -19,7 +19,10 @@ from deerflow.mcp.tasks import (
     TaskSubmitRequest,
 )
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    McpTaskThreadMismatchError,
+)
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
 
@@ -83,6 +86,12 @@ class DuplicateCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
         raise DuplicateMcpRemoteTaskError("already tracked")
+
+
+class DriftedThreadCreateRepository(FakeRepository):
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        raise McpTaskThreadMismatchError("thread incarnation changed")
 
 
 class FakeDriver:
@@ -202,6 +211,7 @@ async def test_submit_persists_remote_handle_before_returning():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -214,6 +224,7 @@ async def test_submit_persists_remote_handle_before_returning():
 
     assert created["remote_task_id"] == "remote-1"
     persisted = repo.created[0]
+    assert persisted["expected_thread_incarnation"] == "incarnation-1"
     assert persisted["next_poll_at"] == now + timedelta(seconds=9)
     assert persisted["driver_data"] == {"submit_tool": "submit", "status_tool": "status"}
     assert driver.submit_calls[0].local_task_id == created["id"]
@@ -241,6 +252,7 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -265,6 +277,47 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
 
 
 @pytest.mark.asyncio
+async def test_submit_compensates_remote_task_when_thread_incarnation_drifted():
+    repo = DriftedThreadCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(McpTaskThreadMismatchError, match="incarnation changed"):
+        await service.submit(
+            driver_name="fake",
+            request=TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                thread_incarnation="captured-incarnation",
+                run_id="run-1",
+                tool_call_id="call-1",
+                server_name="reports",
+                task_name="Generate report",
+                arguments={},
+                local_task_id="task-1",
+            ),
+        )
+
+    assert repo.created[0]["expected_thread_incarnation"] == "captured-incarnation"
+    assert len(driver.cancel_calls) == 1
+    assert driver.cancel_calls[0].thread_incarnation == "captured-incarnation"
+
+
+@pytest.mark.asyncio
 async def test_submit_cancellation_during_persistence_cancels_remote_task():
     repo = BlockingCreateRepository()
     driver = FakeDriver(
@@ -286,6 +339,7 @@ async def test_submit_cancellation_during_persistence_cancels_remote_task():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -329,6 +383,7 @@ async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -376,6 +431,7 @@ async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -426,6 +482,7 @@ async def test_submit_cancellation_preserves_cancelled_error_when_compensation_f
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -472,6 +529,7 @@ async def test_submit_cancels_remote_task_when_its_id_exceeds_storage_limit():
             request=TaskSubmitRequest(
                 user_id="user-1",
                 thread_id="thread-1",
+                thread_incarnation="incarnation-1",
                 run_id="run-1",
                 tool_call_id="call-1",
                 server_name="reports",
@@ -512,6 +570,7 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
             request=TaskSubmitRequest(
                 user_id="user-1",
                 thread_id="thread-2",
+                thread_incarnation="incarnation-2",
                 run_id="run-2",
                 tool_call_id="call-2",
                 server_name="reports",
@@ -548,6 +607,7 @@ async def test_cancel_task_persists_request_without_calling_remote():
         task_id="task-1",
         thread_id="thread-1",
         user_id="user-1",
+        thread_incarnation="incarnation-1",
     )
 
     assert result == record
@@ -961,6 +1021,7 @@ async def test_submit_preserves_persistence_error_when_compensation_cancel_fails
     request = TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -1166,6 +1227,7 @@ async def test_persisted_snapshot_errors_are_bounded_on_submit_and_poll():
         request=TaskSubmitRequest(
             user_id="user-1",
             thread_id="thread-1",
+            thread_incarnation="incarnation-1",
             run_id="run-1",
             tool_call_id="call-1",
             server_name="reports",

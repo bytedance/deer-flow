@@ -79,8 +79,10 @@ def image_search_tool(
     query: str,
     max_results: int = 5,
     size: str | None = None,
+    color: str | None = None,
     type_image: str | None = None,
     layout: str | None = None,
+    license_image: str | None = None,
 ) -> str:
     """Search for images online. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
 
@@ -96,8 +98,13 @@ def image_search_tool(
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
         max_results: Maximum number of images to return. Default is 5.
         size: Image size filter. Options: "Small", "Medium", "Large", "Wallpaper". Use "Large" for reference images.
+        color: Color filter. Options: "color", "Monochrome", "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Brown", "Black", "Gray", "Teal", "White".
+            Note that "color" means full-color (as opposed to "Monochrome"), not a meta-parameter.
+            Match the dominant palette of the image you plan to generate; omit it for unrestricted results.
         type_image: Image type filter. Options: "photo", "clipart", "gif", "transparent", "line". Use "photo" for realistic references.
         layout: Layout filter. Options: "Square", "Tall", "Wide". Choose based on your generation needs.
+        license_image: License filter. Options: "any", "Public", "Share", "ShareCommercially", "Modify", "ModifyCommercially".
+            Use this when the reference image will be redistributed, so the results are already license-cleared.
     """
     config = get_app_config().get_tool_config("image_search")
 
@@ -109,8 +116,10 @@ def image_search_tool(
         query=query,
         max_results=max_results,
         size=size,
+        color=color,
         type_image=type_image,
         layout=layout,
+        license_image=license_image,
     )
 
     if not results:
