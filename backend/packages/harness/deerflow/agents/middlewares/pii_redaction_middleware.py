@@ -213,20 +213,33 @@ def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> lis
 
 
 def _placeholder_token(category: str, value: str) -> str:
-    """Value-derived, deterministic placeholder: ``[EMAIL_<32 hex chars>]`` (128-bit digest).
+    """Value-derived, deterministic placeholder (128-bit digest, base-26 letters).
 
-    Sequential allocation is order-dependent: the same unchanged message
-    re-redacted in a later batch can get a different token, which breaks
-    downstream content-signature deduplication (e.g. OpenViking capture) and
-    cross-turn identity. A pure function of the matched value keeps the token
-    stable across batches, seams, and enqueues — with no shared state and no
-    stored mapping. The unkeyed hash is an egress-hygiene trade, not an
-    adversarial control: a known-format value can be confirmed by guessing,
-    which masking does not claim to prevent. The 128-bit truncation keeps
-    distinct identities collision-free at any realistic volume.
+    Two properties the token format must uphold:
+
+    * **Value-derived** — sequential allocation is order-dependent: the same
+      unchanged message re-redacted in a later batch can get a different
+      token, which breaks downstream content-signature deduplication (e.g.
+      OpenViking capture) and cross-turn identity. A pure function of the
+      matched value keeps the token stable across batches, seams, and
+      enqueues, with no shared state and no stored mapping;
+    * **Letters-only** — the digest is encoded over ``a-z`` instead of hex, so
+      a minted token contains no digit runs and can never satisfy the
+      digit-anchored detectors that run later in the pinned order (no nested
+      ``[EMAIL_…[PHONE_…]…`` corruption). The unkeyed hash is an
+      egress-hygiene trade, not an adversarial control: a known-format value
+      can be confirmed by guessing, which masking does not claim to prevent.
+      128 bits keep distinct identities collision-free at any realistic
+      volume.
     """
-    digest = hashlib.sha256(f"{category}\x00{value}".encode()).hexdigest()
-    return f"[{category.upper()}_{digest[:32]}]"
+    digest = hashlib.sha256(f"{category}\x00{value}".encode()).digest()
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    number = int.from_bytes(digest[:16], "big")
+    letters = []
+    for _ in range(27):
+        number, rem = divmod(number, 26)
+        letters.append(alphabet[rem])
+    return f"[{category.upper()}_{''.join(letters)}]"
 
 
 class _Redactor:
@@ -398,9 +411,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
         if isinstance(update, dict):
             messages = update.get("messages")
             if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
-                for message in messages:
-                    if isinstance(message, ToolMessage):
-                        new_messages = [self._redact_tool_message(m, redactor) if isinstance(m, ToolMessage) else m for m in messages]
+                new_messages = [self._redact_tool_message(m, redactor) if isinstance(m, ToolMessage) else m for m in messages]
                 if new_messages != messages:
                     return dc_replace(result, update={**update, "messages": new_messages})
         return result

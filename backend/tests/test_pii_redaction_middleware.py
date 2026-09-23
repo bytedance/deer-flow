@@ -574,7 +574,7 @@ class _RecordingPiiModel(FakeToolCallingModel):
         self.seen.append(text)
         if self.echo_summary:
             # Preserve the exact placeholder received, rather than inventing one.
-            token = re.search(r"\[EMAIL_[0-9a-f]{32}\]", text).group(0)
+            token = re.search(r"\[EMAIL_[a-z]{27}\]", text).group(0)
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"Alice's email is {token}"))])
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
@@ -685,3 +685,14 @@ def test_title_redacts_identifiers_before_field_truncation():
     prompt, fallback = TitleMiddleware(app_config=config)._build_title_prompt({"messages": [HumanMessage(content="x " * 246 + "alice@example.com"), AIMessage(content="done")]})
     assert "alice" not in prompt
     assert fallback.endswith("alice@example.com")  # Local display fallback preserves the original user text.
+
+
+def test_minted_tokens_survive_later_detectors():
+    # Review round 7 on #5577: hex digests carry digit runs that later
+    # digit-anchored detectors re-scan, corrupting minted tokens into nested
+    # placeholders (user280@example.com -> [EMAIL_…[PHONE_…]…]). Base-26
+    # letters contain no digits, so the token survives the full pinned order.
+    result = redact_text("contact user280@example.com today", PiiRedactionConfig(enabled=True))
+    assert result.startswith("contact [EMAIL_") and result.endswith("] today")
+    assert result.count("[") == 1 and result.count("]") == 1
+    assert "@" not in result and "user280" not in result

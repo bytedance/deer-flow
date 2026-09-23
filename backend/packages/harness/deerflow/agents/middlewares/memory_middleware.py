@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
@@ -54,15 +53,6 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
                 updates["additional_kwargs"] = {**additional_kwargs, "tool_calls": rewritten}
         redacted.append(message.model_copy(update=updates) if updates else message)
     return redacted
-
-
-def _iter_tool_calls(message: object) -> Iterator[dict]:
-    """Yield the parsed tool-call dicts carried by *message*, if any."""
-    tool_calls = getattr(message, "tool_calls", None)
-    if isinstance(tool_calls, list):
-        for call in tool_calls:
-            if isinstance(call, dict):
-                yield call
 
 
 def _redact_tool_call(call: dict, redactor: _Redactor) -> dict:
