@@ -437,11 +437,14 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
 
     assert captured["executor_kwargs"]["extensions"] is loaded
+
+    assert assemble_tools.call_args.kwargs["extensions"] is loaded
 
 
 def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
@@ -504,11 +507,14 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+    assert "extensions" not in assemble_tools.call_args.kwargs
 
 
 def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):

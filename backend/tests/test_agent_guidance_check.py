@@ -27,6 +27,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/mcp/AGENTS.md",
     "backend/packages/harness/deerflow/models/AGENTS.md",
+    "backend/packages/harness/deerflow/persistence/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/migrations/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/user/AGENTS.md",
     "backend/packages/harness/deerflow/reflection/AGENTS.md",

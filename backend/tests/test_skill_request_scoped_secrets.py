@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -101,7 +102,7 @@ class TestAioSandboxEnvInjection:
             return AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
 
     def test_env_none_uses_legacy_shell_path(self, sandbox):
-        """No injected env → unchanged shell.exec_command path (backward compat)."""
+        """No injected env uses the legacy shell path with bounded timeout/status handling."""
         sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="hello")))
         sandbox._client.bash.exec = MagicMock()
         out = sandbox.execute_command("echo hello")
@@ -122,22 +123,194 @@ class TestAioSandboxEnvInjection:
         sandbox._client.shell.exec_command.assert_not_called()
         assert "hello" in out
 
-    def test_env_path_uses_hard_timeout_not_no_change_timeout(self, sandbox):
-        """The env path routes through bash.exec which exposes no idle/no-change
-        timeout; it must use the dedicated wall-clock ``_DEFAULT_HARD_TIMEOUT``,
-        not the legacy idle constant (same numeric value today, but distinct
-        semantics so a future change to one does not silently alter the other)."""
-        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
-
-        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None)))
-        sandbox.execute_command("echo hi", env={"X": "1"})
-        _, kwargs = sandbox._client.bash.exec.call_args
-        assert kwargs["hard_timeout"] == AioSandbox._DEFAULT_HARD_TIMEOUT
-        assert AioSandbox._DEFAULT_HARD_TIMEOUT != AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT or (
-            # Same numeric value is fine today; the contract is that they are
-            # named independently so the two call sites evolve independently.
-            AioSandbox._DEFAULT_HARD_TIMEOUT == AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT
+    def test_env_path_uses_explicit_command_timeout_and_request_budget(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr=None,
+                    exit_code=0,
+                    status="completed",
+                )
+            )
         )
+
+        sandbox.execute_command(
+            "echo hi",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        _, kwargs = sandbox._client.bash.exec.call_args
+        assert kwargs["hard_timeout"] == 3
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 8,
+            "max_retries": 0,
+        }
+
+    def test_env_path_uses_default_hard_timeout_when_timeout_is_none(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr=None,
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        sandbox.execute_command("echo hi", env={"X": "1"})
+
+        _, kwargs = sandbox._client.bash.exec.call_args
+        assert kwargs["hard_timeout"] == sandbox._DEFAULT_HARD_TIMEOUT
+
+    def test_env_hard_timeout_is_rendered_and_not_retried(self, sandbox):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="partial",
+                    stderr=None,
+                    exit_code=-1,
+                    status="timed_out",
+                )
+            )
+
+        sandbox._client.bash.exec = bash_exec
+
+        out = sandbox.execute_command(
+            "side-effect; sleep 30",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+        assert "partial" in out
+        assert "Command timed out after 3 seconds and was terminated." in out
+        assert out.endswith("Exit Code: 124")
+
+    @pytest.mark.parametrize("status", ["timed_out", "killed"])
+    def test_env_interrupted_status_is_never_error_observation_retried(
+        self,
+        sandbox,
+        status,
+    ):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="'ErrorObservation' object has no attribute 'exit_code'",
+                    stderr=None,
+                    exit_code=-1,
+                    status=status,
+                )
+            )
+
+        sandbox._client.bash.exec = bash_exec
+
+        sandbox.execute_command(
+            "unsafe-to-repeat",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+
+    def test_env_session_cleanup_is_bounded_and_does_not_mask_output(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr="",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+        sandbox._client.bash.close_session = MagicMock(side_effect=RuntimeError("cleanup failed"))
+
+        assert (
+            sandbox.execute_command(
+                "echo $TOKEN",
+                env={"TOKEN": "secret"},
+                timeout=3,
+            )
+            == "ok"
+        )
+
+        _, kwargs = sandbox._client.bash.close_session.call_args
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "notice"),
+        [
+            ("killed", "Command was killed before completion."),
+            (
+                "running",
+                "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried.",
+            ),
+        ],
+    )
+    def test_env_interrupted_status_is_rendered_without_exit_fallback(
+        self,
+        sandbox,
+        status,
+        notice,
+    ):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="partial",
+                    stderr=None,
+                    exit_code=-1,
+                    status=status,
+                )
+            )
+        )
+
+        out = sandbox.execute_command(
+            "unsafe-to-repeat",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert notice in out
+        assert "Exit Code: -1" not in out
+
+    def test_env_transport_timeout_is_ambiguous_and_not_retried(self, sandbox):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            raise httpx.ReadTimeout("response stalled")
+
+        sandbox._client.bash.exec = bash_exec
+
+        out = sandbox.execute_command(
+            "side-effect; sleep 30",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+        assert "outcome is unknown" in out
+        assert "not retried" in out
+        _, kwargs = sandbox._client.bash.close_session.call_args
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
 
     def test_env_path_retries_on_error_observation_signature(self, sandbox):
         """The env path shares the legacy persistent-shell recovery contract: if
@@ -152,6 +325,89 @@ class TestAioSandboxEnvInjection:
         assert sandbox._client.bash.exec.call_count == 2
         assert "recovered" in out
         assert _ERROR_OBSERVATION_SIGNATURE not in out
+
+    @pytest.mark.parametrize(
+        ("retry_result", "expected_fragments", "expected_suffix"),
+        [
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative timeout output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="timed_out",
+                    )
+                ),
+                ("Command timed out after 3 seconds and was terminated.",),
+                "Exit Code: 124",
+                id="timed-out",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative killed output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="killed",
+                    )
+                ),
+                ("Command was killed before completion.",),
+                None,
+                id="killed",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative running output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="running",
+                    )
+                ),
+                (
+                    "non-terminal running status",
+                    "outcome is unknown",
+                    "not retried",
+                ),
+                None,
+                id="running",
+            ),
+            pytest.param(
+                httpx.ReadTimeout("response stalled"),
+                ("outcome is unknown", "not retried"),
+                None,
+                id="transport-timeout",
+            ),
+        ],
+    )
+    def test_env_error_observation_retry_returns_authoritative_outcome(
+        self,
+        sandbox,
+        retry_result,
+        expected_fragments,
+        expected_suffix,
+    ):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ERROR_OBSERVATION_SIGNATURE
+
+        corrupted = SimpleNamespace(
+            data=SimpleNamespace(
+                stdout=f"corrupted: {_ERROR_OBSERVATION_SIGNATURE}",
+                stderr=None,
+                exit_code=0,
+                status="completed",
+            )
+        )
+        sandbox._client.bash.exec = MagicMock(side_effect=[corrupted, retry_result])
+
+        out = sandbox.execute_command("unsafe-to-repeat", env={"X": "1"}, timeout=3)
+
+        assert sandbox._client.bash.exec.call_count == 2
+        assert "corrupted:" not in out
+        assert _ERROR_OBSERVATION_SIGNATURE not in out
+        for expected_fragment in expected_fragments:
+            assert expected_fragment in out
+        if expected_suffix is not None:
+            assert out.endswith(expected_suffix)
 
 
 class TestEnvPolicy:
@@ -1076,6 +1332,55 @@ class TestBashToolInjectsActiveSecrets:
         assert captured["command"] == "echo hi"
         assert captured["env"] == {"ERP_TOKEN": "tok-456"}
         assert captured["timeout"] == 42
+
+    def test_remote_bash_does_not_forward_shared_timeout(self):
+        from deerflow.sandbox import tools as tools_mod
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                captured["timeout"] = timeout
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={},
+            state={"sandbox": {"sandbox_id": "aio:1"}},
+        )
+        fake_cfg = SimpleNamespace(
+            sandbox=SimpleNamespace(
+                bash_output_max_chars=321,
+                bash_command_timeout=42,
+            )
+        )
+
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=FakeSandbox(),
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+            patch(
+                "deerflow.config.app_config.get_app_config",
+                return_value=fake_cfg,
+            ),
+        ):
+            out = tools_mod.bash_tool.func(
+                runtime=runtime,
+                command="echo hi",
+                description="run remote",
+            )
+
+        assert out == "done"
+        assert captured["timeout"] is None
 
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"

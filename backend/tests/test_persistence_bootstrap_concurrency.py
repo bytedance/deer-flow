@@ -15,6 +15,7 @@ idempotent revision helpers.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -147,4 +148,99 @@ async def test_slow_upgrade_does_not_corrupt_concurrent_state(monkeypatch, tmp_p
         )
         assert await _alembic_version(engine) == HEAD
     finally:
+        await engine.dispose()
+
+
+async def test_cancelled_bootstrap_keeps_sqlite_lock_until_alembic_worker_finishes(monkeypatch, tmp_path: Path) -> None:
+    """Cancellation must not detach an Alembic worker from its bootstrap lock."""
+    engine = create_async_engine(_url(tmp_path))
+    stamp_started = threading.Event()
+    allow_stamp = threading.Event()
+    second_reflect_started = asyncio.Event()
+    reflect_calls = 0
+    original_reflect = bootstrap_mod._reflect_state
+
+    def blocking_stamp(_cfg, _revision: str) -> None:
+        stamp_started.set()
+        assert allow_stamp.wait(5), "test did not release the blocked stamp worker"
+
+    def recording_reflect(sync_conn):
+        nonlocal reflect_calls
+        reflect_calls += 1
+        if reflect_calls >= 2:
+            second_reflect_started.set()
+        return original_reflect(sync_conn)
+
+    monkeypatch.setattr(bootstrap_mod, "_stamp", blocking_stamp)
+    monkeypatch.setattr(bootstrap_mod, "_upgrade", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap_mod, "_reflect_state", recording_reflect)
+
+    first = asyncio.create_task(bootstrap_schema(engine, backend="sqlite"))
+    second: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(stamp_started.wait, 2), "bootstrap did not reach the Alembic stamp worker"
+
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not first.done(), "cancelled bootstrap returned while its Alembic worker was still running"
+
+        second = asyncio.create_task(bootstrap_schema(engine, backend="sqlite"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not second_reflect_started.is_set(), "cancelled bootstrap released the SQLite mutex before its worker finished"
+    finally:
+        allow_stamp.set()
+        await asyncio.gather(first, *(task for task in (second,) if task is not None), return_exceptions=True)
+        await engine.dispose()
+
+
+async def test_cancelled_versioned_bootstrap_keeps_sqlite_lock_until_upgrade_worker_finishes(monkeypatch, tmp_path: Path) -> None:
+    """The versioned upgrade path must retain the same lock while its worker drains."""
+    engine = create_async_engine(_url(tmp_path))
+    await bootstrap_schema(engine, backend="sqlite")
+
+    upgrade_started = threading.Event()
+    allow_upgrade = threading.Event()
+    second_reflect_started = asyncio.Event()
+    reflect_calls = 0
+    original_reflect = bootstrap_mod._reflect_state
+
+    def blocking_upgrade(_cfg, _revision: str) -> None:
+        upgrade_started.set()
+        assert allow_upgrade.wait(5), "test did not release the blocked upgrade worker"
+
+    def recording_reflect(sync_conn):
+        nonlocal reflect_calls
+        reflect_calls += 1
+        if reflect_calls >= 2:
+            second_reflect_started.set()
+        return original_reflect(sync_conn)
+
+    monkeypatch.setattr(bootstrap_mod, "_upgrade", blocking_upgrade)
+    monkeypatch.setattr(bootstrap_mod, "_reflect_state", recording_reflect)
+
+    first = asyncio.create_task(bootstrap_schema(engine, backend="sqlite"))
+    second: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(upgrade_started.wait, 2), "bootstrap did not reach the Alembic upgrade worker"
+
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not first.done(), "cancelled bootstrap returned while its Alembic upgrade worker was still running"
+
+        second = asyncio.create_task(bootstrap_schema(engine, backend="sqlite"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not second_reflect_started.is_set(), "cancelled bootstrap released the SQLite mutex before upgrade finished"
+    finally:
+        allow_upgrade.set()
+        await asyncio.gather(first, *(task for task in (second,) if task is not None), return_exceptions=True)
         await engine.dispose()

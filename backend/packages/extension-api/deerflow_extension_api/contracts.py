@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_checkable
 
+from deerflow_extension_api.plugins import PluginContribution
 from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -188,6 +189,10 @@ class ExtensionRegistry(Protocol):
     The host's concrete registry additionally carries host-only machinery
     (attribution, positional rollback, build) that is deliberately absent here.
     """
+
+    def plugin(self, contribution: PluginContribution) -> bool:
+        """Return True when accepted; False means this host lacks plugin UI support."""
+        return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         return None

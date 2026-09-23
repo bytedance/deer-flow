@@ -40,9 +40,12 @@ class MemoryRunStore(RunStore):
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
 
-    def _mark_changed(self, run: dict[str, Any]) -> None:
+    def _next_change_seq(self) -> int:
         self._change_seq += 1
-        run["change_seq"] = self._change_seq
+        return self._change_seq
+
+    def _mark_changed(self, run: dict[str, Any]) -> None:
+        run["change_seq"] = self._next_change_seq()
 
     async def put(
         self,
@@ -502,6 +505,7 @@ class MemoryRunStore(RunStore):
         # interrupted state on raise, diverging from SQL where a raise rolls
         # the whole transaction back.
         claimed = []
+        change_seq: int | None = None
         if multitask_strategy in ("interrupt", "rollback"):
             candidates: list[dict[str, Any]] = []
             for r in self._runs.values():
@@ -533,12 +537,20 @@ class MemoryRunStore(RunStore):
                 if r.get("operation_kind", "run") != "run" and not lease_expired:
                     raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                 candidates.append(r)
+            # One position covers this atomic set of changes, with ``run_id``
+            # ordering ties. The SQL store allocates the same single value for
+            # the set from its singleton clock (``runtime/AGENTS.md``); marking
+            # each row separately split one interrupt-and-replace into two
+            # positions in the ``(change_seq, run_id)`` cursor consumers page
+            # with. Allocate after the raise-only scan above so a rejected
+            # operation does not consume a position.
+            change_seq = self._next_change_seq()
             for r in candidates:
                 r["status"] = "interrupted"
                 r["error"] = "Cancelled by newer run"
                 r["owner_worker_id"] = owner_worker_id
                 r["updated_at"] = now
-                self._mark_changed(r)
+                r["change_seq"] = change_seq
                 claimed.append(r)
 
         new_row = {
@@ -561,7 +573,9 @@ class MemoryRunStore(RunStore):
             "created_at": created_at or now,
             "updated_at": now,
         }
+        if change_seq is None:
+            change_seq = self._next_change_seq()
+        new_row["change_seq"] = change_seq
         self._runs[run_id] = new_row
-        self._mark_changed(new_row)
         self._index_run(run_id, thread_id)
         return new_row, claimed

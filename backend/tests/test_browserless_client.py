@@ -482,6 +482,70 @@ class TestBrowserlessTools:
         assert "Error:" not in result
         assert "warning:" not in result
 
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_reads_wait_timeouts_like_web_capture(self, mock_get_client):
+        """web_fetch_tool resolves both wait timeouts with the tolerant int coercion.
+
+        web_capture_tool reads ``wait_for_timeout_ms`` and
+        ``wait_for_selector_timeout_ms`` through ``_as_int``, so a loosely typed
+        value falls back to the default instead of raising. web_fetch_tool used a
+        bare ``int()`` for the first key and never read the second, so a typo'd
+        value made every fetch return "invalid literal for int()" and a slow
+        selector could not be given more than the hardcoded 5000 ms.
+        """
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {
+                "wait_for_timeout_ms": "2500",  # quoted number: parsed, not rejected
+                "wait_for_selector": "article",
+                "wait_for_selector_timeout_ms": 9000,
+            }
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("93.184.216.34")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        kwargs = mock_client.fetch_html_with_status.call_args.kwargs
+        assert kwargs["wait_for_timeout_ms"] == 2500
+        assert kwargs["wait_for_selector_timeout_ms"] == 9000
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_bad_wait_timeout_falls_back_to_default(self, mock_get_client):
+        """A non-numeric wait timeout must not fail the whole fetch."""
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"wait_for_timeout_ms": "2s"}
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("93.184.216.34")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        kwargs = mock_client.fetch_html_with_status.call_args.kwargs
+        assert kwargs["wait_for_timeout_ms"] == 0
+        assert kwargs["wait_for_selector_timeout_ms"] == 5000
+
     async def test_web_fetch_and_web_capture_tools_agree_on_target_error_warning(self, tmp_path):
         """web_fetch_tool and web_capture_tool surface the identical warning for identical target-error headers.
 
