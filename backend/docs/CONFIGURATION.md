@@ -855,7 +855,6 @@ If the configured `host_path` is not visible to the gateway process, DeerFlow lo
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   port: 8080
-  auto_start: true
   container_prefix: deer-flow-sandbox
 
   # Optional: Additional mounts
