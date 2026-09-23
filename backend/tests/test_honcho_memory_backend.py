@@ -59,6 +59,36 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
         assert cfg.api_key is None
 
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            pytest.param("localhost:8000", id="scheme-less-host-port"),
+            pytest.param("honcho.internal", id="scheme-less-hostname"),
+            pytest.param("not a url", id="garbage"),
+            pytest.param("", id="empty"),
+            pytest.param("ftp://localhost:8000", id="wrong-scheme"),
+            pytest.param("http://", id="scheme-only"),
+            pytest.param(12345, id="non-string-int"),
+        ],
+    )
+    def test_unresolvable_base_url_rejected(self, base_url):
+        """A base_url with no scheme, a non-http(s) scheme, or no netloc is a
+        config mistake: httpx parses the hostname as the scheme
+        ('localhost://'), so every memory read returns empty and every write is
+        dropped with only a WARNING while the Gateway stays green. mem0 and
+        OpenViking already reject these shapes at startup; Honcho must match
+        the README's promise that config errors fail fast at Gateway startup."""
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig.from_backend_config({"base_url": base_url})
+
+    def test_api_key_over_scheme_less_url_rejected_as_invalid_url(self):
+        """A scheme-less base_url with an api_key must be rejected as an
+        invalid URL, not silently accepted. The old startswith('http://') guard
+        skipped scheme-less URLs entirely, so the key was sent to whatever
+        httpx resolved 'localhost:8000' to."""
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig.from_backend_config({"base_url": "localhost:8000", "api_key": "sk-x"})
+
     def test_empty_override_values_rejected(self):
         """An override entry with an empty/null value is a config mistake: silently
         falling through to the default derivation (empty string is falsy) or
@@ -110,7 +140,7 @@ class TestHonchoConfig:
     def test_unusable_numeric_values_rejected_as_config_error(self, key, value):
         """``float([...])`` and ``int("wide")`` raise a TypeError that names neither
         the knob nor the config file, so a mistyped scalar reaches the operator as
-        an internal traceback — the same symptom as the nested values above, one
+        an internal traceback �� the same symptom as the nested values above, one
         block below them."""
         with pytest.raises(ValueError, match=f"{key} must be a number"):
             HonchoConfig.from_backend_config({key: value})
@@ -525,7 +555,7 @@ class TestHonchoManagerRead:
         assert doc["user"] == {}
 
     def test_get_memory_fail_closed_raises_contract_error(self):
-        """get_memory() backs the /memory gateway endpoint — a recall op, so it
+        """get_memory() backs the /memory gateway endpoint �� a recall op, so it
         follows failure_policy.read like get_context() and search()."""
         mgr, fake = _manager(failure_policy={"read": "fail_closed"})
         fake.raise_on = "representation"
@@ -612,3 +642,4 @@ class TestFactoryDiscovery:
         from deerflow.agents.memory.backends.honcho import MANAGER_CLASS
 
         assert MANAGER_CLASS is HonchoMemoryManager
+

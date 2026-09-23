@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
+from urllib.parse import urlsplit
 
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -103,9 +104,12 @@ class HonchoConfig:
         cfg = dict(backend_config or {})
         failure_policy = _mapping(cfg.get("failure_policy"), "failure_policy")
         base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
+        parsed_base_url = urlsplit(base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("Honcho backend: base_url must be an absolute http:// or https:// URL")
         api_key = cfg.get("api_key") or None
         allow_insecure = bool(cfg.get("allow_insecure_http", False))
-        if api_key and base_url.startswith("http://") and not allow_insecure:
+        if api_key and parsed_base_url.scheme == "http" and not allow_insecure:
             raise ValueError("Honcho backend: api_key over plain http requires backend_config.allow_insecure_http: true (the key would be sent unencrypted). Use https, or set the opt-in for local development.")
         return cls(
             base_url=base_url,
