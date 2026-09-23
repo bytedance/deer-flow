@@ -1735,7 +1735,11 @@ class FileMemoryStorage(MemoryStorage):
             for fact in facts:
                 content = fact.get("content")
                 if isinstance(content, str) and query_lower in content.lower():
-                    results.append({"fact": fact, "score": float(fact.get("confidence") or 0.5), "matchType": "substring"})
+                    # Default only when missing or null: ``confidence: 0.0`` is
+                    # a valid stored value and must keep its zero weight.
+                    raw_confidence = fact.get("confidence")
+                    score = float(raw_confidence) if raw_confidence is not None else 0.5
+                    results.append({"fact": fact, "score": score, "matchType": "substring"})
         results.sort(key=lambda result: result["score"], reverse=True)
         return results[:top_k]
 

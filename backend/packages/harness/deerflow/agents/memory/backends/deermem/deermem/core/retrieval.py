@@ -578,11 +578,16 @@ class FTS5RetrievalAdapter:
         payload = dict(fact)
         payload["scope"] = {"userId": scope.get("userId"), "agentName": scope.get("agentName")}
         source = payload.get("source")
+        # Default only when the key is missing or null: ``confidence: 0.0`` is a
+        # valid stored value and must keep its zero weight in the ranking, the
+        # same as the low-level engine's ``fact.get("confidence", 0.5)``.
+        raw_confidence = payload.get("confidence")
+        confidence = float(raw_confidence) if raw_confidence is not None else 0.5
         return {
             "fact_id": self._document_id(fact_id, scope),
             "content": content,
             "category": str(payload.get("category") or "context"),
-            "confidence": float(payload.get("confidence") or 0.5),
+            "confidence": confidence,
             "created_at": payload.get("createdAt") if isinstance(payload.get("createdAt"), str) else None,
             "scope_user": scope_user,
             "scope_agent": scope_agent,
