@@ -1280,6 +1280,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     sandbox = MagicMock()
     sandbox.id = sandbox_id
     sandbox.close = MagicMock()
+    sandbox.requires_container_recycle = False
     provider._sandboxes = {sandbox_id: sandbox}
     return provider, sandbox, aio_mod
 
@@ -1336,6 +1337,79 @@ async def test_reset_closes_acquire_serializer_executor(tmp_path):
     with pytest.raises(RuntimeError, match="closed"):
         async with provider._acquire_serializer.hold_async(("alice", "thread-after-reset")):
             pass
+
+
+def test_release_dirty_sandbox_branches_before_warm_pool(
+    tmp_path,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty",
+    )
+    sandbox.requires_container_recycle = True
+
+    observed: dict[str, bool] = {}
+
+    def destroy_tracked(
+        sandbox_id,
+        *,
+        still_reapable,
+    ):
+        observed["active_before_destroy"] = provider._sandboxes.get(sandbox_id) is sandbox
+        observed["warm_before_destroy"] = sandbox_id in provider._warm_pool
+        observed["still_reapable"] = still_reapable()
+
+    provider._destroy_tracked = MagicMock(side_effect=destroy_tracked)
+
+    provider.release("sandbox-dirty")
+
+    assert observed == {
+        "active_before_destroy": True,
+        "warm_before_destroy": False,
+        "still_reapable": True,
+    }
+
+
+def test_release_dirty_sandbox_destroys_container_instead_of_warming(
+    tmp_path,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty-destroy",
+    )
+    sandbox.requires_container_recycle = True
+    info = provider._sandbox_infos["sandbox-dirty-destroy"]
+
+    provider.release("sandbox-dirty-destroy")
+
+    assert "sandbox-dirty-destroy" not in provider._warm_pool
+    assert "sandbox-dirty-destroy" not in provider._sandboxes
+    assert "sandbox-dirty-destroy" not in provider._sandbox_infos
+
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once_with(info)
+
+
+def test_release_dirty_sandbox_destroy_failure_is_logged_without_warming(
+    tmp_path,
+    caplog,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty-fail",
+    )
+    sandbox.requires_container_recycle = True
+    provider._backend.destroy.side_effect = RuntimeError("container stop failed")
+
+    with caplog.at_level("ERROR"):
+        provider.release("sandbox-dirty-fail")
+
+    assert "sandbox-dirty-fail" not in provider._warm_pool
+    assert "sandbox-dirty-fail" not in provider._sandboxes
+    assert "sandbox-dirty-fail" not in provider._sandbox_infos
+    assert "Failed to recycle sandbox sandbox-dirty-fail" in caplog.text
+    provider._backend.destroy.assert_called_once()
+    sandbox.close.assert_called_once_with()
 
 
 def test_release_swallows_close_errors(tmp_path, caplog):

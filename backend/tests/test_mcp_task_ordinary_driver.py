@@ -28,6 +28,7 @@ def _request() -> TaskSubmitRequest:
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -47,6 +48,7 @@ def _reference() -> TaskReference:
         local_task_id="local-1",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         server_name="reports",
         remote_task_id="remote-1",
         driver_data={
@@ -74,6 +76,7 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
             "arguments": {"topic": "MCP"},
             "user_id": "user-1",
             "thread_id": "thread-1",
+            "thread_incarnation": "incarnation-1",
             # Submit is the one durable-task call awaited inside the Agent run,
             # so it is the only one that may carry request-scoped credentials.
             "request_scoped_headers": True,

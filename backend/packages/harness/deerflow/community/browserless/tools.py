@@ -253,9 +253,9 @@ async def web_fetch_tool(url: str) -> str:
         reject_request_pattern: list[str] | None = None
 
         wait_for_event = cfg.get("wait_for_event", wait_for_event)
-        raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
-        wait_for_timeout_ms = int(raw_wait) if not isinstance(raw_wait, int) else raw_wait
+        wait_for_timeout_ms = _as_int(cfg.get("wait_for_timeout_ms"), wait_for_timeout_ms)
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+        wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
         client = _get_browserless_client("web_fetch")
         result = await client.fetch_html_with_status(

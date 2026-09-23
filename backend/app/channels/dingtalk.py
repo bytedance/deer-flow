@@ -629,6 +629,14 @@ class DingTalkChannel(Channel):
         """
         content = await self._download_by_code(download_code)
         if not content:
+            # Neutral on purpose: None covers several reasons (non-200
+            # download exchange, missing downloadUrl, oversize abort,
+            # transport failure), each already logged with its accurate
+            # reason inside _download_by_code — the empty-bytes case lands
+            # here too. Logging here keeps the skip observable at the
+            # receive level instead of vanishing silently (the wechat
+            # channel's callers and the manager reader use the same shape).
+            logger.warning("[DingTalk] inbound file download returned no content, skipping: file=%s", filename or "(unnamed)")
             return ""
 
         paths = get_paths()
