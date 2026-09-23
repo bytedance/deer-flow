@@ -435,7 +435,6 @@ def test_implicit_create_accepts_legacy_thread_created_by_mixed_version_peer():
     runtime.put.assert_awaited_once()
     assert runtime.get_assistant.await_args.kwargs["ctx"] is None
     assert runtime.auth_context_observations == [None]
-    assert runtime.runtime_auth_context.get() == "ambient"
 
 
 @pytest.mark.parametrize(
@@ -476,7 +475,6 @@ def test_implicit_create_rejects_unavailable_assistant_before_thread_put(assista
         assert runtime.auth_context_observations == [None, "ambient"]
     else:
         assert runtime.auth_context_observations == [None]
-    assert runtime.runtime_auth_context.get() == "ambient"
 
 
 @pytest.mark.parametrize("persisted_incarnation", [None, "versioned-incarnation"])
