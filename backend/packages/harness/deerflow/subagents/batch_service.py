@@ -11,6 +11,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
@@ -233,6 +234,9 @@ class SubagentBatchService:
                     item_id,
                 )
                 return
+            executor_kwargs = {}
+            if THREAD_INCARNATION_CONTEXT_KEY in spec:
+                executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
@@ -251,6 +255,7 @@ class SubagentBatchService:
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,
                 acceptance_criteria=item.get("acceptance_criteria"),
+                **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
             execution_id = executor.execute_async(prompt, task_id=item_id)

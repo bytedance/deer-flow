@@ -184,8 +184,8 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
     projection_started = asyncio.Event()
 
     class BlockingTaskRepository:
-        async def list_by_thread(self, thread_id, *, user_id, limit):
-            del thread_id, user_id, limit
+        async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit):
+            del thread_id, user_id, thread_incarnation, limit
             projection_started.set()
             await asyncio.Event().wait()
 
@@ -210,6 +210,7 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
             agent_factory=agent_factory,
             graph_input={},
             config={},
+            thread_incarnation=None,
         )
     )
     await asyncio.wait_for(projection_started.wait(), timeout=1)
@@ -2557,6 +2558,21 @@ def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
     assert ctx["thread_id"] == "real-thread"
     assert ctx["run_id"] == "real-run"
     assert ctx["agent_name"] == "ok"
+
+
+def test_build_runtime_context_uses_server_owned_thread_incarnation():
+    ctx = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            "thread_incarnation": "spoofed",
+            "__deerflow_thread_incarnation_metadata_guard": True,
+        },
+        thread_incarnation="server-incarnation",
+    )
+
+    assert ctx["thread_incarnation"] == "server-incarnation"
+    assert "__deerflow_thread_incarnation_metadata_guard" not in ctx
 
 
 def test_build_runtime_context_ignores_caller_pre_existing_message_ids():

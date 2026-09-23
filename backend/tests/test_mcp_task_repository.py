@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError, McpTaskRepository
+from deerflow.persistence.mcp_tasks import (
+    DuplicateMcpRemoteTaskError,
+    McpTaskRepository,
+    McpTaskThreadMismatchError,
+)
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
@@ -36,11 +40,26 @@ async def _create_working_task(
     now: datetime,
     user_id: str = "user-1",
     remote_task_id: str | None = None,
+    thread_incarnation: str | None = None,
 ) -> dict:
+    async with repo._sf() as session:
+        if await session.get(ThreadMetaRow, "thread-1") is None:
+            session.add(
+                ThreadMetaRow(
+                    thread_id="thread-1",
+                    incarnation=None,
+                    user_id=user_id,
+                    metadata_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
     return await repo.create(
         task_id=task_id,
         user_id=user_id,
         thread_id="thread-1",
+        expected_thread_incarnation=thread_incarnation,
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -108,7 +127,7 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
     await _create_working_task(repo, task_id=task_id, now=now)
     claim = repo.claim_due_tasks
     if operation == "apply_cancel_snapshot":
-        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", requested_at=now)
+        await repo.request_cancel(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None, requested_at=now)
         claim = repo.claim_cancel_requests
     first = await claim(now=now, lease_owner="worker-1", lease_seconds=60, limit=1)
     kwargs = {"lease_owner": "worker-1", "lease_token": first[0]["lease_token"]}
@@ -135,13 +154,14 @@ async def test_interleaved_reclaim_fences_inflight_poll_and_cancel_mutations(tmp
         second = await asyncio.wait_for(claim(now=now + timedelta(seconds=61), lease_owner="worker-1", lease_seconds=60, limit=1), timeout=5)
         assert len(second) == 1
         assert second[0]["lease_token"] != first[0]["lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
     # Check the entire row, including scheduling, errors, results and event
     # versions, not just the new lease: stale work must have no side effects.
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
 
 
@@ -192,11 +212,12 @@ async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_p
         second = await asyncio.wait_for(repo.claim_notification_work(now=now + timedelta(seconds=61), **claim_kwargs), timeout=5)
         assert len(second) == 1
         assert second[0]["notification_lease_token"] != first[0]["notification_lease_token"]
-        before = await repo.get(task_id, user_id="user-1")
+        before = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before is not None
         resume.set()
         applied = await asyncio.wait_for(pending, timeout=5)
 
-    assert await repo.get(task_id, user_id="user-1") == before
+    assert await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None) == before
     assert applied is False
 
 
@@ -241,21 +262,19 @@ async def test_legacy_task_writer_leaves_thread_incarnation_null(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("thread_owner", "expected_incarnation"),
+    "thread_owner",
     [
-        ("user-1", "matching-owner"),
-        (None, "shared-thread"),
-        ("user-2", None),
+        "user-1",
+        None,
     ],
 )
 async def test_create_atomically_copies_accessible_thread_incarnation(
     tmp_path,
     thread_owner,
-    expected_incarnation,
 ):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
-    incarnation = expected_incarnation or "different-owner"
+    incarnation = "matching-incarnation"
     async with repo._sf() as session:
         session.add(
             ThreadMetaRow(
@@ -269,25 +288,49 @@ async def test_create_atomically_copies_accessible_thread_incarnation(
         )
         await session.commit()
 
-    task = await _create_working_task(repo, task_id="new-writer", now=now)
+    task = await _create_working_task(
+        repo,
+        task_id="new-writer",
+        now=now,
+        thread_incarnation=incarnation,
+    )
 
     assert "thread_incarnation" not in task
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "new-writer")
     assert row is not None
-    assert row.thread_incarnation == expected_incarnation
+    assert row.thread_incarnation == incarnation
 
 
 @pytest.mark.asyncio
-async def test_create_leaves_incarnation_null_without_matching_thread(tmp_path):
+async def test_create_rejects_missing_or_inaccessible_thread(tmp_path):
     repo = await _make_repo(tmp_path)
 
-    await _create_working_task(repo, task_id="missing-thread", now=datetime.now(UTC))
+    with pytest.raises(McpTaskThreadMismatchError):
+        await repo.create(
+            task_id="missing-thread",
+            user_id="user-1",
+            thread_id="missing-thread",
+            expected_thread_incarnation=None,
+            run_id="run-1",
+            tool_call_id="call-1",
+            server_name="reports",
+            driver_name="fake",
+            remote_task_id="remote-missing",
+            task_name="Generate report",
+            status="working",
+            result=None,
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+        )
 
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "missing-thread")
-    assert row is not None
-    assert row.thread_incarnation is None
+    assert row is None
 
 
 @pytest.mark.asyncio
@@ -310,9 +353,9 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
     engine = get_engine()
     assert engine is not None
     replaced = False
-    insert_statement = None
+    lock_statement = None
 
-    def replace_thread_before_task_insert(
+    def replace_thread_before_scope_lock(
         _conn,
         _cursor,
         statement,
@@ -320,11 +363,11 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
         _context,
         _executemany,
     ):
-        nonlocal insert_statement, replaced
-        if replaced or not statement.lstrip().upper().startswith("INSERT INTO MCP_TASKS"):
+        nonlocal lock_statement, replaced
+        if replaced or "UPDATE THREADS_META" not in statement.upper():
             return
         replaced = True
-        insert_statement = statement
+        lock_statement = statement
         with contextlib.closing(sqlite3.connect(tmp_path / "deerflow.db")) as connection:
             with connection:
                 connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
@@ -346,21 +389,187 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
                     ),
                 )
 
-    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
     try:
-        await _create_working_task(repo, task_id="racing-task", now=now)
+        with pytest.raises(McpTaskThreadMismatchError):
+            await _create_working_task(
+                repo,
+                task_id="racing-task",
+                now=now,
+                thread_incarnation="old-incarnation",
+            )
     finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
 
     assert replaced is True
-    assert insert_statement is not None
-    normalized_insert = " ".join(insert_statement.upper().split())
-    assert "SELECT THREADS_META.INCARNATION" in normalized_insert
-    assert "INSERT INTO MCP_TASKS" in normalized_insert
+    assert lock_statement is not None
+    normalized_lock = " ".join(lock_statement.upper().split())
+    assert "UPDATE THREADS_META SET INCARNATION = INCARNATION" in normalized_lock
+    assert "INCARNATION IS ?" in normalized_lock
     async with repo._sf() as session:
         row = await session.get(McpTaskRow, "racing-task")
-    assert row is not None
-    assert row.thread_incarnation == "replacement-incarnation"
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_rejects_delete_recreate_before_scope_lock(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="old-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+    await _create_working_task(
+        repo,
+        task_id="old-task",
+        now=now,
+        thread_incarnation="old-incarnation",
+    )
+
+    engine = get_engine()
+    assert engine is not None
+    replaced = False
+
+    def replace_thread_before_scope_lock(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        nonlocal replaced
+        if replaced or "UPDATE THREADS_META" not in statement.upper():
+            return
+        replaced = True
+        with contextlib.closing(sqlite3.connect(tmp_path / "deerflow.db")) as connection:
+            with connection:
+                connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
+                connection.execute(
+                    """
+                    INSERT INTO threads_meta (
+                        thread_id, incarnation, user_id, status, metadata_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "thread-1",
+                        "replacement-incarnation",
+                        "user-1",
+                        "idle",
+                        "{}",
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
+    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
+    try:
+        result = await repo.request_cancel(
+            "old-task",
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation="old-incarnation",
+            requested_at=now,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_scope_lock)
+
+    assert replaced is True
+    assert result is None
+    async with repo._sf() as session:
+        task = await session.get(McpTaskRow, "old-task")
+    assert task is not None
+    assert task.cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_user_access_is_limited_to_current_thread_incarnation(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="old-task", now=now)
+
+    async with repo._sf() as session:
+        old_thread = await session.get(ThreadMetaRow, "thread-1")
+        assert old_thread is not None
+        await session.delete(old_thread)
+        await session.commit()
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="replacement-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    assert await repo.list_by_thread("thread-1", user_id="user-1", thread_incarnation=None) == []
+    assert await repo.get("old-task", user_id="user-1", thread_id="thread-1", thread_incarnation=None) is None
+    assert (
+        await repo.request_cancel(
+            "old-task",
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation=None,
+            requested_at=now,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_pr1_does_not_change_worker_claim_eligibility(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="old-task", now=now)
+
+    async with repo._sf() as session:
+        old_thread = await session.get(ThreadMetaRow, "thread-1")
+        assert old_thread is not None
+        await session.delete(old_thread)
+        await session.commit()
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="replacement-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    claimed = await repo.claim_due_tasks(
+        now=now,
+        lease_owner="worker-1",
+        lease_seconds=60,
+        limit=10,
+    )
+
+    assert [task["id"] for task in claimed] == ["old-task"]
+    assert claimed[0]["_thread_incarnation"] is None
+
+
+@pytest.mark.asyncio
+async def test_user_access_treats_legacy_null_incarnations_as_equal(tmp_path):
+    repo = await _make_repo(tmp_path)
+    task = await _create_working_task(repo, task_id="legacy-task", now=datetime.now(UTC))
+
+    assert "thread_incarnation" not in task
+    assert "_thread_incarnation" not in task
+    assert await repo.get("legacy-task", user_id="user-1", thread_id="thread-1", thread_incarnation=None) is not None
 
 
 @pytest.mark.asyncio
@@ -381,6 +590,12 @@ async def test_remote_task_id_is_unique_per_user_and_server(tmp_path):
             now=now,
             remote_task_id="shared-remote-id",
         )
+
+    async with repo._sf() as session:
+        thread = await session.get(ThreadMetaRow, "thread-1")
+        assert thread is not None
+        thread.user_id = None
+        await session.commit()
 
     other_user = await _create_working_task(
         repo,
@@ -483,7 +698,7 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     )
     assert applied is True
 
-    stored = await repo.get("task-2", user_id="user-1")
+    stored = await repo.get("task-2", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "completed"
     assert stored["result"] == {"report": "ready"}
@@ -533,7 +748,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
     )
 
     assert applied is False
-    stored = await repo.get("task-expired", user_id="user-1")
+    stored = await repo.get("task-expired", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "working"
     assert stored["result"] is None
@@ -567,7 +782,7 @@ async def test_input_required_is_persisted_and_remains_scheduled_for_slow_pollin
     )
     assert applied is True
 
-    stored = await repo.get("task-3", user_id="user-1")
+    stored = await repo.get("task-3", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["input_required"] == {"prompt": "Approve deployment?"}
     assert stored["notification_status"] == "pending"
@@ -596,7 +811,7 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     )
     assert released is True
 
-    stored = await repo.get("task-4", user_id="user-1")
+    stored = await repo.get("task-4", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "working"
     assert stored["last_poll_error"] == "temporary network failure"
@@ -630,7 +845,7 @@ async def test_release_claim_after_same_worker_reclaim_cannot_clear_new_claim(tm
     )
     assert released is False
 
-    stored = await repo.get("task-fence", user_id="user-1")
+    stored = await repo.get("task-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -667,7 +882,7 @@ async def test_apply_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(t
     )
     assert applied is False
 
-    stored = await repo.get("task-apply-fence", user_id="user-1")
+    stored = await repo.get("task-apply-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -703,7 +918,7 @@ async def test_apply_cancel_snapshot_after_same_worker_reclaim_cannot_clear_new_
     )
     assert applied is False
 
-    stored = await repo.get("task-cancel-fence", user_id="user-1")
+    stored = await repo.get("task-cancel-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-1"
     assert stored["lease_token"] == new_token
@@ -768,7 +983,7 @@ async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_
     )
     assert finished is False
 
-    stored = await repo.get("task-notify-fence", user_id="user-1")
+    stored = await repo.get("task-notify-fence", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier"
     assert stored["notification_lease_token"] == new_notify_token
@@ -788,7 +1003,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
         next_poll_at=retry_at,
         error="temporary network failure",
     )
-    before = await repo.get("task-cancelled-poll", user_id="user-1")
+    before = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert before is not None
 
     reclaimed = await repo.claim_due_tasks(now=retry_at, lease_owner="worker-2", lease_seconds=60, limit=10)
@@ -799,7 +1014,7 @@ async def test_release_poll_claim_after_cancellation_preserves_poll_failure_stat
     )
 
     assert released is True
-    stored = await repo.get("task-cancelled-poll", user_id="user-1")
+    stored = await repo.get("task-cancelled-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["next_poll_at"] == before["next_poll_at"]
     assert stored["last_poll_error"] == before["last_poll_error"]
@@ -823,7 +1038,7 @@ async def test_release_poll_claim_after_cancellation_requires_current_owner(tmp_
     )
 
     assert released is False
-    stored = await repo.get("task-stale-cancel", user_id="user-1")
+    stored = await repo.get("task-stale-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-current"
     assert stored["lease_expires_at"] is not None
@@ -844,7 +1059,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
             next_poll_at=now - timedelta(seconds=1),
             error="temporary network failure",
         )
-        stored = await repo.get("task-6", user_id="user-1")
+        stored = await repo.get("task-6", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
         assert stored is not None
         assert stored["consecutive_poll_error_count"] == expected_errors
 
@@ -865,7 +1080,7 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
     )
     assert applied is True
 
-    stored = await repo.get("task-6", user_id="user-1")
+    stored = await repo.get("task-6", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["consecutive_poll_error_count"] == 0
 
@@ -916,7 +1131,7 @@ async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(
         next_poll_at=None,
         polled_at=now,
     )
-    changed = await repo.get("task-notify", user_id="user-1")
+    changed = await repo.get("task-notify", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert changed is not None
     assert changed["event_version"] == 2
     assert changed["dispatch_version"] == 1
@@ -1011,7 +1226,7 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
         error="Agent run failed",
         now=now,
     )
-    failed = await repo.get("task-retry-latest", user_id="user-1")
+    failed = await repo.get("task-retry-latest", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert failed is not None
     assert failed["notification_status"] == "retry"
     assert failed["dispatch_attempt"] == 1
@@ -1083,7 +1298,7 @@ async def test_unexpected_notification_failure_releases_lease_without_changing_p
         error="run store unavailable",
     )
 
-    stored = await repo.get("task-notify-release", user_id="user-1")
+    stored = await repo.get("task-notify-release", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "claimed"
     assert stored["notification_lease_owner"] is None
@@ -1130,7 +1345,7 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
         count_failure=True,
     )
 
-    stored = await repo.get("task-launch-retry", user_id="user-1")
+    stored = await repo.get("task-launch-retry", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "pending"
     assert stored["notification_attempt_count"] == 1
@@ -1185,7 +1400,7 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
         now=now,
     )
 
-    stored = await repo.get("task-dead-letter", user_id="user-1")
+    stored = await repo.get("task-dead-letter", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "dead_letter"
     assert stored["notification_attempt_count"] == 1
@@ -1257,7 +1472,7 @@ async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(t
         now=now,
     )
 
-    stored = await repo.get("task-dispatched-budget", user_id="user-1")
+    stored = await repo.get("task-dispatched-budget", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "dead_letter"
     assert stored["notification_run_id"] is None
@@ -1333,7 +1548,7 @@ async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path
         now=now,
     )
 
-    stored = await repo.get("task-dispatched-latest", user_id="user-1")
+    stored = await repo.get("task-dispatched-latest", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_status"] == "pending"
     assert stored["notification_attempt_count"] == 0
@@ -1360,6 +1575,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         "task-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now,
     )
     assert requested is not None
@@ -1394,6 +1610,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         "task-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now + timedelta(seconds=1),
     )
     assert repeated is not None
@@ -1413,7 +1630,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
         input_required=None,
         completed_at=now,
     )
-    stored = await repo.get("task-cancel", user_id="user-1")
+    stored = await repo.get("task-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["status"] == "cancelled"
     assert stored["notification_status"] == "pending"
@@ -1451,7 +1668,7 @@ async def test_late_poll_release_after_same_worker_reclaim_is_fenced(tmp_path):
     )
     assert released is False
 
-    stored = await repo.get("task-late-poll", user_id="user-1")
+    stored = await repo.get("task-late-poll", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1466,6 +1683,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
         "task-late-cancel",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation=None,
         requested_at=now,
     )
 
@@ -1497,7 +1715,7 @@ async def test_late_cancel_release_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert released is False
 
-    stored = await repo.get("task-late-cancel", user_id="user-1")
+    stored = await repo.get("task-late-cancel", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
@@ -1554,7 +1772,7 @@ async def test_late_notification_release_after_same_worker_reclaim_is_fenced(tmp
     )
     assert released is False
 
-    stored = await repo.get("task-late-notify", user_id="user-1")
+    stored = await repo.get("task-late-notify", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["notification_lease_owner"] == "notifier-same"
     assert stored["notification_lease_token"] == reclaimed[0]["notification_lease_token"]
@@ -1598,7 +1816,7 @@ async def test_late_snapshot_apply_after_same_worker_reclaim_is_fenced(tmp_path)
     )
     assert applied is False
 
-    stored = await repo.get("task-late-apply", user_id="user-1")
+    stored = await repo.get("task-late-apply", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
     assert stored is not None
     assert stored["lease_owner"] == "worker-same"
     assert stored["lease_token"] == reclaimed[0]["lease_token"]
