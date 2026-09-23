@@ -780,13 +780,18 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
     consecutive calls within the same thread reuse the same MCP session.
     HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
     cleanup errors.
+
+    Args:
+        extensions_config: Optional pre-loaded extensions config. Callers that
+            must prove which config revision produced these tools pass the exact
+            instance they snapshotted; ``None`` loads the latest config from disk.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -798,11 +803,13 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    if extensions_config is None:
+        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+        # to always read the latest configuration from disk. This ensures that changes
+        # made through the Gateway API (which runs in a separate process) are immediately
+        # reflected when initializing MCP tools. Callers that need to prove which
+        # revision produced these tools pass the instance they snapshotted instead.
+        extensions_config = ExtensionsConfig.from_file()
     validate_mcp_task_config_snapshot(extensions_config)
     servers_config = build_servers_config(extensions_config)
 

@@ -1,6 +1,7 @@
 """Cache for MCP tools to avoid repeated loading."""
 
 import asyncio
+import json
 import logging
 import threading
 from pathlib import Path
@@ -30,6 +31,17 @@ _cache_generation = 0
 # different config file with an equal-or-older mtime structurally invisible.
 _config_path: Path | None = None  # Resolved extensions config path at init time
 _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
+
+# JSON snapshot of the effective MCP slice (enabled servers in declaration
+# order + mcpInterceptors) that the currently published tools were built from.
+# May contain resolved credentials: never log or persist it.
+_mcp_config_snapshot: str | None = None
+
+# True when the published cache came from an initialization with no resolvable
+# extensions config. Distinguishes "never configured" (a later config must be
+# picked up) from "config deleted after a successful load" (fail-soft: keep
+# serving the last-known-good tools).
+_initialized_without_config = False
 
 
 def _resolve_config_path() -> Path | None:
@@ -76,6 +88,67 @@ def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
     return config_path, _get_config_signature(config_path)
 
 
+def _effective_server_config(server) -> dict:
+    """Return a parsed server config with alias-only fields normalized away."""
+    dumped = server.model_dump(mode="json")
+    # ``transport`` is an MCP-spec alias for ``type``. The model validator
+    # copies it onto ``type`` but keeps the raw extra key (extra="allow"), so
+    # dropping it makes {"type": "stdio"} and {"transport": "stdio"} compare
+    # equal instead of forcing a needless reset.
+    dumped.pop("transport", None)
+    return dumped
+
+
+def _effective_mcp_config_snapshot(config) -> str:
+    """Serialize the MCP-only slice of an extensions config.
+
+    ``extensions_config.json`` also carries skills and middleware settings, so
+    the whole-file signature cannot distinguish an MCP change from a skill
+    toggle. The enabled-server list preserves declaration order (it can affect
+    tool ordering) while ``sort_keys`` only normalizes each server's field
+    order. Parsed models are compared, so equivalent ``type``/``transport``
+    spellings do not cause a needless rebuild.
+
+    The result may embed resolved credentials. It stays in process memory and
+    is never logged or written back to disk.
+    """
+    relevant = {
+        "enabled_servers": [(name, _effective_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
+        "mcpInterceptors": (config.model_extra or {}).get("mcpInterceptors"),
+    }
+    return json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+
+
+def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSignature) -> str | None:
+    """Parse the config and return its MCP snapshot only if the file was stable.
+
+    ``expected_signature`` is the signature observed by the caller. The file is
+    re-hashed after parsing: a mismatch means the config changed while it was
+    being read, so no snapshot can be attributed to a single revision and the
+    caller must treat the cache as stale. Parse failures also return ``None``
+    (conservative: never reuse tools on an unreadable config).
+    """
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    try:
+        config = ExtensionsConfig.from_file(str(config_path))
+    except Exception as exc:
+        # Do NOT pass exc_info/message: ExtensionsConfig.from_file resolves
+        # ``$VAR`` values before validation, so a ValidationError can embed
+        # resolved credentials in its input. Only the exception type is safe.
+        logger.warning(
+            "Could not parse extensions config while checking MCP cache staleness (%s); treating the cache as stale",
+            type(exc).__name__,
+        )
+        return None
+
+    if _get_config_signature(config_path) != expected_signature:
+        logger.info("Extensions config changed while it was being read; treating the MCP cache as stale")
+        return None
+
+    return _effective_mcp_config_snapshot(config)
+
+
 def _is_cache_stale() -> bool:
     """Check if the cache is stale due to config file changes.
 
@@ -84,10 +157,15 @@ def _is_cache_stale() -> bool:
     at initialization. Using content equality (``!=``) instead of a strict mtime
     ``>`` comparison detects same-second edits and backward mtime moves, and
     tracking the resolved path detects a switch to a different config file.
+    A content change alone is not sufficient: the file also carries skills and
+    middleware settings, so the effective MCP slice is compared before the
+    cache is retired.
 
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
+    global _config_signature
+
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
 
@@ -103,18 +181,36 @@ def _is_cache_stale() -> bool:
     # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
     # oversight — a future change that wants "config deleted" to tear down
     # MCP tools needs its own explicit signal here, not an inferred one.
-    if _config_signature is None or current_signature is None:
+    if _config_signature is None:
+        # A config that appears after an unconfigured initialization must be
+        # picked up; a config deleted after a successful load keeps the
+        # last-known-good fail-soft contract below.
+        if _initialized_without_config and current_signature is not None:
+            logger.info("Extensions config appeared after an unconfigured MCP cache; cache is stale")
+            return True
+        return False
+
+    if current_signature is None:
         return False
 
     if current_path != _config_path:
         logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
         return True
 
-    if current_signature != _config_signature:
-        logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
-        return True
+    if current_signature == _config_signature:
+        return False
 
-    return False
+    # The file changed, but it also carries skills and middleware settings.
+    # Retire MCP state only when the effective MCP slice actually changed.
+    if current_path is not None and _mcp_config_snapshot is not None:
+        current_snapshot = _read_stable_mcp_snapshot(current_path, current_signature)
+        if current_snapshot is not None and current_snapshot == _mcp_config_snapshot:
+            logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
+            _config_signature = current_signature
+            return False
+
+    logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
+    return True
 
 
 def _wait_for_initialization(generation: int | None) -> None:
@@ -132,7 +228,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         List of LangChain tools from all enabled MCP servers.
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _initializing_generation, _cache_generation
+    global _initializing_generation, _cache_generation, _mcp_config_snapshot, _initialized_without_config
 
     while True:
         with _init_condition:
@@ -141,7 +237,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 return _mcp_tools_cache or []
 
             if _initializing_generation is None:
-                pre_path, pre_sig = _current_config_state()
                 claim_generation = _cache_generation
                 _initializing_generation = claim_generation
                 break
@@ -150,16 +245,56 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
+    from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     loaded_tools = None
+    loaded_snapshot = None
     post_path = None
     post_sig = None
+    post_snapshot = None
     init_succeeded = False
     try:
         logger.info("Initializing MCP tools...")
-        loaded_tools = await get_mcp_tools()
+        # Read the exact revision we hand to discovery. Comparing pre/post file
+        # snapshots alone cannot prove which revision produced the tools, because
+        # get_mcp_tools() would otherwise read the file itself.
+        try:
+            loaded_config = ExtensionsConfig.from_file()
+        except Exception as exc:
+            # Never let a resolved-credential ValidationError reach a caller's
+            # logger: from_file() resolves $VAR values before validation, so the
+            # exception message can embed secrets. Re-raise a sanitized error;
+            # other MCP failures keep their original traceback.
+            logger.warning(
+                "Could not load extensions config before MCP tool discovery (%s); aborting initialization",
+                type(exc).__name__,
+            )
+            raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
+        loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
+        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
         post_path, post_sig = _current_config_state()
+        if post_path is not None and post_sig is not None:
+            post_snapshot = _read_stable_mcp_snapshot(post_path, post_sig)
+        elif post_path is not None:
+            # The path resolved but its signature could not be read. Publishing
+            # here would record an unpinned cache that later checks could never
+            # invalidate, so discard instead.
+            post_snapshot = None
+        else:
+            # No resolvable config now. Re-resolve after the fallback read so a
+            # config that appeared mid-flight is not published as an unpinned
+            # cache; the snapshot comparison still rejects a different revision.
+            try:
+                fallback_snapshot = _effective_mcp_config_snapshot(ExtensionsConfig.from_file())
+            except Exception as exc:
+                logger.warning(
+                    "Could not load extensions config after MCP tool discovery (%s); discarding result",
+                    type(exc).__name__,
+                )
+                fallback_snapshot = None
+            recheck_path, recheck_sig = _current_config_state()
+            post_snapshot = fallback_snapshot if recheck_path is None and recheck_sig is None else None
         init_succeeded = True
     finally:
         if not init_succeeded:
@@ -175,13 +310,16 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 logger.info("MCP cache was reset during initialization; discarding stale result")
                 return []
 
-            if (pre_path, pre_sig) != (post_path, post_sig):
+            publish = loaded_snapshot is not None and post_snapshot is not None and loaded_snapshot == post_snapshot
+            if not publish:
                 logger.warning("MCP config changed during initialization; discarding stale result")
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
             else:
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
                 _config_path, _config_signature = post_path, post_sig
+                _mcp_config_snapshot = post_snapshot
+                _initialized_without_config = post_path is None
                 logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
                 return _mcp_tools_cache
         finally:
@@ -250,15 +388,49 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                 return _mcp_tools_cache or []
 
 
+def refresh_mcp_cache_if_active() -> bool:
+    """Retire stale MCP cache state without lazily initializing tools.
+
+    Tool assembly skips ``get_cached_mcp_tools()`` when no MCP server is
+    enabled, so a config change that disables the last server would otherwise
+    leave the previous pool and its persistent sessions alive. This entry point
+    performs only the staleness check:
+
+    * it returns immediately when no MCP state was ever initialized and no
+      initialization is in flight, so deployments without MCP servers pay no
+      config-hashing cost;
+    * it invalidates an in-flight initialization (bumping the cache generation)
+      so tools discovered under the superseded config cannot publish;
+    * it retires the pool outside the lock, matching ``get_cached_mcp_tools``.
+
+    Returns:
+        True when existing cache state or an in-flight initialization was
+        retired.
+    """
+    retired_pool = None
+    retired = False
+    with _init_condition:
+        if not _cache_initialized and _initializing_generation is None:
+            return False
+        if _initializing_generation is not None or _is_cache_stale():
+            retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            retired = True
+    if retired_pool is not None:
+        retired_pool.close_all_sync()
+    return retired
+
+
 def _reset_mcp_tools_cache_state() -> None:
     """Reset cache state under ``_init_condition`` / ``_init_lock``."""
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _cache_generation
+    global _cache_generation, _mcp_config_snapshot, _initialized_without_config
 
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_path = None
     _config_signature = None
+    _mcp_config_snapshot = None
+    _initialized_without_config = False
     _cache_generation += 1
     _init_condition.notify_all()
 
