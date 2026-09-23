@@ -28,12 +28,28 @@ import threading
 from pathlib import Path
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 import deerflow.mcp.cache as cache_module
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import get_config_signature
+from deerflow.mcp.client import build_server_params
+from deerflow.mcp.session_pool import (
+    ServerBinding,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
+from deerflow.mcp.tools import ServerDiscoveryResult
 
 _MISSING = object()
+
+
+def _tool(name: str) -> StructuredTool:
+    async def _call() -> str:
+        return name
+
+    return StructuredTool.from_function(coroutine=_call, name=name, description=name)
+
 
 # Module globals that hold cache state. Snapshotted and restored around every
 # test so an initialized cache — or an asyncio lock bound to a closed loop —
@@ -95,6 +111,16 @@ def _server(command: str = "npx") -> dict:
     return {"enabled": True, "type": "stdio", "command": command}
 
 
+def _discovery_result(config, name: str, tool: StructuredTool) -> ServerDiscoveryResult:
+    server = config.get_enabled_mcp_servers()[name]
+    params = build_server_params(name, server)
+    if params.get("transport") != "stdio":
+        return ServerDiscoveryResult(tools=(tool,))
+    pool = get_session_pool()
+    binding = pool.ensure_binding(name, normalized_connection_fingerprint(params))
+    return ServerDiscoveryResult(tools=(tool,), pool=pool, binding=binding)
+
+
 @pytest.fixture()
 def cache_globals():
     """Snapshot/restore ``deerflow.mcp.cache`` module globals and reset the lock."""
@@ -132,10 +158,10 @@ def _initialize_against(monkeypatch, config_path: Path) -> None:
     """
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        return []
+    async def _fake_get_mcp_tools(config=None, *, server_names=None, **_kwargs):
+        return {}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_get_mcp_tools)
     asyncio.run(cache_module.initialize_mcp_tools())
     assert cache_module._cache_initialized is True
 
@@ -354,10 +380,10 @@ class TestCrossLoopReinitialization:
             _write_extensions_config(cfg, {"srv1": _server()})
             monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-            async def _fake_tools(**_kwargs):
-                return []
+            async def _fake_tools(config=None, *, server_names=None, **_kwargs):
+                return {}
 
-            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
             asyncio.run(cache_module.initialize_mcp_tools())
             assert cache_module._cache_initialized is True
@@ -396,13 +422,13 @@ class TestCrossLoopReinitialization:
 
             calls = 0
 
-            async def _fake_tools(**_kwargs):
+            async def _fake_tools(config=None, *, server_names=None, **_kwargs):
                 nonlocal calls
                 calls += 1
                 await asyncio.sleep(0.01)
-                return []
+                return {}
 
-            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
             async def _contended_init():
                 await asyncio.gather(cache_module.initialize_mcp_tools(), cache_module.initialize_mcp_tools())
@@ -444,10 +470,10 @@ class TestCrossLoopReinitialization:
             _write_extensions_config(cfg, {"srv1": _server()})
             monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-            async def _fake_tools(**_kwargs):
-                return []
+            async def _fake_tools(config=None, *, server_names=None, **_kwargs):
+                return {}
 
-            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
             result1 = cache_module.get_cached_mcp_tools()
             assert result1 == []
@@ -476,15 +502,15 @@ def test_config_change_during_initialization_discards_stale_tools(cache_globals,
 
     calls = 0
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
             _write_extensions_config(cfg, {"new": _server("uvx")})
-            return ["old-tools"]
-        return ["new-tools"]
+            return {"old": _discovery_result(config, "old", _tool("old-tools"))}
+        return {"new": _discovery_result(config, "new", _tool("new-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     first = asyncio.run(cache_module.initialize_mcp_tools())
     assert first == []
@@ -492,9 +518,9 @@ def test_config_change_during_initialization_discards_stale_tools(cache_globals,
     assert cache_module._mcp_tools_cache is None
 
     second = cache_module.get_cached_mcp_tools()
-    assert second == ["new-tools"]
+    assert [tool.name for tool in second] == ["new-tools"]
     assert cache_module._cache_initialized is True
-    assert cache_module._mcp_tools_cache == ["new-tools"]
+    assert [tool.name for tool in cache_module._mcp_tools_cache] == ["new-tools"]
     assert cache_module._is_cache_stale() is False
     assert calls == 2
 
@@ -518,6 +544,18 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
         def __init__(self) -> None:
             self.closed = False
             self.sessions = {}
+            self.bindings = {}
+
+        def ensure_binding(self, server_name, fingerprint):
+            binding = self.bindings.get(server_name)
+            if binding is None or binding.fingerprint != fingerprint:
+                epoch = 1 if binding is None else binding.epoch + 1
+                binding = ServerBinding(server_name, epoch, fingerprint)
+                self.bindings[server_name] = binding
+            return binding
+
+        def active_binding(self, server_name):
+            return self.bindings.get(server_name)
 
         async def get_session(self, server_name, scope_key, connection):
             key = (server_name, scope_key)
@@ -544,7 +582,7 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
     loaded_pools = []
     loaded_sessions = []
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         nonlocal calls
         calls += 1
         server = json.loads(cfg.read_text())["mcpServers"]["same"]
@@ -554,9 +592,9 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
         loaded_sessions.append(session)
         if calls == 1:
             _write_extensions_config(cfg, {"same": _server("uvx")})
-        return [f"session-{session.command}"]
+        return {"same": _discovery_result(config, "same", _tool(f"session-{session.command}"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     try:
         first = asyncio.run(cache_module.initialize_mcp_tools())
@@ -565,7 +603,7 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
 
         second = cache_module.get_cached_mcp_tools()
 
-        assert second == ["session-uvx"]
+        assert [tool.name for tool in second] == ["session-uvx"]
         assert loaded_pools[0] is old_pool
         assert loaded_pools[1] is not old_pool
         assert loaded_sessions[0] is not loaded_sessions[1]
@@ -584,12 +622,12 @@ def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_
     started = threading.Event()
     finish = threading.Event()
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         started.set()
         await asyncio.to_thread(finish.wait)
-        return []
+        return {}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     worker = threading.Thread(target=lambda: asyncio.run(cache_module.initialize_mcp_tools()))
     worker.start()
@@ -636,16 +674,16 @@ def test_automatic_stale_invalidation_reconciles_without_replacing_the_pool(cach
     _write_extensions_config(cfg, {"new": _server("uvx")})
     loaded_pools = []
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         loaded_pools.append(session_pool_module.get_session_pool())
-        return ["new-tools"]
+        return {"new": _discovery_result(config, "new", _tool("new-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     try:
         result = cache_module.get_cached_mcp_tools()
 
-        assert result == ["new-tools"]
+        assert [tool.name for tool in result] == ["new-tools"]
         # PR2: the pool is NOT replaced; only the changed servers retire.
         assert loaded_pools == [old_pool]
         assert session_pool_module.get_session_pool() is old_pool
@@ -669,9 +707,9 @@ def test_reset_mcp_tools_cache_retires_session_pool_before_releasing_initializer
     race_results = []
     loaded_pools = []
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         loaded_pools.append(session_pool_module.get_session_pool())
-        return ["race-tools"]
+        return {"srv1": _discovery_result(config, "srv1", _tool("race-tools"))}
 
     def _reset_with_concurrent_initializer():
         # This simulates the old interleaving: a cache waiter starts exactly
@@ -679,7 +717,7 @@ def test_reset_mcp_tools_cache_retires_session_pool_before_releasing_initializer
         race_results.append(asyncio.run(cache_module.initialize_mcp_tools()))
         return real_reset_session_pool()
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
     monkeypatch.setattr(session_pool_module, "reset_session_pool", _reset_with_concurrent_initializer)
 
     try:
@@ -708,14 +746,14 @@ def test_cancelled_initializer_releases_generation_claim(cache_globals, monkeypa
     release = asyncio.Event()
     calls = 0
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         nonlocal calls
         calls += 1
         started.set()
         await release.wait()
-        return []
+        return {}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     async def _cancel_and_retry():
         owner = asyncio.create_task(cache_module.initialize_mcp_tools())
@@ -750,15 +788,19 @@ def test_concurrent_cold_start_callers_share_first_initialization(cache_globals,
     calls = 0
     calls_lock = threading.Lock()
 
-    async def _gated_tools(**_kwargs):
+    async def _gated_tools(config: ExtensionsConfig, *, server_names=None):
         nonlocal calls
         with calls_lock:
             calls += 1
         started.set()
         await asyncio.to_thread(release.wait)
-        return ["cold-start-tool"]
+        server = config.get_enabled_mcp_servers()["srv1"]
+        pool = get_session_pool()
+        params = build_server_params("srv1", server)
+        binding = pool.ensure_binding("srv1", normalized_connection_fingerprint(params))
+        return {"srv1": ServerDiscoveryResult(tools=("cold-start-tool",), pool=pool, binding=binding)}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _gated_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _gated_tools)
 
     real_plan = cache_module._plan_cache_transition
     plan_calls = 0
@@ -825,12 +867,12 @@ def test_skills_only_change_keeps_tools_and_pool(cache_globals, monkeypatch, tmp
     _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": True}})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-    sentinel_tool = object()
+    sentinel_tool = _tool("sentinel")
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        return [sentinel_tool]
+    async def _fake_get_mcp_tools(config=None, *, server_names=None, **_kwargs):
+        return {"srv1": _discovery_result(config, "srv1", sentinel_tool)}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_get_mcp_tools)
     asyncio.run(cache_module.initialize_mcp_tools())
 
     old_pool = get_session_pool()
@@ -974,19 +1016,19 @@ def test_skills_only_change_during_initialization_publishes_loaded_tools(cache_g
 
     calls = 0
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         nonlocal calls
         calls += 1
         _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": False}})
-        return ["loaded-tools"]
+        return {"srv1": _discovery_result(config, "srv1", _tool("loaded-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     result = asyncio.run(cache_module.initialize_mcp_tools())
 
-    assert result == ["loaded-tools"]
+    assert [tool.name for tool in result] == ["loaded-tools"]
     assert cache_module._cache_initialized is True
-    assert cache_module._mcp_tools_cache == ["loaded-tools"]
+    assert [tool.name for tool in cache_module._mcp_tools_cache] == ["loaded-tools"]
     assert calls == 1
 
 
@@ -999,13 +1041,13 @@ def test_refresh_during_initialization_discards_stale_publish(cache_globals, mon
     started = threading.Event()
     release = threading.Event()
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(config=None, *, server_names=None, **_kwargs):
         started.set()
         while not release.is_set():
             await asyncio.sleep(0.01)
-        return ["stale-tools"]
+        return {"srv1": _discovery_result(config, "srv1", _tool("stale-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     async def _run():
         owner = asyncio.create_task(cache_module.initialize_mcp_tools())
@@ -1027,10 +1069,10 @@ def test_initialization_without_a_readable_snapshot_discards_result(cache_global
     _write_extensions_config(cfg, {"srv1": _server()})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        return ["loaded-tools"]
+    async def _fake_get_mcp_tools(config=None, *, server_names=None, **_kwargs):
+        return {"srv1": _discovery_result(config, "srv1", _tool("loaded-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_get_mcp_tools)
     monkeypatch.setattr(cache_module, "_read_stable_mcp_revision", lambda path, signature: None)
 
     result = asyncio.run(cache_module.initialize_mcp_tools())
@@ -1084,19 +1126,19 @@ def test_initialization_hands_the_snapshotted_config_to_discovery(cache_globals,
 
     seen: dict[str, str] = {}
 
-    async def _fake_tools(*, extensions_config):
+    async def _fake_tools(extensions_config, *, server_names=None):
         seen["command"] = extensions_config.mcp_servers["srv1"].command
         # A transient flip to Y and back to X must not invalidate X-built tools.
         _write_extensions_config(cfg, {"srv1": _server("uvx")})
         _write_extensions_config(cfg, {"srv1": _server("npx")})
-        return ["loaded-tools"]
+        return {"srv1": _discovery_result(extensions_config, "srv1", _tool("loaded-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_tools)
 
     result = asyncio.run(cache_module.initialize_mcp_tools())
 
     assert seen["command"] == "npx"
-    assert result == ["loaded-tools"]
+    assert [tool.name for tool in result] == ["loaded-tools"]
     assert cache_module._cache_initialized is True
     assert cache_module._mcp_config_snapshot is not None
 
@@ -1113,10 +1155,10 @@ def test_config_appearing_after_unconfigured_init_is_stale(cache_globals, monkey
         classmethod(lambda cls, config_path=None: state["path"]),
     )
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        return []
+    async def _fake_get_mcp_tools(config=None, *, server_names=None, **_kwargs):
+        return {}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_get_mcp_tools)
     asyncio.run(cache_module.initialize_mcp_tools())
 
     assert cache_module._cache_initialized is True
@@ -1134,10 +1176,10 @@ def test_initialization_with_unreadable_post_signature_discards_result(cache_glo
     _write_extensions_config(cfg, {"srv1": _server()})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-    async def _fake_get_mcp_tools(**_kwargs):
-        return ["loaded-tools"]
+    async def _fake_get_mcp_tools(config=None, *, server_names=None, **_kwargs):
+        return {"srv1": _discovery_result(config, "srv1", _tool("loaded-tools"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_get_mcp_tools)
     monkeypatch.setattr(cache_module, "_current_config_state", lambda: (cfg, None))
 
     result = asyncio.run(cache_module.initialize_mcp_tools())

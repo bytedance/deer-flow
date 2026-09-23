@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import threading
+from pathlib import Path
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 import deerflow.mcp.cache as cache_module
 from deerflow.mcp import cache as c
 from deerflow.mcp.session_pool import reset_session_pool
 from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
+from deerflow.mcp.tools import ServerDiscoveryResult
 
 _MISSING = object()
 
@@ -80,6 +85,28 @@ def cache_globals():
                 setattr(cache_module, name, value)
 
 
+def _write_config(path: Path, servers: dict) -> None:
+    path.write_text(json.dumps({"mcpServers": servers, "skills": {}}), encoding="utf-8")
+
+
+def _http(url: str) -> dict:
+    return {"enabled": True, "type": "http", "url": url}
+
+
+def test_tool(name: str) -> StructuredTool:
+    async def _call() -> str:
+        return name
+
+    return StructuredTool.from_function(
+        coroutine=_call,
+        name=name,
+        description=name,
+    )
+
+
+test_tool.__test__ = False
+
+
 def test_selective_entry_eviction_preserves_unchanged_identity(cache_globals):
     from deerflow.mcp.cache import (
         _evict_server_tool_entries_locked,
@@ -121,3 +148,80 @@ def test_entry_eviction_handles_removal_reorder_and_full_reset(cache_globals):
 
     c.reset_mcp_tools_cache()
     assert c._server_tool_cache == {}
+
+
+def test_change_A_rediscovers_only_A_and_reuses_exact_B_tool(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "A": _http("https://A.example/mcp"),
+            "B": _http("https://B.example/mcp"),
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[frozenset[str]] = []
+
+    async def fake_group_discovery(config, *, server_names=None):
+        enabled = config.get_enabled_mcp_servers()
+        requested = set(enabled) if server_names is None else set(server_names)
+        calls.append(frozenset(requested))
+        return {name: ServerDiscoveryResult(tools=(test_tool(f"{name}_{enabled[name].url.rsplit('/', 2)[-2]}"),)) for name in enabled if name in requested}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_group_discovery)
+
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    old_B_tool = first[1]
+    assert calls == [frozenset({"A", "B"})]
+
+    _write_config(
+        cfg,
+        {
+            "A": _http("https://A.changed.example/mcp"),
+            "B": _http("https://B.example/mcp"),
+        },
+    )
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    second = asyncio.run(cache_module.initialize_mcp_tools())
+    assert calls[-1] == frozenset({"A"})
+    assert second[1] is old_B_tool
+    assert second[0].name == "A_A.changed.example"
+
+
+def test_reorder_preserves_identity_and_zero_discovery(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "A": _http("https://A.example/mcp"),
+            "B": _http("https://B.example/mcp"),
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[frozenset[str]] = []
+
+    async def fake_group_discovery(config, *, server_names=None):
+        enabled = config.get_enabled_mcp_servers()
+        requested = set(enabled) if server_names is None else set(server_names)
+        calls.append(frozenset(requested))
+        return {name: ServerDiscoveryResult(tools=(test_tool(f"{name}_{enabled[name].url.rsplit('/', 2)[-2]}"),)) for name in enabled if name in requested}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_group_discovery)
+
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    old_A_tool, old_B_tool = first
+    _write_config(
+        cfg,
+        {
+            "B": _http("https://B.example/mcp"),
+            "A": _http("https://A.example/mcp"),
+        },
+    )
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    second = asyncio.run(cache_module.initialize_mcp_tools())
+    assert calls == [frozenset({"A", "B"})]
+    assert (second[0], second[1]) == (old_B_tool, old_A_tool)

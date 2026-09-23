@@ -17,6 +17,7 @@ from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 
 if TYPE_CHECKING:
+    from deerflow.mcp.session_pool import MCPSessionPool
     from deerflow.mcp.tools import ServerDiscoveryResult
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,26 @@ def _evict_server_tool_entries_locked(incoming_servers: Mapping[str, str]) -> No
     for name, entry in tuple(_server_tool_cache.items()):
         if incoming_servers.get(name) != entry.snapshot:
             del _server_tool_cache[name]
+
+
+def _reusable_server_entries_locked(
+    incoming_servers: Mapping[str, str],
+    incoming_connections: Mapping[str, str],
+    pool: MCPSessionPool | None,
+) -> dict[str, _ServerToolCacheEntry]:
+    """Select unchanged entries that still belong to the live session pool."""
+    reusable: dict[str, _ServerToolCacheEntry] = {}
+    for name, snapshot in incoming_servers.items():
+        entry = _server_tool_cache.get(name)
+        if entry is None or entry.snapshot != snapshot:
+            continue
+        if name in incoming_connections:
+            if pool is None or entry.result.pool is not pool or entry.result.binding != pool.active_binding(name) or entry.result.binding is None or entry.result.binding.fingerprint != incoming_connections[name]:
+                continue
+        elif entry.result.pool is not None or entry.result.binding is not None:
+            continue
+        reusable[name] = entry
+    return reusable
 
 
 # Cache-invalidation key for the resolved extensions config file. We track the
@@ -659,9 +680,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
     from deerflow.config.extensions_config import ExtensionsConfig
-    from deerflow.mcp.tools import get_mcp_tools
+    from deerflow.mcp.session_pool import get_session_pool
+    from deerflow.mcp.tools import _flatten_server_tool_groups, get_mcp_tools_by_server
 
-    loaded_tools = None
+    candidates = None
+    loaded_enabled = None
     loaded_snapshot = None
     post_path = None
     post_sig = None
@@ -686,7 +709,20 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             )
             raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
         loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
-        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
+        loaded_enabled = loaded_config.get_enabled_mcp_servers()
+        loaded_server_snapshots = {name: _canonical_server_snapshot(server) for name, server in loaded_enabled.items()}
+        loaded_connections = {name: fingerprint for name, server in loaded_enabled.items() if (fingerprint := _stdio_connection_fingerprint(name, server)) is not None}
+        with _init_condition:
+            reusable = _reusable_server_entries_locked(
+                loaded_server_snapshots,
+                loaded_connections,
+                get_session_pool() if loaded_connections else None,
+            )
+        missing = set(loaded_enabled) - reusable.keys()
+        discovered = await get_mcp_tools_by_server(loaded_config, server_names=missing) if missing else {}
+        candidates = dict(reusable)
+        for name, result in discovered.items():
+            candidates[name] = _ServerToolCacheEntry(snapshot=loaded_server_snapshots[name], result=result)
         post_path, post_sig = _current_config_state()
         if post_path is not None and post_sig is not None:
             post_revision = _read_stable_mcp_revision(post_path, post_sig)
@@ -735,18 +771,34 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 logger.warning("MCP config changed during initialization; discarding stale result")
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
             else:
-                _mcp_tools_cache = loaded_tools
-                _cache_initialized = True
-                _config_path, _config_signature = post_path, post_sig
-                _mcp_config_snapshot = post_snapshot
-                _initialized_without_config = post_path is None
-                # Publishing a fresh revision also makes it the pool-applied
-                # baseline: discovery seeded/validated every stdio binding
-                # against exactly this revision.
-                if post_revision is not None:
-                    _record_applied_revision(post_revision)
-                logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
-                return _mcp_tools_cache
+                current_pool = get_session_pool() if loaded_connections else None
+                candidates_valid = all(
+                    entry.result.pool is current_pool and entry.result.binding == current_pool.active_binding(name) and entry.result.binding is not None and entry.result.binding.fingerprint == loaded_connections[name]
+                    if name in loaded_connections
+                    else entry.result.pool is None and entry.result.binding is None
+                    for name, entry in candidates.items()
+                )
+                if not candidates_valid:
+                    logger.warning("MCP session binding changed during initialization; discarding stale result")
+                    retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+                else:
+                    _server_tool_cache.clear()
+                    _server_tool_cache.update(candidates)
+                    _mcp_tools_cache = _flatten_server_tool_groups(
+                        loaded_enabled.keys(),
+                        {name: entry.result for name, entry in candidates.items()},
+                    )
+                    _cache_initialized = True
+                    _config_path, _config_signature = post_path, post_sig
+                    _mcp_config_snapshot = post_snapshot
+                    _initialized_without_config = post_path is None
+                    # Publishing a fresh revision also makes it the pool-applied
+                    # baseline: discovery seeded/validated every stdio binding
+                    # against exactly this revision.
+                    if post_revision is not None:
+                        _record_applied_revision(post_revision)
+                    logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
+                    return _mcp_tools_cache
         finally:
             if _initializing_generation == claim_generation:
                 _initializing_generation = None

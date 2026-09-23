@@ -16,6 +16,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 import deerflow.mcp.cache as cache_module
 from app.gateway.routers import mcp as mcp_router
@@ -42,8 +43,19 @@ from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
     set_mcp_task_config_snapshot,
 )
+from deerflow.mcp.tools import ServerDiscoveryResult
 
 _MISSING = object()
+
+
+def test_tool(name: str) -> StructuredTool:
+    async def _call() -> str:
+        return name
+
+    return StructuredTool.from_function(coroutine=_call, name=name, description=name)
+
+
+test_tool.__test__ = False
 
 # Module globals that hold cache state, including the PR2 applied baseline that
 # must survive ``_reset_mcp_tools_cache_state()``. Snapshotted and restored
@@ -178,18 +190,26 @@ def owner_loop():
 def _install_discovery(monkeypatch) -> None:
     """Fake discovery that seeds real pool bindings and labels tools by config."""
 
-    async def _fake_get_mcp_tools(*, extensions_config):
+    async def _fake_group_discovery(extensions_config, *, server_names=None):
         pool = get_session_pool()
-        tools = []
-        for name, server in extensions_config.get_enabled_mcp_servers().items():
+        enabled = extensions_config.get_enabled_mcp_servers()
+        requested = set(enabled) if server_names is None else set(server_names)
+        groups = {}
+        for name, server in enabled.items():
+            if name not in requested:
+                continue
             params = build_server_params(name, server)
             if params.get("transport") != "stdio":
                 continue
-            pool.ensure_binding(name, normalized_connection_fingerprint(params))
-            tools.append(f"{name}:{server.description or server.command}")
-        return tools
+            binding = pool.ensure_binding(name, normalized_connection_fingerprint(params))
+            groups[name] = ServerDiscoveryResult(
+                tools=(test_tool(f"{name}:{server.description or server.command}"),),
+                pool=pool,
+                binding=binding,
+            )
+        return groups
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _fake_group_discovery)
 
 
 def _publish(monkeypatch, cfg: Path, servers: dict, **kwargs) -> list[str]:
@@ -267,7 +287,7 @@ def _record_reconcile_calls(monkeypatch) -> list[set[str] | None]:
 
 def test_metadata_only_edit_rebuilds_without_retiring(cache_globals, monkeypatch, tmp_path, owner_loop):
     cfg = tmp_path / "extensions_config.json"
-    assert _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")}) == ["A:npx", "B:uvx"]
+    assert [t.name for t in _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})] == ["A:npx", "B:uvx"]
     pool = get_session_pool()
     session_a = _open_session(owner_loop, pool, "A")
     session_b = _open_session(owner_loop, pool, "B")
@@ -287,7 +307,7 @@ def test_metadata_only_edit_rebuilds_without_retiring(cache_globals, monkeypatch
     assert session_a.closed is False and session_b.closed is False
 
     # ...while A's tools are rebuilt from the new revision.
-    assert cache_module.get_cached_mcp_tools() == ["A:described", "B:uvx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["A:described", "B:uvx"]
 
 
 def test_connection_change_retires_only_that_server(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -390,7 +410,7 @@ def test_declaration_order_change_rebuilds_all_without_retiring(cache_globals, m
     assert _entry(pool, "A", owner_loop)[0] is session_a
     assert _entry(pool, "B", owner_loop)[0] is session_b
     # ordered tools are rebuilt from the new declaration order
-    assert cache_module.get_cached_mcp_tools() == ["B:uvx", "A:npx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["B:uvx", "A:npx"]
 
 
 def test_interceptor_change_is_a_full_reset(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -531,12 +551,12 @@ def test_back_to_back_change_diffs_against_the_applied_snapshot(cache_globals, m
     started = threading.Event()
     release = threading.Event()
 
-    async def _gated_get_mcp_tools(*, extensions_config):
+    async def _gated_get_mcp_tools(extensions_config, *, server_names=None):
         started.set()
         await asyncio.to_thread(release.wait)
-        return ["stale-tools"]
+        return {"A": ServerDiscoveryResult(tools=(test_tool("stale-tools"),), pool=get_session_pool(), binding=get_session_pool().active_binding("A"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _gated_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _gated_get_mcp_tools)
     worker = threading.Thread(target=lambda: asyncio.run(cache_module.initialize_mcp_tools()))
     worker.start()
     try:
@@ -561,7 +581,7 @@ def test_back_to_back_change_diffs_against_the_applied_snapshot(cache_globals, m
     assert cache_module._cache_initialized is False
     # The next lazy init reads the latest revision only.
     _install_discovery(monkeypatch)
-    assert cache_module.get_cached_mcp_tools() == ["A:npx-3", "B:uvx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["A:npx-3", "B:uvx"]
 
 
 @pytest.mark.parametrize("changed", [{"A"}, None], ids=["explicit", "full-diff"])
@@ -575,12 +595,12 @@ def test_reconcile_during_first_initialization_fences_stale_publish(cache_global
     started = threading.Event()
     release = threading.Event()
 
-    async def _gated_get_mcp_tools(*, extensions_config):
+    async def _gated_get_mcp_tools(extensions_config, *, server_names=None):
         started.set()
         await asyncio.to_thread(release.wait)
-        return ["stale-tools"]
+        return {"A": ServerDiscoveryResult(tools=(test_tool("stale-tools"),), pool=get_session_pool(), binding=get_session_pool().active_binding("A"))}
 
-    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _gated_get_mcp_tools)
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", _gated_get_mcp_tools)
 
     async def _run() -> list:
         owner = asyncio.create_task(cache_module.initialize_mcp_tools())
@@ -831,7 +851,7 @@ def test_put_server_endpoint_retires_only_changed_server(cache_globals, monkeypa
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
     assert reconcile_calls == [{"A"}]
-    assert cache_module.get_cached_mcp_tools() == ["A:npx-next", "B:uvx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["A:npx-next", "B:uvx"]
 
 
 def test_put_server_endpoint_identical_config_is_a_noop(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -862,7 +882,7 @@ def test_put_server_endpoint_identical_config_is_a_noop(cache_globals, monkeypat
     assert session_b.closed is False
     assert cache_module._cache_initialized is True
     assert reconcile_calls == [set()]
-    assert cache_module.get_cached_mcp_tools() == ["A:npx", "B:uvx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["A:npx", "B:uvx"]
 
 
 def test_put_server_endpoint_transport_alias_only_is_a_noop(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -993,7 +1013,7 @@ def test_create_endpoint_seeds_added_server_without_retiring_existing(cache_glob
     assert session_a.closed is False
     assert session_b.closed is False
     assert reconcile_calls == [{"C"}]
-    assert cache_module.get_cached_mcp_tools() == ["A:npx", "B:uvx", "C:uvx"]
+    assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["A:npx", "B:uvx", "C:uvx"]
 
 
 def test_manual_reset_endpoint_retires_the_whole_pool(cache_globals, monkeypatch, tmp_path, owner_loop):
