@@ -162,6 +162,7 @@ class StoreRunEvidenceReaderFactory:
         self._event_store = event_store
 
     def for_principal(self, principal: ExtensionPrincipal) -> StoreRunEvidenceReader:
-        if not isinstance(principal, ExtensionPrincipal) or not isinstance(principal.user_id, str) or not principal.user_id.strip():
+        # Reject malformed IDs instead of normalizing an authorization identity.
+        if not isinstance(principal, ExtensionPrincipal) or not isinstance(principal.user_id, str) or not principal.user_id or principal.user_id != principal.user_id.strip():
             raise ValueError("a host-authenticated extension principal is required")
         return StoreRunEvidenceReader(self._run_store, self._event_store, user_id=principal.user_id)

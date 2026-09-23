@@ -190,6 +190,16 @@ async def test_reader_hides_runs_outside_scope_and_rejects_cursor_from_another_s
     assert (await other.list_run_events(thread_id="thread-a", run_id="run-a", after_seq=None, limit=10)).items == ()
 
 
+@pytest.mark.parametrize(
+    "principal",
+    [None, SimpleNamespace(user_id="user-1"), *[ExtensionPrincipal(user_id=value) for value in (None, 1, "", " \t", " user-1", "user-1 ", "\tuser-1\n")]],
+)
+def test_reader_factory_rejects_invalid_principals(principal):
+    factory = StoreRunEvidenceReaderFactory(MemoryRunStore(), MemoryRunEventStore())
+    with pytest.raises(ValueError, match="principal"):
+        factory.for_principal(principal)
+
+
 def test_request_resolver_binds_reader_to_principal_and_fails_when_unavailable():
     runs = MemoryRunStore()
     events = MemoryRunEventStore()

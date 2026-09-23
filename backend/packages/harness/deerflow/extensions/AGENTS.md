@@ -297,6 +297,7 @@ app-scoped reader with `user_id=None`, deliberately granting trusted operator ex
 global cross-user visibility because services have no request principal. User-facing contributed
 routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
 the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
 The resolver requires the request's effective `runs:read` permission and never widens admin
 or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
 helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
