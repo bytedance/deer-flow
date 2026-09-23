@@ -239,6 +239,7 @@ class TestLeadAgentAssembly:
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-1"}})
         assert isinstance(assembly, LeadAgentAssembly)
         assert assembly.graph is not None
+        assert assembly.graph["context_schema"] is dict
         assert assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
@@ -653,6 +654,7 @@ class TestCustomAgentModelSettingsReachTheDescriptor:
         TestLeadAgentAssembly._isolate_from_the_ambient_config(monkeypatch)
         with bind_agent_build_extensions(TestLeadAgentAssembly._extensions_with_an_agent_assembly_observer()):
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-bootstrap", "is_bootstrap": True}})
+        assert assembly.graph["context_schema"] is dict
         assert "temperature" not in assembly.descriptor.model_parameters
 
 
@@ -662,7 +664,7 @@ class TestSkillCatalogHashesContent:
     allowed-tools are untouched."""
 
     @staticmethod
-    def _skill(skill_dir: Path, *, required_secrets=(), secrets_autonomous=True):
+    def _skill(skill_dir: Path, *, allowed_tools=None, required_secrets=(), secrets_autonomous=True):
         from deerflow.skills.types import Skill, SkillCategory
 
         skill_file = skill_dir / "SKILL.md"
@@ -674,6 +676,7 @@ class TestSkillCatalogHashesContent:
             skill_file=skill_file,
             relative_path=Path(skill_dir.name),
             category=SkillCategory.CUSTOM,
+            allowed_tools=allowed_tools,
             required_secrets=required_secrets,
             secrets_autonomous=secrets_autonomous,
         )
@@ -718,6 +721,17 @@ class TestSkillCatalogHashesContent:
         no_secrets = self._skill(Path("/nonexistent/skill-a"))
         with_secret = self._skill(Path("/nonexistent/skill-b"), required_secrets=(SecretRequirement(name="API_KEY"),))
         assert self._build([no_secrets]).fingerprint != self._build([with_secret]).fingerprint
+
+    def test_allowed_tools_declaration_states_have_distinct_fingerprints(self, tmp_path):
+        descriptors = [self._build([self._skill(tmp_path, allowed_tools=allowed_tools)]) for allowed_tools in (None, (), ("bash",))]
+
+        assert len({descriptor.fingerprint for descriptor in descriptors}) == 3
+
+    def test_allowed_tools_order_does_not_change_the_fingerprint(self, tmp_path):
+        before = self._build([self._skill(tmp_path, allowed_tools=("bash", "read_file"))])
+        reordered = self._build([self._skill(tmp_path, allowed_tools=("read_file", "bash"))])
+
+        assert before.fingerprint == reordered.fingerprint
 
     def test_a_missing_skill_file_is_undescribable_not_fatal(self, tmp_path):
         skill = self._skill(tmp_path / "missing-skill")

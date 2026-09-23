@@ -6,26 +6,34 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 from deerflow.subagents.config import SubagentConfig
 from deerflow.tools.builtins.batch_task_tool import BatchTaskItem
 
 tool_module = importlib.import_module("deerflow.tools.builtins.batch_task_tool")
+_MISSING = object()
 
 
-def _runtime():
+def _runtime(thread_incarnation=_MISSING):
+    context = {
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "user_id": "user-1",
+        "user_role": "member",
+        "__knowledge_scope_execution": {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-1"],
+        },
+    }
+    if thread_incarnation is not _MISSING:
+        context[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     return SimpleNamespace(
         state={},
-        context={
-            "thread_id": "thread-1",
-            "run_id": "run-1",
-            "user_id": "user-1",
-            "user_role": "member",
-            "__knowledge_scope_execution": {
-                "version": 1,
-                "mode": "selected",
-                "dataset_ids": ["dataset-1"],
-            },
-        },
+        context=context,
         config={
             "metadata": {
                 "model_name": "model-a",
@@ -45,7 +53,19 @@ def _message(command: Command) -> ToolMessage:
 
 
 @pytest.mark.asyncio
-async def test_batch_task_is_explicit_idempotent_submission(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("thread_incarnation", "expected_present"),
+    [
+        ("incarnation-1", True),
+        (None, True),
+        (_MISSING, False),
+    ],
+)
+async def test_batch_task_is_explicit_idempotent_submission(
+    monkeypatch,
+    thread_incarnation,
+    expected_present,
+) -> None:
     submitter = AsyncMock()
     submitter.submit.return_value = {
         "id": "subagent-batch-1",
@@ -68,7 +88,7 @@ async def test_batch_task_is_explicit_idempotent_submission(monkeypatch) -> None
     )
 
     command = await tool_module.batch_task.coroutine(
-        runtime=_runtime(),
+        runtime=_runtime(thread_incarnation),
         title="Process records",
         items=[
             BatchTaskItem(key="record-1", prompt="Process one"),
@@ -93,8 +113,33 @@ async def test_batch_task_is_explicit_idempotent_submission(monkeypatch) -> None
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+    assert (THREAD_INCARNATION_CONTEXT_KEY in request.execution_spec) is expected_present
+    if expected_present:
+        assert request.execution_spec[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
     assert "running independently" in message.content
+
+
+@pytest.mark.asyncio
+async def test_batch_task_rejects_stale_standalone_thread_incarnation(
+    monkeypatch,
+) -> None:
+    submitter = AsyncMock()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    runtime = _runtime("incarnation-1")
+    runtime.context[THREAD_INCARNATION_METADATA_GUARD_KEY] = True
+    runtime.config["metadata"][THREAD_INCARNATION_CONTEXT_KEY] = "incarnation-2"
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        await tool_module.batch_task.coroutine(
+            runtime=runtime,
+            title="Stale lifecycle",
+            items=[BatchTaskItem(key="record-1", prompt="Process one")],
+            subagent_type="general-purpose",
+            tool_call_id="call-1",
+        )
+
+    submitter.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

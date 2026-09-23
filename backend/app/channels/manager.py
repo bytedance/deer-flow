@@ -7,6 +7,7 @@ import logging
 import math
 import mimetypes
 import re
+import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -52,6 +53,7 @@ from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
+from deerflow.uploads.manager import apply_upload_sandbox_permits
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -1082,6 +1084,19 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+def _make_inbound_file_sandbox_readable(file_path: Path) -> None:
+    """Make a channel-downloaded upload readable by the sandbox process.
+
+    The gateway writes inbound files as root with 0o600; in AIO/Docker sandbox
+    mode the sandbox runs as a non-root user on the bind-mounted path and
+    cannot read the file without group/other read bits. Delegates to the shared
+    apply_upload_sandbox_permits helper so the permission change stays bound to
+    the validated upload inode (O_NOFOLLOW + fchmod) and cannot be redirected
+    through a symlink swapped in after validation.
+    """
+    apply_upload_sandbox_permits(file_path, stat.S_IRGRP | stat.S_IROTH)
+
+
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
@@ -1160,6 +1175,9 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             dest = uploads_dir / safe_name
             try:
                 dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                # Root-written 0o600 files are unreadable to the non-root
+                # sandbox; grant group/other read like the HTTP upload path.
+                await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
@@ -1742,7 +1760,12 @@ class ChannelManager:
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is None:
             return None
-        if not policy.is_interactive:
+        if policy.interaction_mode is not None:
+            run_context["interaction_mode"] = policy.interaction_mode
+            # Keep legacy consumers (including sandbox network approval) aligned.
+            if policy.interaction_mode != "interactive":
+                run_context["disable_clarification"] = True
+        elif not policy.is_interactive:
             run_context["disable_clarification"] = True
         if policy.credentials_provider is not None:
             try:

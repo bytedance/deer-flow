@@ -727,6 +727,10 @@
 
 ### 修复
 
+- **上传：** 删除已上传的文档时，不再连带删除其旁边转换生成的 Markdown。转换以文档主干名
+  命名配套文件，名称被占用时回退为 `_N` 后缀，因此文档旁的 `.md` 可能属于主干名相同的另一个
+  文档，或属于用户自己：上传 `a.docx` 与 `a.pdf` 会生成 `a.md` 与 `a_1.md`，删除 `a.pdf`
+  却会销毁 `a.docx` 的配套文件。现在配套文件会保留、继续出现在列表中，可单独删除。([#5673])
 - **nginx：** 把 600 秒读取超时扩展到其余两个会等待 Gateway 的 location，它们在线程路由的修复
   之后仍沿用 nginx 默认的 60 秒。`/api/` 兜底 location 之后：无状态的 `POST /api/runs/wait`
   阻塞在同一套运行完成等待上，并在客户端断开时取消该运行，因此等待超过 60 秒的 API 调用方会
@@ -2091,6 +2095,14 @@
 
 ### 安全
 
+- **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
+  客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
+  宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
+  描述符，转换 uploads 之外的私有副本；客户端则转换调用方提供的源文件。([#5611])
+- **客户端：** `DeerFlowClient.upload_files` 不再写穿符号链接。沙箱可写的 uploads 目录中，
+  若在上传文件名或其 Markdown 配套文件名处放置符号链接，嵌入式客户端此前会覆盖链接指向的宿主
+  文件并报告成功。现在该文件会被跳过并列入 `skipped_files`，`success` 为 `false`，与 Gateway
+  一致；不安全的配套文件会被省略，原上传保留。复制时保留源文件的权限位与时间戳。([#5578])
 - **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
   放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
   `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
@@ -2213,6 +2225,13 @@
 
 ### 内部改进
 
+- **依赖：** `langgraph-checkpoint` 下限提升到 `>=4.2.0,<5.0`，
+  `langgraph-checkpoint-postgres` 提升到 `>=3.1.2,<3.2`，并移除
+  `InMemorySaver` delta-history 兼容补丁。上游 4.2.0 修复了 full → delta
+  迁移后首条写入丢失（langchain-ai/langgraph#8526），postgres 新版本能定位
+  plain-value delta 种子（langchain-ai/langgraph#8535），因此由依赖下限取代
+  补丁；full → delta 迁移合约测试保留为门禁。`langgraph` 与
+  `langgraph-checkpoint-sqlite` 不变。 ([#5734])
 - **测试：** 前端单元测试迁移到 rstest，并在 DOM 环境运行 hook 级测试。([#3703]、[#4453])
 - **测试：** live client 测试要求显式 opt-in。([#4482])
 - **测试：** LLM 错误测试替身不再复用共享 `FakeError`。([#4744])
@@ -3512,3 +3531,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734

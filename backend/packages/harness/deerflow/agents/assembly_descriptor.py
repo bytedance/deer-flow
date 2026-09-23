@@ -467,7 +467,8 @@ def build_assembly_descriptor(
         {
             "name": str(getattr(skill, "name", "")),
             "description": str(getattr(skill, "description", "")),
-            "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
+            # None preserves legacy allow-all; an empty declaration allows no business tools.
+            "allowed_tools": None if (allowed_tools := getattr(skill, "allowed_tools", None)) is None else sorted(str(item) for item in allowed_tools),
             "content_hash": _skill_content_hash(skill),
             "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
             "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),

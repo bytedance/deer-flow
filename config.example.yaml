@@ -316,6 +316,35 @@ models:
   # For Docker deployments, use host.docker.internal instead of localhost:
   #   base_url: http://host.docker.internal:11434
 
+  # Example: llama.cpp (OpenAI-compatible local server)
+  #
+  # llama-server exposes an OpenAI-compatible /v1/chat/completions endpoint,
+  # so use ChatOpenAI and point base_url at the server's /v1 root. --alias
+  # gives the served model a stable API name independent of the GGUF filename.
+  #
+  # Start llama.cpp, for example:
+  #   llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 --alias qwen-local
+  #
+  # Tool calling depends on the model's chat template supporting tools. Current
+  # llama.cpp enables its Jinja template engine by default; if you override the
+  # template, use one that supports function/tool calls.
+  #
+  # - name: qwen-llamacpp
+  #   display_name: Qwen (llama.cpp)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: qwen-local
+  #   api_key: no-key              # Non-empty placeholder when llama-server auth is disabled
+  #   base_url: http://localhost:8080/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   supports_vision: false
+  #
+  # If llama-server was started with --api-key, replace the placeholder with
+  # that key (prefer an environment variable). In Docker, localhost is the
+  # DeerFlow container itself; use an address reachable from the container,
+  # for example on Docker Desktop:
+  #   base_url: http://host.docker.internal:8080/v1
+
   # Example: Anthropic Claude model (with extended thinking)
   # supports_thinking: true is required — without it, DeerFlow silently falls
   # back to non-thinking mode even when the UI thinking toggle is on.
@@ -962,6 +991,7 @@ tools:
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
+  #   # wait_for_selector_timeout_ms: 5000  # How long to wait for that selector, in milliseconds
 
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
@@ -1447,12 +1477,9 @@ safety_finish_reason:
   #       error_codes: [336003, 17, 18]
 
 # ============================================================================
-# Sandbox Configuration
+# Uploads
 # ============================================================================
-# Choose between local sandbox (direct execution) or Docker-based AIO sandbox
-
-# Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Limits and conversion settings for files attached to a conversation.
 uploads:
   # Application-level upload limits enforced by the gateway and exposed to the
   # frontend before file selection.
@@ -1473,6 +1500,13 @@ uploads:
   # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
   pdf_converter: auto
 
+# ============================================================================
+# Sandbox Configuration
+# ============================================================================
+# Choose between local sandbox (direct execution), Docker-based AIO sandbox,
+# or BoxLite micro-VM sandbox
+# Option 1: Local Sandbox (Default)
+# Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
@@ -1500,13 +1534,17 @@ sandbox:
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
 
-  # Maximum wall-clock seconds a single host bash command may run before it is
-  # terminated (process group and all). A blocking foreground command — e.g. a
-  # server started without backgrounding — is killed after this long so the
-  # agent's turn cannot hang. Start long-lived processes in the background with
-  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`) when you
-  # need logs; unredirected background output is drained with bounded capture
-  # and excess output is discarded.
+  # Provider command deadline (default: 600). AIO images on the supported
+  # semver line (1.9.3+, recommended 1.11.0) enforce it server-side through
+  # `hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image only
+  # gets the bounded host-side request. `bash_command_timeout` is used by
+  # providers that explicitly wire this setting (currently LocalSandbox,
+  # AioSandbox, and OpenSandbox). Other providers retain their provider-specific
+  # command defaults unless a caller supplies an explicit timeout. For providers
+  # that enforce this deadline server- or process-side, blocking foreground
+  # commands are terminated at the configured deadline. Long-lived processes
+  # should be started in the background with output redirected; unredirected
+  # background output is drained with bounded capture.
   bash_command_timeout: 600
 
 # Option 2: Container-based AIO Sandbox

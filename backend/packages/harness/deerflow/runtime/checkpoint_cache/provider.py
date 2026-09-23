@@ -12,6 +12,7 @@ from typing import Any
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.checkpoint_cache.base import CACHE_FORMAT_VERSION, CheckpointHistoryCache
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ async def make_checkpoint_cache(
         try:
             yield cache
         finally:
-            await cache.aclose()
+            await await_drained(cache.aclose())
         return
 
     if config.type == "redis":
@@ -95,7 +96,7 @@ async def make_checkpoint_cache(
         try:
             yield cache
         finally:
-            await cache.aclose()
+            await await_drained(cache.aclose())
         return
 
     raise ValueError(f"Unknown checkpoint cache type: {config.type!r}")

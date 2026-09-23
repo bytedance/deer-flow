@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,9 @@ class AgentConfig(BaseModel):
     # Stable MCP installation IDs. None inherits all; [] selects none.
     # This is tool selection, not a replacement for host authorization.
     mcp_plugins: list[str] | None = None
+    # Default for new Gateway turns; explicit message scope overrides it.
+    # Kept outside managed fields so harness self-updates preserve the binding.
+    knowledge_scope: KnowledgeScope | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to
