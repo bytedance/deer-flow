@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 46
+config_version: 47
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -3092,6 +3092,14 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     host_access:                        # optional host-owned grants (restart required)
+#       model_invocation:
+#         roles:                          # logical role -> configured models[].name
+#           default: my-configured-model
+#         max_concurrency: 2              # shared by this installation's services
+#         timeout_seconds: 60             # includes waiting for capacity
+#         max_input_chars: 262144         # includes the response-schema instruction
+#         max_output_chars: 65536         # returned text, checked after generation
 #     table_prefix: example_ext_          # optional: table-name prefix this extension
 #                                         # owns under its own MetaData/migration chain.
 #                                         # Keeps `alembic revision --autogenerate`, run
