@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -239,14 +240,21 @@ def build_oauth_tool_interceptor(
     return oauth_interceptor
 
 
-async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict[str, str]:
+async def get_initial_oauth_headers(
+    extensions_config: ExtensionsConfig,
+    *,
+    server_names: Collection[str] | None = None,
+) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
     token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
     if not token_manager.has_oauth_servers():
         return {}
 
     headers: dict[str, str] = {}
+    requested = set(server_names) if server_names is not None else None
     for server_name in token_manager.oauth_server_names():
+        if requested is not None and server_name not in requested:
+            continue
         try:
             value = await token_manager.get_authorization_header(server_name)
         except Exception:

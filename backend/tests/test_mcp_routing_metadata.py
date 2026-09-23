@@ -109,7 +109,7 @@ async def test_get_mcp_tools_tags_effective_routing_metadata(transport: str):
             "deerflow.mcp.tools.build_servers_config",
             return_value={"postgres": {"transport": transport, "url": "http://localhost:8000/mcp", "command": "npx"}},
         ),
-        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
         patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
         patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
     ):

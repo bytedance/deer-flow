@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.tools import get_mcp_tools
 
 
@@ -25,14 +26,16 @@ def _make_patches(*, interceptor_paths=None):
         ),
         "from_file": patch(
             "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-            return_value=MagicMock(
-                model_extra=extra,
-                get_enabled_mcp_servers=MagicMock(return_value={}),
+            return_value=ExtensionsConfig.model_validate(
+                {
+                    "mcpServers": {"test-server": {"enabled": True, "type": "http", "url": "https://example.test/mcp"}},
+                    **extra,
+                }
             ),
         ),
         "build_servers": patch(
             "deerflow.mcp.tools.build_servers_config",
-            return_value={"test-server": {}},
+            return_value={"test-server": {"transport": "http", "url": "https://example.test/mcp"}},
         ),
         "oauth_headers": patch(
             "deerflow.mcp.tools.get_initial_oauth_headers",
