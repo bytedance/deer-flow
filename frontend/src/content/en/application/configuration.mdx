@@ -149,6 +149,37 @@ models:
   </Tabs.Tab>
 </Tabs>
 
+#### Reasoning capabilities
+
+`supports_thinking` and `supports_reasoning_effort` only say whether a knob exists. When a provider's contract differs from DeerFlow's generic assumptions — thinking that cannot be turned off, or an effort vocabulary other than `minimal/low/medium/high` — declare a `reasoning` block instead. The two booleans are then derived from it, the chat UI offers only the values the model accepts, and every model call (chat, summarization, title generation, subagents) follows the same policy.
+
+```yaml
+models:
+  - name: glm-5.3-flash
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: glm-5.3-flash
+    api_base: https://api.z.ai/api/paas/v4
+    api_key: $ZAI_API_KEY
+    supports_vision: true
+    reasoning:
+      thinking: required            # unsupported | optional | required
+      dialect: openai_extra_body    # auto | openai_extra_body | anthropic | vllm_chat_template | ollama | none
+      history: clear                # preserve | clear
+      effort:
+        values: [low, high, max]    # the provider's own vocabulary
+        default: max                # used when the caller does not choose
+        aliases:                    # DeerFlow generic value -> provider value
+          minimal: low
+          medium: high
+    extra_body:
+      tool_stream: true
+```
+
+- `thinking: required` keeps thinking on even when a background caller asks for it off; set `on_disable_request: reject` to fail such calls instead.
+- Effort values outside `values` map through `aliases` or fall back to `default`; they never reach the provider.
+- `dialect: auto` (the default) infers the on/off payload from `when_thinking_enabled`, so existing profiles can add `reasoning` without rewriting their templates. Profiles without a `reasoning` block behave exactly as before.
+- Contradictory profiles (for example `required` together with `when_thinking_disabled`) fail at startup.
+
 ### Sandbox
 
 Choose the execution environment for agent file and command operations:

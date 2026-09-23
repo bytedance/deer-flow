@@ -176,7 +176,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
+   如果某个模型的 provider 约定与 DeerFlow 通用的 thinking/effort 假设不同，可以为该模型声明 `reasoning:` 块（thinking 为 `unsupported`/`optional`/`required`、允许的 effort 取值及别名和默认值、payload 方言、推理历史要求）。Setup Wizard 内置的 Z.AI GLM-5.3-Flash 配置就使用了它：前台和后台调用都会保持 thinking 开启，effort 选择器只提供该模型自己的 `low`/`high`/`max` 档位。未声明该块的配置行为保持不变。具体格式与等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 

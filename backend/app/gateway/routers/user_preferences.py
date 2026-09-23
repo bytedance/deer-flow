@@ -18,7 +18,10 @@ class Preferences(BaseModel):
     notification_enabled: bool | None = None
     model_name: Annotated[str, StringConstraints(max_length=200)] | None = None
     mode: Literal["flash", "thinking", "pro", "ultra"] | None = None
-    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    # Provider vocabularies differ (issue #5073): accept any effort token so a
+    # model-specific default such as ``max`` can be remembered. The model
+    # factory validates the value against the selected model's contract.
+    reasoning_effort: Annotated[str, StringConstraints(max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")] | None = None
 
 
 async def _owner(request: Request, expected_user: str) -> str:

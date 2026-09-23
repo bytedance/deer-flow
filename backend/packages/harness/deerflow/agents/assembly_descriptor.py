@@ -49,6 +49,9 @@ _MODEL_METADATA_FIELDS = frozenset(
         "use",
         "context_window",
         "pricing",
+        # Declarative reasoning contract (issue #5073): capability metadata,
+        # not a provider parameter.
+        "reasoning",
     }
 )
 _MIDDLEWARE_PUBLIC_FIELDS = (

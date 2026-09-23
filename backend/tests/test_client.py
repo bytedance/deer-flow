@@ -197,6 +197,13 @@ class TestConfigQueries:
         assert "model" in result["models"][0]
         assert "display_name" in result["models"][0]
         assert "supports_thinking" in result["models"][0]
+        # The normalized reasoning contract is projected beside the legacy booleans.
+        assert result["models"][0]["reasoning"] == {
+            "thinking": "unsupported",
+            "effort": None,
+            "history": None,
+            "source": "legacy",
+        }
 
     def test_list_skills(self, client):
         skill = MagicMock()
@@ -1993,6 +2000,12 @@ class TestGetModel:
             "description": "A test model",
             "supports_thinking": True,
             "supports_reasoning_effort": True,
+            "reasoning": {
+                "thinking": "optional",
+                "effort": {"values": ["minimal", "low", "medium", "high"], "default": None, "aliases": {}},
+                "history": None,
+                "source": "legacy",
+            },
         }
 
     def test_not_found(self, client):

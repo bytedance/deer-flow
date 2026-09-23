@@ -54,6 +54,7 @@ from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
@@ -1262,6 +1263,7 @@ class DeerFlowClient:
                     "description": getattr(model, "description", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+                    "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
                 }
                 for model in self._app_config.models
             ],
@@ -1334,6 +1336,7 @@ class DeerFlowClient:
             "description": getattr(model, "description", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+            "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
         }
 
     # ------------------------------------------------------------------

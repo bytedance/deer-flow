@@ -1116,14 +1116,20 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            # Subagents request thinking off; the model's reasoning contract
+            # decides what that means (a required-thinking model stays on), and
+            # the descriptor reports the effective policy the factory applied.
+            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                thinking_enabled=effective_reasoning.thinking_enabled,
+                reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,

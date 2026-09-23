@@ -493,6 +493,17 @@ This release closes that milestone with **765 merged pull requests**.
 
 #### Models & integrations
 
+- **models:** Optional per-model `reasoning:` capability contract beside the
+  legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
+  `unsupported | optional | required`, the accepted effort `values` with
+  `aliases`, `default`, and serialization `path`, the payload `dialect`, and the
+  reasoning `history` requirement. Every model-creation path enforces one
+  normalized policy, so required-thinking models never receive a synthesized
+  disable payload and unsupported effort values never reach the provider;
+  `/api/models` projects the contract as `reasoning`, the composer derives its
+  effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
+  `low/high/max` effort control. Profiles without the block are unchanged.
+  ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
   screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
@@ -4167,6 +4178,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5066]: https://github.com/bytedance/deer-flow/pull/5066
 [#5069]: https://github.com/bytedance/deer-flow/pull/5069
 [#5071]: https://github.com/bytedance/deer-flow/pull/5071
+[#5073]: https://github.com/bytedance/deer-flow/issues/5073
 [#5074]: https://github.com/bytedance/deer-flow/pull/5074
 [#5076]: https://github.com/bytedance/deer-flow/pull/5076
 [#5077]: https://github.com/bytedance/deer-flow/pull/5077
