@@ -9,6 +9,7 @@ from types import MappingProxyType
 from deerflow_extension_api.auth import resolve_principal
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from deerflow.extensions.browser_assets import LoadedBrowserAssets, valid_asset_path
 from deerflow.extensions.plugin_tools import plugin_settings
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
@@ -30,7 +31,14 @@ async def list_plugins(request: Request, response: Response):
     for source, plugin in request.app.state.extensions.plugins:
         settings = plugin_settings(source, plugin)
         module = plugin.frontend
-        revision = hashlib.sha256(module.code.encode()).hexdigest() if module else None
+        if isinstance(module, LoadedBrowserAssets):
+            revision = module.revision
+            entry = f"/api/plugins/{plugin.namespace}/assets/{revision}/{module.entry}"
+            transport = "assets-v1"
+        else:
+            revision = hashlib.sha256(module.code.encode()).hexdigest() if module else None
+            entry = f"/api/plugins/modules/{module.module}/{revision}.mjs" if module else None
+            transport = "inline-v1" if module else None
         public = ("enabled", *module.public_fields) if module else ("enabled",)
         entries.append(
             {
@@ -39,7 +47,8 @@ async def list_plugins(request: Request, response: Response):
                 "description": plugin.description,
                 "viewer_id": principal.user_id,
                 "module": module.module if module else None,
-                "entry": f"/api/plugins/modules/{module.module}/{revision}.mjs" if module else None,
+                "entry": entry,
+                "transport": transport,
                 "settings": {key: settings[key] for key in public},
                 "backend_actions": [action.name for action in plugin.backend],
             }
@@ -51,11 +60,34 @@ async def list_plugins(request: Request, response: Response):
 async def plugin_module(request: Request, module: str, revision: str):
     _principal(request)
     for _, plugin in request.app.state.extensions.plugins:
-        if plugin.frontend and plugin.frontend.module == module:
+        if plugin.frontend and not isinstance(plugin.frontend, LoadedBrowserAssets) and plugin.frontend.module == module:
             code = plugin.frontend.code.encode()
             if hashlib.sha256(code).hexdigest() == revision:
                 return Response(code, media_type="text/javascript", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
     raise HTTPException(404, "Plugin module unavailable; reload the page.")
+
+
+@router.get("/{namespace}/assets/{revision}/{path:path}")
+async def plugin_asset(request: Request, namespace: str, revision: str, path: str):
+    _principal(request)
+    if valid_asset_path(path):
+        for _, plugin in request.app.state.extensions.plugins:
+            module = plugin.frontend
+            if plugin.namespace == namespace and isinstance(module, LoadedBrowserAssets) and module.revision == revision:
+                asset = module.files.get(path)
+                if asset is not None:
+                    return Response(
+                        asset.content,
+                        media_type=asset.media_type,
+                        headers={
+                            "Cache-Control": "private, max-age=31536000, immutable",
+                            "Vary": "Cookie, Authorization",
+                            "X-Content-Type-Options": "nosniff",
+                            # Assets can also be opened as documents (notably SVG).
+                            "Content-Security-Policy": "sandbox",
+                        },
+                    )
+    raise HTTPException(404, "Plugin asset unavailable; reload the page.", headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/{namespace}/actions/{action_name}")

@@ -3,11 +3,11 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.2).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.3).
 
-The browser contribution API in this slice is experimental. `BrowserModule(code=...)`
-is an MVP transport for validating page/action host interfaces, not the final asset
-packaging contract or a requirement that all future plugins ship one JavaScript file.
+The browser contribution API is experimental. `BrowserModule(code=...)` remains the
+self-contained transport; `BrowserAssets(root=...)` adds manifest-listed resources
+without changing the page/action API or requiring a host frontend rebuild.
 
 ## What users see
 
@@ -27,6 +27,8 @@ the existing positional rollback and source attribution.
 
 - `BrowserModule(module, code, public_fields=())` contains a self-contained ES module,
   at most 512 KiB. It may export `surfaces` and `conversationActions` with `apiVersion: 1`.
+- `BrowserAssets(module, root, manifest="ui_manifest.json", public_fields=())`
+  loads a versioned resource manifest from an installed package (details below).
 - `BackendAction(name, handler)` declares an async handler receiving a JSON object and
   `ActionContext(principal, settings)`. The principal comes from host authentication.
 - `ModelTool(name, description, input_schema, handler, group="extensions")` declares
@@ -52,19 +54,21 @@ the process default once at construction.
 
 The authenticated host exposes:
 
-| Route                                            | Purpose                                                         |
-| ------------------------------------------------ | --------------------------------------------------------------- |
-| `GET /api/plugins`                               | Deployed descriptors, public configuration and declared actions |
-| `GET /api/plugins/modules/{module}/{sha256}.mjs` | Installed code with a content revision                          |
-| `POST /api/plugins/{namespace}/actions/{name}`   | Invoke one declared backend action                              |
+| Route                                                   | Purpose                                                         |
+| ------------------------------------------------------- | --------------------------------------------------------------- |
+| `GET /api/plugins`                                      | Deployed descriptors, public configuration and declared actions |
+| `GET /api/plugins/modules/{module}/{sha256}.mjs`        | Installed code with a content revision                          |
+| `GET /api/plugins/{namespace}/assets/{revision}/{path}` | One manifest-listed static resource                             |
+| `POST /api/plugins/{namespace}/actions/{name}`          | Invoke one declared backend action                              |
 
 The host does not accept filesystem paths, import strings or arbitrary remote URLs
-from the browser. Asset responses use JavaScript content type, `nosniff` and private
-no-store caching. Existing Gateway session/CSRF policies apply; PATs do not gain a new
+from the browser. Inline modules use JavaScript content type and private no-store
+caching; packaged assets use their declared file type and private immutable caching.
+Both transports send `nosniff`. Existing Gateway session/CSRF policies apply; PATs do not gain a new
 route allowlist. The browser sends its descriptor's viewer ID so the action route can
 reject a stale view after account changes, in addition to normal request authentication.
 
-Module downloads honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including a path prefix,
+Inline module downloads honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including a path prefix,
 and use the host's authenticated fetch helper before importing a temporary Blob URL.
 The URL is released after import, including on failure. Browser modules must be
 self-contained: relative imports and assets resolved against `import.meta.url` are
@@ -96,38 +100,106 @@ names that collide with ordinary tools follow the host's ordinary-first deduplic
 unrelated tools remain available. Duplicate names within the plugin tool set still fail
 strict validation.
 
-## Packaged assets and compatibility direction
+## Packaged resources (`assets-v1`)
 
-RFC #5510 proposes a manifest plus packaged static resources (`ui_manifest.json` and
-`static/dist/...`). That remains the intended direction for larger plugins. The current
-single-file transport cannot naturally support relative chunks, separate CSS, images,
-fonts, WASM, source maps or `import.meta.url` assets, and holds the module as a Python
-string. Its `no-store` response intentionally provides no immutable cache reuse.
+Register a package-owned directory alongside the Python implementation:
 
-A follow-up should add a distinct, versioned packaged-asset declaration alongside the
-inline form, rather than silently changing the meaning of `BrowserModule.code`:
+```python
+from pathlib import Path
+from deerflow_extension_api import BrowserAssets, PluginContribution
 
-- A validated manifest identifies the entry module and permitted files under a
-  package-owned asset root. The root comes from the installed package, never a browser
-  supplied filesystem path.
-- Namespace/revision-scoped URLs, for example
-  `/api/plugins/{namespace}/assets/{revision}/{path}`, must confine canonical paths to
-  that root, reject traversal and escaping symlinks, and serve only manifest-listed
-  files with correct MIME types and `nosniff`.
-- Revisioned assets should support immutable caching. Private assets must retain
-  authentication and private-cache policy; public/CDN caching needs an explicit public
-  distribution contract. Cache invalidation and removal semantics must be specified.
-- Entry modules and relative dependencies must share an authenticated loading design
-  for both same-origin and split-origin deployments. The current Blob importer cannot
-  simply be reused for relative chunks; an authenticated same-origin asset proxy is
-  one option to evaluate.
-- Discovery should negotiate the supported transport/version and reject unsupported
-  transports clearly. Existing inline v1 packages should keep working while the new
-  transport reuses the namespace, page/action interfaces and deployment lifecycle.
+registry.plugin(PluginContribution(
+    namespace="community.example",
+    title="Example",
+    frontend=BrowserAssets("example.v1", Path(__file__).parent),
+))
+```
 
-These are compatibility requirements for the follow-up, not implemented asset APIs.
-The stable packaging contract requires review before plugin authors rely on it. Neither
-transport should require rebuilding DeerFlow's frontend for each compatible plugin.
+Place `ui_manifest.json` at that root, and include it and every listed file in the
+installed wheel. The [bookmarks package](../examples/deerflow-extension-bookmarks/README.md)
+is a working example. Its manifest uses this schema:
+
+```json
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/index.mjs",
+    "static/dist/chunks/bookmarks.mjs",
+    "static/dist/styles.css",
+    "static/dist/bookmark.svg"
+  ]
+}
+```
+
+`entry` must be a listed `.js` or `.mjs` ES module exporting the existing browser
+API v1 object. Relative static/dynamic imports and `new URL(..., import.meta.url)`
+resolve within the revision's URL tree. Bundle third-party dependencies into the
+package: bare npm imports and shared host React instances are not provided. Emit
+relative URLs, not absolute `/assets/...` paths from a bundler's default public path.
+
+The manifest accepts only `schema_version`, `entry` and `files`; unknown versions,
+extra/duplicate keys, duplicate paths, missing files and symlinks are rejected at
+registration. The declared root itself must not be a symlink (including a dangling
+link); ordinary parent directory aliases are resolved before checking package files.
+Paths use ASCII letters, digits, `_`, `-`, `.` and `/` separators;
+segments must start with a letter, digit, `_` or `-`. Dotfiles, dot segments, empty
+segments, percent encoding, query strings and backslashes are rejected. No directory
+listing or unlisted file is served. Limits: 64 KiB manifest, 256 files, 4 MiB per
+file and 16 MiB total per plugin. These limits bound the in-memory startup snapshot.
+
+Supported types are JS/MJS, CSS, JSON/source maps, WASM, PNG/JPEG/GIF/WebP/SVG/ICO
+and WOFF/WOFF2/TTF/OTF. HTML and executable server files are not served. SVG can
+contain active document content, so asset responses carry
+`Content-Security-Policy: sandbox`: direct navigation cannot execute scripts or
+retain the Gateway's origin.
+This document restriction preserves image, stylesheet and module subresource use;
+it does not sandbox the plugin JavaScript deliberately loaded into the host page.
+Do not list secrets or private build sources; any authenticated user can download listed assets,
+including source maps, even when the contribution is disabled.
+
+The host snapshots all listed bytes during registration and computes a SHA-256
+revision over the manifest, paths and file content hashes. Changing any resource
+changes every resource URL's revision. Requests read that immutable snapshot, not
+the filesystem. Responses require authentication and send
+`Cache-Control: private, max-age=31536000, immutable`, `Vary: Cookie, Authorization`
+and the file's MIME type. Missing files/revisions return 404 with `private, no-store`.
+There is no public CDN contract or retained historical snapshot. A browser can retain
+already cached code after removal; uncached old resources require a page reload after
+restart/upgrade. Installation and authorization are not instantaneous cache revocation.
+
+Discovery labels the transport `inline-v1` or `assets-v1`. The frontend rejects unknown
+transports and treats an omitted transport as legacy inline v1. Deploy the matching
+host frontend/backend together before installing an assets-v1 plugin; this does not
+make old host frontends support the new transport.
+
+For packaged JavaScript the host inserts a native module script with
+`crossorigin="use-credentials"`, then obtains exports from the document's module map.
+This preserves authenticated static and lazy imports without rewriting source or Blob
+URLs. See the [HTML module-script credential rules](https://html.spec.whatwg.org/multipage/scripting.html#attr-script-crossorigin).
+URLs honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including relative/absolute prefixes.
+The host stops waiting after 30 seconds and rejects that contribution, removing its
+loading script node. This is a waiting deadline, not execution cancellation: native
+module fetching/evaluation can continue and top-level side effects can occur later.
+A late completion cannot change the already rejected host result. Blocking synchronous
+plugin code can also delay the deadline's timer. Trusted plugins should keep top-level
+code free of user-visible side effects, start UI work in `mount` and release it in
+`dispose`. This loader does not provide preemption, rollback or a security sandbox.
+
+Module exports are shared within a document. Keep viewer data in per-mount state,
+observe the host abort signal and clear it on dispose; never retain principals or
+private results in module-level state across account changes.
+Split-origin deployments need exact-origin credentialed CORS and working session
+cookies; browser third-party cookie restrictions still apply.
+
+Other resource requests are the plugin's responsibility: attach a stylesheet or image
+with `crossOrigin = "use-credentials"`, and use `fetch(url, { credentials: "include" })`
+for WASM, JSON or binary assets. CSS font/background requests do not universally carry
+cross-origin session cookies. Prefer same-origin deployment for such CSS references,
+or fetch with credentials and construct a `FontFace`/Blob URL, releasing it on dispose.
+The host does not rewrite CSS URLs or add authorization tokens to URLs. CSP must allow
+the backend origin in the applicable `script-src`, `style-src`, `img-src`, `font-src`
+and `connect-src` directives. Inline-v1 still needs `blob:` in `script-src`.
 
 ## Trust and lifecycle
 
@@ -157,3 +229,11 @@ and SQLite, with synthetic authentication and scripted LangGraph ToolNode calls.
 It covers persistence, owner isolation, read-only deployment management and the full
 page workflow. It does not claim live model behavior or a full production deployment.
 The example uses single-host storage, not a multi-node persistence contract.
+
+`plugin-assets.spec.ts` also checks authenticated static/lazy imports, CSS and images,
+plus direct SVG navigation through the real Gateway asset route. Its script-execution
+control removes the sandbox header from the same SVG to verify the restriction.
+To exercise the actual Turbopack development build, start the frontend with
+`DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
+`PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
+Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.
