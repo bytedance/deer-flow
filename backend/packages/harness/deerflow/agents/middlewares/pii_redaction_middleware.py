@@ -2,7 +2,8 @@
 
 Detects personally identifiable information in the two untrusted-content entry
 points — genuine user messages and remote-content tool results — and rewrites
-it to irreversible placeholders (``[EMAIL_1]`` …) before it reaches the model.
+it to irreversible value-derived placeholders (128-bit HMAC digests over
+base-26 letters) before it reaches the model.
 Complements the structural guardrails: ``InputSanitizationMiddleware``
 neutralizes injection tags in user input and ``ToolResultSanitizationMiddleware``
 does the same for remote tool results; neither inspects *content* for PII.
