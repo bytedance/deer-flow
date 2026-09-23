@@ -31,7 +31,7 @@ from app.gateway.routers.mcp import (
     update_mcp_server,
     update_mcp_server_state,
 )
-from deerflow.mcp.cache import _McpCacheTransition
+from deerflow.mcp.cache import _McpCacheTransition, _McpIncomingRevision, _McpReconciliationPlan
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.session_pool import (
     StaleMCPBindingError,
@@ -56,6 +56,36 @@ def test_tool(name: str) -> StructuredTool:
 
 
 test_tool.__test__ = False
+
+
+def test_secret_bearing_mcp_revision_and_plan_repr_omit_values():
+    secret = "resolved-secret-value"
+    snapshot = "resolved-snapshot-value"
+    fingerprint = "resolved-fingerprint-value"
+    revision = _McpIncomingRevision(
+        config={"token": secret},
+        path=Path("extensions_config.json"),
+        signature=None,
+        snapshot=snapshot,
+        servers={"server": snapshot},
+        order=("server",),
+        connections={"server": fingerprint},
+        interceptors=secret,
+    )
+    plan = _McpReconciliationPlan(
+        transition=_McpCacheTransition(frozenset({"server"}), frozenset({"server"})),
+        incoming=revision,
+        active={"server": fingerprint},
+        removed=frozenset({"server"}),
+    )
+
+    revision_repr = repr(revision)
+    plan_repr = repr(plan)
+    assert revision_repr not in plan_repr
+    for value in (secret, snapshot, fingerprint):
+        assert value not in revision_repr
+        assert value not in plan_repr
+
 
 # Module globals that hold cache state, including the PR2 applied baseline that
 # must survive ``_reset_mcp_tools_cache_state()``. Snapshotted and restored

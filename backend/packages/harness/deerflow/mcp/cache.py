@@ -46,6 +46,28 @@ def _evict_server_tool_entries_locked(incoming_servers: Mapping[str, str]) -> No
             del _server_tool_cache[name]
 
 
+def _is_reusable_server_entry(
+    entry: _ServerToolCacheEntry,
+    *,
+    name: str,
+    incoming_connection: str | None,
+    pool: MCPSessionPool | None,
+) -> bool:
+    """Return whether an unchanged entry still matches its live pool binding."""
+    if incoming_connection is None:
+        return entry.result.pool is None and entry.result.binding is None
+    if pool is None:
+        return False
+    if entry.result.pool is not pool:
+        return False
+    active_binding = pool.active_binding(name)
+    if entry.result.binding != active_binding:
+        return False
+    if entry.result.binding is None:
+        return False
+    return entry.result.binding.fingerprint == incoming_connection
+
+
 def _reusable_server_entries_locked(
     incoming_servers: Mapping[str, str],
     incoming_connections: Mapping[str, str],
@@ -57,10 +79,7 @@ def _reusable_server_entries_locked(
         entry = _server_tool_cache.get(name)
         if entry is None or entry.snapshot != snapshot:
             continue
-        if name in incoming_connections:
-            if pool is None or entry.result.pool is not pool or entry.result.binding != pool.active_binding(name) or entry.result.binding is None or entry.result.binding.fingerprint != incoming_connections[name]:
-                continue
-        elif entry.result.pool is not None or entry.result.binding is not None:
+        if not _is_reusable_server_entry(entry, name=name, incoming_connection=incoming_connections.get(name), pool=pool):
             continue
         reusable[name] = entry
     return reusable
@@ -204,14 +223,14 @@ class _McpCacheTransition:
 class _McpIncomingRevision:
     """One parsed, signature-verified effective MCP revision read from disk."""
 
-    config: Any
+    config: Any = field(repr=False)
     path: Path | None
     signature: _ConfigSignature | None
-    snapshot: str
-    servers: dict[str, str]
+    snapshot: str = field(repr=False)
+    servers: dict[str, str] = field(repr=False)
     order: tuple[str, ...]
-    connections: dict[str, str]
-    interceptors: str
+    connections: dict[str, str] = field(repr=False)
+    interceptors: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -219,8 +238,8 @@ class _McpReconciliationPlan:
     """A classified transition plus the pool operations it requires."""
 
     transition: _McpCacheTransition
-    incoming: _McpIncomingRevision | None
-    active: dict[str, str]
+    incoming: _McpIncomingRevision | None = field(repr=False)
+    active: dict[str, str] = field(repr=False)
     removed: frozenset[str]
 
 
@@ -581,6 +600,29 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
 _pending_teardowns: set[asyncio.Task[Any]] = set()
 
 
+def _candidate_binding_is_current(
+    entry: _ServerToolCacheEntry,
+    *,
+    name: str,
+    loaded_connections: Mapping[str, str],
+    current_pool: MCPSessionPool | None,
+) -> bool:
+    """Return whether a discovered candidate still matches the live binding."""
+    loaded_connection = loaded_connections.get(name)
+    if loaded_connection is None:
+        return entry.result.pool is None and entry.result.binding is None
+    if current_pool is None:
+        return False
+    if entry.result.pool is not current_pool:
+        return False
+    active_binding = current_pool.active_binding(name)
+    if entry.result.binding != active_binding:
+        return False
+    if entry.result.binding is None:
+        return False
+    return entry.result.binding.fingerprint == loaded_connection
+
+
 def _pending_teardown_work(pending: _PendingTeardown) -> Callable[[], None] | None:
     """The blocking teardown callable, or ``None`` when there is nothing to do."""
     if pending.pool is None:
@@ -773,9 +815,12 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             else:
                 current_pool = get_session_pool() if loaded_connections else None
                 candidates_valid = all(
-                    entry.result.pool is current_pool and entry.result.binding == current_pool.active_binding(name) and entry.result.binding is not None and entry.result.binding.fingerprint == loaded_connections[name]
-                    if name in loaded_connections
-                    else entry.result.pool is None and entry.result.binding is None
+                    _candidate_binding_is_current(
+                        entry,
+                        name=name,
+                        loaded_connections=loaded_connections,
+                        current_pool=current_pool,
+                    )
                     for name, entry in candidates.items()
                 )
                 if not candidates_valid:
