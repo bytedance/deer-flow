@@ -199,6 +199,106 @@ def test_create_memory_fact_route_returns_updated_memory() -> None:
     assert response.json()["facts"] == updated_memory["facts"]
 
 
+def test_scoped_memory_read_and_fact_crud_forward_canonical_agent_name() -> None:
+    """The management API must bind every scoped operation to one canonical bucket."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    selected_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_shared-id",
+                "content": "Research agent preference",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    manager = MagicMock()
+    manager.supports_agent_scoped_management = True
+    manager.get_memory.return_value = selected_memory
+    manager.create_fact.return_value = (selected_memory, "fact_shared-id")
+    manager.update_fact.return_value = selected_memory
+    manager.delete_fact.return_value = _sample_memory()
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        fetched = client.get("/api/memory?agent_name=Research-Agent")
+        created = client.post(
+            "/api/memory/facts?agent_name=Research-Agent",
+            json={"content": "Research agent preference"},
+        )
+        updated = client.patch(
+            "/api/memory/facts/fact_shared-id?agent_name=Research-Agent",
+            json={"confidence": 0.95},
+        )
+        deleted = client.delete("/api/memory/facts/fact_shared-id?agent_name=Research-Agent")
+
+    assert fetched.status_code == 200
+    assert created.status_code == 200
+    assert updated.status_code == 200
+    assert deleted.status_code == 200
+    manager.get_memory.assert_called_once_with(user_id="alice", agent_name="research-agent")
+    assert manager.create_fact.call_args.kwargs["agent_name"] == "research-agent"
+    assert manager.update_fact.call_args.kwargs["agent_name"] == "research-agent"
+    assert manager.delete_fact.call_args.kwargs["agent_name"] == "research-agent"
+
+
+def test_scoped_memory_read_rejects_backend_without_scope_capability() -> None:
+    """A backend that ignores agent_name must not silently expose the default bucket."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = MagicMock()
+    manager.supports_agent_scoped_management = False
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=manager):
+        with TestClient(app) as client:
+            response = client.get("/api/memory?agent_name=research-agent")
+
+    assert response.status_code == 501
+    assert "agent-scoped management" in response.json()["detail"]
+    manager.get_memory.assert_not_called()
+
+
+def test_scoped_memory_read_rejects_malformed_agent_name() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = MagicMock()
+    manager.supports_agent_scoped_management = True
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=manager):
+        with TestClient(app) as client:
+            response = client.get("/api/memory?agent_name=../other-user")
+
+    assert response.status_code == 422
+    manager.get_memory.assert_not_called()
+
+
+def test_scoped_reload_fallback_reads_the_same_agent_bucket() -> None:
+    """A backend without reload support must not lose scope on read fallback."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = MagicMock()
+    manager.supports_agent_scoped_management = True
+    manager.reload_memory.side_effect = NotImplementedError("no cache")
+    manager.get_memory.return_value = _sample_memory()
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/reload?agent_name=Research-Agent")
+
+    assert response.status_code == 200
+    manager.reload_memory.assert_called_once_with(user_id="alice", agent_name="research-agent")
+    manager.get_memory.assert_called_once_with(user_id="alice", agent_name="research-agent")
+
+
 def test_create_memory_fact_route_maps_conflict_to_409() -> None:
     app = FastAPI()
     app.include_router(memory.router)
@@ -336,6 +436,55 @@ def test_settings_fact_crud_without_agent_name_uses_default_agent(tmp_path) -> N
     assert facts_root.exists()
     assert not list(facts_root.glob("**/*.md"))
     assert "facts" not in json.loads(memory_path.read_text(encoding="utf-8"))
+
+
+def test_scoped_fact_mutation_does_not_cross_agent_bucket_with_same_fact_id(
+    tmp_path,
+) -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    shared_id = "fact_01HZZZZZZZZZZZZZZZZZZZZZZZ"
+    agent_a = _sample_memory(
+        facts=[
+            {
+                "id": shared_id,
+                "content": "Agent A original",
+                "category": "context",
+                "confidence": 0.8,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    agent_b = _sample_memory(
+        facts=[
+            {
+                "id": shared_id,
+                "content": "Agent B original",
+                "category": "context",
+                "confidence": 0.8,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    manager.import_memory(agent_a, user_id="alice", agent_name="agent-a")
+    manager.import_memory(agent_b, user_id="alice", agent_name="agent-b")
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.patch(
+            f"/api/memory/facts/{shared_id}?agent_name=agent-a",
+            json={"content": "Agent A updated"},
+        )
+
+    assert response.status_code == 200
+    assert manager.get_memory(user_id="alice", agent_name="agent-a")["facts"][0]["content"] == "Agent A updated"
+    assert manager.get_memory(user_id="alice", agent_name="agent-b")["facts"][0]["content"] == "Agent B original"
 
 
 def test_update_memory_fact_route_preserves_omitted_fields() -> None:
