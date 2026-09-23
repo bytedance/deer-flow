@@ -593,7 +593,7 @@ def test_import_blank_fact_returns_400_without_replacing_saved_memory(tmp_path):
     manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
     before = manager.import_memory(_sample_memory(facts=[{"id": "keep", "content": "Saved preference"}]), user_id="alice")
     payload = _sample_memory(facts=[{**before["facts"][0], "content": "   "}])
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(memory.router)
     with (
         patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
