@@ -43,6 +43,9 @@ def test_research_audit_example_is_disabled_and_pinned() -> None:
         r"git\+https://github\.com/chenhz01/adversarial-research-audit\.git@[0-9a-f]{40}",
         server["args"][1],
     )
+    # Review the transport regressions before changing this accepted revision.
+    assert server["args"][1].endswith("@cf72dfac4e57dd1aab64bc531552110b99d49148")
+    assert server["env"]["ADVERSARIAL_RESEARCH_AUDIT_ALLOW_PRIVATE_NETWORKS"] == "false"
     assert server["session_init_timeout"] >= 300
     assert server["routing"]["mode"] == "off"
 

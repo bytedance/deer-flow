@@ -67,17 +67,18 @@ Apply these evidence rules:
   either `PASS` or `verified` as factual verification.
 - Gate 6 runs only when integrity data is supplied. Report which checks ran;
   skipped or absent checks are not successful verification.
-- The pinned server has an unresolved DNS-rebinding weakness: its address
-  check does not bind the subsequent connection to the validated IP. Until a
-  fixed revision is reviewed and pinned, do not request live verification.
-  This workflow provides offline structural checks only.
+- Live checks establish URL reachability and content hashes, not claim support.
+  The configured server restricts connections to validated public addresses.
+  Policy-blocked sources and proxy/transport failures leave verification
+  incomplete; do not call them dead links or bypass the network policy.
 
 ## Run And Interpret The Audit
 
 1. Call `research_audit_audit_report` with `report` set to the constructed
-   object and `verify_sources` set to `false` for the current pinned revision.
-   State that live source verification was not run. Do not treat a public
-   hostname as sufficient protection against DNS rebinding.
+   object and `verify_sources` set to `false` by default. Set it to `true`
+   only when the user explicitly requests live source verification. State
+   whether live verification ran. Never enable private-network access or
+   change proxy settings to make a check pass.
 2. Treat `outputs.verdict` as the audit decision. A `FAIL` verdict is a valid
    tool result, not a tool failure.
 3. If the first verdict is `FAIL`, inspect the failed gates and make one honest

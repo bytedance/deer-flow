@@ -147,14 +147,23 @@ server is unavailable, the report is still delivered as `UNAUDITED`; network
 uncertainty during live citation checks is delivered as `DEGRADED`, not as a
 dead-link failure.
 
-The current pinned server has an unresolved DNS-rebinding weakness: it checks
-resolved addresses but resolves the hostname again when connecting. Its
-private-address filter is therefore not an SSRF boundary. Keep
-`verify_sources: false`; the Skill currently requests offline structural checks
-only. This is a workflow precaution, not a server-enforced fix: direct MCP calls
-can still enable verification. Live verification and merge readiness remain
-blocked on a reviewed upstream transport fix and a new pin. Do not enable the
-private-network override for untrusted inputs.
+The reviewed pin `cf72dfac4e57dd1aab64bc531552110b99d49148` includes the upstream
+DNS-rebinding transport fix and the follow-up proxy-policy fix. Direct sockets
+connect only to validated public addresses, while Host and TLS verification
+retain the original hostname. Address pins are shared by HEAD/GET and same-host
+redirects; other redirect targets are validated before connecting. This applies
+to direct MCP calls with `verify_sources: true`, not only the Skill workflow.
+The example explicitly sets `ADVERSARIAL_RESEARCH_AUDIT_ALLOW_PRIVATE_NETWORKS`
+to `false`, overriding any inherited opt-out. Do not enable this override for
+untrusted inputs.
+
+The Skill defaults to `verify_sources: false`; live verification requires an
+explicit user request. Restricted mode refuses configured proxies with
+`proxy-policy-unsupported` instead of delegating DNS to an unvalidated proxy.
+Operators needing direct verification should configure a proxy-free execution
+environment; do not enable private-network access to work around this refusal.
+Policy-blocked sources are reported separately from dead links. Blocked sources,
+proxy refusal, and transport uncertainty make a returned audit `DEGRADED`.
 
 The server's `verified` claim label counts distinct source keys, not independently
 corroborated evidence. It does not verify that cited content supports a claim;
@@ -170,6 +179,27 @@ only a returned envelope with `degraded: true` establishes `DEGRADED`.
 The pinned commit is the review unit. When upgrading it, review the upstream
 diff, replace the full 40-character SHA, and rerun the MCP configuration and
 public-skill checks before deployment.
+
+The opt-in transport regression suite imports a trusted local checkout of the
+exact configured pin, checks the imported files against that Git revision, and
+never downloads code. It uses controlled DNS and two synthetic loopback HTTP
+fixtures: a public endpoint stand-in and a private trap. Socket routing is
+intercepted so no public or private infrastructure is contacted. The private
+trap must receive zero requests through both `SourceVerifier` and the actual
+MCP `tools/call` handler, including HEAD-to-GET fallback, redirects, and proxies.
+Ordinary offline CI skips these checks when the source checkout is absent.
+Before changing the pin, prepare a trusted checkout and run from `backend/`:
+
+```bash
+RESEARCH_AUDIT_SOURCE=/absolute/path/to/adversarial-research-audit \
+  uv run pytest tests/test_research_audit_transport.py -q
+uv run pytest tests/test_research_audit_integration.py -q
+```
+
+The transport checks also verify successful HEAD/GET requests preserve Host,
+HTTPS retains the original TLS hostname, and blocked/uncertain checks are not
+reported as dead links. Re-run the upstream suite and a fresh-cache `uvx` MCP
+installation check when accepting a new revision.
 
 ## Routing Hints
 

@@ -557,9 +557,12 @@ result as `<report-stem>.audit.json` and always delivers the report: failed
 audits are labeled `FAIL`, unavailable tooling is `UNAUDITED`, and uncertain
 network verification is `DEGRADED`. This is an opt-in model-driven workflow,
 not an automatic post-run hook. `PASS` and per-claim `verified` labels do not
-establish factual accuracy or source independence. The current pin is limited
-to offline structural checks in the Skill while an upstream DNS-rebinding fix
-is pending; direct live-verification calls remain unsafe for untrusted URLs.
+establish factual accuracy or source independence. The Skill defaults to offline
+structural checks; live source verification requires an explicit request. The
+pinned server binds direct connections to validated public IPs, including
+HEAD/GET and redirects, and the example explicitly disables private-network
+access. Restricted verification refuses proxy configurations rather than
+bypassing address validation; incomplete verification is reported as `DEGRADED`.
 See the
 [research report audit setup](backend/docs/MCP_SERVER.md#research-report-audit-optional).
 
