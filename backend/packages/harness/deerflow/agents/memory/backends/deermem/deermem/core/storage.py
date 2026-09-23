@@ -139,7 +139,7 @@ def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
     category = fact.get("category")
     fact["category"] = category.strip() if isinstance(category, str) and category.strip() else "context"
 
-    confidence = fact.get("confidence", 0.0)
+    confidence = fact.get("confidence", 0.5)
     if isinstance(confidence, bool):
         numeric_confidence = 0.5
     else:

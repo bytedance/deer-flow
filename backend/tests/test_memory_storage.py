@@ -72,7 +72,7 @@ class TestNormalizeMemoryData:
         assert fact["id"].startswith("fact_")
         assert fact["content"] == "User prefers conclusions first"
         assert fact["category"] == "cognitive"
-        assert fact["confidence"] == 0.0
+        assert fact["confidence"] == 0.5
         assert fact["createdAt"] == ""
         assert fact["source"] == "unknown"
 

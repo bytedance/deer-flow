@@ -33,9 +33,9 @@ describe("normalizeUserMemory (API read path)", () => {
     expect(result.facts[0]).toMatchObject({
       content: "User prefers conclusions first.",
       category: "cognitive",
-      confidence: 0,
+      confidence: 0.5,
       createdAt: "",
-      source: "",
+      source: "unknown",
     });
   });
 });

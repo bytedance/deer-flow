@@ -162,9 +162,9 @@ describe("legacy memory import compatibility (TDD)", () => {
     expect(result!.facts[0]).toMatchObject({
       content: "User prefers conclusions first.",
       category: "cognitive",
-      confidence: 0,
+      confidence: 0.5,
       createdAt: "",
-      source: "",
+      source: "unknown",
     });
   });
 
@@ -225,6 +225,38 @@ describe("legacy memory import compatibility (TDD)", () => {
     expect(result!.user.cognitiveStyle).toEqual({
       summary: "",
       updatedAt: "",
+    });
+  });
+});
+
+describe("legacy fact metadata parity", () => {
+  it.each([
+    [undefined, 0.5],
+    [null, 0.5],
+    [true, 0.5],
+    ["invalid", 0.5],
+    [NaN, 0.5],
+    [Infinity, 0.5],
+    [0, 0],
+    [-1, 0],
+    [2, 1],
+    ["0.8", 0.8],
+  ])("normalizes confidence %s to %s", (confidence, expected) => {
+    const result = normalizeMemoryPayload({
+      ...legacyMemoryWithoutCognitiveStyle(),
+      facts: [
+        {
+          id: "legacy",
+          content: "  Keep conclusions first.  ",
+          confidence,
+          source: "  ",
+        },
+      ],
+    });
+    expect(result!.facts[0]).toMatchObject({
+      confidence: expected,
+      content: "Keep conclusions first.",
+      source: "unknown",
     });
   });
 });

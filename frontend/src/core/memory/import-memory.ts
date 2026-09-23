@@ -49,8 +49,8 @@ function normalizeMemoryFact(value: unknown, index: number): MemoryFact | null {
     return null;
   }
 
-  const content = typeof value.content === "string" ? value.content : "";
-  if (!content.trim()) {
+  const content = typeof value.content === "string" ? value.content.trim() : "";
+  if (!content) {
     return null;
   }
 
@@ -58,10 +58,17 @@ function normalizeMemoryFact(value: unknown, index: number): MemoryFact | null {
     typeof value.category === "string" && value.category.trim()
       ? value.category.trim()
       : "context";
-  const confidence =
-    typeof value.confidence === "number" && Number.isFinite(value.confidence)
-      ? Math.min(1, Math.max(0, value.confidence))
-      : 0;
+  const rawConfidence = value.confidence;
+  const numericConfidence =
+    typeof rawConfidence === "number"
+      ? rawConfidence
+      : typeof rawConfidence === "string" &&
+          /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(rawConfidence.trim())
+        ? Number(rawConfidence)
+        : NaN;
+  const confidence = Number.isFinite(numericConfidence)
+    ? Math.min(1, Math.max(0, numericConfidence))
+    : 0.5;
 
   const fact = {
     ...value,
@@ -74,7 +81,10 @@ function normalizeMemoryFact(value: unknown, index: number): MemoryFact | null {
     confidence,
     createdAt:
       typeof value.createdAt === "string" ? value.createdAt.trim() : "",
-    source: typeof value.source === "string" ? value.source.trim() : "",
+    source:
+      typeof value.source === "string" && value.source.trim()
+        ? value.source.trim()
+        : "unknown",
   } as MemoryFact & Record<string, unknown>;
 
   if (

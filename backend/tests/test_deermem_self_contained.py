@@ -983,7 +983,7 @@ def test_import_memory_persists_normalized_legacy_payload(deermem_data_dir) -> N
     assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
     assert result["facts"][0]["id"].startswith("fact_")
     assert result["facts"][0]["category"] == "cognitive"
-    assert result["facts"][0]["confidence"] == 0.0
+    assert result["facts"][0]["confidence"] == 0.5
     assert result["facts"][0]["createdAt"] == ""
     assert result["facts"][0]["source"] == "unknown"
 
