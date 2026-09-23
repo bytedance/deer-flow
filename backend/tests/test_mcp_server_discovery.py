@@ -306,3 +306,62 @@ async def test_initial_oauth_headers_only_fetch_selected_names(monkeypatch):
     manager.get_authorization_header.reset_mock()
     assert await get_initial_oauth_headers(config, server_names=set()) == {}
     manager.get_authorization_header.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_snapshot_guard_validates_full_config_before_selected_discovery(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, set_mcp_task_config_snapshot
+    from deerflow.mcp.tools import _configure_task_tools_for_server, get_mcp_tools_by_server
+
+    full_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {
+                    "enabled": True,
+                    "type": "stdio",
+                    "command": "a-server",
+                    "task_toolsets": [{"name": "reports", "submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}],
+                },
+                "B": {"enabled": True, "type": "http", "url": "https://b.example/mcp"},
+            }
+        }
+    )
+    changed_config = full_config.model_copy(deep=True)
+    changed_config.mcp_servers["A"].command = "a-replaced-server"
+    created: list[set[str]] = []
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            created.append(set(connections))
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            return [_tool(f"{server_name}_search")]
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    set_mcp_task_config_snapshot(full_config)
+    try:
+        with pytest.raises(McpTaskConfigurationError, match="A.*restart"):
+            await get_mcp_tools_by_server(changed_config, server_names={"B"})
+        assert created == []
+
+        unchanged = await get_mcp_tools_by_server(full_config, server_names={"B"})
+        assert list(unchanged) == ["B"]
+        assert created == [{"B"}]
+
+        task_config = full_config.mcp_servers["A"]
+        agent_tools = _configure_task_tools_for_server(
+            [_tool("A_submit"), _tool("A_status"), _tool("A_cancel")],
+            server_name="A",
+            server_config=task_config,
+            tool_name_prefix=True,
+        )
+        assert [tool.name for tool in agent_tools] == ["A_submit"]
+        assert "durable background task" in agent_tools[0].description
+    finally:
+        set_mcp_task_config_snapshot(None)

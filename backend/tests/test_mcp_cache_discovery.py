@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.tools import StructuredTool
@@ -742,3 +743,261 @@ def test_cancelled_discovery_releases_generation_for_waiter(cache_globals, monke
         assert cache_module._initializing_generation is None
 
     asyncio.run(run())
+
+
+def test_a_update_fetches_only_a_oauth_and_reuses_b_client_tools(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "A": {
+                **_http("https://a-v1.example/mcp"),
+                "oauth": {"enabled": True, "token_url": "https://auth-a.example/token"},
+            },
+            "B": {
+                **_http("https://b.example/mcp"),
+                "oauth": {"enabled": True, "token_url": "https://auth-b.example/token"},
+            },
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    created_connections: list[dict[str, dict]] = []
+    oauth_calls: list[str] = []
+
+    class TokenManager:
+        @classmethod
+        def from_extensions_config(cls, _config):
+            return cls()
+
+        def has_oauth_servers(self):
+            return True
+
+        def oauth_server_names(self):
+            return ("A", "B")
+
+        async def get_authorization_header(self, name):
+            oauth_calls.append(name)
+            return f"Bearer header-{name}"
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            created_connections.append({name: dict(connection) for name, connection in connections.items()})
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            return [test_tool(f"{server_name}-discovered-{len(created_connections)}")]
+
+    monkeypatch.setattr("deerflow.mcp.oauth.OAuthTokenManager", TokenManager)
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    old_b_tool = next(tool for tool in first if tool.metadata["deerflow_mcp_source"]["server_name"] == "B")
+    oauth_calls.clear()
+
+    _write_config(
+        cfg,
+        {
+            "A": {
+                **_http("https://a-v2.example/mcp"),
+                "oauth": {"enabled": True, "token_url": "https://auth-a.example/token"},
+            },
+            "B": {
+                **_http("https://b.example/mcp"),
+                "oauth": {"enabled": True, "token_url": "https://auth-b.example/token"},
+            },
+        },
+    )
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    second = asyncio.run(cache_module.initialize_mcp_tools())
+
+    assert oauth_calls == ["A"]
+    assert [set(connections) for connections in created_connections] == [{"A"}, {"B"}, {"A"}]
+    new_b_tool = next(tool for tool in second if tool.metadata["deerflow_mcp_source"]["server_name"] == "B")
+    assert new_b_tool is old_b_tool
+    assert created_connections[-1]["A"]["url"] == "https://a-v2.example/mcp"
+
+
+def test_metadata_only_A_rebuild_preserves_stdio_bindings_sessions_and_B_discovery(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "A": {
+                **_stdio("a-server"),
+                "description": "A old description",
+                "routing": {"mode": "prefer", "priority": 1, "keywords": ["old"]},
+                "tools": {"search": {"routing": {"priority": 2}}},
+            },
+            "B": _stdio("b-server"),
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    discovery_counts = {"A": 0, "B": 0}
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.connections = connections
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            discovery_counts[server_name] += 1
+            count = discovery_counts[server_name]
+            if server_name == "A" and count == 1:
+
+                async def initial_tool(query: str) -> str:
+                    return query
+
+                return [StructuredTool.from_function(coroutine=initial_tool, name="A_search", description="A initial tool")]
+            if server_name == "A":
+
+                async def rebuilt_tool(term: str) -> str:
+                    return term
+
+                return [StructuredTool.from_function(coroutine=rebuilt_tool, name="A_search", description="A rebuilt tool")]
+
+            async def b_tool(query: str) -> str:
+                return query
+
+            return [StructuredTool.from_function(coroutine=b_tool, name="B_search", description="B tool")]
+
+    class SessionContext:
+        def __init__(self, session):
+            self.session = session
+
+        async def __aenter__(self):
+            return self.session
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeSession:
+        async def initialize(self):
+            return None
+
+    sessions: dict[str, object] = {}
+
+    def fake_create_session(connection, **_kwargs):
+        session = sessions.setdefault(connection["command"], FakeSession())
+        return SessionContext(session)
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", fake_create_session)
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    async def run():
+        first = await cache_module.initialize_mcp_tools()
+        first_entry_a = c._server_tool_cache["A"]
+        first_entry_b = c._server_tool_cache["B"]
+        first_a, first_b = first
+        first_config = ExtensionsConfig.from_file()
+        assert first_a.metadata["deerflow_mcp_routing"] == {
+            "mode": "prefer",
+            "priority": 2,
+            "keywords": ["old"],
+        }
+        b_discovery_count_before_update = discovery_counts["B"]
+        first_a_session = await first_entry_a.result.pool.get_session(
+            "A",
+            "metadata-test",
+            build_server_params("A", first_config.mcp_servers["A"]),
+            binding=first_entry_a.result.binding,
+        )
+        first_b_session = await first_entry_b.result.pool.get_session(
+            "B",
+            "metadata-test",
+            build_server_params("B", first_config.mcp_servers["B"]),
+            binding=first_entry_b.result.binding,
+        )
+
+        _write_config(
+            cfg,
+            {
+                "A": {
+                    **_stdio("a-server"),
+                    "description": "A new description",
+                    "routing": {"mode": "prefer", "priority": 9, "keywords": ["new"]},
+                    "tools": {"search": {"routing": {"priority": 17}}},
+                },
+                "B": _stdio("b-server"),
+            },
+        )
+        assert cache_module.refresh_mcp_cache_if_active() is True
+        second = await cache_module.initialize_mcp_tools()
+
+        second_entry_a = c._server_tool_cache["A"]
+        second_entry_b = c._server_tool_cache["B"]
+        second_a, second_b = second
+        second_a_session = await second_entry_a.result.pool.get_session(
+            "A",
+            "metadata-test",
+            build_server_params("A", ExtensionsConfig.from_file().mcp_servers["A"]),
+            binding=second_entry_a.result.binding,
+        )
+        second_b_session = await second_entry_b.result.pool.get_session(
+            "B",
+            "metadata-test",
+            build_server_params("B", ExtensionsConfig.from_file().mcp_servers["B"]),
+            binding=second_entry_b.result.binding,
+        )
+
+        assert second_a is not first_a
+        assert second_a.description == "A rebuilt tool"
+        assert set(second_a.args_schema.model_fields) == {"term"}
+        assert second_a.metadata["deerflow_mcp_routing"] == {
+            "mode": "prefer",
+            "priority": 17,
+            "keywords": ["new"],
+        }
+        assert second_b is first_b
+        assert first_entry_a.result.pool is second_entry_a.result.pool
+        assert first_entry_b.result.pool is second_entry_b.result.pool
+        assert first_entry_a.result.binding is second_entry_a.result.binding
+        assert first_entry_b.result.binding is second_entry_b.result.binding
+        assert second_a_session is first_a_session
+        assert second_b_session is first_b_session
+        assert discovery_counts["B"] == b_discovery_count_before_update
+        assert discovery_counts == {"A": 2, "B": 1}
+
+    asyncio.run(run())
+
+
+def test_user_filtered_mcp_tools_do_not_replace_full_server_scoped_cache(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _http("https://a.example/mcp"), "B": _http("https://b.example/mcp")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    from deerflow.capabilities.runtime import filter_mcp_plugins, installation_id
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    async def fake_discover(config, *, server_names=None):
+        selected = set(config.get_enabled_mcp_servers()) if server_names is None else set(server_names)
+        groups = {}
+        for name in selected:
+            tool = tag_mcp_tool(test_tool(f"{name}-tool"), server_name=name, transport="http")
+            groups[name] = ServerDiscoveryResult(tools=(tool,))
+        return groups
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+
+    full = asyncio.run(cache_module.initialize_mcp_tools())
+    old_a, old_b = full
+    config = ExtensionsConfig.from_file()
+    selected_a = [installation_id("A", config.mcp_servers["A"].model_dump())]
+
+    filtered = filter_mcp_plugins(full, selected_a, config)
+    uncensored = cache_module.get_cached_mcp_tools()
+
+    assert filtered == [old_a]
+    assert uncensored[0] is old_a
+    assert uncensored[1] is old_b
+    assert [tool.metadata["deerflow_mcp_source"]["server_name"] for tool in uncensored] == ["A", "B"]
