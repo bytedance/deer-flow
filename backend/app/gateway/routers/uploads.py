@@ -254,7 +254,7 @@ def _link_staged_no_overwrite(
     symlink — symlinks are excluded from the seeded listing, so one could
     only come from outside) stays an unsafe destination; anything else is a
     plain collision to retry. Any other failure removes the staged file
-    best-effort and propagates; success unlinks it. Staging and destination
+    best-effort and propagates; success also removes it best-effort. Staging and destination
     are co-located in the uploads dir, so the hard link is always same-filesystem.
 
     ``unlink_staged=False`` publishes the link but leaves the staged name in
@@ -278,7 +278,7 @@ def _link_staged_no_overwrite(
             _remove_staged_file(staged_path)
         raise
     if unlink_staged:
-        os.unlink(staged_path)
+        _remove_staged_file(staged_path)
     return file_path
 
 

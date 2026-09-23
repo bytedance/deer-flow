@@ -496,6 +496,35 @@ def test_upload_files_preserves_link_error_and_cleans_staging_after_closing_conv
     assert list(thread_uploads_dir.iterdir()) == []
 
 
+def test_upload_files_succeeds_when_published_staging_cleanup_fails(tmp_path, monkeypatch, caplog):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if str(path).endswith(uploads.UPLOAD_STAGING_SUFFIX):
+            raise PermissionError("staged cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"published bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-cleanup-error", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"published bytes"
+    # The hidden staging name is left for the startup sweep, not reported as a
+    # failed upload after the destination has already been published.
+    staged_paths = list(thread_uploads_dir.glob(".upload-*.part"))
+    assert len(staged_paths) == 1
+    assert "Failed to remove staged upload file" in caplog.text
+
+
 def test_link_staged_preserves_original_error_when_cleanup_fails(tmp_path):
     staged_path = tmp_path / "upload.part"
     staged_path.write_bytes(b"upload bytes")

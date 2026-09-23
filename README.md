@@ -1755,6 +1755,8 @@ incorrectly can make uploaded files unavailable inside the sandbox.
 
 Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
+Once the file is published, a temporary-file cleanup failure is logged without
+failing the upload; hidden staging files are left for the startup sweep.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
