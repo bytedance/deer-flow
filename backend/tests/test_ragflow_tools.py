@@ -1065,3 +1065,203 @@ def test_ragflow_package_has_explicit_init_file() -> None:
     package_dir = Path(ragflow_tools.__file__).resolve().parent
 
     assert (package_dir / "__init__.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_search_artifact_binds_citation_to_exact_retrieved_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "Engineering")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "Manual.pdf", "content": "The limit is 42.", "positions": [[3, 10, 20, 30, 40]]}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    runtime = SimpleNamespace(context={})
+    content, artifact = await ragflow_tools._knowledge_search_entrypoint("limit", runtime)
+    source = artifact["knowledge_sources"]["sources"][0]
+    assert source["document_id"] == "doc-a"
+    assert source["chunk_id"] == "chunk-a"
+    assert source["document_name"] == "Manual.pdf"
+    assert source["text"] == "The limit is 42."
+    assert source["pages"] == [3]
+    assert f"](#knowledge-{source['id']})" in content
+    assert DATASET_ID_1 not in content
+    assert "doc-a" not in content
+    _, next_artifact = await ragflow_tools._knowledge_search_entrypoint("limit", runtime)
+    assert next_artifact["knowledge_sources"]["sources"][0]["id"] != source["id"]
+
+
+@pytest.mark.asyncio
+async def test_search_artifact_redacts_credentials_and_has_no_sources_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "ragflow-secret")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "ragflow-secret", "content": "ragflow-secret"}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    result = await ragflow_tools._knowledge_search_entrypoint("query", SimpleNamespace(context={}))
+    assert "ragflow-secret" not in str(result)
+    content, artifact = await ragflow_tools._knowledge_search_entrypoint("", SimpleNamespace(context={}))
+    assert content.startswith("Error:")
+    assert artifact is None
+
+
+@pytest.mark.asyncio
+async def test_citation_artifact_survives_native_tool_node_and_message_serialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.messages import AIMessage, messages_from_dict, messages_to_dict
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    client = FakeRAGFlowClient(
+        all_datasets=[_dataset(DATASET_ID_1, "Engineering")],
+        retrieval={"chunks": [{"id": "chunk-a", "dataset_id": DATASET_ID_1, "document_id": "doc-a", "document_keyword": "Manual.pdf", "content": "Limit: 42."}]},
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda _: client)
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", ToolNode([ragflow_tools.knowledge_search_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    result = await builder.compile().ainvoke({"messages": [AIMessage(content="", tool_calls=[{"name": "knowledge_search", "args": {"query": "limit"}, "id": "call-a"}])]})
+    tool_message = result["messages"][-1]
+    assert tool_message.status == "success"
+    assert tool_message.artifact["knowledge_sources"]["sources"][0]["document_id"] == "doc-a"
+    restored = messages_from_dict(messages_to_dict([tool_message]))[0]
+    assert restored.artifact == tool_message.artifact
+    assert restored.content == tool_message.content
+
+
+def test_subagent_forwards_only_cited_captured_sources() -> None:
+    from deerflow.community.ragflow.sources import cited_source_artifact
+
+    sources = [{"id": "a", "text": "first"}, {"id": "b", "text": "second"}]
+    messages = [{"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": sources}}}]
+    assert cited_source_artifact(messages, "[citation:1](#knowledge-a)") == {"knowledge_sources": {"version": 1, "sources": [sources[0]]}}
+    assert cited_source_artifact(messages, "[citation:3](#knowledge-invented)") is None
+    assert cited_source_artifact([{**messages[0], "type": "ai"}], "[citation:1](#knowledge-a)") is None
+
+
+def test_citation_budget_never_emits_partial_links_or_unseen_artifact_text() -> None:
+    from deerflow.community.ragflow.formatting import format_retrieval_sources
+
+    chunks = [{"id": f"chunk-{i}", "dataset_id": DATASET_ID_1, "document_id": "doc", "content": "X" * 1000} for i in range(4)]
+    content, artifact = format_retrieval_sources({"chunks": chunks}, dataset_names_by_id={DATASET_ID_1: "Knowledge"}, max_total_chars=200, max_chars_per_chunk=100)
+    assert len(content) <= 200
+    sources = artifact["knowledge_sources"]["sources"]
+    assert len(sources) == 1
+    assert f"](#knowledge-{sources[0]['id']})" in content
+    assert sources[0]["text"] in content
+    assert sources[0]["truncated"] is True
+
+
+def test_task_command_preserves_child_source_artifact() -> None:
+    from deerflow.tools.builtins.task_tool import _task_result_command
+
+    source = {"id": "abc", "text": "evidence"}
+    message = {"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": [source]}}}
+    command = _task_result_command(tool_call_id="task-1", status="completed", result="Answer [citation:1](#knowledge-abc)", source_messages=[message])
+    assert command.update["messages"][0].artifact["knowledge_sources"]["sources"] == [source]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count", [1, 100, 101, 200, 1000])
+async def test_large_document_scope_batches_provider_validation(monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+    document_ids = [f"doc-{index:04d}" for index in range(count)]
+
+    class StrictClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            ids = [value for key, value in params if key == "ids"]
+            assert 1 <= len(ids) <= 100
+            assert dict(params)["page"] == "1"
+            assert int(dict(params)["page_size"]) == len(ids)
+            return await super().list_documents(dataset_id, params=params)
+
+    fake = StrictClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Documents")]},
+        documents_by_dataset_id={DATASET_ID_1: [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in document_ids]},
+    )
+    _install(monkeypatch, fake)
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": [DATASET_ID_1], "document_filters": [{"dataset_id": DATASET_ID_1, "document_ids": document_ids}]},
+    )
+    assert result == "No relevant content found."
+    assert len(fake.document_list_calls) == (count + 99) // 100
+    assert [value for _, params in fake.document_list_calls for key, value in params if key == "ids"] == document_ids
+    assert len(fake.retrieve_calls) == 1
+    assert fake.retrieve_calls[0][1]["document_ids"] == document_ids
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["missing", "running", "empty", "connection", "protocol"])
+async def test_large_document_scope_later_batch_fails_closed(monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    document_ids = [f"doc-{index:04d}" for index in range(101)]
+
+    class LaterBatchFailureClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            ids = [value for key, value in params if key == "ids"]
+            assert len(ids) <= 100
+            if document_ids[-1] in ids:
+                if failure == "connection":
+                    raise RAGFlowConnectionError("unavailable")
+                if failure == "protocol":
+                    return {"data": {"docs": None}}
+            return await super().list_documents(dataset_id, params=params)
+
+    documents = [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in document_ids]
+    if failure == "missing":
+        documents.pop()
+    elif failure == "running":
+        documents[-1]["run"] = "RUNNING"
+    elif failure == "empty":
+        documents[-1]["chunk_count"] = 0
+    fake = LaterBatchFailureClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Documents")]},
+        documents_by_dataset_id={DATASET_ID_1: documents},
+    )
+    _install(monkeypatch, fake)
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": [DATASET_ID_1], "document_filters": [{"dataset_id": DATASET_ID_1, "document_ids": document_ids}]},
+    )
+    if failure in {"missing", "running", "empty"}:
+        assert "selected knowledge scope is no longer available" in result
+    elif failure == "connection":
+        assert "Unable to connect" in result
+    else:
+        assert "invalid document list" in result
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_large_document_scope_batches_share_global_concurrency_limit() -> None:
+    filters = [{"dataset_id": f"dataset-{index}", "document_ids": [f"doc-{index}-{number}" for number in range(201)]} for index in range(3)]
+    release = asyncio.Event()
+    saturated = asyncio.Event()
+    active = 0
+    peak = 0
+
+    class BarrierClient(FakeRAGFlowClient):
+        async def list_documents(self, dataset_id: str, *, params: list[tuple[str, str]]) -> dict:
+            nonlocal active, peak
+            ids = [value for key, value in params if key == "ids"]
+            assert len(ids) <= 100
+            active += 1
+            peak = max(peak, active)
+            if active >= 4:
+                saturated.set()
+            try:
+                await release.wait()
+                return {"data": {"docs": [{"id": doc_id, "run": "DONE", "chunk_count": 1} for doc_id in reversed(ids)]}}
+            finally:
+                active -= 1
+
+    task = asyncio.create_task(ragflow_tools._validate_document_filters(BarrierClient(), filters))
+    try:
+        await asyncio.wait_for(saturated.wait(), timeout=2)
+        assert peak == 4
+    finally:
+        release.set()
+        result, error = await task
+    assert error is None
+    assert result == {item["dataset_id"]: item["document_ids"] for item in filters}
+    assert peak == 4

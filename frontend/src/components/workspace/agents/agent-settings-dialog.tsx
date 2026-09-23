@@ -23,10 +23,19 @@ import {
 } from "@/components/ui/select";
 import { useUpdateAgent } from "@/core/agents";
 import type { Agent, ReasoningEffort } from "@/core/agents";
+import { useKnowledgeBaseEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  buildKnowledgeScopeSnapshot,
+  knowledgeScopeToSelection,
+  type KnowledgeScopeSelection,
+} from "@/core/knowledge";
 import { useModels } from "@/core/models/hooks";
 import { useSubagents } from "@/core/subagents";
 
+import { KnowledgeScopeSelector } from "../knowledge-scope-selector";
+
+import { AgentCapabilitySelection } from "./agent-capability-selection";
 import {
   allowedSubagentsToSelection,
   DEFAULT_MODEL_VALUE,
@@ -39,6 +48,15 @@ import {
   type SubagentAccessSelection,
   thinkingEnabledToSelection,
 } from "./agent-settings-dialog-helpers";
+
+function sameSelection(left: string[] | null, right: string[] | null) {
+  if (left === null || right === null) return left === right;
+  const selected = new Set(left);
+  return (
+    selected.size === new Set(right).size &&
+    right.every((id) => selected.has(id))
+  );
+}
 
 const REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high"];
 
@@ -61,9 +79,24 @@ export function AgentSettingsDialog({
 }: AgentSettingsDialogProps) {
   const { t } = useI18n();
   const { models } = useModels();
+  const { scopeSelectionEnabled } = useKnowledgeBaseEnabled();
+  const [knowledgeSelection, setKnowledgeSelection] =
+    useState<KnowledgeScopeSelection>(() =>
+      knowledgeScopeToSelection(agent.knowledge_scope),
+    );
+  const [knowledgeChanged, setKnowledgeChanged] = useState(false);
   const { subagents } = useSubagents();
   const subagentDescriptionId = useId();
   const updateAgent = useUpdateAgent();
+  // Keep the opening snapshot even if a background refetch updates agent props.
+  const [initialSelections] = useState(() => ({
+    plugins: agent.mcp_plugins ?? null,
+    skills: agent.skills ?? null,
+  }));
+  const [plugins, setPlugins] = useState<string[] | null>(
+    agent.mcp_plugins ?? null,
+  );
+  const [skills, setSkills] = useState<string[] | null>(agent.skills ?? null);
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
@@ -142,6 +175,16 @@ export function AgentSettingsDialog({
         name: agent.name,
         request: {
           display_name: displayName.trim() || null,
+          ...(knowledgeChanged && {
+            knowledge_scope:
+              knowledgeSelection.mode === "all"
+                ? null
+                : buildKnowledgeScopeSnapshot(knowledgeSelection),
+          }),
+          ...(!sameSelection(plugins, initialSelections.plugins) && {
+            mcp_plugins: plugins,
+          }),
+          ...(!sameSelection(skills, initialSelections.skills) && { skills }),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -173,6 +216,62 @@ export function AgentSettingsDialog({
         </DialogHeader>
 
         <div className="min-h-0 min-w-0 space-y-4 overflow-y-auto overscroll-contain px-1 py-1">
+          <AgentCapabilitySelection
+            plugins={plugins}
+            skills={skills}
+            onPluginsChange={setPlugins}
+            onSkillsChange={setSkills}
+          />
+          {(scopeSelectionEnabled || agent.knowledge_scope) && (
+            <div className="space-y-1.5 rounded-md border p-3">
+              <p className="text-sm font-medium">
+                {t.agents.settingsKnowledge}
+              </p>
+              <p className="text-muted-foreground text-xs">
+                {t.agents.settingsKnowledgeHint}
+              </p>
+              <KnowledgeScopeSelector
+                agentName={agent.name}
+                selection={knowledgeSelection}
+                description={t.agents.settingsKnowledgeHint}
+                showLabel
+                disabled={updateAgent.isPending}
+                unavailableReason={
+                  !scopeSelectionEnabled
+                    ? t.knowledge.scope.loadFailed
+                    : agent.tool_groups != null &&
+                        !agent.tool_groups.includes("knowledge")
+                      ? t.knowledge.scope.agentUnavailable
+                      : undefined
+                }
+                onChange={(selection) => {
+                  setKnowledgeSelection(selection);
+                  setKnowledgeChanged(true);
+                }}
+              />
+              {knowledgeSelection.mode === "selected" && (
+                <p className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
+                  {knowledgeSelection.datasets
+                    .map((dataset) => dataset.name)
+                    .join(", ")}
+                </p>
+              )}
+              {knowledgeSelection.mode !== "all" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={updateAgent.isPending}
+                  onClick={() => {
+                    setKnowledgeSelection({ mode: "all" });
+                    setKnowledgeChanged(true);
+                  }}
+                >
+                  {t.agents.settingsKnowledgeReset}
+                </Button>
+              )}
+            </div>
+          )}
           <div className="space-y-1.5">
             <label htmlFor="agent-display-name" className="text-sm font-medium">
               {t.agents.settingsDisplayName}

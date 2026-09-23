@@ -941,6 +941,17 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** Deleting an uploaded document no longer deletes the converted
+  Markdown beside it. Conversion names a companion after the document's stem
+  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
+  a document can belong to another document sharing the stem, or to the user:
+  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
+  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
+  document, stay listed, and can be deleted on their own. ([#5673])
+- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
+  acceptance checks. Readable empty files now satisfy `exists` and
+  `file_written` and deterministically fail `non-empty`, instead of remaining
+  UNVERIFIED. ([#5559])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -1018,6 +1029,15 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
+- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
+  reporting an exactly-full result as truncated. They hold the whole listing —
+  the raw stream is capped above `max_results` and reports its own cut-off — but
+  they returned as soon as they had collected `max_results` filtered matches, so
+  a tree holding exactly that many — and no more — came back flagged as cut off
+  and the tool told the model the result was incomplete. They now look one match
+  past the cap before deciding, the rule AIO's `glob` branches already apply.
+  This concerns the filtered-match cap only; the raw-output cap
+  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2772,6 +2792,20 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **uploads:** Document conversion no longer re-opens the upload by name. The
+  Gateway converted the committed file and the embedded client converted the
+  copy it had just placed in the thread's uploads directory, so a sandbox that
+  replaced that name with a symlink in between had a host file converted into
+  the thread as the `.md` companion. The Gateway now converts a private copy of
+  the staged bytes, read through the descriptor it wrote, and the client
+  converts the caller's own source file. ([#5611])
+- **client:** `DeerFlowClient.upload_files` no longer writes through a
+  symlink. A symlink planted in the sandbox-writable uploads directory, at an
+  upload's name or its Markdown companion's name, made the embedded client
+  overwrite the host file it pointed to while reporting success. The file is
+  now skipped and listed in `skipped_files` with `success: false`, matching
+  the Gateway; an unsafe companion is left out and the upload kept. Copies
+  keep the source's permission bits and timestamps. ([#5578])
 - **uploads:** Deleting an upload no longer follows a symlink to delete a
   different file. A symlink planted in the sandbox-writable uploads directory
   made `DELETE /api/threads/{id}/uploads/{filename}` (and
@@ -2941,6 +2975,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Internal
 
+- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
+  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
+  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
+  first write dropped after a full → delta migration
+  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
+  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
+  the patch; the full → delta migration contract test remains the gate.
+  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged. ([#5734])
 - **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
   a DOM environment. ([#3703], [#4453])
 - **tests:** Require explicit opt-in for live client tests. ([#4482])
@@ -4298,5 +4340,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5534]: https://github.com/bytedance/deer-flow/pull/5534
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734

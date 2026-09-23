@@ -2,6 +2,8 @@
 
 import errno
 import os
+import shutil
+import stat
 from unittest.mock import patch
 
 import pytest
@@ -9,14 +11,41 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    copy_upload_file_no_symlink,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
+
+
+@pytest.mark.skipif(not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")), reason="POSIX-only: O_NOFOLLOW + fchmod")
+def test_apply_upload_sandbox_permits_propagates_permission_errors(tmp_path):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+
+    with patch.object(os, "fchmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
+    assert stat.S_IMODE(upload.stat().st_mode) == 0o600
+
+
+def test_apply_upload_sandbox_permits_fallback_propagates_permission_errors(tmp_path, monkeypatch):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    with patch.object(os, "chmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
 
 # ---------------------------------------------------------------------------
 # normalize_filename
@@ -192,6 +221,100 @@ class TestWriteUploadFileNoSymlink:
 
 
 # ---------------------------------------------------------------------------
+# copy_upload_file_no_symlink
+# ---------------------------------------------------------------------------
+
+
+class TestCopyUploadFileNoSymlink:
+    def test_copies_content_mode_and_timestamps(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"hello")
+        os.chmod(src, 0o640)
+        os.utime(src, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+        dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest == uploads / "notes.txt"
+        assert dest.read_bytes() == b"hello"
+        if os.chmod in os.supports_fd:
+            assert stat.S_IMODE(os.stat(dest).st_mode) == 0o640
+        if os.utime in os.supports_fd:
+            assert os.stat(dest).st_mtime_ns == 1_700_000_000_000_000_000
+
+    def test_overwrites_existing_regular_file(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "notes.txt").write_bytes(b"old contents")
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"new contents"
+
+    def test_rejects_symlink_destination(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"original")
+        link = uploads / "notes.txt"
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"attacker-chosen target")
+
+        with pytest.raises(UnsafeUploadPathError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert outside.read_bytes() == b"original"
+        assert link.is_symlink()
+
+    def test_rejects_copying_a_file_onto_itself(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = uploads / "notes.txt"
+        src.write_bytes(b"IMPORTANT")
+
+        with pytest.raises(shutil.SameFileError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert src.read_bytes() == b"IMPORTANT"
+
+    def test_rejects_a_hardlink_to_the_destination(self, tmp_path):
+        """Identity, not path text: another name for the same inode is the same file."""
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        dest = uploads / "notes.txt"
+        dest.write_bytes(b"IMPORTANT")
+        src = uploads / "same-inode.txt"
+        try:
+            os.link(dest, src)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"hardlinks unavailable on this platform: {exc}")
+
+        with pytest.raises(shutil.SameFileError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"IMPORTANT"
+
+    def test_missing_source_leaves_existing_destination_untouched(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        (uploads / "notes.txt").write_bytes(b"keep me")
+
+        with pytest.raises(FileNotFoundError):
+            copy_upload_file_no_symlink(uploads, "notes.txt", tmp_path / "missing.txt")
+
+        assert (uploads / "notes.txt").read_bytes() == b"keep me"
+
+
+# ---------------------------------------------------------------------------
 # list_files_in_dir
 # ---------------------------------------------------------------------------
 
@@ -287,6 +410,21 @@ class TestDeleteFileSafe:
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
 
+    def test_delete_keeps_the_converted_markdown(self, tmp_path):
+        """Companion ownership cannot be proven from the name, so nothing is guessed at."""
+        (tmp_path / "a.docx").write_bytes(b"DOCX")
+        (tmp_path / "a.md").write_text("converted from the docx", encoding="utf-8")
+        (tmp_path / "a.pdf").write_bytes(b"PDF")
+        (tmp_path / "a_1.md").write_text("converted from the pdf", encoding="utf-8")
+
+        result = delete_file_safe(tmp_path, "a.pdf")
+
+        assert result["success"] is True
+        assert not (tmp_path / "a.pdf").exists()
+        # a.md belongs to a.docx; deleting a.pdf used to remove it.
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "converted from the docx"
+        assert (tmp_path / "a_1.md").read_text(encoding="utf-8") == "converted from the pdf"
+
     def test_delete_symlink_to_sibling_upload_keeps_target(self, tmp_path):
         """A symlink planted in the uploads dir must not delete the upload it aliases."""
         victim = tmp_path / "victim.pdf"
@@ -302,7 +440,7 @@ class TestDeleteFileSafe:
             raise
 
         with pytest.raises(FileNotFoundError):
-            delete_file_safe(tmp_path, "alias.pdf", convertible_extensions={".pdf"})
+            delete_file_safe(tmp_path, "alias.pdf")
 
         assert victim.read_bytes() == b"pdf-bytes"
         assert companion.exists()

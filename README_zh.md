@@ -55,6 +55,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [运行应用](#运行应用)
       - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
+      - [升级已有的代码仓库](#升级已有的代码仓库)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
       - [Sandbox 模式](#sandbox-模式)
@@ -277,6 +278,13 @@ make down   # 停止并移除容器
 访问地址：http://localhost:2026
 
 更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+#### 升级已有的代码仓库
+
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`。停止当前运行的服务后，
+执行 `git pull --ff-only`，再按原运行方式启动。日常源码升级不需要再次运行 `make config`
+或 `make docker-init`；如果新版本需要变更配置，请在重启前运行 `make config-upgrade`。
+各运行方式的命令见[运维与排障](frontend/src/content/zh/application/operations-and-troubleshooting.mdx#升级已有的代码仓库)。
 
 #### 方式二：本地开发
 
@@ -643,6 +651,8 @@ DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding
 
 使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为主智能体和自定义智能体聊天开放模式选择器右侧的纯图标“知识库”按钮。图标持续高亮表示知识检索已启用，普通状态表示本轮检索已关闭。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。同一个配置开关统一控制两类聊天；关闭时两类输入框都不显示、也不提交知识范围。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。回复待处理的澄清问题或编辑后重新生成时，若提交了当前选择器快照则以该新范围为准，未提交时继承来源轮次已接纳的范围；知识库仍处于“全部可检索文件”时，展开文件区域不会加载目录，切换为“指定文件”后才加载。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。`knowledge_base` 是与 provider 无关的能力开关，只控制知识能力和选择器是否启用；RAGFlow 的连接、dataset allowlist 和检索参数（`base_url`、`api_key`、`datasets`、`page_size`、阈值及输出上限）必须配置在 `tools[].name: knowledge_search` 条目中，`knowledge_base` 中的这些字段不会被读取。
 
+每条消息仍可选择最多 1000 份文档；同一知识库超过 100 份时，DeerFlow 会按每批最多 100 份校验，保留完整选择范围。任何一批文档不可访问或不可检索，都会拒绝本次检索。
+
 自定义智能体聊天请求会同时携带该智能体名称作为 `assistant_id` 和
 `context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
 
@@ -771,6 +781,12 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。
 
 **摘要压缩**：在单个 session 内，DeerFlow 会比较积极地管理上下文，包括总结已完成的子任务、把中间结果转存到文件系统、压缩暂时不重要的信息。这样在长链路、多步骤任务里，它也能保持聚焦，而不会轻易把上下文窗口打爆。
+
+### 读取引用的会话
+
+Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
+
+无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
 
 ### 长期记忆
 

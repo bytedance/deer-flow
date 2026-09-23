@@ -28,3 +28,40 @@ while handing off to the wait queue.
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
+
+### Managed shared models (`config/managed_models.py`)
+
+`ManagedModelStore` persists a Fernet-encrypted catalog plus its generated local key
+under `runtime_home()/managed-models`. Files are atomically replaced with temporary
+file permissions; complete read/modify/write transactions hold the process lock and
+cross-process sidecar lock. Missing keys and invalid catalogs fail closed. Backups
+and shared deployments must include both files. SQL storage does not replicate this
+catalog. Admin-supplied endpoints can address local providers; only trusted admins
+may create or probe them.
+
+`get_app_config()` and `reload_app_config()` merge enabled managed models after YAML
+profiles, with YAML names winning conflicts. A cached effective snapshot uses the
+base config identity and content signatures of both files. Never mutate a previously
+returned AppConfig: runtime-scoped and explicitly injected configurations remain
+authoritative. `_managed_model_names` is private source metadata, not provider kwargs.
+Direct `AppConfig.from_file()` continues to read only operator configuration.
+
+`config/managed_model_providers.py` owns endpoint detection and provider defaults.
+Managed profiles normally use `langchain_openai:ChatOpenAI`. Official HTTPS
+`api.deepseek.com` endpoints (default port, root or `/v1` path) instead resolve to
+`PatchedChatDeepSeek` with explicit thinking on/off settings and reasoning-effort
+support. Resolve from the parsed endpoint, never a model-name substring; proxies,
+lookalike hosts and other paths retain the generic contract. This is derived runtime
+configuration: no catalog migration or new API fields. The native `api_base` field
+preserves the administrator's endpoint; the adapter preserves `reasoning_content`
+and sends `max_tokens` rather than OpenAI's `max_completion_tokens`.
+
+Full updates require the current revision; omission means create, an omitted API
+key retains the saved key and an empty string clears it. Never serialize SecretStr
+masking as a saved key. Read APIs return `has_api_key`, never a credential.
+The Gateway probe constructs the resolved class off-loop and applies the profile's
+`when_thinking_disabled` settings to its bounded forced-tool request. It does not
+repeat provider selection or persist the probe override.
+Tests: `test_managed_models.py`, `test_managed_deepseek.py` (real SDK serialization
+with an HTTP double), opt-in `test_managed_deepseek_live.py`, and
+`tests/blocking_io/test_managed_models.py`.

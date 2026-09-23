@@ -129,6 +129,11 @@ for (const viewport of [
         );
       }
       const expectWithinViewport = async () => {
+        // The icon editor adds body content on short screens. Scroll the JSON
+        // editor into view while keeping the pinned heading/actions visible.
+        await textbox.evaluate((element) =>
+          element.scrollIntoView({ block: "center" }),
+        );
         for (const element of [
           dialog,
           dialog.getByRole("heading"),

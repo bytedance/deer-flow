@@ -54,11 +54,16 @@ def remote_search_command(search: str, root: str, *, limit: int) -> str:
     quoted = shlex.quote(root)
     # One extra line is the truncation signal; the parser drops it.
     n = int(limit) + 1
+    # ``set +e`` stays outermost (pinned by existing tests); the rest runs in a
+    # ( ... ) subshell: a bare ``exit`` in the implicit persistent session kills
+    # the session's shell process and the AIO server's response path hangs
+    # forever; a subshell ``exit`` only kills the subshell, so the session
+    # survives and the exit code propagates unchanged.
     return (
-        f"set +e; if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 0; fi; "
+        f"set +e; ( if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 0; fi; "
         f'_st=/tmp/df_search_$$; {{ {search}; echo $? > "$_st"; }} | head -n {n}; '
         f'st=$(cat "$_st" 2>/dev/null); rm -f "$_st"; '
-        f"printf '\\n%s\\n' {_STATUS_PREFIX}\"$st\"; exit 0"
+        f"printf '\\n%s\\n' {_STATUS_PREFIX}\"$st\"; exit 0 )"
     )
 
 
