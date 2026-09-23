@@ -183,6 +183,7 @@ async def test_drained_async_context_drains_repeated_cancellation_during_exit():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+
 @pytest.mark.anyio
 async def test_drained_async_context_exit_failure_replaces_cancellation_during_exit():
     exit_started = asyncio.Event()
@@ -222,4 +223,3 @@ async def test_drained_async_context_exit_failure_replaces_cancellation_during_e
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
