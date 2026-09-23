@@ -479,7 +479,18 @@ for (let i = 0; i < lines.length; i++) {
 
     // Handle messages-tuple event (if the AI reply is here)
     if (obj.type === 'ai' || obj.role === 'assistant') {
-      if (obj.content) finalContent += obj.content;
+      if (obj.content) {
+        if (Array.isArray(obj.content)) {
+          // Extract and join text blocks if content is an array
+          finalContent += obj.content
+            .filter((block) => block.type === 'text')
+            .map((block) => block.text)
+            .join('');
+        } else {
+          // Handle the string-content path
+          finalContent += obj.content;
+        }
+      }
     }
   } catch (e) {
     // Ignore lines that cannot be parsed
@@ -964,7 +975,18 @@ for (let i = 0; i < lines.length; i++) {
 
     // Handle messages-tuple event (if the AI reply is here)
     if (obj.type === 'ai' || obj.role === 'assistant') {
-      if (obj.content) finalContent += obj.content;
+      if (obj.content) {
+        if (Array.isArray(obj.content)) {
+          // Extract and join text blocks if content is an array
+          finalContent += obj.content
+            .filter((block) => block.type === 'text')
+            .map((block) => block.text)
+            .join('');
+        } else {
+          // Handle the string-content path
+          finalContent += obj.content;
+        }
+      }
     }
   } catch (e) {
     // Ignore lines that cannot be parsed
