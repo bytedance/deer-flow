@@ -52,6 +52,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
@@ -240,6 +241,7 @@ class DeerFlowClient:
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
+        self._thread_incarnations: dict[str, str] = {}
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -948,7 +950,15 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         run_id = str(uuid.uuid4())
-        context: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+        thread_incarnations = getattr(self, "_thread_incarnations", None)
+        if thread_incarnations is None:
+            thread_incarnations = self._thread_incarnations = {}
+        thread_incarnation = thread_incarnations.setdefault(thread_id, uuid.uuid4().hex)
+        context: dict[str, Any] = {
+            "thread_id": thread_id,
+            "run_id": run_id,
+            THREAD_INCARNATION_CONTEXT_KEY: thread_incarnation,
+        }
         for key in _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS:
             if key in kwargs:
                 context[key] = kwargs[key]
@@ -1778,10 +1788,9 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts

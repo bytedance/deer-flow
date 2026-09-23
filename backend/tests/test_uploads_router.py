@@ -372,6 +372,77 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
     make_writable.assert_any_call(thread_uploads_dir / "report.md")
 
 
+def test_upload_files_removes_the_staged_part_when_the_platform_blocks_an_open_unlink(tmp_path, monkeypatch):
+    """A staged ``.part`` that is still open must neither fail the upload nor leak.
+
+    Windows refuses to remove a file that still has an open handle, and the
+    conversion path deliberately holds a descriptor on the staged inode across
+    the link commit (that descriptor is what keeps conversion reading the bytes
+    this request wrote). Reproduce the resulting sharing violation portably by
+    pinning the staged name for as long as the descriptor lives: the commit's
+    own removal attempt would raise ``PermissionError``, and the deferred one
+    after the descriptor is released succeeds.
+    """
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    async def fake_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    pinned: set[str] = set()
+    real_unlink = os.unlink
+    real_prepare_upload_destination = uploads._prepare_upload_destination
+    real_copy_fd_to_path = upload_ingestion._copy_fd_to_path
+
+    def prepare_upload_destination(uploads_dir, display_filename):
+        upload_temp = real_prepare_upload_destination(uploads_dir, display_filename)
+        pinned.add(str(upload_temp.temp_path))
+        return upload_temp
+
+    def copy_fd_to_path(fd: int, dest: Path) -> None:
+        try:
+            real_copy_fd_to_path(fd, dest)
+        finally:
+            # The descriptor is gone: the staged inode is removable again.
+            pinned.clear()
+
+    def unlink(path, *args, **kwargs):
+        if str(path) in pinned:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(uploads, "_prepare_upload_destination", prepare_upload_destination)
+    monkeypatch.setattr(upload_ingestion, "_copy_fd_to_path", copy_fd_to_path)
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(uploads, "_make_file_sandbox_writable"),
+    ):
+        file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    assert result.files[0].filename == "report.pdf"
+    assert result.files[0].markdown_file == "report.md"
+    assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert not list(thread_uploads_dir.glob(f"{uploads.UPLOAD_STAGING_PREFIX}*{uploads.UPLOAD_STAGING_SUFFIX}"))
+
+
 def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -1246,18 +1317,23 @@ def test_upload_files_closes_conversion_descriptor_when_cancelled_while_copy_is_
     assert duplicated[0] in closed, "the descriptor handed to the queued copy was never closed"
 
 
-def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
+def test_delete_uploaded_file_keeps_the_converted_markdown(tmp_path):
+    """The .md next to a document may belong to another document, or to the user."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
+    (thread_uploads_dir / "report.docx").write_bytes(b"docx-bytes")
+    (thread_uploads_dir / "report.md").write_text("converted from the docx", encoding="utf-8")
     (thread_uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
-    (thread_uploads_dir / "report.md").write_text("converted", encoding="utf-8")
+    (thread_uploads_dir / "report_1.md").write_text("converted from the pdf", encoding="utf-8")
 
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
         result = asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-aio", "report.pdf", request=MagicMock()))
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     assert not (thread_uploads_dir / "report.pdf").exists()
-    assert not (thread_uploads_dir / "report.md").exists()
+    # report.md belongs to report.docx; deleting report.pdf used to remove it.
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted from the docx"
+    assert (thread_uploads_dir / "report_1.md").read_text(encoding="utf-8") == "converted from the pdf"
 
 
 def test_delete_uploaded_file_rejects_symlink_to_sibling_upload(tmp_path):

@@ -941,6 +941,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** Deleting an uploaded document no longer deletes the converted
+  Markdown beside it. Conversion names a companion after the document's stem
+  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
+  a document can belong to another document sharing the stem, or to the user:
+  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
+  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
+  document, stay listed, and can be deleted on their own. ([#5673])
 - **subagents:** Recognize zero-byte regular deliverables in remote sandbox
   acceptance checks. Readable empty files now satisfy `exists` and
   `file_written` and deterministically fail `non-empty`, instead of remaining
@@ -2976,6 +2983,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Internal
 
+- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
+  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
+  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
+  first write dropped after a full → delta migration
+  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
+  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
+  the patch; the full → delta migration contract test remains the gate.
+  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged. ([#5734])
 - **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
   a DOM environment. ([#3703], [#4453])
 - **tests:** Require explicit opt-in for live client tests. ([#4482])
@@ -4339,3 +4354,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734

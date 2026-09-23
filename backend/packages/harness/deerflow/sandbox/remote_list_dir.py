@@ -14,9 +14,10 @@ not an error.
 
 from __future__ import annotations
 
+import os
 import shlex
 
-from deerflow.sandbox.search import should_ignore_path
+from deerflow.sandbox.search import IGNORE_PATTERNS, should_ignore_path
 
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _MISSING_ROOT = "missing"
@@ -31,6 +32,12 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     quoted = shlex.quote(path)
     depth = int(max_depth)
     n = int(limit)
+    # Match the parser's host-platform case policy. Prune ignored descendants
+    # before head so they cannot consume the visible listing's output budget.
+    name_test = "-iname" if os.path.normcase("A") == "a" else "-name"
+    # IGNORE_PATTERNS must contain basename patterns (no '/'); -name/-iname do not match paths.
+    ignored = " -o ".join(f"{name_test} {shlex.quote(pattern)}" for pattern in IGNORE_PATTERNS)
+    prune = f"\\( {ignored} \\) -prune -o " if ignored else ""
     # Status file is written by the find side of the pipe, then printed AFTER
     # head so a 500-line listing cannot truncate the marker. ``set +e`` undoes
     # a login-profile ``set -e`` so a failing find still records $?. End with
@@ -45,7 +52,11 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     return (
         f"set +e; ( if [ ! -e {quoted} ]; then printf '%s\\n' {_STATUS_PREFIX}{_MISSING_ROOT}; exit 1; fi; "
         f"_st=/tmp/df_find_$$; "
-        f"{{ find -H {quoted} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null; "
+        # Print the explicit root separately and only filter its descendants.
+        # Unlike a -path root exemption, this treats glob metacharacters in
+        # the root literally and still permits listing an ignored root itself.
+        f"{{ printf '%s\\n' {quoted}; "
+        f"find -H {quoted} -mindepth 1 -maxdepth {depth} {prune}\\( -type f -o -type d \\) -print 2>/dev/null; "
         f'echo $? > "$_st"; }} | head -n {n}; '
         f'st=$(cat "$_st" 2>/dev/null); '
         f"printf '\\n%s\\n' {_STATUS_PREFIX}$st; "
@@ -121,8 +132,7 @@ def parse_remote_list_dir_output(
             if not should_ignore_path(entry[len(prefix) :]):
                 kept.append(entry)
         else:
-            # ``find -H`` prints the resolved target when the root is a symlink,
-            # so an entry may not carry the requested prefix. Keep it: a path
-            # that cannot be placed relative to the root must not disappear.
+            # Defensive fallback for unexpected entries outside the requested
+            # prefix: root-relative ignore matching cannot classify them.
             kept.append(entry)
     return kept
