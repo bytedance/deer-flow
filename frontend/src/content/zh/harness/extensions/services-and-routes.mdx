@@ -116,8 +116,8 @@ Gateway 在**所有宿主路由之后**挂载贡献的路由，所以匹配时�
 
 贡献的路由与宿主 API 共用同一套中间件，而且无法退出：
 
-- **认证。** 没有有效会话或个人访问令牌的请求，在你的处理函数运行之前就会得到 `401`。
-- **CSRF。** 来自浏览器会话的 `POST`、`PUT`、`PATCH` 或 `DELETE` 必须在 `X-CSRF-Token` 头里带上 `csrf_token` cookie 的值，DeerFlow 前端已经这样做了。缺少时请求在你的处理函数运行之前就会得到 `403`。用 `Authorization: Bearer` 头认证的请求跳过这项检查。
+- **认证。** 未认证的请求在你的处理函数运行之前就会得到 `401`。个人访问令牌（PAT）不能访问扩展贡献的路由：即使令牌有效，宿主也会在处理函数运行之前返回 `403 {"detail": "PAT credentials are not permitted on this route"}`。
+- **CSRF。** 来自浏览器会话的 `POST`、`PUT`、`PATCH` 或 `DELETE` 必须在 `X-CSRF-Token` 头里带上 `csrf_token` cookie 的值，DeerFlow 前端已经这样做了。缺少时请求在你的处理函数运行之前就会得到 `403`。Bearer 头会跳过 CSRF 检查，但不会让 PAT 获得访问扩展贡献路由的权限。
 
 当 Gateway 以 `DEER_FLOW_AUTH_DISABLED=1` 运行时（本地开发开关，`DEER_FLOW_ENV` 或 `ENVIRONMENT` 为 `prod` 或 `production` 时无效），每个请求都以一个合成的管理员用户运行，两项检查都不生效。
 
@@ -139,7 +139,7 @@ class ExtensionPrincipal:
 | `resolve_principal(request)` | 调用方的 `ExtensionPrincipal`；宿主无法确定时返回 `None`                                    |
 | `require_admin(request)`     | 调用方是管理员时返回其 principal，否则抛出 `PermissionError`，身份未知时也是如此            |
 
-`roles` 保存调用方唯一的系统角色，例如 `("admin",)` 或 `("user",)`。对于 Gateway 自身组件用内部服务令牌发出的请求（例如 IM 渠道桥接），`is_internal` 为 `true`；这类调用方的角色是 `internal`，不是管理员。用**个人访问令牌**认证的请求永远不带管理员权限：即使令牌属于管理员，`is_admin` 也是 `False`，`roles` 为空。
+`roles` 保存调用方唯一的系统角色，例如 `("admin",)` 或 `("user",)`。对于 Gateway 自身组件用内部服务令牌发出的请求（例如 IM 渠道桥接），`is_internal` 为 `true`；这类调用方的角色是 `internal`，不是管理员。PAT 请求在到达扩展贡献路由的处理函数之前就会被拒绝，因此这里的辅助函数不会收到 PAT principal。
 
 两个辅助函数都是同步的，在同步和异步处理函数里都能用。它们与框架无关，所以要自己把结果映射成 HTTP 状态码：`None` 映射为 `401`，`PermissionError` 映射为 `403`。
 
@@ -239,7 +239,8 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
 | `GET /me`，没有会话                              | 宿主返回 `401 {"detail": {"code": "not_authenticated", ...}}`               |
 | `POST /reset`，已登录但没有 `X-CSRF-Token`       | 宿主返回 `403 {"detail": "CSRF token missing. Include X-CSRF-Token header."}` |
 | `GET /me`，以普通用户登录                        | `200 {"user_id": "...", "is_admin": false, "database": false, "evidence": true}` |
-| `POST /reset`，普通用户或个人访问令牌            | `403 {"detail": "this endpoint requires an administrator account"}`         |
+| `POST /reset`，普通用户                        | `403 {"detail": "this endpoint requires an administrator account"}`         |
+| `GET /me` 或 `POST /reset`，个人访问令牌        | 宿主返回 `403 {"detail": "PAT credentials are not permitted on this route"}`  |
 | `POST /reset`，管理员会话并带 CSRF 头            | `200 {"resets": 1}`                                                        |
 
 ## 常见误区
