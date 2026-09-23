@@ -74,13 +74,15 @@ class _SessionContext:
         return None
 
 
-async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any], *, wait_timeout: float = 0.25) -> None:
+async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any], *, wait_timeout: float = 0.25, expected_message: str | None = None) -> None:
     task = asyncio.create_task(awaitable)
     try:
         done, _pending = await asyncio.wait({task}, timeout=wait_timeout)
         assert task in done, "configured timeout was ignored"
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError) as error:
             await task
+        if expected_message is not None:
+            assert str(error.value) == expected_message
     finally:
         if not task.done():
             task.cancel()
@@ -424,13 +426,14 @@ async def test_remote_task_session_initialization_respects_configured_timeout(tr
         MagicMock(return_value=_SessionContext(session)),
     ):
         await _assert_configured_timeout(
-            caller.call_tool(
+            expected_message="MCP task session initialization for server 'reports' timed out after 0.01s",
+            awaitable=caller.call_tool(
                 server_name="reports",
                 tool_name="status_report",
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
-            )
+            ),
         )
 
     session.call_tool.assert_not_awaited()
@@ -462,13 +465,14 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
         MagicMock(return_value=_SessionContext(session)),
     ):
         await _assert_configured_timeout(
-            caller.call_tool(
+            expected_message="",
+            awaitable=caller.call_tool(
                 server_name="reports",
                 tool_name="status_report",
                 arguments={"task_id": "remote-1"},
                 user_id="user-1",
                 thread_id="thread-1",
-            )
+            ),
         )
 
     session.call_tool.assert_awaited_once_with(
@@ -476,6 +480,33 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
         {"task_id": "remote-1"},
         read_timeout_seconds=timedelta(seconds=0.01),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("phase", ["connect", "initialize", "call", "cleanup"])
+async def test_remote_task_unrelated_timeout_is_not_relabelled(transport: str, phase: str) -> None:
+    config = _remote_config(transport)
+    config.mcp_servers["reports"].session_init_timeout = 1.0
+    original = TimeoutError(f"original {phase} timeout")
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value={"ok": True}))
+    if phase == "initialize":
+        session.initialize.side_effect = original
+    elif phase == "call":
+        session.call_tool.side_effect = original
+
+    @asynccontextmanager
+    async def fake_session(_connection):
+        if phase == "connect":
+            raise original
+        yield session
+        if phase == "cleanup":
+            raise original
+
+    with patch("langchain_mcp_adapters.sessions.create_session", fake_session):
+        with pytest.raises(TimeoutError) as error:
+            await _remote_status_call(config)
+    assert error.value is original
 
 
 @pytest.mark.asyncio
@@ -496,7 +527,7 @@ async def test_remote_task_session_open_respects_configured_timeout(transport: s
             closed.set()
 
     with patch("langchain_mcp_adapters.sessions.create_session", slow_session):
-        await _assert_configured_timeout(_remote_status_call(config))
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.01s", awaitable=_remote_status_call(config))
 
     assert closed.is_set()
     session.initialize.assert_not_awaited()
@@ -521,7 +552,7 @@ async def test_remote_task_connection_and_initialize_share_timeout(transport: st
             yield session
 
     with patch("langchain_mcp_adapters.sessions.create_session", slow_session):
-        await _assert_configured_timeout(_remote_status_call(config), wait_timeout=2)
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.5s", awaitable=_remote_status_call(config), wait_timeout=2)
 
     session.initialize.assert_awaited_once()
     session.call_tool.assert_not_awaited()
@@ -652,7 +683,7 @@ async def test_sse_task_session_timeout_closes_real_connection(monkeypatch, phas
     config.mcp_servers["reports"].url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/sse"
     config.mcp_servers["reports"].session_init_timeout = 0.5
     try:
-        await _assert_configured_timeout(_remote_status_call(config), wait_timeout=3)
+        await _assert_configured_timeout(expected_message="MCP task session initialization for server 'reports' timed out after 0.5s", awaitable=_remote_status_call(config), wait_timeout=3)
         assert connected.is_set()
         assert initialized.is_set() == (phase == "initialize")
         await asyncio.wait_for(disconnected.wait(), 1)
