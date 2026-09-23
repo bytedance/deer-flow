@@ -16,6 +16,7 @@ from deerflow.agents.features import Next, Prev, RuntimeFeatures
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.subagents import SubagentRuntime
@@ -168,6 +169,33 @@ def test_features_mode(mock_create_agent):
     assert "SandboxMiddleware" in mw_types
     assert "TitleMiddleware" in mw_types
     assert "ClarificationMiddleware" in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_factory_threads_pii_redaction_config(mock_create_agent):
+    """#5577 review: the SDK-path wiring must not silently drop the knob —
+    both MemoryMiddleware and DurableContextMiddleware carry the config."""
+    mock_create_agent.return_value = MagicMock()
+    pii = PiiRedactionConfig(enabled=True)
+
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(memory=True), pii_redaction_config=pii)
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    memory_mw = next(m for m in middleware if type(m).__name__ == "MemoryMiddleware")
+    durable_mw = next(m for m in middleware if type(m).__name__ == "DurableContextMiddleware")
+    assert memory_mw._pii_redaction_config is pii
+    assert durable_mw._pii_redaction_config is pii
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_factory_defaults_to_redaction_off(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(memory=True))
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    memory_mw = next(m for m in middleware if type(m).__name__ == "MemoryMiddleware")
+    assert memory_mw._pii_redaction_config is None
 
 
 # ---------------------------------------------------------------------------

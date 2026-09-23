@@ -126,6 +126,11 @@ def create_deerflow_agent(
         only when the caller needs non-default native-subagent capacity or a
         caller-managed durable batch worker without Gateway/DeerFlowClient
         startup. Requires ``features.subagent`` to be enabled.
+    pii_redaction_config:
+        Optional PII redaction policy (#3190). ``None`` leaves redaction off;
+        when enabled, memory-queue and durable-context redaction apply to the
+        assembled middlewares. A ``middleware=`` takeover bypasses the
+        assembly that would apply it.
 
     Raises
     ------
