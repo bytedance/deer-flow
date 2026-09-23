@@ -6,15 +6,18 @@ import asyncio
 import json
 import logging
 import threading
-from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+
+if TYPE_CHECKING:
+    from deerflow.mcp.tools import ServerDiscoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,23 @@ _init_lock = threading.RLock()  # Guards cache state transitions.
 _init_condition = threading.Condition(_init_lock)
 _initializing_generation: int | None = None
 _cache_generation = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerToolCacheEntry:
+    snapshot: str = field(repr=False)
+    result: ServerDiscoveryResult = field(repr=False)
+
+
+_server_tool_cache: dict[str, _ServerToolCacheEntry] = {}
+
+
+def _evict_server_tool_entries_locked(incoming_servers: Mapping[str, str]) -> None:
+    """Caller holds _init_condition; preserve exact unchanged group instances."""
+    for name, entry in tuple(_server_tool_cache.items()):
+        if incoming_servers.get(name) != entry.snapshot:
+            del _server_tool_cache[name]
+
 
 # Cache-invalidation key for the resolved extensions config file. We track the
 # resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
@@ -517,6 +537,8 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
     if plan.transition.retire_servers is None:
         retired_pool = reset_session_pool()
         prepared = retired_pool.prepare_retire_all() if retired_pool is not None else None
+        # PR3: a whole-pool retirement must also drop every retained server entry.
+        _server_tool_cache.clear()
         _reset_mcp_tools_cache_state()
         _clear_applied_revision()
         return _PendingTeardown(pool=retired_pool, prepared=prepared)
@@ -525,6 +547,10 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
     prepared = pool.reconcile_bindings(plan.active, plan.removed)
     # Retain the just-applied revision across the tool-cache clear so a
     # back-to-back edit diffs against it rather than an erased snapshot.
+    if incoming is not None:
+        _evict_server_tool_entries_locked(incoming.servers)
+    else:
+        _server_tool_cache.clear()
     _reset_mcp_tools_cache_state()
     if incoming is not None:
         _record_applied_revision(incoming)
@@ -885,6 +911,7 @@ def _reset_mcp_tools_cache_state_and_retire_pool_locked():
     from deerflow.mcp.session_pool import reset_session_pool
 
     retired_pool = reset_session_pool()
+    _server_tool_cache.clear()
     _reset_mcp_tools_cache_state()
     _clear_applied_revision()
     return retired_pool
@@ -918,6 +945,7 @@ def reset_mcp_tools_cache() -> None:
             # tool wrappers against the soon-to-be-detached pool and publish
             # them after this reset replaces the singleton.
             retired_pool = reset_session_pool()
+            _server_tool_cache.clear()
             _reset_mcp_tools_cache_state()
             _clear_applied_revision()
 

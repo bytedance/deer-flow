@@ -65,6 +65,7 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_server_tool_cache",
 )
 
 _CLEARED_GLOBALS = (
@@ -78,6 +79,7 @@ _CLEARED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_server_tool_cache",
 )
 
 
@@ -107,7 +109,7 @@ def cache_globals():
     cache_module._cache_initialized = False
     for name in _CLEARED_GLOBALS:
         if hasattr(cache_module, name):
-            setattr(cache_module, name, None)
+            setattr(cache_module, name, {} if name == "_server_tool_cache" else None)
     cache_module._init_lock = threading.RLock()
     cache_module._init_condition = threading.Condition(cache_module._init_lock)
     cache_module._initializing_generation = None

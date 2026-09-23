@@ -59,6 +59,22 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_server_tool_cache",
+)
+
+_CLEARED_GLOBALS = (
+    "_config_path",
+    "_config_signature",
+    "_config_mtime",
+    "_mcp_config_snapshot",
+    "_initialized_without_config",
+    "_mcp_applied_servers",
+    "_mcp_applied_order",
+    "_mcp_applied_connections",
+    "_mcp_applied_interceptors",
+    "_mcp_applied_path",
+    "_mcp_applied_signature",
+    "_server_tool_cache",
 )
 
 
@@ -86,21 +102,9 @@ def cache_globals():
 
     cache_module._mcp_tools_cache = None
     cache_module._cache_initialized = False
-    for name in (
-        "_config_path",
-        "_config_signature",
-        "_config_mtime",
-        "_mcp_config_snapshot",
-        "_initialized_without_config",
-        "_mcp_applied_servers",
-        "_mcp_applied_order",
-        "_mcp_applied_connections",
-        "_mcp_applied_interceptors",
-        "_mcp_applied_path",
-        "_mcp_applied_signature",
-    ):
+    for name in _CLEARED_GLOBALS:
         if hasattr(cache_module, name):
-            setattr(cache_module, name, None)
+            setattr(cache_module, name, {} if name == "_server_tool_cache" else None)
     # threading.Lock is safe across threads and does not bind to event loops,
     # so each test gets fresh coordination state for isolation.
     cache_module._init_lock = threading.RLock()
@@ -337,6 +341,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
+            cache_module._server_tool_cache = {}
             for name in ("_config_path", "_config_signature", "_config_mtime"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
@@ -376,6 +381,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
+            cache_module._server_tool_cache = {}
             for name in ("_config_path", "_config_signature", "_config_mtime"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
@@ -425,6 +431,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
+            cache_module._server_tool_cache = {}
             for name in ("_config_path", "_config_signature", "_config_mtime"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
