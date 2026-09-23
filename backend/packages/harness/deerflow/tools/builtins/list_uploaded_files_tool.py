@@ -325,7 +325,7 @@ def list_uploaded_files(
     ] = None,
     cursor: Annotated[
         str | None,
-        "上一页返回的 next_cursor；续页时保留相同 query/extensions。省略表示第一页。出现 restart_required 时丢弃先前页并从第一页重新枚举。",
+        "The next_cursor returned by the previous page; keep the same query/extensions when continuing. Omit for the first page. On restart_required, discard previously collected pages and restart from the first page.",
     ] = None,
 ) -> dict:
     """Discover historical uploaded files available in this thread.
@@ -345,9 +345,10 @@ def list_uploaded_files(
     Optional filters (`query`, `extensions`) run before the max_results cap, so
     older matching files are not displaced by newer unrelated uploads.
 
-    结果包含 next_cursor 时可继续调用本工具；末页不返回 next_cursor。
-    目录元数据、用户、线程、过滤条件或本轮上传排除集合变化会使游标失效。
-    每页最多 100 项；这是清单枚举，不是文件内容快照。
+    Continue with next_cursor when present; the last page has no next_cursor.
+    Changes to directory metadata, user, thread, filters, or current-run upload
+    exclusions invalidate the cursor. Each page contains at most 100 files;
+    this enumerates a listing, not a snapshot of file contents.
     """
     return _list_uploaded_files_impl(
         include_outline=include_outline,
