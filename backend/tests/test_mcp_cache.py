@@ -59,7 +59,7 @@ def _write_extensions_config(
     servers: dict,
     *,
     skills: dict | None = None,
-    interceptors: list | None = None,
+    interceptors: list | str | None = None,
 ) -> None:
     payload: dict = {"mcpServers": servers, "skills": skills or {}}
     if interceptors is not None:
@@ -1065,3 +1065,144 @@ def test_lazy_init_does_not_leak_credentials_on_malformed_config(cache_globals, 
         assert cache_module.get_cached_mcp_tools() == []
 
     assert "TOPSECRET123" not in caplog.text
+
+
+def _assert_cache_survives_edit(monkeypatch, cfg, sentinel, rewrite):
+    """Initialize with *sentinel*, apply *rewrite*, and prove nothing was retired."""
+    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_get_mcp_tools(**_kwargs):
+        return [sentinel]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    asyncio.run(cache_module.initialize_mcp_tools())
+
+    old_pool = get_session_pool()
+    closed: list[bool] = []
+    monkeypatch.setattr(old_pool, "close_all_sync", lambda: closed.append(True))
+    try:
+        rewrite()
+        assert cache_module.get_cached_mcp_tools() == [sentinel]
+        assert cache_module._mcp_tools_cache == [sentinel]
+        assert get_session_pool() is old_pool
+        assert closed == []
+    finally:
+        reset_session_pool()
+
+
+def test_string_and_single_element_interceptor_list_are_equivalent(cache_globals, monkeypatch, tmp_path):
+    """A bare string and its single-element list select the same interceptor chain."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()}, interceptors="pkg.interceptor:build")
+    sentinel = object()
+    _assert_cache_survives_edit(
+        monkeypatch,
+        cfg,
+        sentinel,
+        lambda: _write_extensions_config(cfg, {"srv1": _server()}, interceptors=["pkg.interceptor:build"]),
+    )
+
+
+def test_missing_and_empty_interceptors_are_equivalent(cache_globals, monkeypatch, tmp_path):
+    """An absent key and an empty list both select no custom interceptors."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    sentinel = object()
+    _assert_cache_survives_edit(
+        monkeypatch,
+        cfg,
+        sentinel,
+        lambda: _write_extensions_config(cfg, {"srv1": _server()}, interceptors=[]),
+    )
+
+
+def test_interceptor_order_change_is_still_stale(cache_globals, monkeypatch, tmp_path):
+    """Order is part of the effective chain and must keep retiring the cache."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()}, interceptors=["a:build", "b:build"])
+    _initialize_against(monkeypatch, cfg)
+
+    _write_extensions_config(cfg, {"srv1": _server()}, interceptors=["b:build", "a:build"])
+
+    assert cache_module._is_cache_stale() is True
+
+
+def test_path_switch_with_equivalent_mcp_config_keeps_tools_and_pool(cache_globals, monkeypatch, tmp_path):
+    """Switching to a file whose MCP slice is identical must not retire sessions."""
+    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+
+    cfg_a = tmp_path / "a_extensions_config.json"
+    cfg_b = tmp_path / "b_extensions_config.json"
+    _write_extensions_config(cfg_a, {"srv1": _server()}, skills={"skill-a": {"enabled": True}})
+    _write_extensions_config(cfg_b, {"srv1": _server()}, skills={"skill-a": {"enabled": False}})
+
+    state: dict[str, object] = {"path": cfg_a}
+    monkeypatch.setattr(
+        ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None: state["path"]),
+    )
+
+    sentinel = object()
+
+    async def _fake_get_mcp_tools(**_kwargs):
+        return [sentinel]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+    asyncio.run(cache_module.initialize_mcp_tools())
+
+    old_pool = get_session_pool()
+    closed: list[bool] = []
+    monkeypatch.setattr(old_pool, "close_all_sync", lambda: closed.append(True))
+    try:
+        state["path"] = cfg_b
+
+        assert cache_module.get_cached_mcp_tools() == [sentinel]
+        assert get_session_pool() is old_pool
+        assert closed == []
+        assert cache_module._config_path == cfg_b
+        assert cache_module._config_signature == get_config_signature(cfg_b)
+    finally:
+        reset_session_pool()
+
+
+def test_path_switch_with_different_mcp_config_is_still_stale(cache_globals, monkeypatch, tmp_path):
+    """A path switch to a file with a different MCP slice keeps the global reset."""
+    cfg_a = tmp_path / "a_extensions_config.json"
+    cfg_b = tmp_path / "b_extensions_config.json"
+    _write_extensions_config(cfg_a, {"srv1": _server("npx")})
+    _write_extensions_config(cfg_b, {"srv1": _server("uvx")})
+
+    state: dict[str, object] = {"path": cfg_a}
+    monkeypatch.setattr(
+        ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None: state["path"]),
+    )
+    _initialize_against(monkeypatch, cfg_a)
+
+    state["path"] = cfg_b
+
+    assert cache_module._is_cache_stale() is True
+
+
+def test_unverifiable_signature_is_not_treated_as_stable(cache_globals, monkeypatch, tmp_path):
+    """A signature without a sha256 digest must never be published as stable."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _initialize_against(monkeypatch, cfg)
+
+    real = cache_module._get_config_signature
+
+    def _no_digest(path):
+        signature = real(path)
+        return None if signature is None else (signature[0], signature[1], None)
+
+    monkeypatch.setattr(cache_module, "_get_config_signature", _no_digest)
+    incomplete = _no_digest(cfg)
+    assert incomplete is not None and incomplete[2] is None
+
+    assert cache_module._read_stable_mcp_snapshot(cfg, incomplete) is None
+    assert cache_module._is_cache_stale() is True

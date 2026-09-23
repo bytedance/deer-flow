@@ -10,6 +10,7 @@ from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -88,17 +89,6 @@ def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
     return config_path, _get_config_signature(config_path)
 
 
-def _effective_server_config(server) -> dict:
-    """Return a parsed server config with alias-only fields normalized away."""
-    dumped = server.model_dump(mode="json")
-    # ``transport`` is an MCP-spec alias for ``type``. The model validator
-    # copies it onto ``type`` but keeps the raw extra key (extra="allow"), so
-    # dropping it makes {"type": "stdio"} and {"transport": "stdio"} compare
-    # equal instead of forcing a needless reset.
-    dumped.pop("transport", None)
-    return dumped
-
-
 def _effective_mcp_config_snapshot(config) -> str:
     """Serialize the MCP-only slice of an extensions config.
 
@@ -106,28 +96,47 @@ def _effective_mcp_config_snapshot(config) -> str:
     the whole-file signature cannot distinguish an MCP change from a skill
     toggle. The enabled-server list preserves declaration order (it can affect
     tool ordering) while ``sort_keys`` only normalizes each server's field
-    order. Parsed models are compared, so equivalent ``type``/``transport``
+    order. Parsed models are compared through
+    ``config_normalization.normalize_mcp_server_config`` (equivalent
+    ``type``/``transport`` spellings) and the custom interceptor list through
+    ``config_normalization.normalize_mcp_interceptor_paths`` (a bare string and
+    its single-element list, or a missing key and an empty list), so equivalent
     spellings do not cause a needless rebuild.
 
     The result may embed resolved credentials. It stays in process memory and
     is never logged or written back to disk.
     """
     relevant = {
-        "enabled_servers": [(name, _effective_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
-        "mcpInterceptors": (config.model_extra or {}).get("mcpInterceptors"),
+        "enabled_servers": [(name, normalize_mcp_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
+        "mcpInterceptors": normalize_mcp_interceptor_paths((config.model_extra or {}).get("mcpInterceptors")),
     }
     return json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+
+
+def _signature_is_verifiable(signature: _ConfigSignature | None) -> bool:
+    """True when a config signature carries a content digest.
+
+    ``get_config_signature`` returns ``(mtime, size, None)`` when the file could
+    be stat-ed but not read. Such a signature cannot prove the content is
+    unchanged, so the MCP cache must neither publish nor adopt it.
+    """
+    return signature is not None and signature[2] is not None
 
 
 def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSignature) -> str | None:
     """Parse the config and return its MCP snapshot only if the file was stable.
 
-    ``expected_signature`` is the signature observed by the caller. The file is
+    ``expected_signature`` is the signature observed by the caller. A signature
+    without a content digest is treated as unverifiable, and the file is
     re-hashed after parsing: a mismatch means the config changed while it was
     being read, so no snapshot can be attributed to a single revision and the
     caller must treat the cache as stale. Parse failures also return ``None``
     (conservative: never reuse tools on an unreadable config).
     """
+    if not _signature_is_verifiable(expected_signature):
+        logger.info("Extensions config signature has no content digest; treating the MCP cache as stale")
+        return None
+
     from deerflow.config.extensions_config import ExtensionsConfig
 
     try:
@@ -142,7 +151,8 @@ def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSign
         )
         return None
 
-    if _get_config_signature(config_path) != expected_signature:
+    current_signature = _get_config_signature(config_path)
+    if not _signature_is_verifiable(current_signature) or current_signature != expected_signature:
         logger.info("Extensions config changed while it was being read; treating the MCP cache as stale")
         return None
 
@@ -152,14 +162,15 @@ def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSign
 def _is_cache_stale() -> bool:
     """Check if the cache is stale due to config file changes.
 
-    The cache is stale when the resolved extensions config path changed, or when
-    the ``(mtime, size, sha256)`` content signature differs from the one recorded
-    at initialization. Using content equality (``!=``) instead of a strict mtime
-    ``>`` comparison detects same-second edits and backward mtime moves, and
-    tracking the resolved path detects a switch to a different config file.
-    A content change alone is not sufficient: the file also carries skills and
-    middleware settings, so the effective MCP slice is compared before the
-    cache is retired.
+    The cache is stale when the effective MCP slice of the resolved config
+    differs from the one recorded at initialization. The resolved path and the
+    ``(mtime, size, sha256)`` content signature are the change signals that
+    trigger that comparison, not invalidation reasons on their own. Using
+    content equality (``!=``) instead of a strict mtime ``>`` comparison detects
+    same-second edits and backward mtime moves. A path switch to a file with the
+    same MCP configuration, or an edit that only touches skills or middleware
+    settings, therefore keeps the cached tools and sessions and adopts the new
+    path and signature.
 
     When the file signature changes but the effective MCP configuration does
     not, this function adopts the new signature into ``_config_signature`` and
@@ -169,7 +180,7 @@ def _is_cache_stale() -> bool:
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
-    global _config_signature
+    global _config_path, _config_signature
 
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
@@ -198,19 +209,21 @@ def _is_cache_stale() -> bool:
     if current_signature is None:
         return False
 
-    if current_path != _config_path:
-        logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
-        return True
-
-    if current_signature == _config_signature:
+    if current_path == _config_path and current_signature == _config_signature and _signature_is_verifiable(current_signature):
         return False
 
-    # The file changed, but it also carries skills and middleware settings.
-    # Retire MCP state only when the effective MCP slice actually changed.
+    # The resolved path and/or the file content changed. Both are only signals to
+    # re-read the effective MCP slice: the file also carries skills and middleware
+    # settings, and a path switch can land on a file with the same MCP
+    # configuration, so neither is an invalidation reason on its own.
+    if current_path != _config_path:
+        logger.info("MCP config path changed (%s -> %s); re-checking the effective MCP configuration", _config_path, current_path)
+
     if current_path is not None and _mcp_config_snapshot is not None:
         current_snapshot = _read_stable_mcp_snapshot(current_path, current_signature)
         if current_snapshot is not None and current_snapshot == _mcp_config_snapshot:
             logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
+            _config_path = current_path
             _config_signature = current_signature
             return False
 
