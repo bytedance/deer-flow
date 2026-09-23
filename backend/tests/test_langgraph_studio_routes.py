@@ -31,10 +31,11 @@ from langgraph.runtime import Runtime
 from mcp.types import CallToolResult, TextContent
 
 from deerflow.mcp import tools as mcp_tools
+from deerflow.mcp.session_pool import ServerBinding
 
 
 class _FakePool:
-    async def get_session(self, _server_name, scope_key, _connection):
+    async def get_session(self, _server_name, scope_key, _connection, **_kwargs):
         return object()
 
 
@@ -68,6 +69,8 @@ pooled_probe = mcp_tools._make_session_pool_tool(
     ),
     "test-server",
     {"transport": "streamable_http", "url": "http://unused.invalid/mcp"},
+    pool=_POOL,
+    binding=ServerBinding("test-server", 1, "fp"),
 )
 
 builder = StateGraph(MessagesState, context_schema=dict)
@@ -204,7 +207,14 @@ def _running_studio_server(
     port = _free_port()
     log_path = runtime_dir / f"server-{uuid4()}.log"
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(BACKEND_DIR), env.get("PYTHONPATH")]))
+    # The dev server runs with ``cwd=runtime_dir``, so a *relative* PYTHONPATH
+    # entry inherited from the parent (e.g. ``.:packages/harness``) would be
+    # re-resolved against ``runtime_dir`` and silently fall back to a stale
+    # editable install of ``deerflow``. Normalize the inherited entries to
+    # absolute paths so the server resolves the same import roots the parent did
+    # (and therefore imports THIS checkout).
+    inherited_roots = [os.path.abspath(entry) for entry in (env.get("PYTHONPATH") or "").split(os.pathsep) if entry]
+    env["PYTHONPATH"] = os.pathsep.join([str(BACKEND_DIR), *inherited_roots])
     env["LANGSMITH_LANGGRAPH_API_VARIANT"] = "local_dev"
     executable = shutil.which(
         "langgraph",

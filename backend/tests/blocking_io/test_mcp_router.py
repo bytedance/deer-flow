@@ -14,20 +14,24 @@ IO runs at collection, outside the gate.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers.mcp import (
     McpConfigUpdateRequest,
     McpServerConfigResponse,
+    McpServerConfigUpdateRequest,
     McpServerStateUpdateRequest,
     get_mcp_configuration,
     update_mcp_configuration,
+    update_mcp_server,
     update_mcp_server_state,
 )
 
@@ -93,7 +97,7 @@ async def test_update_mcp_server_state_does_not_block_event_loop(tmp_path: Path,
         return None
 
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
 
     response = await update_mcp_server_state(
         request=None,
@@ -162,3 +166,79 @@ async def test_concurrent_mcp_put_and_patch_updates_are_serialized(tmp_path: Pat
     )
 
     assert counters["max"] == 1, f"config updates were not serialized (max concurrency {counters['max']})"
+
+
+async def test_reset_mcp_tools_cache_endpoint_offloads_the_global_reset(monkeypatch) -> None:
+    """The unconditional reset must not block the Gateway event loop."""
+    thread_names: list[str] = []
+
+    def _blocking_reset() -> None:
+        time.sleep(0.05)
+        thread_names.append(threading.current_thread().name)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", _blocking_reset)
+
+    await mcp_router.reset_mcp_tools_cache_endpoint(None)
+
+    assert thread_names
+    assert thread_names[0] != threading.main_thread().name, "the reset ran synchronously on the event loop"
+
+
+async def test_frozen_task_server_config_change_is_rejected_before_write(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "reports": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"TOKEN": "one"},
+                "task_toolsets": [
+                    {
+                        "name": "reports",
+                        "submit_tool": "submit",
+                        "status_tool": "status",
+                        "cancel_tool": "cancel",
+                    }
+                ],
+            }
+        },
+        "skills": {},
+    }
+    original_bytes = json.dumps(original, separators=(",", ":")).encode("utf-8")
+    await asyncio.to_thread(config_path.write_bytes, original_bytes)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
+
+    snapshot = await asyncio.to_thread(ExtensionsConfig.from_file, str(config_path))
+    set_mcp_task_config_snapshot(snapshot)
+    try:
+        changed = {**original["mcpServers"]["reports"], "env": {"TOKEN": "two"}}
+        with pytest.raises(HTTPException) as exc_info:
+            await update_mcp_server(
+                None,
+                McpServerConfigUpdateRequest(
+                    server_name="reports",
+                    server=McpServerConfigResponse.model_validate(changed),
+                ),
+            )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == ("MCP task-enabled server configuration changed after Gateway startup (reports); restart DeerFlow before using durable task tools")
+        assert "two" not in str(exc_info.value.detail)
+        assert await asyncio.to_thread(config_path.read_bytes) == original_bytes
+    finally:
+        set_mcp_task_config_snapshot(None)

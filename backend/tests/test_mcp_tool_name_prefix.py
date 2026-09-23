@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.routers.mcp import McpServerConfigResponse
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.session_pool import ServerBinding
 from deerflow.mcp.tools import _make_session_pool_tool, get_mcp_tools
 from deerflow.tools.mcp_metadata import get_mcp_routing
 
@@ -159,6 +160,8 @@ async def test_unprefixed_stdio_tool_keeps_server_like_original_name(tmp_path: P
             "github",
             {"transport": "stdio", "command": "mcp-server", "args": []},
             tool_name_prefix=False,
+            pool=mock_pool,
+            binding=ServerBinding("github", 1, "fp"),
         )
         await wrapped.coroutine(query="repositories")
 
