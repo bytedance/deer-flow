@@ -49,7 +49,7 @@ AIO 镜像默认最多 10 个 shell 会话（`MAX_SHELL_SESSIONS`），超出时
 
 ## 身份传播到命令
 
-通过 IM 渠道触发的对话会把发送者身份放进运行时上下文的 `channel_user_id`。`task` 工具把它转发给子 Agent，子 Agent 的每条 bash 命令前会加上 `export DEERFLOW_CHANNEL_USER_ID=<值>;`（没有身份时是 `unset`），值最长 256 个字符并经过 shell 转义。因此委派出去的脚本仍然知道是谁在操作。
+通过 IM 渠道触发的对话会把发送者身份放进运行时上下文的 `channel_user_id`。`task` 工具把它转发给子 Agent，子 Agent 的每条 bash 命令前会加上 `export DEERFLOW_CHANNEL_USER_ID=<值>;`（IM 身份存在但为空或无效时是 `unset DEERFLOW_CHANNEL_USER_ID;`；没有 IM 身份的运行不加前缀），值最长 256 个字符并经过 shell 转义。因此委派出去的脚本仍然知道是谁在操作。
 
 ## 子 Agent 的中间件链
 
@@ -66,7 +66,7 @@ Lead Agent 独有、**不在**子 Agent 链上的中间件：动态上下文（�
 ## 执行隔离
 
 - **无 checkpoint**：子图以 `checkpointer=False` 编译，运行时也不向子图传入 `thread_id` 等 checkpoint 坐标，而是让 LangGraph 自然继承父运行的命名空间。这样子 Agent 的消息不会混进父线程的流，也不会被父 run 的同步 checkpointer 绊倒。
-- **独立事件循环**：所有子 Agent 在一条名为 `subagent-persistent-loop` 的守护线程上运行，与 Gateway 的请求循环分开。跨越这条边界时，运行时会剥离父 run 中绑定到原事件循环的回调（例如账单日志），改用专门的代理把 token 用量与审计事件送回父 run。
+- **独立事件循环**：所有子 Agent 共享一个进程级事件循环，运行在一条名为 `subagent-persistent-loop` 的守护线程上，与 Gateway 的请求循环分开。跨越这条边界时，运行时会剥离父 run 中绑定到原事件循环的回调（例如账单日志），改用专门的代理把 token 用量与审计事件送回父 run。
 - **系统提示常驻**：子 Agent 的系统提示作为状态里的第一条系统消息存在。摘要压缩按索引裁剪时会显式保留系统消息和最新的用户消息，所以角色提示、报告契约、验收说明和技能索引不会在压缩后丢失。
 - **技能投影**：子 Agent 不会重新投影 `/mnt/skills`，投影由 Lead Agent 的运行拥有。子 Agent 的技能允许列表是发现与激活范围，不是文件系统隔离。
 

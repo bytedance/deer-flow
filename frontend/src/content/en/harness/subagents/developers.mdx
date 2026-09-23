@@ -16,7 +16,7 @@ This chapter is for developers embedding the DeerFlow harness in their own progr
 - Enabling the `subagent` feature through `RuntimeFeatures` installs `SubagentLimitMiddleware` (concurrency and per-run total) and registers the `task` tool. You may pass a `SubagentRuntime`; it requires the `subagent` feature and cannot be combined with full middleware takeover.
 - `DurableContextMiddleware` is now **always** on the factory chain. It writes the delegation ledger, which the per-run total and the "already delegated" guidance depend on, and it re-injects `summary_text` after summarization. Older factory graphs lacked it, so those features silently did nothing.
 - `RuntimeFeatures(token_budget=True)` builds an enabled `TokenBudgetConfig`.
-- When the supplied `SubagentRuntime` owns a durable batch service, `batch_task`, `batch_status`, and `cancel_batch` bind to it; otherwise they fall back to the process-global submitter. An owned batch worker that has not been started raises at build time.
+- When the supplied `SubagentRuntime` owns a durable batch service, `batch_task`, `batch_status`, and `cancel_batch` bind to it; when a runtime is supplied without one, the batch tools are not registered. Only when no `SubagentRuntime` is passed at all do they fall back to the process-global submitter. An owned batch worker that has not been started raises at build time.
 
 ### Runs without a run_id
 
@@ -49,7 +49,7 @@ Public exports: `deerflow.agents` provides `create_deerflow_agent`, `RuntimeFeat
 - Valid `subagent_stop_reason`: `token_capped`, `turn_capped`, `loop_capped`.
 - The tool result text is display content, not part of the contract.
 
-The backend writes metadata with `make_subagent_additional_kwargs` and reads it with `read_subagent_result_metadata`; an invalid status raises `ValueError`. The frontend's `parseSubtaskResult` reads structured fields first and falls back to text prefixes only when no structured metadata exists at all. Additive fields (model name, token usage, receipts, acceptance) do not require a contract version bump.
+The backend writes metadata with `make_subagent_additional_kwargs` and reads it with `read_subagent_result_metadata`. The writer raises `ValueError` on an invalid status; the reader returns `None` for an unknown one and maps the legacy `max_turns_reached` to `turn_capped`. The frontend's `parseSubtaskResult` reads structured fields first and falls back to text prefixes only when no structured metadata exists at all. Additive fields (model name, token usage, receipts, acceptance) do not require a contract version bump.
 
 ### Event contract
 

@@ -14,12 +14,12 @@ import { Callout } from "nextra/components";
 | `subagent_status`     | 含义                                                                 | 卡片显示 | 结果正文开头                       |
 | --------------------- | -------------------------------------------------------------------- | -------- | ---------------------------------- |
 | `completed`           | 子图正常结束                                                         | 完成     | `Task Succeeded. Result:`          |
-| `failed`              | 模型调用最终失败、容量拒绝，或运行时异常                             | 失败     | `Task failed.`                     |
+| `failed`              | 模型调用最终失败、容量拒绝，或运行时异常                             | 失败     | `Task failed.` 或 `Task failed (capped: <label>).` |
 | `cancelled`           | 用户停止，或父 run 被取消                                            | 失败     | `Task cancelled by user.`          |
 | `timed_out`           | 超过 `timeout_seconds`                                               | 失败     | `Task timed out.`                  |
 | `polling_timed_out`   | 父侧轮询次数用尽，后台任务可能卡住；运行时已请求取消并安排延迟清理   | 失败     | `Task polling timed out after N minutes.` |
 
-失败类状态在有错误详情时会追加 `Error: <详情>`。正文只是给人看的展示内容，前端与 Lead Agent 都应依赖消息元数据里的结构化字段，而不是解析文本。
+`failed`、`cancelled`、`timed_out` 在有错误详情时会追加 `Error: <详情>`；`polling_timed_out` 直接显示详情。正文只是给人看的展示内容，前端与 Lead Agent 都应依赖消息元数据里的结构化字段，而不是解析文本。
 
 <Callout type="info">
   子 Agent 失败不会让父 run 失败。失败的委派是一条普通的工具结果，Lead Agent
@@ -28,7 +28,7 @@ import { Callout } from "nextra/components";
 
 ### 截断原因 stop_reason
 
-三道防护可以提前结束一次运行，但运行仍然可能是 `completed`：
+三道防护可以提前结束一次运行。运行通常仍是 `completed`；没有可用输出时为 `failed`，并保留同样的 `stop_reason`：
 
 | `subagent_stop_reason` | 触发                         | 结果正文                                             |
 | ---------------------- | ---------------------------- | ---------------------------------------------------- |
@@ -36,7 +36,7 @@ import { Callout } from "nextra/components";
 | `token_capped`         | 触达 `token_budget` 硬停止   | `Task Succeeded (capped: token budget). Result: ...` |
 | `loop_capped`          | 循环检测硬停止               | `Task Succeeded (capped: repeated tool-call loop). Result: ...` |
 
-被截断意味着报告是**部分结果**：最后一轮的工具调用被剥离，模型被迫给出最终答案。轮次用尽时如果连一段可用文本都没有，状态是 `failed`，错误为 `Reached max_turns=N`。旧版本的 `max_turns_reached` 状态在读取时映射为 `turn_capped`。
+被截断意味着报告是**部分结果**：最后一轮的工具调用被剥离，模型被迫给出最终答案。轮次用尽时如果连一段可用文本都没有，状态是 `failed`，正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。旧版本的 `max_turns_reached` 状态在读取时映射为 `turn_capped`。
 
 ### 失败的判定依据
 
@@ -69,7 +69,7 @@ Execution evidence only — receipts record that a call happened and its status;
 | resolved              | 引用的回执存在、状态为成功，且工具名与引用的锚一致                    |
 | failed                | 回执存在但状态不是成功，或者引用时写的工具名与实际不符                |
 | unknown               | 账本里没有这个 id                                                    |
-| `no_citation_claims`  | 报告里没有任何引用，却有动作性描述或路径，或者报告长度不低于 240 字符 |
+| `no_citation_claims`  | 报告里没有任何引用，却有动作性描述或路径，或者在回执账本非空时报告长度不低于 240 字符 |
 
 这份结论不写进结果正文，而是记在消息元数据里，并在委派账本里以一行摘要显示，例如 `citations: 2 resolved, 1 failed, 1 unknown — execution evidence only, does not validate claim correctness`，或者 `citations: UNVERIFIED — action claims without receipt citations`。
 
@@ -85,7 +85,7 @@ Execution evidence only — receipts record that a call happened and its status;
 
 ```
 Acceptance checklist (deterministic checks; execution evidence only, does not validate claim correctness):
-- [holds] file:outputs/report.md non-empty — 1,204 bytes
+- [holds] file:outputs/report.md non-empty — 1204 bytes
 - [does not hold] file_written:outputs/summary.md — file does not exist
 - [UNVERIFIED] 报告须覆盖三家竞争对手 — not deterministically checkable
 ```
@@ -125,7 +125,7 @@ Lead Agent 的提示词、`task` 的说明和委派账本都强调同一件事�
 ```
 ## Work already delegated
 Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. ...
-- [completed] 调研竞争对手 (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> 前 5 家竞争对手的定价… · citations: 3 resolved · acceptance: 1 hold
+- [completed] 调研竞争对手 (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> 前 5 家竞争对手的定价… · citations: 3 resolved · acceptance: 1 hold, 1 does not hold — execution evidence only, does not validate claim correctness
 - [in_progress] 整理数据 (via bash; already delegated; do NOT delegate again; wait for or build on the result)
 ```
 

@@ -36,7 +36,7 @@ The `general-purpose` system prompt carries a `tool_restrictions` block stating 
 
 Runtime precedence is **built-in → `config.yaml` → managed**. A managed definition whose name collides with a built-in or `config.yaml` entry stays stored and shows a conflict marker in Settings, but is excluded from the runtime catalog.
 
-On top of that, `subagents.agents.<name>` can override `timeout_seconds`, `max_turns`, `model`, `skills`, and `token_budget` for a subagent from any source. The Settings catalog shows those overrides.
+On top of that, `subagents.agents.<name>` can override `timeout_seconds`, `max_turns`, `model`, `skills`, and `token_budget` for a subagent from any source. The Settings catalog shows the `timeout_seconds`, `max_turns`, `model`, and `skills` overrides.
 
 <Callout type="warning">
   The global `subagents.timeout_seconds` and `subagents.max_turns` apply to
@@ -55,7 +55,7 @@ subagents:
       system_prompt: |                                                                          # required
         You are a data analysis specialist...
       tools: null            # null inherits every Lead Agent tool; or give an allowlist
-      disallowed_tools:      # default; task / ask_clarification / present_files are always denied
+      disallowed_tools:      # default; task is always unavailable, the other two only while listed here
         - task
         - ask_clarification
         - present_files
@@ -73,7 +73,7 @@ Administrators add reusable workers under **Settings → Subagents**. Each defin
 
 | Field                        | Notes                                                                                              |
 | ---------------------------- | -------------------------------------------------------------------------------------------------- |
-| `name`                       | Letters, digits, and hyphens only; used as the `subagent_type`                                     |
+| `name`                       | Letters, digits, and hyphens only; stored lowercase and used as the `subagent_type`                |
 | `display_name`               | Optional                                                                                           |
 | `description`                | Dispatch description the Lead Agent uses to decide when to delegate                                |
 | `system_prompt`              | The system prompt                                                                                  |
@@ -86,17 +86,17 @@ Administrators add reusable workers under **Settings → Subagents**. Each defin
 
 Built-in and `config.yaml` definitions appear in the same catalog as read-only entries.
 
-Storage follows the Custom Agent backend: `agent_storage.backend: file` writes one atomic JSON file per definition under `DEER_FLOW_HOME/managed-subagents/`; `agent_storage.backend: db` stores them in the shared application database for multi-instance deployments. These definitions are deployment-wide, not user-scoped. The admin-only API lives at `/api/subagents`, and the runtime caches definitions for about one second.
+Storage follows the Custom Agent backend: `agent_storage.backend: file` writes one atomic JSON file per definition under `DEER_FLOW_HOME/managed-subagents/`; `agent_storage.backend: db` stores them in the shared application database for multi-instance deployments. These definitions are deployment-wide, not user-scoped. The API lives at `/api/subagents`: any user can list the catalog (system prompts are shown to administrators only), while create, update, and delete require an administrator. The runtime caches definitions for about one second.
 
 ## Custom Agent delegation scope
 
-The default Lead Agent sees every enabled runtime subagent. Each Custom Agent created in Settings can narrow that in its own settings:
+The default Lead Agent sees every enabled runtime subagent. Each Custom Agent can narrow that with the **Subagent access** option in its agent settings:
 
 | Option                   | Effect                                                                              |
 | ------------------------ | ----------------------------------------------------------------------------------- |
 | All enabled subagents    | No extra restriction                                                                |
 | No subagents             | Delegation stays off even when the request enables Ultra mode                       |
-| Selected subagents only  | The prompt lists only the selected names, and `task` and `batch_task` accept only those |
+| Selected subagents       | The prompt lists only the selected names, and `task` and `batch_task` accept only those |
 
 The allowlist is snapshotted into run metadata when a run starts and enforced again by the `task` tool, so a client cannot bypass it by naming a hidden subagent directly. The assembly descriptor extensions see (`effective_policies.subagents`) is filtered by the same allowlist and never leaks the full catalog.
 

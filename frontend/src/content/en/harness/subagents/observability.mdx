@@ -34,7 +34,7 @@ During a delegation the `task` tool emits the following custom events through th
 | `task_completed` | `task_id`, `result`, `usage`, `model_name`                                     |                                                                                                 |
 | `task_failed`    | `task_id`, `error`, `usage`, `model_name`                                      | The "task disappeared from the registry" case carries only `task_id` and `error`                |
 | `task_cancelled` | `task_id`, `error`, `usage`, `model_name`                                      |                                                                                                 |
-| `task_timed_out` | `task_id`, `error`, `usage`, `model_name`                                      | Polling timeouts emit this event too, while the tool result status is `polling_timed_out`; there is no separate polling-timeout event |
+| `task_timed_out` | `task_id`, `error` (absent for polling timeouts), `usage`, `model_name`        | Polling timeouts emit this event too, while the tool result status is `polling_timed_out`; there is no separate polling-timeout event |
 
 ## Persisted run events
 
@@ -114,7 +114,7 @@ Durable batches have no SSE; the workspace UI polls, every 2 seconds while a bat
 | `POST /{batch_id}/items/{item_id}/retry`   | Retry one item; only `failed` items, otherwise 409                               |
 | `GET /{batch_id}/results.jsonl`            | Stream every item as NDJSON, including full results and acceptance verdicts      |
 
-Batch statuses: `queued`, `running`, `paused` are active; `completed`, `failed`, `cancelled` are terminal. Item statuses: `pending`, `queued`, `leased`, `running` are active; `succeeded`, `failed`, `cancelled` are terminal. When a batch ends with failed items and no succeeded items it is `failed`, otherwise `completed`.
+Batch statuses: `queued`, `running`, `paused` are active; `completed`, `failed`, `cancelled` are terminal. Item statuses: `pending` is waiting and not counted as active; `queued`, `leased`, `running` are active; `succeeded`, `failed`, `cancelled` are terminal. When a batch ends with failed items and no succeeded items it is `failed`, otherwise `completed`.
 
 ## Extension observers
 

@@ -34,7 +34,7 @@ token 标签受 `token_usage.enabled` 控制，前端通过 `GET /api/models` �
 | `task_completed` | `task_id`、`result`、`usage`、`model_name`                                 |                                                            |
 | `task_failed`    | `task_id`、`error`、`usage`、`model_name`                                  | "任务从后台注册表消失"时只有 `task_id` 与 `error`          |
 | `task_cancelled` | `task_id`、`error`、`usage`、`model_name`                                  |                                                            |
-| `task_timed_out` | `task_id`、`error`、`usage`、`model_name`                                  | 轮询超时也发这个事件，但工具结果的状态是 `polling_timed_out`；没有单独的轮询超时事件 |
+| `task_timed_out` | `task_id`、`error`（轮询超时时没有）、`usage`、`model_name`                | 轮询超时也发这个事件，但工具结果的状态是 `polling_timed_out`；没有单独的轮询超时事件 |
 
 ## 持久化运行事件
 
@@ -114,7 +114,7 @@ GET /api/threads/{thread_id}/token-usage?include_active=false
 | `POST /{batch_id}/items/{item_id}/retry`  | 重试单个条目，只接受 `failed` 状态，否则 409                          |
 | `GET /{batch_id}/results.jsonl`           | 以 NDJSON 流式导出全部条目，含完整结果与验收结论                      |
 
-批次状态：`queued`、`running`、`paused` 为活跃，`completed`、`failed`、`cancelled` 为终态。条目状态：`pending`、`queued`、`leased`、`running` 为活跃，`succeeded`、`failed`、`cancelled` 为终态。批次结束时，若有失败条目且没有任何成功条目，批次记为 `failed`，否则为 `completed`。
+批次状态：`queued`、`running`、`paused` 为活跃，`completed`、`failed`、`cancelled` 为终态。条目状态：`pending` 为等待中，不计入活跃；`queued`、`leased`、`running` 为活跃，`succeeded`、`failed`、`cancelled` 为终态。批次结束时，若有失败条目且没有任何成功条目，批次记为 `failed`，否则为 `completed`。
 
 ## 扩展观察点
 

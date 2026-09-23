@@ -16,7 +16,7 @@ import { Callout } from "nextra/components";
 - 通过 `RuntimeFeatures` 打开 `subagent` 特性后，工厂会装上 `SubagentLimitMiddleware`（并发数与每 run 总量）并注册 `task` 工具。可以传入一个 `SubagentRuntime`，它必须与 `subagent` 特性同时使用，且不能与中间件完全接管模式并存。
 - `DurableContextMiddleware` 现在**始终**在工厂链上。委派账本由它写入，每 run 总量和"已委派勿重复"都依赖账本；摘要后的 `summary_text` 也由它回注。旧版本的工厂图缺少它，导致这些功能静默失效。
 - `RuntimeFeatures(token_budget=True)` 会构造一个启用的 `TokenBudgetConfig`。
-- 传入的 `SubagentRuntime` 带有自有的持久批处理服务时，`batch_task`、`batch_status`、`cancel_batch` 会绑定到它；否则回退到进程全局的提交器。未启动的自有批处理 worker 会在构图时抛错。
+- 传入的 `SubagentRuntime` 带有自有的持久批处理服务时，`batch_task`、`batch_status`、`cancel_batch` 会绑定到它；传入的运行时不带批处理服务时，不注册批处理工具；只有完全没有传入 `SubagentRuntime` 时，才回退到进程全局的提交器。未启动的自有批处理 worker 会在构图时抛错。
 
 ### run_id 为空的运行
 
@@ -49,7 +49,7 @@ LangGraph Server 的入口必须是模块级的具体函数，harness 提供 `ma
 - 合法 `subagent_stop_reason`：`token_capped`、`turn_capped`、`loop_capped`。
 - 工具结果正文只是展示内容，不属于契约。
 
-后端用 `make_subagent_additional_kwargs` 写元数据、`read_subagent_result_metadata` 读取；非法状态值会抛 `ValueError`。前端的 `parseSubtaskResult` 先读结构化字段，只有完全没有结构化元数据时才回退到文本前缀。附加字段（模型名、token 用量、回执、验收）是加法式的，新增字段不需要升级契约版本。
+后端用 `make_subagent_additional_kwargs` 写元数据、`read_subagent_result_metadata` 读取；写入时非法状态值会抛 `ValueError`，读取时遇到未知状态返回 `None`，并把旧的 `max_turns_reached` 映射为 `turn_capped`。前端的 `parseSubtaskResult` 先读结构化字段，只有完全没有结构化元数据时才回退到文本前缀。附加字段（模型名、token 用量、回执、验收）是加法式的，新增字段不需要升级契约版本。
 
 ### 事件契约
 

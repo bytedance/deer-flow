@@ -11,8 +11,8 @@ This chapter is for people using DeerFlow through the web interface. By the end 
 
 ## Prerequisites
 
-- DeerFlow is configured per [Install](/docs/harness) and you can chat normally. The `subagents:` section in `config.yaml` can stay empty; the built-in defaults work.
-- To use the `bash` subagent you need a container sandbox, or `sandbox.allow_host_bash: true` under the local sandbox, which is only appropriate in a fully trusted local environment. Otherwise the catalog only contains `general-purpose`.
+- DeerFlow is configured per [Quick Start](/docs/application/quick-start) and you can chat normally. The `subagents:` section in `config.yaml` can stay empty; the built-in defaults work.
+- To use the `bash` subagent you need a container sandbox, or `sandbox.allow_host_bash: true` under the local sandbox, which is only appropriate in a fully trusted local environment. Otherwise `bash` is hidden from the catalog.
 
 <Steps>
 
@@ -20,7 +20,7 @@ This chapter is for people using DeerFlow through the web interface. By the end 
 
 Pick **Ultra** in the mode selector of the input box. The UI describes it as "Pro mode with subagents to divide work". Ultra mode sets `subagent_enabled` to `true` in the request context, enables plan mode, and defaults the reasoning effort to high. In Flash, Thinking, and Pro modes the Lead Agent does not see the `task` tool.
 
-If you are talking to a Custom Agent created in Settings, its own subagent access setting may narrow or disable delegation further. See [Subagent Catalog](/docs/harness/subagents/catalog).
+If you are talking to a Custom Agent, the **Subagent access** option in that agent's settings may narrow or disable delegation further. See [Subagent Catalog](/docs/harness/subagents/catalog).
 
 ### Send a task that splits well
 

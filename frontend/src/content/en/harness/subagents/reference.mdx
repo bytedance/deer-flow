@@ -14,7 +14,7 @@ description: Quick reference for subagent configuration keys, request context ke
 | `subagents.max_total_per_run`                | 6                                           | Delegations per run, 1 to 50                                                |
 | `subagents.token_budget.enabled`             | true                                        |                                                                             |
 | `subagents.token_budget.max_tokens`          | 2,000,000; 1,000,000 when summarization is on | Once set explicitly, no longer coupled to the summarization switch         |
-| `subagents.token_budget.warn_threshold`      | 0.7                                         | Logs a warning at this fraction                                             |
+| `subagents.token_budget.warn_threshold`      | 0.7                                         | At this fraction, warns the model once on its next call                     |
 | `subagents.agents.<name>.timeout_seconds`    |                                             | Per-agent override, applies to subagents from any source                    |
 | `subagents.agents.<name>.max_turns`          |                                             |                                                                             |
 | `subagents.agents.<name>.model`              |                                             |                                                                             |
@@ -50,7 +50,7 @@ description: Quick reference for subagent configuration keys, request context ke
 | `subagent_enabled`         | Whether delegation is allowed; the web UI sets it in Ultra mode                                              |
 | `max_concurrent_subagents` | Per-response concurrency, 1 to 64, capped by `subagent_runtime.max_running`                                  |
 | `max_total_subagents`      | Temporary override of the per-run total, 1 to 50                                                             |
-| `allowed_subagents`        | From the Custom Agent definition: `null` all, `[]` none, a list as allowlist; snapshotted into run metadata at run start |
+| `allowed_subagents`        | Not read from the request: comes from the Custom Agent definition, `null` all, `[]` none, a list as allowlist; snapshotted into run metadata at run start |
 
 ## Tool signatures
 
@@ -82,7 +82,7 @@ Canonical acceptance criteria: `file:<path> exists`, `file:<path> non-empty`, `f
 | Batch status                | `queued`, `running`, `paused`, `completed`, `failed`, `cancelled`                        |
 | Batch item status           | `pending`, `queued`, `leased`, `running`, `succeeded`, `failed`, `cancelled`             |
 
-Result text formats: `Task Succeeded. Result: ...`, `Task Succeeded (capped: <label>). Result: ...`, `Task failed.`, `Task cancelled by user.`, `Task timed out.`, `Task polling timed out after N minutes. ...`; failure-class results may append `Error: <detail>`.
+Result text formats: `Task Succeeded. Result: ...`, `Task Succeeded (capped: <label>). Result: ...`, `Task failed.`, `Task failed (capped: <label>).`, `Task cancelled by user.`, `Task timed out.`, `Task polling timed out after N minutes. ...`; `failed`, `cancelled`, and `timed_out` results may append `Error: <detail>`.
 
 Tool result metadata keys: `subagent_status`, `subagent_stop_reason`, `subagent_error`, `subagent_result_brief`, `subagent_result_sha256`, `subagent_model_name`, `subagent_token_usage`, `subagent_tool_receipts`, `subagent_receipt_verdict`, `subagent_acceptance_verdict`. Contract file: `contracts/subagent_status_contract.json` (version 2).
 
@@ -99,7 +99,7 @@ Tool result metadata keys: `subagent_status`, `subagent_stop_reason`, `subagent_
 
 | Route                                                            | Purpose                                                        |
 | ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| `GET/POST /api/subagents`, `PUT/DELETE /api/subagents/{name}`    | Managed subagent catalog, administrators only                  |
+| `GET/POST /api/subagents`, `PUT/DELETE /api/subagents/{name}`    | Managed subagent catalog; `GET` is open to all users (system prompts for administrators only), writes are administrators only |
 | `GET /api/threads/{thread_id}/runs/{run_id}/events`              | Run events, filtered by `event_types` and `task_id`            |
 | `GET /api/threads/{thread_id}/token-usage`                       | Thread token usage with `by_model` and `by_caller`             |
 | `/api/threads/{thread_id}/subagent-batches/...`                  | Durable batches, see [Observability](/docs/harness/subagents/observability) |
@@ -117,7 +117,7 @@ Pull requests merged to the main branch between June 1 and September 22, 2026 wh
 - [#5221](https://github.com/bytedance/deer-flow/pull/5221) Close the stream before releasing the sandbox lease on cooperative cancellation.
 - [#5488](https://github.com/bytedance/deer-flow/pull/5488) `create_deerflow_agent` gains `DurableContextMiddleware`, making the per-run total, summarization, and token budget effective.
 - [#5485](https://github.com/bytedance/deer-flow/pull/5485) Convert `max_turns` into the super-step budget from middleware node counts.
-- [#5178](https://github.com/bytedance/deer-flow/pull/5178) Set AIO `MAX_SHELL_SESSIONS` from `max_running + 1`.
+- [#5178](https://github.com/bytedance/deer-flow/pull/5178) Raise AIO `MAX_SHELL_SESSIONS` to `max_running + 1` when that exceeds the image default.
 - [#5477](https://github.com/bytedance/deer-flow/pull/5477) Shield capacity slot release from repeated cancellation.
 - [#5476](https://github.com/bytedance/deer-flow/pull/5476) Trim the subagent acceptance checklist agent guidance.
 - [#5454](https://github.com/bytedance/deer-flow/pull/5454) Keep the subagent system prompt through context compaction.

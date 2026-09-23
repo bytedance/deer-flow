@@ -36,7 +36,7 @@ import { Callout } from "nextra/components";
 
 运行时合并顺序为**内置 → `config.yaml` → 设置页管理**。设置页管理的定义如果与内置或 `config.yaml` 同名，会继续保存并在设置页显示冲突标记，但被排除在运行时目录之外。
 
-在此之上，`subagents.agents.<name>` 可以对任何来源的子 Agent 覆盖 `timeout_seconds`、`max_turns`、`model`、`skills` 和 `token_budget`。设置页目录会标出这些覆盖。
+在此之上，`subagents.agents.<name>` 可以对任何来源的子 Agent 覆盖 `timeout_seconds`、`max_turns`、`model`、`skills` 和 `token_budget`。设置页目录会标出其中 `timeout_seconds`、`max_turns`、`model`、`skills` 的覆盖。
 
 <Callout type="warning">
   全局的 `subagents.timeout_seconds` 和 `subagents.max_turns` 只作用于内置子
@@ -54,7 +54,7 @@ subagents:
       system_prompt: |                                        # 必填
         你是数据分析专家……
       tools: null            # null 表示继承 Lead Agent 的全部工具；也可以给出白名单
-      disallowed_tools:      # 默认值，task / ask_clarification / present_files 总会被禁止
+      disallowed_tools:      # 默认值；task 始终不可用，另外两个仅在列于此处时被禁止
         - task
         - ask_clarification
         - present_files
@@ -72,7 +72,7 @@ subagents:
 
 | 字段               | 说明                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------- |
-| `name`             | 只允许字母、数字和连字符，作为 `subagent_type` 使用                                     |
+| `name`             | 只允许字母、数字和连字符，保存时转为小写，作为 `subagent_type` 使用                                     |
 | `display_name`     | 可选显示名                                                                               |
 | `description`      | 派遣说明，Lead Agent 据此决定何时使用                                                    |
 | `system_prompt`    | 系统提示                                                                                 |
@@ -85,11 +85,11 @@ subagents:
 
 内置项和 `config.yaml` 项也会显示在同一个目录里，但只读。
 
-存储后端跟随 Custom Agent 的设置：`agent_storage.backend: file` 在 `DEER_FLOW_HOME/managed-subagents/` 下为每条定义写一个原子 JSON 文件；`agent_storage.backend: db` 写入共享应用数据库，供多实例部署共同读取。这些定义是部署级全局数据，不按用户隔离。对应的管理 API 在 `/api/subagents`，仅管理员可用；运行时对定义有约 1 秒的缓存。
+存储后端跟随 Custom Agent 的设置：`agent_storage.backend: file` 在 `DEER_FLOW_HOME/managed-subagents/` 下为每条定义写一个原子 JSON 文件；`agent_storage.backend: db` 写入共享应用数据库，供多实例部署共同读取。这些定义是部署级全局数据，不按用户隔离。对应的 API 在 `/api/subagents`：所有用户都可以读取目录（系统提示仅对管理员可见），创建、更新与删除仅管理员可用；运行时对定义有约 1 秒的缓存。
 
 ## Custom Agent 的委派范围
 
-默认 Lead Agent 可以看到全部已启用的运行时子 Agent。设置页创建的每个 Custom Agent 可以在自身设置里收窄：
+默认 Lead Agent 可以看到全部已启用的运行时子 Agent。每个 Custom Agent 可以用其智能体设置里的**子智能体权限**选项收窄：
 
 | 选项                 | 效果                                                                              |
 | -------------------- | --------------------------------------------------------------------------------- |

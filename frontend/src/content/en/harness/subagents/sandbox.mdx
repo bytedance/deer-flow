@@ -49,7 +49,7 @@ Delegating to `bash` under the local sandbox returns an explicit failure explain
 
 ## Identity propagation into commands
 
-Conversations triggered through an IM channel carry the sender identity in the runtime context as `channel_user_id`. The `task` tool forwards it to the subagent, and every bash command the subagent runs is prefixed with `export DEERFLOW_CHANNEL_USER_ID=<value>;` (or `unset` when there is no identity). The value is at most 256 characters and shell-quoted, so delegated scripts still know who is acting.
+Conversations triggered through an IM channel carry the sender identity in the runtime context as `channel_user_id`. The `task` tool forwards it to the subagent, and every bash command the subagent runs is prefixed with `export DEERFLOW_CHANNEL_USER_ID=<value>;` (or `unset DEERFLOW_CHANNEL_USER_ID;` when the IM id is present but empty or invalid; runs without an IM identity get no prefix). The value is at most 256 characters and shell-quoted, so delegated scripts still know who is acting.
 
 ## The subagent middleware chain
 
@@ -66,7 +66,7 @@ Lead-only middlewares that are **not** on the subagent chain: dynamic context (u
 ## Execution isolation
 
 - **No checkpointing**: the subgraph compiles with `checkpointer=False`, and the runtime passes no checkpoint coordinates such as `thread_id` to it; LangGraph inherits the parent namespace naturally. Subagent messages therefore do not leak into the parent stream, and a parent's synchronous checkpointer cannot trip the child.
-- **A dedicated event loop**: every subagent runs on a daemon thread named `subagent-persistent-loop`, separate from the Gateway request loop. Crossing that boundary strips the parent callbacks bound to the original loop (such as the billing journal); token usage and audit events reach the parent through dedicated proxies.
+- **A dedicated event loop**: all subagents share one process-wide event loop on a daemon thread named `subagent-persistent-loop`, separate from the Gateway request loop. Crossing that boundary strips the parent callbacks bound to the original loop (such as the billing journal); token usage and audit events reach the parent through dedicated proxies.
 - **A resident system prompt**: the subagent's system prompt is the first system message in state. Summarization trims by index but explicitly preserves system messages and the latest user message, so the role prompt, report contract, acceptance note, and skill index survive compaction.
 - **Skill projection**: a subagent does not re-project `/mnt/skills`; the Lead Agent's run owns the projection. The subagent's skill allowlist scopes discovery and activation, not filesystem isolation.
 

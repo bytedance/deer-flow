@@ -1,9 +1,6 @@
 import type { MetaRecord } from "nextra";
 
 const meta: MetaRecord = {
-  index: {
-    title: "概念与工作原理",
-  },
   "quick-start": {
     title: "快速上手",
   },

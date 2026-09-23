@@ -35,7 +35,7 @@ import { Callout } from "nextra/components";
 
 ### 状态是 `failed`，错误为 `Reached max_turns=N`
 
-轮次用尽且最后一条助手消息没有可用文本。处理办法同上。
+轮次用尽且最后一条助手消息没有可用文本，结果正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。处理办法同上。
 
 ## 容量与限制
 
@@ -80,7 +80,7 @@ import { Callout } from "nextra/components";
 
 ### 并发子 Agent 的命令报 `404 Session not found`，或 shell 状态互相串
 
-**原因**：多个子 Agent 共用 AIO 的隐式 shell 会话，或者会话数超过镜像上限被驱逐。[#5134](https://github.com/bytedance/deer-flow/pull/5134) 给每个子 Agent 独立的执行租约与持久会话，[#5178](https://github.com/bytedance/deer-flow/pull/5178) 按 `max_running + 1` 自动设置 `MAX_SHELL_SESSIONS`。
+**原因**：多个子 Agent 共用 AIO 的隐式 shell 会话，或者会话数超过镜像上限被驱逐。[#5134](https://github.com/bytedance/deer-flow/pull/5134) 给每个子 Agent 独立的执行租约与持久会话，[#5178](https://github.com/bytedance/deer-flow/pull/5178) 在 `max_running + 1` 超过镜像默认的 10 且未显式配置时，自动把 `MAX_SHELL_SESSIONS` 提高到该值；显式设置的值小于 `max_running + 1` 会以 `ValueError` 拒绝。
 
 **处理**：升级后确认 `sandbox.environment.MAX_SHELL_SESSIONS` 未被显式设成小于 `max_running + 1`；Provisioner 模式下同时升级 Provisioner，否则 Gateway 会报它未回报 `max_shell_sessions`。
 

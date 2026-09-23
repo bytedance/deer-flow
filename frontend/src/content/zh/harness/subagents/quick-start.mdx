@@ -11,8 +11,8 @@ import { Callout, Steps } from "nextra/components";
 
 ## 前提
 
-- 已按[安装](/docs/harness)完成配置并能正常对话。`config.yaml` 里的 `subagents:` 段可以完全留空，内置默认值即可使用。
-- 想用 `bash` 子 Agent，需要配置容器沙箱；或者在本地沙箱下显式设置 `sandbox.allow_host_bash: true`，这只适合完全可信的本地环境。否则目录里只有 `general-purpose`。
+- 已按[快速上手](/docs/application/quick-start)完成配置并能正常对话。`config.yaml` 里的 `subagents:` 段可以完全留空，内置默认值即可使用。
+- 想用 `bash` 子 Agent，需要配置容器沙箱；或者在本地沙箱下显式设置 `sandbox.allow_host_bash: true`，这只适合完全可信的本地环境。否则目录会隐藏 `bash`。
 
 <Steps>
 
@@ -20,7 +20,7 @@ import { Callout, Steps } from "nextra/components";
 
 在输入框的模式选择器里选择 **Ultra**。界面对它的描述是"继承自 Pro 模式，可调用子代理分工协作"。Ultra 模式会在请求上下文里把 `subagent_enabled` 置为 `true`，同时开启计划模式并把推理深度默认设为 high。Flash、Thinking、Pro 模式下 Lead Agent 看不到 `task` 工具。
 
-如果你用的是设置页创建的 Custom Agent，它自己的"子智能体"设置还可能进一步收窄或禁止委派。见[子 Agent 目录](/docs/harness/subagents/catalog)。
+如果你用的是 Custom Agent，该智能体设置里的**子智能体权限**选项还可能进一步收窄或禁止委派。见[子 Agent 目录](/docs/harness/subagents/catalog)。
 
 ### 发一个适合拆分的任务
 

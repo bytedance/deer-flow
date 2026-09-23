@@ -14,12 +14,12 @@ A subagent's report is its **self-report**. DeerFlow layers three kinds of check
 | `subagent_status`     | Meaning                                                                                        | Card     | Result text starts with                   |
 | --------------------- | ---------------------------------------------------------------------------------------------- | -------- | ----------------------------------------- |
 | `completed`           | The subgraph ended normally                                                                    | Completed | `Task Succeeded. Result:`                 |
-| `failed`              | The model call failed after retries, capacity was rejected, or a runtime error occurred        | Failed   | `Task failed.`                            |
+| `failed`              | The model call failed after retries, capacity was rejected, or a runtime error occurred        | Failed   | `Task failed.` or `Task failed (capped: <label>).` |
 | `cancelled`           | The user stopped the run, or the parent run was cancelled                                      | Failed   | `Task cancelled by user.`                 |
 | `timed_out`           | `timeout_seconds` elapsed                                                                      | Failed   | `Task timed out.`                         |
 | `polling_timed_out`   | The parent's polling budget ran out; the background task may be stuck. The runtime requested cancellation and scheduled deferred cleanup | Failed | `Task polling timed out after N minutes.` |
 
-Failure-class statuses append `Error: <detail>` when a detail exists. The text body is display content only; the frontend and the Lead Agent rely on the structured fields in the message metadata, not on parsing text.
+`failed`, `cancelled`, and `timed_out` append `Error: <detail>` when a detail exists; `polling_timed_out` shows its detail as-is. The text body is display content only; the frontend and the Lead Agent rely on the structured fields in the message metadata, not on parsing text.
 
 <Callout type="info">
   A failed subagent does not fail the parent run. A failed delegation is an
@@ -29,7 +29,7 @@ Failure-class statuses append `Error: <detail>` when a detail exists. The text b
 
 ### Cap reasons: stop_reason
 
-Three guards can end a run early while it still counts as `completed`:
+Three guards can end a run early. The run usually still counts as `completed`; when no usable output exists it is `failed` and keeps the same `stop_reason`:
 
 | `subagent_stop_reason` | Trigger                          | Result text                                                          |
 | ---------------------- | -------------------------------- | -------------------------------------------------------------------- |
@@ -37,7 +37,7 @@ Three guards can end a run early while it still counts as `completed`:
 | `token_capped`         | `token_budget` hard stop reached | `Task Succeeded (capped: token budget). Result: ...`                 |
 | `loop_capped`          | Loop-detection hard stop         | `Task Succeeded (capped: repeated tool-call loop). Result: ...`      |
 
-A capped report is a **partial result**: the tool calls of the final turn were stripped and the model was forced to answer. When the turn budget runs out with no usable text at all, the status is `failed` with the error `Reached max_turns=N`. The legacy `max_turns_reached` status maps to `turn_capped` on read.
+A capped report is a **partial result**: the tool calls of the final turn were stripped and the model was forced to answer. When the turn budget runs out with no usable text at all, the status is `failed` and the text reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. The legacy `max_turns_reached` status maps to `turn_capped` on read.
 
 ### How failure is decided
 
@@ -70,7 +70,7 @@ When the subagent finishes, the parent checks every `[rN]` in the report against
 | resolved              | The receipt exists, its status is success, and the tool name matches the citation anchor                    |
 | failed                | The receipt exists but its status is not success, or the cited tool name does not match the actual tool     |
 | unknown               | No receipt with that id exists in the ledger                                                                |
-| `no_citation_claims`  | The report cites nothing but contains action verbs or paths, or is at least 240 characters long             |
+| `no_citation_claims`  | The report cites nothing but contains action verbs or paths, or, when the receipt ledger is not empty, is at least 240 characters long             |
 
 This verdict is not written into the result text. It is stored in the message metadata and summarized on one line in the delegation ledger, such as `citations: 2 resolved, 1 failed, 1 unknown — execution evidence only, does not validate claim correctness`, or `citations: UNVERIFIED — action claims without receipt citations`.
 
@@ -88,7 +88,7 @@ When `acceptance_criteria` were attached, a `completed` result ends with a check
 
 ```
 Acceptance checklist (deterministic checks; execution evidence only, does not validate claim correctness):
-- [holds] file:outputs/report.md non-empty — 1,204 bytes
+- [holds] file:outputs/report.md non-empty — 1204 bytes
 - [does not hold] file_written:outputs/summary.md — file does not exist
 - [UNVERIFIED] The report must cover three competitors — not deterministically checkable
 ```
@@ -128,7 +128,7 @@ The ledger is the system-maintained record of delegations, stored in the `delega
 ```
 ## Work already delegated
 Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. ...
-- [completed] research competitors (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> Pricing of the top 5 competitors… · citations: 3 resolved · acceptance: 1 hold
+- [completed] research competitors (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> Pricing of the top 5 competitors… · citations: 3 resolved · acceptance: 1 hold, 1 does not hold — execution evidence only, does not validate claim correctness
 - [in_progress] organize data (via bash; already delegated; do NOT delegate again; wait for or build on the result)
 ```
 

@@ -13,8 +13,8 @@ import { Callout } from "nextra/components";
 
 | 限制               | 配置键 / 上下文键                                                        | 默认值                                          | 范围                                 | 触发时表现                                                                                         |
 | ------------------ | ------------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| 每次响应并发数     | 请求上下文 `max_concurrent_subagents`                                    | 3                                               | 1 到 64，且不超过 `subagent_runtime.max_running` | 多余的 `task` 调用被丢弃，只记日志                                                       |
-| 每次 run 总量      | `subagents.max_total_per_run`，请求上下文 `max_total_subagents` 可临时覆盖 | 6                                               | 1 到 50                              | 多余调用被丢弃，助手消息末尾追加 `[SUBAGENT LIMIT REACHED] ...`，本 run 的 `stop_reason` 记为 `subagent_limit_capped` |
+| 每次响应并发数     | 请求上下文 `max_concurrent_subagents`                                    | `subagent_runtime.max_running`（默认 3）        | 1 到 64，且不超过 `subagent_runtime.max_running` | 多余的 `task` 调用被丢弃，只记日志                                                       |
+| 每次 run 总量      | `subagents.max_total_per_run`，请求上下文 `max_total_subagents` 可临时覆盖 | 6                                               | 1 到 50                              | 多余调用被丢弃。若响应前总量已经用尽，助手消息末尾追加 `[SUBAGENT LIMIT REACHED] ...`，本 run 的 `stop_reason` 记为 `subagent_limit_capped`；某次响应只是越过上限时，仅截断并记日志 |
 | 轮次               | `subagents.max_turns`（仅内置）、`subagents.agents.<name>.max_turns`     | general-purpose 150，bash 60，自定义 50         | 大于等于 1                           | 保留部分结果并标记 `turn_capped`；没有可用文本时 `failed`                                          |
 | 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
 | 轮询次数           | 由超时推导：`(timeout_seconds + 60) / 5` 次，每 5 秒一次                 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
@@ -33,8 +33,8 @@ import { Callout } from "nextra/components";
 
 `SubagentLimitMiddleware` 只装在 Lead Agent 链上，负责两道闸：
 
-- **每次响应并发数**：一次模型响应里允许的 `task` 调用数，默认 3，并被进程容量 `max_running` 封顶。超出的调用直接丢弃，不追加任何文字，只记日志。提示词里的 HARD LIMITS 行会告诉模型这个数字。
-- **每次 run 总量**：一次 run 里累计的委派数，默认 6，也就是默认并发下的两整批。只统计带当前 `run_id` 的账本条目；没有 `run_id` 时会记一条警告并统计整个线程。总量用尽时中间件把剩余的 `task` 调用去掉，并在助手消息后追加：
+- **每次响应并发数**：一次模型响应里允许的 `task` 调用数，默认等于进程容量 `max_running`（默认 3），也以它为上限。超出的调用直接丢弃，不追加任何文字，只记日志。提示词里的 HARD LIMITS 行会告诉模型这个数字。
+- **每次 run 总量**：一次 run 里累计的委派数，默认 6，也就是默认并发下的两整批。只统计带当前 `run_id` 的账本条目；没有 `run_id` 时会记一条警告并统计整个线程。超出剩余总量的 `task` 调用会被去掉。某次响应只是越过上限时，只记日志；如果响应前总量已经用尽，中间件去掉该响应里全部 `task` 调用，把本 run 的 `stop_reason` 记为 `subagent_limit_capped`，并在助手消息后追加：
 
 ```
 [SUBAGENT LIMIT REACHED] The subagent delegation limit for this run has been reached. Continue using the subagent results already collected, execute remaining simple work directly, or summarize the remaining work instead of launching more subagents.
@@ -63,7 +63,7 @@ recursion_limit = max_turns × (每轮节点数) + (每次调用一次性节点�
 子 Agent 中间件链镜像了 Lead Agent 的三道防护：
 
 - **循环检测** `LoopDetectionMiddleware`：打断不取得进展却反复调用同一工具的循环。子 Agent 没有 `task`，所以只有工具循环启发式会触发。硬停止把结果标记为 `completed` + `subagent_stop_reason=loop_capped`。由 `loop_detection` 配置控制，可以用 `tool_freq_overrides` 按工具名单独设阈值。
-- **token 预算** `TokenBudgetMiddleware`：按 `subagents.token_budget` 计算单次运行的累计 token。到达硬停止阈值时剥离当前轮的工具调用、强制产出最终答案，结果标记 `completed` + `token_capped`。到达 `warn_threshold` 比例时记一条警告日志。
+- **token 预算** `TokenBudgetMiddleware`：按 `subagents.token_budget` 计算单次运行的累计 token。到达硬停止阈值时剥离当前轮的工具调用、强制产出最终答案，结果标记 `completed` + `token_capped`。到达 `warn_threshold` 比例时，会在子 Agent 的下一次模型调用中注入一次预算警告，并记一条 INFO 日志。
 - **摘要压缩** `DeerFlowSummarizationMiddleware`：用与 Lead Agent 相同的 `summarization.enabled` 开关压缩过长的子 Agent 记录，摘要模型默认就是子 Agent 自己在用的模型。压缩时子 Agent 的系统提示（角色、报告契约、验收说明、技能索引、延迟工具目录）和最新用户消息会被保留；`DurableContextMiddleware` 排在压缩之前，把 `summary_text` 回注到后续请求，避免压缩后出现以助手消息开头的历史。
 
 token 预算的默认上限与摘要开关联动：压缩开启时 1,000,000，关闭时 2,000,000。显式设置的 `subagents.token_budget.max_tokens`（全局或按 Agent）始终优先，切换摘要开关不会悄悄改动你固定的值。

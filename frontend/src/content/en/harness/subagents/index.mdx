@@ -62,8 +62,8 @@ How task cards, event streams, and the ledger surface this process is covered in
 | The same thread sandbox, with its own shell session and execution lease       | Parent conversation history. Isolated by default; `context_mode="snapshot"` passes an explicit snapshot            |
 | The user identity and the user-scoped skill catalog                           | User memory and the Lead Agent's dynamic context. A subagent receives one `current_date` reminder only             |
 | The model. `inherit` by default, overridable per agent                        | The parent run's checkpointer. Subgraphs compile with `checkpointer=False`: one-shot, not resumable                |
-| Guard configuration: `summarization`, `loop_detection`, `token_budget`        | Parent callbacks bound to the parent event loop. Token usage and audit events reach the parent through proxies     |
-| The request trace id and the IM `channel_user_id`                             | The `task`, `ask_clarification`, and `present_files` tools. No further delegation, no questions to the user        |
+| Guard configuration: `summarization`, `loop_detection`. The token budget comes from `subagents.token_budget` instead | Parent callbacks bound to the parent event loop. Token usage and audit events reach the parent through proxies     |
+| The request trace id and the IM `channel_user_id`                             | The `task` tool (no further delegation) and, by default, `ask_clarification` and `present_files` (no questions to the user) |
 | Discovery of historical uploads (ordinary `task` delegations)                 | Lead-only middlewares: memory, todo, title generation, clarification, delegation limits                            |
 
 Details are in [Sandbox and Isolation](/docs/harness/subagents/sandbox).

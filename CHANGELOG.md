@@ -2971,7 +2971,8 @@ This release closes that milestone with **765 merged pull requests**.
   sandbox and isolation, observability, troubleshooting by symptom, developer
   integration, and a reference appendix with the June to September 2026
   change log. The former single page becomes the section index, so existing
-  links keep working.
+  page links keep working; deep links to sections of the old page now land
+  on the index.
 
 ### Internal
 

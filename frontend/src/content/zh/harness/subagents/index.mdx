@@ -61,8 +61,8 @@ task(
 | 同一个线程沙箱，但有各自独立的 shell 会话与执行租约          | 父对话历史。默认隔离，可用 `context_mode="snapshot"` 显式带入一份快照               |
 | 用户身份，以及用户作用域的技能目录                           | 用户记忆与 Lead Agent 的动态上下文。子 Agent 只收到一条 `current_date` 提醒         |
 | 模型。默认 `inherit`，可按 Agent 覆盖                        | 父 run 的 checkpointer。子图以 `checkpointer=False` 编译，一次性执行、不可恢复      |
-| `summarization`、`loop_detection`、`token_budget` 等防护配置 | 父 run 绑定到事件循环的回调。token 用量与审计事件通过专门的代理回传父 run           |
-| 请求级 trace id，以及 IM 渠道的 `channel_user_id`            | `task`、`ask_clarification`、`present_files` 三个工具。不能再派生，不能向用户提问   |
+| `summarization`、`loop_detection` 等防护配置；token 预算改用独立的 `subagents.token_budget` | 父 run 绑定到事件循环的回调。token 用量与审计事件通过专门的代理回传父 run           |
+| 请求级 trace id，以及 IM 渠道的 `channel_user_id`            | `task` 工具（不能再派生），以及默认禁用的 `ask_clarification`、`present_files`（不能向用户提问） |
 | 历史上传文件的发现能力（普通 `task` 委派）                   | Lead Agent 专属中间件：记忆、待办、标题生成、澄清、委派上限                         |
 
 细节见[沙箱与隔离](/docs/harness/subagents/sandbox)。

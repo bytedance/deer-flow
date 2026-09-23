@@ -14,7 +14,7 @@ description: 子 Agent 相关的配置键、请求上下文键、工具签名、
 | `subagents.max_total_per_run`              | 6                                        | 每次 run 的委派总量，1 到 50                                          |
 | `subagents.token_budget.enabled`           | true                                     |                                                                       |
 | `subagents.token_budget.max_tokens`        | 2,000,000；摘要压缩开启时 1,000,000      | 显式设置后不再与摘要开关联动                                          |
-| `subagents.token_budget.warn_threshold`    | 0.7                                      | 达到该比例记警告                                                      |
+| `subagents.token_budget.warn_threshold`    | 0.7                                      | 达到该比例时，在下一次模型调用中向模型发出一次警告                    |
 | `subagents.agents.<name>.timeout_seconds`  |                                          | 按 Agent 覆盖，对任何来源的子 Agent 生效                              |
 | `subagents.agents.<name>.max_turns`        |                                          |                                                                       |
 | `subagents.agents.<name>.model`            |                                          |                                                                       |
@@ -50,7 +50,7 @@ description: 子 Agent 相关的配置键、请求上下文键、工具签名、
 | `subagent_enabled`         | 是否允许委派；Web 界面在 Ultra 模式下置为 true                        |
 | `max_concurrent_subagents` | 每次响应并发数，1 到 64，受 `subagent_runtime.max_running` 封顶       |
 | `max_total_subagents`      | 每次 run 总量的临时覆盖，1 到 50                                      |
-| `allowed_subagents`        | 由 Custom Agent 定义决定：`null` 全部、`[]` 禁止、列表为允许名单；run 开始时快照进 run metadata |
+| `allowed_subagents`        | 不从请求读取，由 Custom Agent 定义决定：`null` 全部、`[]` 禁止、列表为允许名单；run 开始时快照进 run metadata |
 
 ## 工具签名
 
@@ -82,7 +82,7 @@ invoke_acp_agent(...)   # 外部 ACP Agent，见子 Agent 目录
 | 批次状态                  | `queued`、`running`、`paused`、`completed`、`failed`、`cancelled`      |
 | 批次条目状态              | `pending`、`queued`、`leased`、`running`、`succeeded`、`failed`、`cancelled` |
 
-结果正文格式：`Task Succeeded. Result: ...`、`Task Succeeded (capped: <label>). Result: ...`、`Task failed.`、`Task cancelled by user.`、`Task timed out.`、`Task polling timed out after N minutes. ...`，失败类可追加 `Error: <detail>`。
+结果正文格式：`Task Succeeded. Result: ...`、`Task Succeeded (capped: <label>). Result: ...`、`Task failed.`、`Task failed (capped: <label>).`、`Task cancelled by user.`、`Task timed out.`、`Task polling timed out after N minutes. ...`，`failed`、`cancelled`、`timed_out` 可追加 `Error: <detail>`。
 
 工具结果元数据键：`subagent_status`、`subagent_stop_reason`、`subagent_error`、`subagent_result_brief`、`subagent_result_sha256`、`subagent_model_name`、`subagent_token_usage`、`subagent_tool_receipts`、`subagent_receipt_verdict`、`subagent_acceptance_verdict`。契约文件：`contracts/subagent_status_contract.json`（版本 2）。
 
@@ -99,7 +99,7 @@ invoke_acp_agent(...)   # 外部 ACP Agent，见子 Agent 目录
 
 | 路由                                                            | 用途                                        |
 | --------------------------------------------------------------- | ------------------------------------------- |
-| `GET/POST /api/subagents`，`PUT/DELETE /api/subagents/{name}`   | 设置页管理的子 Agent 目录，仅管理员         |
+| `GET/POST /api/subagents`，`PUT/DELETE /api/subagents/{name}`   | 设置页管理的子 Agent 目录；`GET` 所有用户可用（系统提示仅管理员可见），写操作仅管理员 |
 | `GET /api/threads/{thread_id}/runs/{run_id}/events`             | 运行事件，按 `event_types`、`task_id` 过滤  |
 | `GET /api/threads/{thread_id}/token-usage`                      | 线程 token 用量，含 `by_model`、`by_caller` |
 | `/api/threads/{thread_id}/subagent-batches/...`                 | 持久批处理，见[可观测性](/docs/harness/subagents/observability) |
@@ -117,7 +117,7 @@ invoke_acp_agent(...)   # 外部 ACP Agent，见子 Agent 目录
 - [#5221](https://github.com/bytedance/deer-flow/pull/5221) 协作取消时先关闭流再释放沙箱租约。
 - [#5488](https://github.com/bytedance/deer-flow/pull/5488) `create_deerflow_agent` 补上 `DurableContextMiddleware`，使总量上限、摘要与 token 预算生效。
 - [#5485](https://github.com/bytedance/deer-flow/pull/5485) `max_turns` 按中间件节点数换算为 super-step 预算。
-- [#5178](https://github.com/bytedance/deer-flow/pull/5178) 按 `max_running + 1` 设置 AIO 的 `MAX_SHELL_SESSIONS`。
+- [#5178](https://github.com/bytedance/deer-flow/pull/5178) 在超过镜像默认值时把 AIO 的 `MAX_SHELL_SESSIONS` 提高到 `max_running + 1`。
 - [#5477](https://github.com/bytedance/deer-flow/pull/5477) 容量槽位释放屏蔽重复取消。
 - [#5476](https://github.com/bytedance/deer-flow/pull/5476) 精简子 Agent 验收清单的开发指南。
 - [#5454](https://github.com/bytedance/deer-flow/pull/5454) 上下文压缩后保留子 Agent 系统提示。

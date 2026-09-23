@@ -35,7 +35,7 @@ Expected. A failed subagent is an ordinary tool result; the parent run does not 
 
 ### Status `failed` with the error `Reached max_turns=N`
 
-The turns ran out and the last assistant message had no usable text. Same fix as above.
+The turns ran out and the last assistant message had no usable text; the result reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. Same fix as above.
 
 ## Capacity and limits
 
@@ -80,7 +80,7 @@ The subagent inferred from the parent's context that `task` exists and tried to 
 
 ### Concurrent subagents get `404 Session not found`, or their shell state bleeds into each other
 
-**Cause**: subagents shared the AIO implicit shell session, or the session count exceeded the image limit and sessions were evicted. [#5134](https://github.com/bytedance/deer-flow/pull/5134) gives every subagent its own execution lease and persistent session, and [#5178](https://github.com/bytedance/deer-flow/pull/5178) sets `MAX_SHELL_SESSIONS` to `max_running + 1` automatically.
+**Cause**: subagents shared the AIO implicit shell session, or the session count exceeded the image limit and sessions were evicted. [#5134](https://github.com/bytedance/deer-flow/pull/5134) gives every subagent its own execution lease and persistent session, and [#5178](https://github.com/bytedance/deer-flow/pull/5178) raises `MAX_SHELL_SESSIONS` to `max_running + 1` automatically when that exceeds the image default of 10 and you have not set it; an explicit value below `max_running + 1` is rejected with a `ValueError`.
 
 **Fix**: after upgrading, make sure `sandbox.environment.MAX_SHELL_SESSIONS` is not explicitly set below `max_running + 1`. In provisioner mode upgrade the provisioner too, or the Gateway reports that it did not return `max_shell_sessions`.
 
