@@ -25,6 +25,7 @@ from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     ensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
+    raise_if_checkpoint_tuple_incompatible,
     raise_if_snapshot_incompatible,
 )
 
@@ -148,6 +149,18 @@ class CheckpointStateAccessor:
         snapshot = await self.graph.aget_state(prepared)
         raise_if_snapshot_incompatible(snapshot, self.mode)
         return snapshot
+
+    def get_metadata(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Read checkpoint metadata without materializing channel state."""
+        checkpoint_tuple = self.checkpointer.get_tuple(self._prepare_config(config))
+        raise_if_checkpoint_tuple_incompatible(checkpoint_tuple, self.mode)
+        return dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+
+    async def aget_metadata(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Read checkpoint metadata without materializing channel state."""
+        checkpoint_tuple = await self.checkpointer.aget_tuple(self._prepare_config(config))
+        raise_if_checkpoint_tuple_incompatible(checkpoint_tuple, self.mode)
+        return dict(getattr(checkpoint_tuple, "metadata", {}) or {})
 
     def history(self, config: dict[str, Any], *, limit: int | None = None) -> list[Any]:
         prepared = self._prepare_config(config)

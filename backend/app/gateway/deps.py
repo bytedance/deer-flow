@@ -22,7 +22,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
@@ -33,6 +33,7 @@ from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +57,21 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
 
 
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
-    """Refuse unsafe multi-worker configurations before persistence starts.
+    """Refuse unsafe multi-process configurations before persistence starts.
 
-    Four checks (all must pass for multi-worker):
+    Multi-instance scheduler recovery also needs the durable run ownership
+    contract even when each Pod runs a single Gateway worker.
 
-    1. Process-local browser sessions must be disabled. Browser tools keep
+    1. The background scheduler must be disabled for ordinary multi-worker
+       mode. ``scheduler.multi_instance`` opts into the lease-aware path.
+    2. Process-local browser sessions must be disabled. Browser tools keep
        Chromium and Playwright objects in one worker's memory, while ordinary
        uvicorn dispatch provides no thread-id affinity.
-    2. The DB backend must be Postgres — SQLite write-locks cannot support
+    3. The DB backend must be Postgres — SQLite write-locks cannot support
        concurrent multi-process access.
-    3. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
+    4. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
        process-local, so workers cannot enforce a shared singleton receipt.
-    4. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+    5. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
@@ -81,17 +85,33 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     except (TypeError, ValueError):
         workers = 1
 
+    scheduler = getattr(config, "scheduler", None)
+    multi_instance_requested = bool(getattr(scheduler, "multi_instance", False))
+    multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and multi_instance_requested)
+
+    backend = getattr(config.database, "backend", None)
+    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
+    run_ownership = getattr(config, "run_ownership", None)
+
+    if multi_instance_requested and backend != "postgres":
+        raise SystemExit(f"scheduler.multi_instance=true requires database.backend='postgres'. database.backend is '{backend}'. Set scheduler.multi_instance=false or configure Postgres.")
+    if multi_instance_requested and run_events_backend != "db":
+        raise SystemExit(f"scheduler.multi_instance=true requires run_events.backend='db'. run_events.backend is '{run_events_backend}'. Set scheduler.multi_instance=false or configure run_events.backend: db.")
+    if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
+        raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
+
     if workers <= 1:
         return
+
+    if config.scheduler.enabled and not multi_instance_scheduler:
+        raise SystemExit(f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set GATEWAY_WORKERS=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
     if _browser_tools_enabled_in_config(config):
         raise SystemExit(browser_multi_worker_error(workers))
 
-    backend = getattr(config.database, "backend", None)
     if backend != "postgres":
         raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
 
-    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
     if run_events_backend != "db":
         raise SystemExit(
             f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
@@ -99,7 +119,6 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
             "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
         )
 
-    run_ownership = getattr(config, "run_ownership", None)
     if run_ownership is None or not run_ownership.heartbeat_enabled:
         raise SystemExit(
             f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "
@@ -114,9 +133,10 @@ def _validate_agent_storage(config: AppConfig) -> None:
     """Fail fast on an agent-storage backend the database cannot support.
 
     ``agent_storage.backend: db`` needs a durable, shared SQL database — a
-    ``memory`` database is per-process, so agent definitions would silently
-    diverge across nodes (and there is no SQL URL to open). Mirrors deermem's
-    create_storage fail-fast and the multi-worker gate above.
+    ``memory`` database is per-process, so custom-agent and managed-subagent
+    definitions would silently diverge across nodes (and there is no SQL URL
+    to open). Mirrors deermem's create_storage fail-fast and the multi-worker
+    gate above.
 
     Also warns when a multi-worker Postgres deployment leaves agent storage on
     ``file``: custom agents created on one node's local disk are invisible to
@@ -137,7 +157,9 @@ def _validate_agent_storage(config: AppConfig) -> None:
         workers = 1
     if workers > 1 and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': custom agents are stored per-node on local disk and are not visible across workers/nodes. Set agent_storage.backend='db' to share them.",
+            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "custom agents and managed subagents are stored per-node on local disk and are not visible "
+            "across workers/nodes. Set agent_storage.backend='db' to share them.",
             workers,
         )
 
@@ -146,24 +168,37 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
     Shields the (internally-bounded) drain so that even if the lifespan
-    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
-    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
-    checkpointer pool is not closed while run tasks are still writing
-    checkpoints. On such a cancellation we let the already-running drain finish
-    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
-    the cancellation.
+    coroutine is repeatedly cancelled mid-shutdown — e.g. signal escalation or
+    the server's graceful-shutdown timeout — the checkpointer pool is not closed
+    while run tasks are still writing checkpoints. Cancellation is remembered
+    and propagated only after the already-running drain reaches a safe terminal
+    point.
     """
     drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
-    try:
-        await asyncio.shield(drain)
-    except asyncio.CancelledError:
-        # Re-shield so this second wait does not abandon the in-flight drain;
-        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+    cancellation: asyncio.CancelledError | None = None
+
+    while not drain.done():
         try:
             await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            if cancellation is not None:
+                logger.exception("In-flight run drain failed after shutdown cancellation")
+                raise cancellation
+            logger.exception("Failed to drain in-flight runs during shutdown")
+            return
+
+    if cancellation is not None:
+        try:
+            drain.result()
         except Exception:
             logger.exception("In-flight run drain failed after shutdown cancellation")
-        raise
+        raise cancellation
+
+    try:
+        drain.result()
     except Exception:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
@@ -385,6 +420,33 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     _validate_agent_storage(startup_config)
 
     async with AsyncExitStack() as stack:
+        # Lifecycle and system-model hooks can originate on isolated subagent
+        # loops. Bind them to the Gateway's serving loop before any runtime
+        # dependency starts, then reset the binding last through the exit
+        # stack. Registering the callback synchronously here also covers every
+        # startup-failure and cancellation path below.
+        try:
+            from deerflow.extensions.notify import (
+                reset_extension_notify_loop,
+                set_extension_notify_loop,
+            )
+
+            set_extension_notify_loop(asyncio.get_running_loop())
+        except Exception:
+            logger.exception("Failed to register the extension notify loop; sync observations will be dropped")
+        else:
+
+            def reset_notify_loop_safely() -> None:
+                try:
+                    reset_extension_notify_loop()
+                except Exception:
+                    logger.debug(
+                        "Failed to reset the extension notify loop (non-fatal)",
+                        exc_info=True,
+                    )
+
+            stack.callback(reset_notify_loop_safely)
+
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
         app.state.checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(config.database.checkpoint_delta.snapshot_frequency)
@@ -393,47 +455,128 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize persistence engine BEFORE checkpointer so that
         # auto-create-database logic runs first (postgres backend).
+        # Own cleanup before initialization so partial startup and host
+        # cancellation cannot strand an engine created along the way.
+        stack.push_async_callback(close_engine)
         await init_engine_from_config(config.database)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
+        # Record the checkpointer/Store backend selected from this startup
+        # snapshot so GET /health/ready probes what the running process
+        # actually uses. These singletons are restart-required by design and
+        # are never rebuilt on config.yaml hot reload, so the probe must not
+        # re-resolve process-wide configuration per request.
+        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config
+
+        setattr(app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config(config))
+
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
+
+            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            # Memory backend has no durable PAT store, so Bearer credentials
+            # cannot be validated there and are rejected by the middleware.
+            app.state.pat_repo = None
+
+        # Evidence readers are available to Gateway-lifetime extension services,
+        # so the configured event store must exist before those services start.
+        run_events_config = getattr(config, "run_events", None)
+        app.state.run_events_config = run_events_config
+        app.state.run_event_store = make_run_event_store(run_events_config)
+
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
+
+        # Gateway-lifetime services are trusted operator extensions without a
+        # request principal. None deliberately binds this app-scoped reader to
+        # global, cross-user visibility; event content is not secret-redacted.
+        app.state.run_evidence_reader = StoreRunEvidenceReader(
+            app.state.run_store,
+            app.state.run_event_store,
+            user_id=None,
+        )
+        app.state.run_evidence_reader_factory = StoreRunEvidenceReaderFactory(
+            app.state.run_store,
+            app.state.run_event_store,
+        )
+
+        # Services are app-scoped. Capture this app's immutable extension set
+        # once and close over the same object for teardown; the process-wide
+        # singleton may be replaced by another app/test before shutdown.
+        from deerflow.extensions import EMPTY_EXTENSIONS, record_runtime_diagnostics
+        from deerflow.extensions.gateway import start_services, stop_services
+
+        extensions = getattr(app.state, "extensions", EMPTY_EXTENSIONS)
+        attempted_services: list[tuple[str, Any]] = []
+
+        async def stop_extension_services() -> None:
+            record_runtime_diagnostics(
+                await await_drained(
+                    stop_services(
+                        extensions,
+                        service_entries=attempted_services,
+                    )
+                )
+            )
+
+        # Register cleanup before starting: start() can partially acquire
+        # resources and then fail or be cancelled.
+        stack.push_async_callback(stop_extension_services)
+        record_runtime_diagnostics(
+            await start_services(
+                extensions,
+                config,
+                sf,
+                run_evidence_reader=app.state.run_evidence_reader,
+                attempted_services=attempted_services,
+            )
+        )
 
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
+            from deerflow.persistence.mcp_tasks import McpTaskRepository
+            from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+            from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+            app.state.project_repo = ProjectRepository(sf)
+            app.state.project_document_repo = ProjectDocumentRepository(sf)
+            app.state.scheduled_task_repo = ScheduledTaskRepository(
+                sf,
+                run_repository=app.state.run_store,
+            )
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(
+                sf,
+                run_repository=app.state.run_store,
+            )
+            app.state.mcp_task_repo = McpTaskRepository(sf)
+            app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
+            app.state.mcp_task_repo = None
+            app.state.project_repo = None
+            app.state.project_document_repo = None
+            app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
-
-        # Run event store. The store and the matching ``run_events_config`` are
-        # both frozen at startup so ``get_run_context`` does not combine a
-        # freshly-reloaded ``AppConfig.run_events`` with a store still bound to
-        # the previous backend.
-        run_events_config = getattr(config, "run_events", None)
-        app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -514,7 +657,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                             ),
                         ),
                     )
-            await close_engine()
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +683,8 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_project_repo = _require("project_repo", "Projects")
+get_project_document_repo = _require("project_document_repo", "Projects")
 
 
 def get_store(request: Request):
@@ -577,6 +721,34 @@ def get_scheduled_task_service(request: Request):
     return val
 
 
+def get_mcp_task_repo(request: Request):
+    val = getattr(request.app.state, "mcp_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task repo not available")
+    return val
+
+
+def get_mcp_task_service(request: Request):
+    val = getattr(request.app.state, "mcp_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task service not available")
+    return val
+
+
+def get_subagent_batch_repo(request: Request):
+    val = getattr(request.app.state, "subagent_batch_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch repository not available")
+    return val
+
+
+def get_subagent_batch_service(request: Request):
+    val = getattr(request.app.state, "subagent_batch_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch service not available")
+    return val
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -584,8 +756,8 @@ def get_run_context(request: Request) -> RunContext:
     ``app_config`` field is resolved live so per-run fields (e.g.
     ``models[*].max_tokens``) follow ``config.yaml`` edits; the
     ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
-    captured in :func:`langgraph_runtime` so callers never see a store bound
-    to one backend paired with a config pointing at another.
+    captured in :func:`langgraph_runtime` so callers never see a store bound to
+    one backend paired with a config pointing at another.
     """
     return RunContext(
         checkpointer=get_checkpointer(request),
@@ -595,7 +767,9 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
+        mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
+        extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 
@@ -631,6 +805,19 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_pat_repo(request: Request):
+    """Return the personal-access-token repository from app state.
+
+    Raises 503 when the process runs on the memory backend (no durable PAT
+    storage), so PAT management routes fail explicitly instead of silently
+    accepting tokens nobody can validate.
+    """
+    pat_repo = getattr(request.app.state, "pat_repo", None)
+    if pat_repo is None:
+        raise HTTPException(status_code=503, detail="Personal access tokens require a configured database")
+    return pat_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
@@ -638,12 +825,13 @@ async def get_current_user_from_request(request: Request):
     """
     state = getattr(request, "state", None)
     state_user = getattr(state, "user", None)
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 
     if state_user is not None and getattr(state, "auth_source", None) in {
         AUTH_SOURCE_SESSION,
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_PAT,
     }:
         return state_user
 
@@ -682,13 +870,13 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
-    """Require the authenticated caller to be an admin user.
+async def is_admin_user(request: Request) -> bool:
+    """Return whether the authenticated caller is an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
     reaches a router. Falling back to the strict dependency keeps the route safe
     in tests or alternative ASGI compositions that mount a router without the
-    global middleware. ``detail`` is the route-specific 403 message.
+    global middleware.
 
     Centralising this here means a future change to the admin definition (e.g.
     allowing an internal system role, adding audit logging, or switching to a
@@ -696,11 +884,28 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
+    # PAT credentials never carry admin capability: no scope in the PAT
+    # universe grants it, so an admin's automation token must not unlock
+    # admin-only routes (skill installs, integration credentials, MCP config).
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)
 
-    if getattr(user, "system_role", None) != "admin":
+    return getattr(user, "system_role", None) == "admin"
+
+
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``detail`` is the route-specific 403 message. The shared predicate keeps
+    read-side redaction and write authorization on the same admin definition.
+    """
+
+    if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 
 

@@ -143,7 +143,7 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Memory 和 Redis 都只保留 `queue_maxsize` 条数据事件；游标早于保留水位线时返回 `StreamGap`，不会从当前最早事件静默部分重放。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。store-only SSE 与 `/wait` consumer 不能把普通 durable terminal status 当成流已完成，否则可能跳过延迟发布的 error 等尾部事件；只有 `orphan_recovered` 信号能在 heartbeat 时触发 END fallback，因为此时 producer 已被确认失联。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。`stream_bridge.heartbeat_interval_seconds`（默认 15 秒）是 bridge 实例的默认心跳周期，统一作用于 Gateway SSE、`/wait` 和内部 channel watcher；显式传给 `subscribe()` 的值仍可覆盖单次订阅。Memory 和 Redis 都只保留 `queue_maxsize` 条数据事件；游标早于保留水位线时返回 `StreamGap`，不会从当前最早事件静默部分重放。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。store-only SSE 与 `/wait` consumer 不能把普通 durable terminal status 当成流已完成，否则可能跳过延迟发布的 error 等尾部事件；只有 `orphan_recovered` 信号能在 heartbeat 时触发 END fallback，因为此时 producer 已被确认失联。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 
@@ -159,7 +159,7 @@ data: {"code":"stream_replay_gap","run_id":"...","requested_event_id":"...","ear
 
 ```
 
-`gap` 帧没有 SSE `id:`，后面也没有正常 `end`；当前订阅随即关闭。它是恢复边界而不是客户端断开，因此不会触发 `on_disconnect=cancel`。客户端必须丢弃不再可信的瞬时状态，重新读取 thread checkpoint 和持久化 run-event/message history，再以 `latest_available_event_id` 为游标跟随新事件。DeerFlow Web UI 自动执行此流程并最多连续恢复五次。
+`gap` 帧没有 SSE `id:`，后面也没有正常 `end`；当前订阅随即关闭。它是恢复边界而不是客户端断开，因此不会触发 `on_disconnect=cancel`。`earliest_available_event_id` 与 `latest_available_event_id` 在缓冲区无保留事件时为 `null`。客户端必须丢弃不再可信的瞬时状态，重新读取 thread checkpoint 和持久化 run-event/message history，再以 `latest_available_event_id` 为游标跟随新事件（若缓冲区为空即 `latest_available_event_id` 为 `null`，则不带游标重新加入流）。DeerFlow Web UI 自动执行此流程并最多连续恢复五次。
 
 Redis 对无游标、空 stream 上已经建立的阻塞等待也遵循相同契约：第一次 `XREAD` 唤醒的数据在交付前仍是 provisional baseline，bridge 会用下一次事务快照确认其尾 ID 仍在保留窗口。若生产者已经裁剪了该基线，订阅直接返回 `requested_event_id: null` 的 `gap`，不会先交付 retained tail。这个检查有明确的性能代价：每轮订阅需要一个包含 `XRANGE`、`XREVRANGE`、非阻塞 `XREAD` 的事务快照；空闲时还需要单独的阻塞 `XREAD` 来唤醒。
 

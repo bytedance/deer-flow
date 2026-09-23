@@ -25,13 +25,18 @@ graph LR
 
     OperatorYaml["config.yaml<br/>channels.github:<br/>  enabled: true<br/>  default_mention_login"]:::operator
     AgentYaml["agents/{name}/config.yaml<br/>github:<br/>  installation_id<br/>  bot_login<br/>  bindings: [{repo, triggers}]"]:::agent
-    Registry["build_github_agent_registry()<br/>(mtime-cached, asyncio.to_thread)"]:::route
+    Registry["build_github_agent_registry()<br/>(store-signature cached, asyncio.to_thread)"]:::route
     Webhook["POST /api/webhooks/github<br/>(HMAC verify)"]:::route
 
     OperatorYaml --> Registry
     AgentYaml --> Registry
     Registry --> Webhook
 ```
+
+Registry cache invalidation uses the configured agent store's opaque signature.
+The file backend derives it from agent config mtimes; the database backend uses
+a deterministic digest of the stored owner, name, config, and soul, so an update
+still invalidates the registry when two writes share the same timestamp.
 
 Each agent binding lists the **events it cares about** under `triggers:`. Events absent from `triggers:` are not delivered to that agent — the dispatcher never loads the agent for them. `DEFAULT_TRIGGERS` only supplies **field-level defaults** (e.g. `require_mention: true`) for events a binding did declare; it is no longer an enablement list.
 

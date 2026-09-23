@@ -1,8 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { browserStreamURL } from "./api";
+import { LatestBrowserFrameBuffer } from "./frame-buffer";
 
 export interface BrowserTab {
   index: number;
@@ -38,8 +45,8 @@ function normalizeSeedUrl(url: string | null | undefined): string {
  * Manage a live browser screencast WebSocket.
  *
  * When ``enabled`` is true, opens the stream, exposes the latest JPEG frame as
- * a data URL, and returns a ``sendInput`` callback that forwards user input to
- * the live page. Closes and cleans up when disabled or unmounted.
+ * an object URL, and returns a ``sendInput`` callback that forwards user input
+ * to the live page. Closes and cleans up when disabled or unmounted.
  *
  * ``seedUrl`` is only read when a connection is first established (via a ref, so
  * it is NOT a reconnect trigger). A separate effect steers an already-open live
@@ -56,10 +63,19 @@ export function useBrowserStream(
   ) => void,
 ) {
   const [status, setStatus] = useState<BrowserStreamStatus>("idle");
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [frameBuffer] = useState(() => new LatestBrowserFrameBuffer());
+  const frameUrl = useSyncExternalStore(
+    frameBuffer.subscribe,
+    frameBuffer.getSnapshot,
+    () => null,
+  );
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
-  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  // This state is only a lifecycle-generation signal. The actual consecutive
+  // reconnect count lives in a ref so resetting it after a successful open
+  // does not recreate the WebSocket effect.
+  const [reconnectGeneration, setReconnectGeneration] = useState(0);
+  const reconnectAttemptRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   const pendingNavigateRef = useRef<Extract<
     BrowserInputEvent,
@@ -96,12 +112,13 @@ export function useBrowserStream(
     if (enabled) {
       return;
     }
-    setConnectionAttempt(0);
-    setFrameUrl(null);
+    reconnectAttemptRef.current = 0;
+    setReconnectGeneration(0);
+    frameBuffer.dispose();
     setLiveUrl(null);
     setTabs([]);
     liveUrlRef.current = null;
-  }, [enabled, threadId]);
+  }, [enabled, frameBuffer, threadId]);
 
   useEffect(() => {
     if (!enabled) {
@@ -119,6 +136,7 @@ export function useBrowserStream(
     // after open (the server already aligns the page to the connect-time seed).
     liveUrlRef.current = seedRef.current ?? null;
     const socket = new WebSocket(browserStreamURL(threadId, seedRef.current));
+    socket.binaryType = "blob";
     socketRef.current = socket;
 
     const scheduleReconnect = () => {
@@ -130,15 +148,17 @@ export function useBrowserStream(
       }
       // Exponential backoff with a ceiling + attempt cap so a server that keeps
       // rejecting the upgrade cannot pin the client in a tight reconnect loop.
-      if (connectionAttempt >= RECONNECT_MAX_ATTEMPTS) {
+      const attempt = reconnectAttemptRef.current;
+      if (attempt >= RECONNECT_MAX_ATTEMPTS) {
         return;
       }
       const delay = Math.min(
-        RECONNECT_BASE_DELAY_MS * 2 ** connectionAttempt,
+        RECONNECT_BASE_DELAY_MS * 2 ** attempt,
         RECONNECT_MAX_DELAY_MS,
       );
       reconnectTimer = window.setTimeout(() => {
-        setConnectionAttempt((attempt) => attempt + 1);
+        reconnectAttemptRef.current += 1;
+        setReconnectGeneration((generation) => generation + 1);
       }, delay);
     };
 
@@ -153,25 +173,27 @@ export function useBrowserStream(
       // mounted, so after RECONNECT_MAX_ATTEMPTS total reconnects — even across
       // many healthy connections — scheduleReconnect would bail forever and
       // Live would go permanently dead until the panel is toggled off/on.
-      setConnectionAttempt(0);
+      reconnectAttemptRef.current = 0;
       setStatus("open");
     };
-    socket.onmessage = async (message) => {
+    socket.onmessage = (message) => {
       try {
-        const raw =
-          typeof message.data === "string"
-            ? message.data
-            : message.data instanceof Blob
-              ? await message.data.text()
-              : message.data instanceof ArrayBuffer
-                ? new TextDecoder().decode(message.data)
-                : String(message.data);
-        // The message may resolve after cleanup (async Blob/ArrayBuffer decode);
-        // do not write state for a socket the effect already tore down.
-        if (closedByEffect) {
+        if (closedByEffect) return;
+        if (message.data instanceof Blob) {
+          frameBuffer.push(
+            message.data.type === "image/jpeg"
+              ? message.data
+              : new Blob([message.data], { type: "image/jpeg" }),
+          );
           return;
         }
-        const payload = JSON.parse(raw) as {
+        if (message.data instanceof ArrayBuffer) {
+          frameBuffer.push(new Blob([message.data], { type: "image/jpeg" }));
+          return;
+        }
+        if (typeof message.data !== "string") return;
+
+        const payload = JSON.parse(message.data) as {
           type?: string;
           data?: string;
           url?: string;
@@ -179,7 +201,7 @@ export function useBrowserStream(
           tabs?: BrowserTab[];
         };
         if (payload.type === "frame" && payload.data) {
-          setFrameUrl(`data:image/jpeg;base64,${payload.data}`);
+          frameBuffer.replaceWithUrl(`data:image/jpeg;base64,${payload.data}`);
         } else if (payload.type === "url" && payload.url) {
           liveUrlRef.current = payload.url;
           setLiveUrl(payload.url);
@@ -212,8 +234,9 @@ export function useBrowserStream(
       }
       socketRef.current = null;
       socket.close();
+      frameBuffer.dispose();
     };
-  }, [connectionAttempt, enabled, threadId]);
+  }, [reconnectGeneration, enabled, frameBuffer, threadId]);
 
   // Steer an already-open stream toward a changed seed in-band instead of
   // rebuilding the socket. Only navigates when the live page differs from the

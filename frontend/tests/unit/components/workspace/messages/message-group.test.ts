@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { MessageGroup } from "@/components/workspace/messages/message-group";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 
 const artifactsMockState = rs.hoisted(() => ({
   autoOpen: false,
@@ -183,6 +184,108 @@ describe("MessageGroup", () => {
 
     expect(html).toContain("/mnt/user-data/outputs/report.md");
     expect(timeoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("renders streaming reasoning above the answer text of the same message", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "The user asked who I am, so I will summarize.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, ["Thinking", ">Zephyr</span>"]);
+  });
+
+  it("renders streaming inline think reasoning above the answer text", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content:
+            "<think>\nThe user only said hello, so I will greet back.\n</think>\n\nZephyr answer body.",
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, ["Thinking", ">Zephyr</span>"]);
+  });
+
+  it("renders trailing reasoning above the answer text that follows a tool call", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-1",
+              name: "read_file",
+              args: { path: "message-group.tsx" },
+            },
+          ],
+        } as Message,
+        {
+          id: "tool-1",
+          type: "tool",
+          name: "read_file",
+          tool_call_id: "call-1",
+          content: "file contents",
+        } as Message,
+        {
+          id: "ai-2",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "The file confirms the renderer order.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, [
+      "message-group.tsx",
+      "Thinking",
+      ">Zephyr</span>",
+    ]);
+  });
+
+  it("keeps assistant text emitted before the trailing reasoning above it", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Quartz interim note.",
+        } as Message,
+        {
+          id: "ai-2",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "Now I can write the final answer.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, [
+      ">Quartz</span>",
+      "Thinking",
+      ">Zephyr</span>",
+    ]);
   });
 
   it("keeps tool-calling assistant text visible when reasoning is also present", () => {
@@ -413,6 +516,176 @@ describe("MessageGroup", () => {
   });
 });
 
+// Tool args come from the model and results from search providers, so a
+// prompt-injected URL must not become a navigable anchor. React only rewrites
+// javascript: hrefs; local and OS-handler schemes would otherwise pass through.
+// A blocked URL keeps the markdown path's "Unsafe link omitted" marker.
+describe("MessageGroup tool links", () => {
+  const unsafeUrls = [
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    "ms-msdt:/id PCWDiagnostic",
+    "vscode://file/etc/passwd",
+  ];
+
+  it.each(unsafeUrls)("marks a web_fetch URL of %s as omitted", (url) => {
+    const html = renderToolCall("web_fetch", { url });
+
+    expect(html).toContain(`>${url}</span>`);
+    expect(html).toContain(`title="Unsafe link scheme in ${url}"`);
+    expect(unsafeMarkerCount(html)).toBe(1);
+    expect(html).not.toContain("<a");
+  });
+
+  it.each(unsafeUrls)("marks a web_search result at %s as omitted", (url) => {
+    const html = renderToolCall(
+      "web_search",
+      { query: "DeerFlow" },
+      JSON.stringify([
+        { title: "Safe source", url: "https://safe.example" },
+        { title: "Injected source", url },
+      ]),
+    );
+
+    expect(html).toContain('href="https://safe.example"');
+    expect(html).toContain(">Injected source</span>");
+    expect(unsafeMarkerCount(html)).toBe(1);
+    expect(anchorCount(html)).toBe(1);
+  });
+
+  it.each(unsafeUrls)(
+    "marks an image_search source at %s as omitted",
+    (url) => {
+      const html = renderToolCall(
+        "image_search",
+        { query: "DeerFlow" },
+        JSON.stringify({
+          results: [
+            {
+              title: "Injected image",
+              source_url: url,
+              thumbnail_url: "https://images.example/thumb.png",
+              image_url: "https://images.example/full.png",
+            },
+          ],
+        }),
+      );
+
+      expect(html).toContain('src="https://images.example/thumb.png"');
+      expect(unsafeMarkerCount(html)).toBe(1);
+      expect(html).not.toContain("<a");
+    },
+  );
+
+  it("keeps linking web_fetch and image_search results with web URLs", () => {
+    const fetchHtml = renderToolCall("web_fetch", {
+      url: "https://example.com/page",
+    });
+    const imageHtml = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: "Image",
+            source_url: "https://example.com/source",
+            thumbnail_url: "https://images.example/thumb.png",
+            image_url: "https://images.example/full.png",
+          },
+        ],
+      }),
+    );
+
+    expect(fetchHtml).toContain('href="https://example.com/page"');
+    expect(imageHtml).toContain('href="https://example.com/source"');
+    expect(unsafeMarkerCount(fetchHtml + imageHtml)).toBe(0);
+  });
+
+  // Models occasionally emit non-string args, and the step renders mid-stream;
+  // an object reaching the JSX would throw and take down the message list.
+  it("renders a web_fetch step whose url arg is not a string", () => {
+    const html = renderToolCall("web_fetch", {
+      url: { href: "https://example.com/page" },
+    });
+
+    expect(html).toContain("View web page");
+    expect(html).not.toContain("<a");
+  });
+
+  // Persisted or mid-stream tool calls can arrive without an args object;
+  // every specialized branch reads args, so none may throw on its absence.
+  it.each([
+    "web_fetch",
+    "web_search",
+    "image_search",
+    "ls",
+    "read_file",
+    "write_file",
+    "str_replace",
+    "bash",
+    "ask_clarification",
+    "write_todos",
+    "browser_navigate",
+    "mcp_lookup",
+  ])("renders a %s step whose tool call has no args", (name) => {
+    for (const args of [undefined, null]) {
+      const render = () =>
+        renderGroup([
+          {
+            id: "ai-1",
+            type: "ai",
+            content: "",
+            tool_calls: [{ id: "call-1", name, args }],
+          } as unknown as Message,
+        ]);
+
+      expect(render).not.toThrow();
+    }
+  });
+});
+
+function renderToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  content?: string,
+) {
+  const messages: Message[] = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call-1", name, args }],
+    } as Message,
+  ];
+  if (content !== undefined) {
+    messages.push({
+      id: "tool-1",
+      type: "tool",
+      name,
+      tool_call_id: "call-1",
+      content,
+    } as Message);
+  }
+  return renderGroup(messages);
+}
+
+function unsafeMarkerCount(html: string) {
+  return html.split('aria-label="Unsafe link omitted"').length - 1;
+}
+
+function anchorCount(html: string) {
+  return html.match(/<a\s/g)?.length ?? 0;
+}
+
+/** Asserts every needle is present and that they appear in the given order. */
+function expectRenderedInOrder(html: string, needles: string[]) {
+  const indices = needles.map((needle) => html.indexOf(needle));
+  for (const index of indices) {
+    expect(index).toBeGreaterThan(-1);
+  }
+  expect(indices).toStrictEqual([...indices].sort((a, b) => a - b));
+}
+
 function renderGroup(
   messages: Message[],
   props: Omit<ComponentProps<typeof MessageGroup>, "messages"> = {},
@@ -424,6 +697,7 @@ function renderGroup(
         value: {
           locale: "en-US",
           setLocale: () => undefined,
+          t: enUS,
         },
       },
       createElement(MessageGroup, { ...props, messages }),

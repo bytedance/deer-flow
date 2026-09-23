@@ -29,6 +29,15 @@ def test_model_settings_default_to_none() -> None:
     assert cfg.model_settings is None
     assert cfg.thinking_enabled is None
     assert cfg.reasoning_effort is None
+    assert cfg.memory_enabled is True
+
+
+def test_custom_agent_can_disable_memory_without_making_it_an_api_managed_field() -> None:
+    cfg = AgentConfig(name="stateless-worker", memory_enabled=False)
+
+    assert cfg.memory_enabled is False
+    assert "memory_enabled" not in MANAGED_AGENT_CONFIG_FIELDS
+    assert preserve_non_managed_fields(cfg) == {"memory_enabled": False}
 
 
 def test_model_settings_parse_full_shape() -> None:
@@ -81,7 +90,7 @@ def test_model_settings_are_managed_fields() -> None:
     # preserve_non_managed_fields helper must not also carry them. Surfaces that
     # do not expose them directly, such as the harness update_agent tool, need a
     # dedicated carry-forward path instead.
-    for field in ("model_settings", "thinking_enabled", "reasoning_effort"):
+    for field in ("model_settings", "thinking_enabled", "reasoning_effort", "allowed_subagents"):
         assert field in MANAGED_AGENT_CONFIG_FIELDS
 
 
@@ -117,6 +126,7 @@ def test_load_agent_config_round_trips_model_settings(tmp_path: Path, monkeypatc
         "model_settings": {"temperature": 0.2, "max_tokens": 12000},
         "thinking_enabled": True,
         "reasoning_effort": "high",
+        "memory_enabled": False,
     }
     _write_agent(tmp_path, "default", "researcher", body)
 
@@ -127,6 +137,7 @@ def test_load_agent_config_round_trips_model_settings(tmp_path: Path, monkeypatc
     assert cfg.model_settings.max_tokens == 12000
     assert cfg.thinking_enabled is True
     assert cfg.reasoning_effort == "high"
+    assert cfg.memory_enabled is False
 
 
 def test_load_agent_config_without_model_settings_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

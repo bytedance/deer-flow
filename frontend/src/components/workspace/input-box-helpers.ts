@@ -1,4 +1,4 @@
-import type { Skill } from "@/core/skills";
+import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
@@ -161,15 +161,31 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
   return query;
 }
 
+export function filterSkillsForAgent(
+  skills: Skill[],
+  agentSkillNames?: string[] | null,
+): Skill[] {
+  if (!agentSkillNames) {
+    return skills;
+  }
+
+  const allowedNames = new Set(agentSkillNames);
+  return skills.filter((skill) => allowedNames.has(skill.name));
+}
+
 export function getMatchingSkillSuggestions(
   skills: Skill[],
   query: string,
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  const builtinCommandNames = new Set(
-    builtinCommands.map(({ name }) => name.toLowerCase()),
-  );
+  // A name the slash parser refuses must not be offered here either. Builtin
+  // names remain unavailable, while `context` is only reserved for the exact
+  // `/context compact` alias and can therefore still be a skill suggestion.
+  const reservedNames = new Set([
+    ...RESERVED_SLASH_SKILL_NAMES,
+    ...builtinCommands.map(({ name }) => name.toLowerCase()),
+  ]);
 
   const builtinMatches = builtinCommands.filter(({ name, description }) => {
     if (!normalizedQuery) {
@@ -191,7 +207,7 @@ export function getMatchingSkillSuggestions(
       if (!skill.enabled) {
         return false;
       }
-      if (builtinCommandNames.has(name)) {
+      if (reservedNames.has(name) && name !== "context") {
         return false;
       }
       return !normalizedQuery || name.includes(normalizedQuery);

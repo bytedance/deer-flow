@@ -39,6 +39,13 @@ class DeferredToolFilterMiddleware(AgentMiddleware[AgentState]):
         self._deferred = deferred_names
         self._catalog_hash = catalog_hash
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "deferred_names": sorted(self._deferred),
+            "catalog_hash": self._catalog_hash,
+            "promotion_scope": "graph_state_catalog_hash",
+        }
+
     def _promoted(self, state) -> set[str]:
         promoted = (state or {}).get("promoted")
         if promoted and promoted.get("catalog_hash") == self._catalog_hash:

@@ -27,6 +27,7 @@ import sqlalchemy as sa
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_head_revision
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.run import RunRepository
 
@@ -76,7 +77,7 @@ async def test_legacy_database_recovers_token_usage_column(tmp_path: Path) -> No
             cols = {row[1] for row in raw.execute("PRAGMA table_info(runs)").fetchall()}
             assert "token_usage_by_model" in cols
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-            assert version_row[0] == "0010_run_cancel_request"
+            assert version_row[0] == _get_head_revision()
 
         # And the read path that originally 500'd must now succeed.
         sf = get_session_factory()
@@ -116,6 +117,6 @@ async def test_legacy_database_with_manual_alter_still_bootstraps(tmp_path: Path
             # No duplicate column -- list, not set, to catch dupes.
             assert cols.count("token_usage_by_model") == 1
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-            assert version_row[0] == "0010_run_cancel_request"
+            assert version_row[0] == _get_head_revision()
     finally:
         await close_engine()

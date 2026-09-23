@@ -119,12 +119,23 @@ secrets:
   # add channel tokens, search keys, etc. as needed
 ```
 
+The default ingress annotations permit a 100 MiB local `.skill` archive plus
+multipart framing, stream request bodies without ingress buffering, and allow
+up to 600 seconds for a response, which the API requests that wait on a model
+call or a whole run all need — skill install and custom-skill edits (each file
+is scanned by an LLM), `/api/threads/{id}/compact`, `/api/input-polish`, and
+`/api/runs/wait`. If you replace `ingress.annotations`, preserve equivalent
+size, streaming, and response-timeout settings for your ingress controller, or
+local skill uploads may fail before DeerFlow completes the installation and
+those requests may time out while Gateway is still working — for
+`/api/runs/wait` the disconnect also cancels the run.
+
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 31
+  config_version: 46
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -144,6 +155,10 @@ config: |
     connection_string: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+  knowledge_base:
+    enabled: true
+    scope_selection_enabled: false
+    # Provider connection/retrieval settings belong on the knowledge_search tool.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,
@@ -155,6 +170,7 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    - name: knowledge
   tools:
     - name: web_search
       group: web
@@ -168,6 +184,14 @@ config: |
       group: web
       use: deerflow.community.image_search.tools:image_search_tool
       max_results: 5
+    - name: knowledge_search
+      group: knowledge
+      use: deerflow.community.ragflow.tools:knowledge_search_tool
+      base_url: http://ragflow:9380
+      api_key: $RAGFLOW_API_KEY
+    - name: list_knowledge_bases
+      group: knowledge
+      use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool
@@ -183,6 +207,16 @@ Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
 sections shown above.
+
+`extensionsConfig` is an initial seed, not a live read-only mount. An init
+container copies it into
+`/app/backend/.deer-flow/extensions-config/extensions_config.json`, where the
+Gateway can persist MCP and skill-state API updates. With
+`persistence.home.enabled: true`, the runtime file is kept on the home PVC and
+is not overwritten by later Helm upgrades; delete that runtime file before a
+pod restart only when you intentionally want a changed `extensionsConfig` seed
+to replace it. With persistence disabled, the writable copy uses `emptyDir`
+and is reseeded whenever the Pod is replaced.
 
 ## 3. Install (from a local chart checkout)
 
@@ -240,6 +274,15 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   double-submit can create two runs on one thread (checkpoint corruption), a
   cancel can land on a non-owner pod (409), and a crashed pod's runs stay
   `pending`/`running` forever. Stay on 1 replica until that work lands.
+- **Scheduled task recovery.** If a deployment explicitly enables
+  `scheduler.multi_instance: true`, it must use shared Postgres,
+  `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
+  Scheduler startup then preserves live scheduled runs owned by another Pod,
+  atomically takes over only expired leases, and fences stale post-launch
+  bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
+  including pre-launch dispatch reservations. Restart all Gateway Pods after
+  changing these startup-only settings. This does not remove the broader
+  Gateway replica limitations described above.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in

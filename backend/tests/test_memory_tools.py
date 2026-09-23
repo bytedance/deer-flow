@@ -234,7 +234,7 @@ class TestMemoryAddTool:
 
         result_json = memory_add_tool.func(SimpleNamespace(context={}), "low confidence fact", confidence=0.1)
         result = json.loads(result_json)
-        assert result == {"error": "Fact was not stored because memory.max_facts kept higher-confidence facts"}
+        assert result == {"error": "Fact was not stored because the configured memory.max_facts capacity policy evicted it"}
         assert recorded == ["low confidence fact"]
 
     def test_uses_runtime_scope(self, monkeypatch):
@@ -415,6 +415,20 @@ class TestModeGating:
         tool_names = [t.name for t in extra_tools]
         assert MemoryMiddleware not in middleware_types
         assert "memory_add" in tool_names
+
+    def test_mem0_tool_mode_keeps_passive_write_middleware(self):
+        """mem0 has search tools but no fact CRUD, so tool mode must retain
+        the per-turn middleware write path that feeds server-side extraction."""
+        from deerflow.agents.factory import _assemble_from_features
+        from deerflow.agents.features import RuntimeFeatures
+        from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+        from deerflow.config.memory_config import MemoryConfig
+
+        config = MemoryConfig(enabled=True, mode="tool", manager_class="mem0")
+        chain, extra_tools = _assemble_from_features(RuntimeFeatures(memory=True, memory_config=config), name="test-agent")
+
+        assert MemoryMiddleware in [type(m) for m in chain]
+        assert "memory_search" in [tool.name for tool in extra_tools]
 
     def test_middleware_mode_appends_middleware_not_tools(self, monkeypatch):
         """When mode=middleware (default), MemoryMiddleware IS in the chain

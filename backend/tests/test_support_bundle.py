@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import zipfile
 
 import pytest
@@ -12,6 +13,27 @@ import support_bundle
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_version_command(name, args, cwd):
+        calls.append((name, args, cwd))
+        return {"name": name, "ok": True, "stdout": "version", "stderr": ""}
+
+    monkeypatch.setattr(support_bundle, "_version_command", fake_version_command)
+
+    support_bundle.collect_environment(tmp_path)
+
+    pnpm_calls = [call for call in calls if call[0] == "pnpm"]
+    assert pnpm_calls == [
+        (
+            "pnpm",
+            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--version"],
+            tmp_path / "frontend",
+        )
+    ]
 
 
 def test_redact_data_recursively_masks_secret_like_keys():
@@ -693,7 +715,17 @@ def test_validate_thread_id_rejects_dot_traversal(thread_id):
 
 def test_validate_thread_id_accepts_safe_ids():
     support_bundle._validate_thread_id("thread-123")
-    support_bundle._validate_thread_id("a.b_c-1")
+    support_bundle._validate_thread_id("ab_c-1")
+
+
+def test_validate_thread_id_rejects_noncanonical_ids():
+    """The script's pattern is pinned byte-identical to the canonical
+    ``THREAD_ID_PATTERN`` (see test_thread_id_validation.py) — dotted or
+    over-length IDs are rejected even though they are not traversals."""
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("a.b_c-1")
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("x" * 65)
 
 
 def test_main_reports_invalid_thread_id_without_traceback(tmp_path, capsys):

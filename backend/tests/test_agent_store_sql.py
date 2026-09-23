@@ -8,11 +8,13 @@ signature the GitHub registry keys its cache off.
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest import mock
 
 import pytest
 from sqlalchemy import create_engine
 
+import deerflow.persistence.agents.model as agent_model
 from deerflow.config.agents_config import AgentConfig
 from deerflow.persistence.agents.base import AgentExistsError
 from deerflow.persistence.agents.model import AgentRow
@@ -40,6 +42,16 @@ def test_create_and_get_round_trips_config_and_soul(store):
     assert cfg.description == "reviews code"
     assert cfg.model == "gpt-x"
     assert store.get_soul("reviewer", user_id="u1") == "You review."
+
+
+def test_display_name_is_config_data_not_storage_identity(store):
+    store.create("reviewer", {"name": "reviewer", "display_name": "代码审查助手"}, "Soul", user_id="u1")
+    assert store.get("reviewer", user_id="u1").display_name == "代码审查助手"
+    assert store.list(user_id="u1")[0].display_name == "代码审查助手"
+    assert not store.exists("reviewer", user_id="u2")
+    store.update("reviewer", {"name": "reviewer", "display_name": "新名称"}, None, user_id="u1")
+    assert store.get("reviewer", user_id="u1").display_name == "新名称"
+    assert store.get_soul("reviewer", user_id="u1") == "Soul"
 
 
 def test_name_is_stored_lowercase_and_excluded_from_document(store):
@@ -160,6 +172,36 @@ def test_signature_changes_on_mutation(store):
     assert store.signature() != after_create
 
 
+def test_signature_changes_when_update_reuses_timestamp(store, monkeypatch):
+    store.create(
+        "x",
+        {"name": "x", "description": "before"},
+        "s",
+        user_id="u1",
+    )
+    after_create = store.signature()
+
+    with store._Session() as session:
+        frozen_timestamp = session.query(AgentRow).one().updated_at
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_timestamp
+
+    monkeypatch.setattr(agent_model, "datetime", FrozenDateTime)
+
+    store.update(
+        "x",
+        {"name": "x", "description": "changed"},
+        None,
+        user_id="u1",
+    )
+
+    assert store.get("x", user_id="u1").description == "changed"
+    assert store.signature() != after_create
+
+
 def test_sync_engine_mirrors_async_pragmas(tmp_path):
     # The db backend's sync engine must set the same per-connection SQLite PRAGMAs
     # the async engine does (persistence/engine.py), not leave synchronous=FULL
@@ -230,3 +272,13 @@ def test_delete_removes_memory_dir_when_row_exists(store, tmp_path, monkeypatch)
 
     assert store.delete("real", user_id="u1") == "deleted"
     assert not mem_dir.exists()
+
+
+def test_knowledge_defaults_round_trip_and_stay_owner_scoped(store):
+    from deerflow.knowledge_scope import canonicalize_knowledge_scope
+
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
+    store.create("researcher", {"knowledge_scope": scope}, "Soul", user_id="u1")
+    store.create("researcher", {"knowledge_scope": {"version": 1, "mode": "disabled"}}, "Soul", user_id="u2")
+    assert canonicalize_knowledge_scope(store.get("researcher", user_id="u1").knowledge_scope) == scope
+    assert store.get("researcher", user_id="u2").knowledge_scope.mode == "disabled"

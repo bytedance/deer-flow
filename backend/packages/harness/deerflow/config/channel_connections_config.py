@@ -50,6 +50,7 @@ class ChannelConnectionsConfig(BaseModel):
     dingtalk: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
     wechat: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
     wecom: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
+    buzz: BindingCodeChannelConnectionConfig = Field(default_factory=BindingCodeChannelConnectionConfig)
 
     def provider_status(self, provider: str) -> dict[str, bool]:
         config = getattr(self, provider, None)

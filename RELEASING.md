@@ -70,6 +70,18 @@ distinguishes it from a release.
    ```
    Pushing the tag triggers the publishing workflows (below).
 
+### Release candidates
+
+Release-candidate tags must include the same prerelease suffix in all four
+version fields. For example, before tagging `v2.1.0-rc0`, run
+`bash scripts/bump_version.sh 2.1.0-rc0`, refresh `backend/uv.lock` with
+`cd backend && uv lock`, and run `bash scripts/verify_versions.sh 2.1.0-rc0`
+from the repository root. Commit the version and lockfile changes before
+creating the tag. Python lockfiles normalize this version to `2.1.0rc0`;
+the source version fields checked by the release gate retain `2.1.0-rc0`.
+Re-running a failed workflow on an unchanged tag does not pick up a later
+version-fix commit.
+
 ## What CI publishes on a `v*` tag
 
 - `.github/workflows/container.yaml` — builds and pushes `backend`,
@@ -110,6 +122,24 @@ Artifacts (under the running repo's owner, where `<date>` is `YYYYMMDD`):
 
 The chart version is patched in-workflow only - `Chart.yaml` and `values.yaml`
 in the repo are never modified.
+
+## lark-cli sandbox images
+
+The two optional Lark sandbox runtime images — `lark-cli-init` (Pattern A) and
+`lark-cli-broker` (Pattern B) — are **not** part of the `v*` release. They track
+the upstream `larksuite/cli` version, so they publish independently via
+`.github/workflows/lark-cli-images.yaml`:
+
+- Trigger with `workflow_dispatch` (a `lark_cli_version` input, e.g. `v1.0.65`)
+  or by pushing a `lark-cli-v*` tag (the version is read from after the prefix).
+- Builds multi-arch (`linux/amd64,linux/arm64`) and pushes
+  `ghcr.io/<owner>/deer-flow-{lark-cli-init,lark-cli-broker}:<lark-cli-version>`.
+- Gated on `github.repository == 'bytedance/deer-flow'`; not tied to the
+  `verify-versions` gate (its version is the lark-cli release, not the DeerFlow
+  release), and it never touches `latest`.
+
+Both features stay opt-in: the provisioner ignores them until
+`LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` point at a published tag.
 
 ## Version gate
 

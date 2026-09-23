@@ -23,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { createMarkdownLinkComponent } from "@/components/workspace/messages/markdown-link";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -33,12 +34,16 @@ import {
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
+import { normalizeMemoryPayload } from "@/core/memory/import-memory";
 import type {
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
-import { SafeStreamdown } from "@/core/streamdown/components";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -63,60 +68,6 @@ type PendingImport = {
   fileName: string;
   memory: UserMemory;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isMemorySection(value: unknown): value is {
-  summary: string;
-  updatedAt: string;
-} {
-  return (
-    isRecord(value) &&
-    typeof value.summary === "string" &&
-    typeof value.updatedAt === "string"
-  );
-}
-
-function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.content === "string" &&
-    typeof value.category === "string" &&
-    typeof value.confidence === "number" &&
-    Number.isFinite(value.confidence) &&
-    typeof value.createdAt === "string" &&
-    typeof value.source === "string"
-  );
-}
-
-function isImportedMemory(value: unknown): value is UserMemory {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (
-    typeof value.version !== "string" ||
-    typeof value.lastUpdated !== "string" ||
-    !isRecord(value.user) ||
-    !isRecord(value.history) ||
-    !Array.isArray(value.facts)
-  ) {
-    return false;
-  }
-
-  return (
-    isMemorySection(value.user.workContext) &&
-    isMemorySection(value.user.personalContext) &&
-    isMemorySection(value.user.topOfMind) &&
-    isMemorySection(value.history.recentMonths) &&
-    isMemorySection(value.history.earlierContext) &&
-    isMemorySection(value.history.longTermBackground) &&
-    value.facts.every(isMemoryFact)
-  );
-}
 
 type FactFormState = {
   content: string;
@@ -185,6 +136,11 @@ function buildMemorySectionGroups(
           summary: memory.user.topOfMind.summary,
           updatedAt: memory.user.topOfMind.updatedAt,
         },
+        {
+          title: t.settings.memory.markdown.cognitiveStyle,
+          summary: memory.user.cognitiveStyle.summary,
+          updatedAt: memory.user.cognitiveStyle.updatedAt,
+        },
       ],
     },
     {
@@ -251,6 +207,7 @@ function isMemorySummaryEmpty(memory: UserMemory) {
     memory.user.workContext.summary.trim() === "" &&
     memory.user.personalContext.summary.trim() === "" &&
     memory.user.topOfMind.summary.trim() === "" &&
+    memory.user.cognitiveStyle.summary.trim() === "" &&
     memory.history.recentMonths.summary.trim() === "" &&
     memory.history.earlierContext.summary.trim() === "" &&
     memory.history.longTermBackground.summary.trim() === ""
@@ -271,6 +228,13 @@ function truncateFactPreview(content: string, maxLength = 140) {
 
 function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function formatFactCreatedAt(createdAt: string, unknownLabel: string) {
+  if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+    return unknownLabel;
+  }
+  return formatTimeAgo(createdAt);
 }
 
 export function MemorySettingsPage() {
@@ -420,13 +384,14 @@ export function MemorySettingsPage() {
 
     try {
       const parsed: unknown = JSON.parse(await file.text());
-      if (!isImportedMemory(parsed)) {
+      const memory = normalizeMemoryPayload(parsed);
+      if (!memory) {
         toast.error(t.settings.memory.importInvalidFile);
         return;
       }
       setPendingImport({
         fileName: file.name,
-        memory: parsed,
+        memory,
       });
     } catch {
       toast.error(t.settings.memory.importInvalidFile);
@@ -542,7 +507,9 @@ export function MemorySettingsPage() {
             {t.common.loading}
           </div>
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <div>
+            {t.common.error} {error.message}
+          </div>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
@@ -642,6 +609,13 @@ export function MemorySettingsPage() {
                 <SafeStreamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
+                  components={toStreamdownComponents({
+                    // Defense in depth on top of the rehype-sanitize step in
+                    // streamdownPlugins: memory summaries are LLM/stored
+                    // content, so never render an unsafe href (javascript:,
+                    // data:, …) as a clickable anchor.
+                    a: createMarkdownLinkComponent(),
+                  })}
                 >
                   {summariesToMarkdown(memory, filteredSectionGroups, t)}
                 </SafeStreamdown>
@@ -690,7 +664,10 @@ export function MemorySettingsPage() {
                                 <span className="text-muted-foreground">
                                   {t.settings.memory.markdown.table.createdAt}:
                                 </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
+                                {formatFactCreatedAt(
+                                  fact.createdAt,
+                                  t.settings.memory.markdown.table.unknown,
+                                )}
                               </span>
                               <span>
                                 <span className="text-muted-foreground">
@@ -698,13 +675,15 @@ export function MemorySettingsPage() {
                                 </span>{" "}
                                 {fact.source === "manual" ? (
                                   t.settings.memory.manualFactSource
-                                ) : (
+                                ) : fact.source && fact.source !== "unknown" ? (
                                   <Link
                                     href={pathOfThread(fact.source)}
                                     className="text-primary underline-offset-4 hover:underline"
                                   >
                                     {t.settings.memory.markdown.table.view}
                                   </Link>
+                                ) : (
+                                  t.settings.memory.markdown.table.unknown
                                 )}
                               </span>
                             </div>

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import mimetypes
 import re
+import stat
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
@@ -13,11 +15,13 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
+from fastapi import HTTPException
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
@@ -38,14 +42,18 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 # ChannelManager construction sees the same policy map as gateway bootstrap.
 from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
-from deerflow.config.agents_config import load_agent_config
+from app.gateway.path_utils import resolve_outputs_confined_path
+from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.trace_context import ensure_trace_context
+from deerflow.uploads.manager import apply_upload_sandbox_permits
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -53,7 +61,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
+DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+CHANNEL_AGENT_METADATA_KEY = "channel_agent_name"
+THREAD_AGENT_METADATA_KEY = "agent_name"
+MAX_CHANNEL_AGENT_LIST_ITEMS = 50
+MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
 # This is independent of subagent depth: a `task()` dispatch runs the whole
@@ -125,6 +139,7 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
+    "buzz": {"supports_streaming": True},
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
@@ -136,6 +151,37 @@ CHANNEL_CAPABILITIES = {
 }
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
+
+# Cap for URL-based inbound attachments fetched by the generic reader (WeCom
+# media today; the WeChat reader is path-only by design — see
+# _read_wechat_inbound_file). The bytes are buffered in memory before being
+# persisted, so an oversized attachment must be refused before it is fully
+# read, not after — mirrors DingTalkChannel._download_by_code. 50 MB is a
+# deliberate default, not the platform ceiling: published WeCom callback
+# examples document files up to 100 MB, but the whole file is buffered (and
+# decrypt_file allocates a second copy), so the bound matches the sibling
+# channels' inbound caps (DingTalk's identically-sized 50 MB, WeChat's
+# max_inbound_file_bytes) and halves worst-case per-message buffering; a
+# legit-but-oversized file drops with a host-labeled warning naming the limit.
+MAX_INBOUND_URL_FILE_BYTES = 50 * 1024 * 1024
+
+# WeCom inbound media URLs come from the platform's WS frames (wecom.py passes
+# ``payload.get("url")`` straight through), the same untrusted-input shape as
+# WeChat's ``full_url``; the fetch is therefore gated to platform-owned hosts
+# before streaming, mirroring WechatChannel._is_allowed_media_url. Two
+# families: qq.com hosts, and the temporary signed COS links WeCom actually
+# serves media from — ``ww-aibot-img-<APPID>.cos.<region>.myqcloud.com``
+# (published callback examples; valid ~5 minutes). The COS numeric suffix is
+# the owner's Tencent Cloud APPID and the bucket name is user-chosen, so any
+# Tencent Cloud account could register a matching ``ww-aibot-img-*`` bucket:
+# the shape alone proves nothing about ownership. Only the APPID observed in
+# Tencent's published aibot callback examples (1258476243) is trusted by
+# default; media from any other account — including a future WeCom rotation
+# to a new APPID — goes through the operator suffix list
+# ``channels.wecom.allowed_media_hosts``.
+WECOM_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
+_WECOM_MEDIA_COS_APPIDS = frozenset({"1258476243"})
+_WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-(?P<appid>\d+)\.cos\.[a-z0-9-]+\.myqcloud\.com$")
 
 _METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
 
@@ -157,12 +203,149 @@ async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.Async
     if not isinstance(url, str) or not url:
         return None
 
-    resp = await client.get(url)
-    resp.raise_for_status()
-    return resp.content
+    chunks: list[bytes] = []
+    total = 0
+    # The transfer must stay undecoded: aiter_bytes() transparently decodes
+    # Content-Encoding, and the decoder allocates the whole decompressed body
+    # before yielding a single chunk — a compressed response from an admitted
+    # host would blow past the cap exactly like the unbounded read this
+    # reader exists to prevent. Identity is requested up front, any residual
+    # encoding is refused before reading, and aiter_raw() never decodes.
+    async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+        response.raise_for_status()
+        encoding = (response.headers.get("content-encoding") or "").strip().lower()
+        if encoding and encoding != "identity":
+            logger.warning(
+                "[Manager] inbound file response uses Content-Encoding %r, dropping before decode: %s",
+                encoding,
+                _inbound_file_label(file_info, url),
+            )
+            return None
+        async for chunk in response.aiter_raw():
+            total += len(chunk)
+            if total > MAX_INBOUND_URL_FILE_BYTES:
+                logger.warning(
+                    "[Manager] inbound file exceeds %d bytes download limit, dropping: %s",
+                    MAX_INBOUND_URL_FILE_BYTES,
+                    _inbound_file_label(file_info, url),
+                )
+                return None
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _url_host(url: str) -> str:
+    """Best-effort host extraction for logging; never raises, never logs the URL.
+
+    Media URLs can carry access tokens in their query strings, so only the
+    host is surfaced in drop warnings.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _inbound_file_label(file_info: dict[str, Any], url: str | None = None, idx: int | None = None) -> str:
+    """Sanitized logging label for one inbound attachment: filename, else URL host.
+
+    Signed media URLs carry credentials in both the path and the query string
+    (WeCom COS links: ``/path?sign=...&q-signature=...``), so no part of the
+    URL itself may reach the logs — only the hostname. Filenames are webhook
+    supplied, so whitespace is collapsed and length capped to keep a crafted
+    name from forging log lines (mirrors dingtalk._display_filename).
+    """
+    filename = file_info.get("filename")
+    if isinstance(filename, str) and filename.strip():
+        return re.sub(r"\s+", " ", filename).strip()[:80]
+    source = url if isinstance(url, str) else None
+    if source is None:
+        for key in ("url", "full_url"):
+            value = file_info.get(key)
+            if isinstance(value, str) and value.strip():
+                source = value
+                break
+    if source:
+        host = _url_host(source)
+        if host:
+            return f"host={host}"
+    return f"#{idx}" if idx is not None else "<unnamed>"
+
+
+def _reader_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media reader failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the signed download
+    credentials — and rendering the traceback (``logger.exception``) would
+    reproduce them verbatim, so only the class name and explicitly safe
+    fields ever reach the logs.
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
+def _is_allowed_wecom_media_url(url: str, extra_suffixes: frozenset[str] | tuple[str, ...] | list[str] = ()) -> bool:
+    """Platform-owned-host gate for WeCom inbound media fetches.
+
+    Matching semantics mirror ``WechatChannel._is_allowed_media_url``: http/https
+    only, and ``notqq.com`` / ``qq.com.evil.io`` never match a ``qq.com`` suffix.
+    The COS shape is matched exactly (see ``_WECOM_MEDIA_COS_HOST_RE``) AND its
+    numeric suffix must be one of the verified WeCom-owned APPIDs
+    (``_WECOM_MEDIA_COS_APPIDS``) — the suffix is a Tencent Cloud account
+    APPID and bucket names are user-chosen, so the shape alone would admit
+    any account that registers a lookalike bucket. Operator-supplied
+    ``channels.wecom.allowed_media_hosts`` suffixes are merged in on top of the
+    hard-coded families (see ``_wecom_extra_media_host_suffixes``).
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in (*WECOM_ALLOWED_MEDIA_HOST_SUFFIXES, *extra_suffixes)):
+        return True
+    cos_match = _WECOM_MEDIA_COS_HOST_RE.fullmatch(host)
+    return cos_match is not None and cos_match.group("appid") in _WECOM_MEDIA_COS_APPIDS
+
+
+def _wecom_extra_media_host_suffixes() -> frozenset[str]:
+    """Operator host suffixes from the live WeCom channel, if one is running.
+
+    The registry reader is module-level while ``channels.wecom.allowed_media_hosts``
+    is per-channel config, so the extras are resolved per call from the running
+    channel instance — the same service-reach-in ``_channel_supports_streaming``
+    already uses. Empty when no WeCom channel is up (direct calls, most tests),
+    leaving only the strict built-in families; a strict default plus an operator
+    escape hatch means a platform URL-shape change never requires widening the
+    hard-coded pattern for every deployment.
+    """
+    try:
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        channel = service.get_channel("wecom") if service is not None else None
+    except Exception:
+        return frozenset()
+    return frozenset(getattr(channel, "allowed_media_host_suffixes", ()) or ())
 
 
 async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.AsyncClient) -> bytes | None:
+    url = file_info.get("url")
+    if isinstance(url, str) and url and not _is_allowed_wecom_media_url(url, _wecom_extra_media_host_suffixes()):
+        logger.warning(
+            "[Manager] WeCom inbound media URL host is not allowed, dropping file=%s host=%s",
+            _inbound_file_label(file_info, url),
+            _url_host(url),
+        )
+        return None
+
     data = await _read_http_inbound_file(file_info, client)
     if data is None:
         return None
@@ -189,10 +372,14 @@ async def _read_wechat_inbound_file(file_info: dict[str, Any], client: httpx.Asy
             logger.exception("[Manager] failed to read WeChat inbound file from local path: %s", raw_path)
             return None
 
-    full_url = file_info.get("full_url")
-    if isinstance(full_url, str) and full_url.strip():
-        return await _read_http_inbound_file({"url": full_url}, client)
-
+    # No re-fetch fallback: the only producer (WechatChannel) always stages a
+    # local ``path`` and drops the attachment when staging fails, so a file
+    # dict without one has no legitimate fetch source. Fetching ``full_url``
+    # here would be the one ungated Gateway-host fetch left in the WeChat
+    # path — the channel-side ``channels.wechat.allowed_media_hosts`` gate
+    # cannot reach this module-level reader, and re-implementing it with
+    # divergent rules would drop media the operator explicitly allowed.
+    logger.debug("[Manager] WeChat inbound file has no staged local path, skipping")
     return None
 
 
@@ -333,6 +520,37 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
         raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
     return normalized
+
+
+def _apply_explicit_agent_choice(
+    run_config: dict[str, Any],
+    run_context: dict[str, Any],
+    agent_name: str | None,
+) -> None:
+    """Pin or clear an explicit channel agent in every runtime carrier.
+
+    Gateway accepts ``agent_name`` from the request's top-level context and
+    from either RunnableConfig container. Its compatibility merge preserves
+    existing values with ``setdefault``, so an explicit ``/agent use`` choice
+    must normalize all three carriers before the request crosses that boundary.
+    ``None`` represents an explicit reset to the default lead agent.
+    """
+    carriers = [run_context]
+    for section in ("configurable", "context"):
+        value = run_config.get(section)
+        if isinstance(value, Mapping):
+            # Session layers own their nested dictionaries. Copy before changing
+            # one so selecting an agent for a conversation cannot mutate the
+            # manager's reusable channel configuration.
+            copied = dict(value)
+            run_config[section] = copied
+            carriers.append(copied)
+
+    for carrier in carriers:
+        if agent_name is None:
+            carrier.pop("agent_name", None)
+        else:
+            carrier["agent_name"] = agent_name
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -515,12 +733,93 @@ def _extract_stream_message_id(payload: Any, metadata: Any) -> str | None:
     return None
 
 
+def _stream_payload_type(payload: Mapping[str, Any]) -> str:
+    """Resolve the message ``type`` of one ``messages-tuple`` payload.
+
+    Two payload shapes reach this function and they name the message type in
+    different places:
+
+    * The shape DeerFlow's own gateway emits (``runtime/serialization.py``
+      calls ``model_dump()``): ``type`` is the LangChain literal directly --
+      ``"ai"`` / ``"AIMessageChunk"`` / ``"human"`` / ``"tool"`` / ``"system"``.
+    * LangChain's ``to_json()`` constructor shape, which
+      ``_extract_stream_message_id`` and the content extraction below already
+      accommodate: the wrapper's own ``type`` is the literal string
+      ``"constructor"`` and the real class name is the last element of the
+      ``id`` path (``["langchain", "schema", "messages", "AIMessageChunk"]``),
+      with the constructor kwargs under ``kwargs``.
+
+    Reading only the top level would classify every constructor-shaped payload
+    as ``"constructor"``, which an allowlist rejects (safe) but which would
+    also mean hidden context and assistant output are treated identically --
+    so the class name is resolved properly instead of guessed.
+    """
+    raw_type = payload.get("type")
+    if isinstance(raw_type, str) and raw_type and raw_type != "constructor":
+        return raw_type
+    kwargs = payload.get("kwargs")
+    if isinstance(kwargs, Mapping):
+        nested = kwargs.get("type")
+        if isinstance(nested, str) and nested:
+            return nested
+    lc_path = payload.get("id")
+    if isinstance(lc_path, (list, tuple)) and lc_path:
+        tail = lc_path[-1]
+        if isinstance(tail, str) and tail:
+            return tail
+    return raw_type if isinstance(raw_type, str) else ""
+
+
+def _is_assistant_stream_type(payload_type: str) -> bool:
+    """Is this message type assistant output, i.e. displayable in an IM channel?
+
+    An ALLOWLIST, deliberately.  The previous denylist ("reject anything whose
+    type contains 'tool'") published every other message type, and DeerFlow
+    writes hidden model context into the ``messages`` channel as ordinary
+    messages: ``DynamicContextMiddleware`` injects the ``<memory>`` block as a
+    hidden ``HumanMessage`` (``type == "human"``) and rewrites the user's own
+    turn into a new ``HumanMessage``, and ``DurableContextMiddleware`` injects a
+    hidden ``<durable_context_data>`` ``HumanMessage``.  LangGraph fans state
+    writes out on the ``messages-tuple`` stream, so all of those reached the
+    channel as if they were the assistant's reply -- proved live on a Buzz
+    relay, where each streaming update is an immutable public Nostr event and a
+    later corrective edit cannot unpublish the leaked one.
+
+    The accepted spellings are the ones assistant output actually carries:
+    LangChain serializes ``AIMessage.type`` as ``"ai"`` and
+    ``AIMessageChunk.type`` as ``"AIMessageChunk"``; ``"assistant"`` is the
+    OpenAI-style spelling a foreign runtime may use.  Matching is by prefix
+    rather than substring because a substring test is not safe here -- ordinary
+    English words contain "ai" ("chain", "domain"), so ``"ai" in type`` would
+    admit a future/foreign type name by accident, which is exactly the class of
+    mistake this allowlist exists to prevent.  No LangChain message type other
+    than the AI ones begins with "ai" or "assistant".
+    """
+    normalized = payload_type.strip().lower()
+    return normalized.startswith(("ai", "assistant"))
+
+
 def _accumulate_stream_text(
     buffers: dict[str, str],
     current_message_id: str | None,
     event_data: Any,
 ) -> tuple[str | None, str | None]:
-    """Convert a ``messages-tuple`` event into the latest displayable AI text."""
+    """Convert a ``messages-tuple`` event into the latest displayable AI text.
+
+    Only assistant output is displayable.  Hidden human/system context (memory
+    facts, durable context, the middleware-rewritten echo of the user's own
+    message) and tool traffic must never be published to an IM channel; see
+    :func:`_is_assistant_stream_type`.
+
+    A bare ``str`` payload -- previously accepted here and buffered under the
+    current message id -- carries no type information at all, so it cannot be
+    attributed to the assistant.  Nothing in DeerFlow produces it (the gateway
+    always serializes a ``messages-tuple`` chunk as ``[message_dict, metadata]``
+    via ``runtime/serialization.py::serialize_messages_tuple``), and a runtime
+    that did emit raw text deltas would emit hidden context the same way, with
+    no way to tell them apart.  Under an allowlist an unattributable payload is
+    dropped rather than published.
+    """
     payload = event_data
     metadata: Any = None
     if isinstance(event_data, (list, tuple)):
@@ -529,16 +828,10 @@ def _accumulate_stream_text(
         if len(event_data) > 1:
             metadata = event_data[1]
 
-    if isinstance(payload, str):
-        message_id = current_message_id or "__default__"
-        buffers[message_id] = _merge_stream_text(buffers.get(message_id, ""), payload)
-        return buffers[message_id], message_id
-
     if not isinstance(payload, Mapping):
         return None, current_message_id
 
-    payload_type = str(payload.get("type", "")).lower()
-    if "tool" in payload_type:
+    if not _is_assistant_stream_type(_stream_payload_type(payload)):
         return None, current_message_id
 
     text = _extract_text_content(payload.get("content"))
@@ -607,9 +900,6 @@ def _format_artifact_text(artifacts: list[str]) -> str:
     if len(filenames) == 1:
         return f"Created File: 📎 {filenames[0]}"
     return "Created Files: 📎 " + "、".join(filenames)
-
-
-_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
 def _unknown_command_reply(command: str | None = None) -> str:
@@ -732,26 +1022,19 @@ def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str |
     Skips artifacts that cannot be resolved (missing files, invalid paths)
     and logs warnings for them.
     """
-    from deerflow.config.paths import get_paths
-
     attachments: list[ResolvedAttachment] = []
-    paths = get_paths()
     effective_user_id = user_id or get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id).resolve()
     for virtual_path in artifacts:
-        # Security: only allow files from the agent outputs directory
-        if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
-            logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
+        # Security: only files under the agent outputs directory may leave the
+        # thread. The shared helper rejects sibling ``uploads/``/``workspace/``
+        # paths both lexically (``..``) and after symlink resolution, so this
+        # rule cannot drift from the artifact editor's.
+        try:
+            actual = resolve_outputs_confined_path(thread_id, virtual_path, user_id=effective_user_id)
+        except HTTPException as exc:
+            logger.warning("[Manager] rejected artifact path outside outputs: %s (%s)", virtual_path, exc.detail)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=effective_user_id)
-            # Verify the resolved path is actually under the outputs directory
-            # (guards against path-traversal even after prefix check)
-            try:
-                actual.resolve().relative_to(outputs_dir)
-            except ValueError:
-                logger.warning("[Manager] artifact path escapes outputs dir: %s -> %s", virtual_path, actual)
-                continue
             if not actual.is_file():
                 logger.warning("[Manager] artifact not found on disk: %s -> %s", virtual_path, actual)
                 continue
@@ -801,6 +1084,19 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+def _make_inbound_file_sandbox_readable(file_path: Path) -> None:
+    """Make a channel-downloaded upload readable by the sandbox process.
+
+    The gateway writes inbound files as root with 0o600; in AIO/Docker sandbox
+    mode the sandbox runs as a non-root user on the bind-mounted path and
+    cannot read the file without group/other read bits. Delegates to the shared
+    apply_upload_sandbox_permits helper so the permission change stays bound to
+    the validated upload inode (O_NOFOLLOW + fchmod) and cannot be redirected
+    through a symlink swapped in after validation.
+    """
+    apply_upload_sandbox_permits(file_path, stat.S_IRGRP | stat.S_IROTH)
+
+
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
@@ -840,11 +1136,15 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             else:
                 try:
                     data = await file_reader(f, client)
-                except Exception:
-                    logger.exception(
-                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                except Exception as exc:
+                    # Sanitized on purpose: the URL-bearing exception message
+                    # and traceback must not reach the logs (see
+                    # _reader_error_summary).
+                    logger.warning(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
                         msg.channel_name,
-                        f.get("url") or filename or idx,
+                        _inbound_file_label(f, idx=idx),
+                        _reader_error_summary(exc),
                     )
                     continue
 
@@ -852,7 +1152,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 logger.warning(
                     "[Manager] inbound file reader returned no data: channel=%s, file=%s",
                     msg.channel_name,
-                    f.get("url") or filename or idx,
+                    _inbound_file_label(f, idx=idx),
                 )
                 continue
 
@@ -875,6 +1175,9 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             dest = uploads_dir / safe_name
             try:
                 dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                # Root-written 0o600 files are unreadable to the non-root
+                # sandbox; grant group/other read like the HTTP upload path.
+                await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
@@ -907,7 +1210,8 @@ class ChannelManager:
         bus: MessageBus,
         store: ChannelStore,
         *,
-        max_concurrency: int = 5,
+        max_concurrency: int = DEFAULT_CHANNEL_MAX_CONCURRENCY,
+        shutdown_grace_period_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
@@ -918,9 +1222,14 @@ class ChannelManager:
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
+            raise ValueError("max_concurrency must be a positive integer")
+        if isinstance(shutdown_grace_period_seconds, bool) or not isinstance(shutdown_grace_period_seconds, (int, float)) or not math.isfinite(shutdown_grace_period_seconds) or shutdown_grace_period_seconds < 0:
+            raise ValueError("shutdown_grace_period_seconds must be a non-negative finite number")
         self.bus = bus
         self.store = store
         self._max_concurrency = max_concurrency
+        self._shutdown_grace_period_seconds = float(shutdown_grace_period_seconds)
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
         self._assistant_id = assistant_id
@@ -938,15 +1247,21 @@ class ChannelManager:
         self._get_stream_bridge = get_stream_bridge
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
-        # Per-conversation locks so concurrent inbound messages for the same
-        # chat don't race to create duplicate threads (see _get_or_create_thread).
-        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        # Explicit /agent selections are pinned to the newly-created thread.
+        # Cache the durable thread metadata so the hot path does not GET the
+        # same thread before every turn; None distinguishes a checked default
+        # thread from a thread that has not been inspected yet.
+        self._thread_agent_names: dict[str, str | None] = {}
+        # Waiter-aware per-conversation locks prevent concurrent inbound messages
+        # from creating duplicate threads. Participants are checked out before
+        # they wait, so failure or cancellation of the current creator cannot let
+        # a late caller bypass an already-queued creator through a new lock generation.
+        self._thread_create_locks = AsyncKeyedLockTable[tuple[str, str, str | None]]()
         # Per-thread run locks for channels that want in-manager serialization
         # instead of surfacing the runtime's generic busy reply.
         self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
-        self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         # Distinct from self._running: that flag is also False before the
         # very first start() (so tests that call internal drain/handler
@@ -954,7 +1269,11 @@ class ChannelManager:
         # working unchanged). self._stopped tracks specifically whether
         # stop() has run, for the follow-up drain guard below.
         self._stopped = False
-        self._task: asyncio.Task | None = None
+        # Fixed, long-lived workers own message handling end to end. The pool
+        # size is the only number of handler coroutines that can exist; inbound
+        # bursts remain as bounded queue entries instead of semaphore-waiting
+        # task-per-message fan-out.
+        self._worker_tasks: set[asyncio.Task[None]] = set()
         # Inbound webhook dedupe store. Defaults to the in-process Memory store
         # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
         # duplicate deliveries landing on different pods are collapsed.
@@ -1134,7 +1453,7 @@ class ChannelManager:
         threaded in — e.g. a ``ChannelManager`` constructed directly without
         going through ``start_channel_service()`` — so tests and any
         not-yet-wired deployment never see a dangling background task for
-        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        this. When wired, mirrors the worker-task error-reporting pattern:
         ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
         so an unexpected watcher failure is surfaced in the logs instead of
         silently vanishing. The task is also tracked in
@@ -1142,7 +1461,7 @@ class ChannelManager:
         so ``stop()`` can cancel+await any watcher still in flight instead of
         leaving it to fire a follow-up run after shutdown.
         """
-        if self._get_stream_bridge is None:
+        if self._get_stream_bridge is None or self._stopped:
             return
 
         run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
@@ -1320,7 +1639,8 @@ class ChannelManager:
         if isinstance(meta_assistant_id, str) and meta_assistant_id.strip():
             message_assistant_id = meta_assistant_id
 
-        assistant_id = message_assistant_id or user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
+        thread_assistant_id = self._thread_agent_names.get(thread_id)
+        assistant_id = message_assistant_id or thread_assistant_id or user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
@@ -1371,12 +1691,23 @@ class ChannelManager:
             run_context_identity,
         )
 
+        explicit_agent_choice = message_assistant_id is not None or thread_assistant_id is not None
         # Custom agents are implemented as lead_agent + agent_name context.
         # Keep backward compatibility for channel configs that set
         # assistant_id: <custom-agent-name> by routing through lead_agent.
         if assistant_id != DEFAULT_ASSISTANT_ID:
-            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
+            normalized_agent_name = _normalize_custom_agent_name(assistant_id)
+            if explicit_agent_choice:
+                _apply_explicit_agent_choice(run_config, run_context, normalized_agent_name)
+            else:
+                run_context.setdefault("agent_name", normalized_agent_name)
             assistant_id = DEFAULT_ASSISTANT_ID
+        elif explicit_agent_choice:
+            # An explicit lead_agent selection is also a real pin: discard a
+            # configured agent in every Gateway-supported carrier so
+            # /agent use lead_agent cannot claim to reset the conversation
+            # while silently routing elsewhere.
+            _apply_explicit_agent_choice(run_config, run_context, None)
 
         # Apply per-channel run policy (recursion_limit bump for webhook
         # channels, etc.). Looking the policy up by channel_name keeps
@@ -1429,7 +1760,12 @@ class ChannelManager:
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is None:
             return None
-        if not policy.is_interactive:
+        if policy.interaction_mode is not None:
+            run_context["interaction_mode"] = policy.interaction_mode
+            # Keep legacy consumers (including sandbox network approval) aligned.
+            if policy.interaction_mode != "interactive":
+                run_context["disable_clarification"] = True
+        elif not policy.is_interactive:
             run_context["disable_clarification"] = True
         if policy.credentials_provider is not None:
             try:
@@ -1445,8 +1781,13 @@ class ChannelManager:
                 )
         return policy
 
-    def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+    def _resolve_available_skill_names(
+        self,
+        msg: InboundMessage,
+        thread_id: str | None = None,
+    ) -> set[str] | None:
+        if thread_id is None:
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
         _, _, run_context = self._resolve_run_params(msg, thread_id)
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
@@ -1489,77 +1830,180 @@ class ChannelManager:
     # -- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the dispatch loop."""
+        """Open inbound admission and start the fixed message-worker pool."""
         if self._running:
             return
+        unfinished_workers = {task for task in self._worker_tasks if not task.done()}
+        if unfinished_workers:
+            raise RuntimeError("cannot restart ChannelManager while workers are still running")
+        self._worker_tasks.clear()
         self._running = True
         self._stopped = False
-        self._semaphore = asyncio.Semaphore(self._max_concurrency)
-        self._task = asyncio.create_task(self._dispatch_loop())
-        logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
+        self.bus.open_inbound()
+        self._worker_tasks = {
+            asyncio.create_task(
+                self._worker_loop(worker_index),
+                name=f"deerflow-channel-worker-{worker_index}",
+            )
+            for worker_index in range(self._max_concurrency)
+        }
+        for task in self._worker_tasks:
+            task.add_done_callback(self._log_task_error)
+            task.add_done_callback(self._worker_tasks.discard)
+        logger.info(
+            "ChannelManager started (workers=%d, inbound_queue_maxsize=%d, shutdown_grace=%.1fs)",
+            self._max_concurrency,
+            self.bus.inbound_queue_maxsize,
+            self._shutdown_grace_period_seconds,
+        )
 
-    async def stop(self) -> None:
-        """Stop the dispatch loop."""
+    def begin_shutdown(self) -> int:
+        """Close admission while leaving workers alive to drain accepted work."""
         self._running = False
         self._stopped = True
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        return self.bus.close_inbound()
 
-        # Follow-up watchers are long-lived background tasks (they await a
-        # run's full stream, which can take minutes) started outside the
-        # dispatch loop, so cancelling self._task above does not touch them.
-        # Left unmanaged, one still subscribed to a run that ends AFTER this
-        # point would drain its buffer and fire a brand new runs.create()
-        # into a manager that has already been stopped.
+    async def stop(self) -> None:
+        """Drain accepted work, then cancel and await every owned task.
+
+        Admission closes immediately, but workers keep processing the accepted
+        queue for ``shutdown_grace_period_seconds`` so provider acknowledgments
+        are normally followed by a final response. Once that grace expires,
+        workers are cancelled. A successful return means no worker or follow-up
+        watcher can continue using channel resources. The Gateway lifespan owns
+        the process-level timeout; if it cancels this coroutine, transports stay
+        attached to the service and shutdown can be retried.
+        """
+        invalidated_reservations = self.begin_shutdown()
+        loop = asyncio.get_running_loop()
+        grace_deadline = loop.time() + self._shutdown_grace_period_seconds
+        worker_tasks = list(self._worker_tasks)
         watcher_tasks = list(self._followup_watcher_tasks)
+
+        # Watchers can create follow-up runs and are not acknowledgments for
+        # this accepted queue. Stop them immediately; active workers are still
+        # allowed to finish their current/queued messages during the grace.
         for task in watcher_tasks:
             task.cancel()
-        for task in watcher_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[Manager] follow-up watcher task raised during stop()")
-        self._followup_watcher_tasks.clear()
+
+        join_task = asyncio.create_task(self.bus.join_inbound(), name="deerflow-channel-inbound-drain")
+        drained = False
+        try:
+            done, _ = await asyncio.wait({join_task}, timeout=max(0.0, grace_deadline - loop.time()))
+            drained = join_task in done and not join_task.cancelled() and join_task.exception() is None
+        except asyncio.CancelledError:
+            for task in worker_tasks:
+                task.cancel()
+            discarded_messages = self.bus.discard_pending_inbound()
+            if not join_task.done():
+                join_task.cancel()
+            if invalidated_reservations or discarded_messages:
+                logger.warning(
+                    "[Manager] cancelled shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                    invalidated_reservations,
+                    discarded_messages,
+                )
+            raise
+
+        if not drained:
+            logger.warning(
+                "[Manager] graceful shutdown period expired after %.1fs; cancelling active handlers",
+                self._shutdown_grace_period_seconds,
+            )
+
+        for task in worker_tasks:
+            task.cancel()
+
+        # Anything still queued never started and must not keep Queue.join()
+        # pending after its workers have been cancelled.
+        discarded_messages = self.bus.discard_pending_inbound()
+        if not join_task.done():
+            join_task.cancel()
+
+        owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, join_task) if not task.done()}
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
+
+        for task in tuple(self._worker_tasks):
+            if task.done():
+                self._worker_tasks.discard(task)
+        for task in tuple(self._followup_watcher_tasks):
+            if task.done():
+                self._followup_watcher_tasks.discard(task)
+
+        if invalidated_reservations or discarded_messages:
+            logger.warning(
+                "[Manager] shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                invalidated_reservations,
+                discarded_messages,
+            )
 
         logger.info("ChannelManager stopped")
 
-    # -- dispatch loop -----------------------------------------------------
+    # -- worker pool -------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        logger.info("[Manager] dispatch loop started, waiting for inbound messages")
-        while self._running:
+    async def _worker_loop(self, worker_index: int) -> None:
+        logger.info("[Manager] inbound worker %d started", worker_index)
+        # Closing admission flips ``_running`` to False, but queued messages
+        # were already accepted (and providers may already have acknowledged
+        # them). Keep draining until the queue is empty; stop() then cancels
+        # workers that are idle in get_inbound().
+        while self._running or not self.bus.inbound_queue.empty():
             try:
-                msg = await asyncio.wait_for(self.bus.get_inbound(), timeout=1.0)
-            except TimeoutError:
-                continue
+                msg = await self.bus.get_inbound()
             except asyncio.CancelledError:
-                break
+                raise
 
-            # Dedupe before logging "received" so a provider retrying an event N
-            # times does not log N accepts; duplicates are logged once as ignored.
-            # Note: this manager-level dedupe only guards the agent run / final
-            # answer. Provider adapters may emit ack side-effects (a "Working on
-            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
-            # intentionally not deduped here.
-            if await self._is_duplicate_inbound(msg):
-                continue
-            logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
-                msg.channel_name,
-                msg.chat_id,
-                msg.msg_type.value,
-                len(msg.text or ""),
-                len(msg.files),
-            )
-            task = asyncio.create_task(self._handle_message(msg))
-            task.add_done_callback(self._log_task_error)
+            # Inbound IM messages are a non-HTTP entry point: channels hold
+            # long-lived provider connections, so no ASGI middleware ever runs
+            # for them. Scope one trace id per message here -- the worker task
+            # is long-lived and reused, so the scope must close with the
+            # message rather than leak into the next one.
+            with ensure_trace_context():
+                dedupe_recorded = False
+                try:
+                    # Dedupe before logging "received" so a provider retrying an
+                    # event N times does not log N accepts. Provider ack side
+                    # effects may still happen before this manager-level dedupe.
+                    if await self._is_duplicate_inbound(msg):
+                        continue
+                    dedupe_recorded = self._inbound_dedupe_key(msg) is not None
+                    logger.info(
+                        "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                        msg.channel_name,
+                        msg.chat_id,
+                        msg.msg_type.value,
+                        len(msg.text or ""),
+                        len(msg.files),
+                    )
+                    # Deliberately awaited inline: never create a task per message.
+                    await self._handle_message(msg)
+                except asyncio.CancelledError:
+                    # A cancellation after dedupe admission must make provider
+                    # redelivery retryable rather than retaining a TTL-long key for
+                    # work that never completed.
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
+                    raise
+                except Exception:
+                    logger.exception(
+                        "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                        worker_index,
+                        msg.channel_name,
+                        msg.chat_id,
+                    )
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            # A dedupe backend outage must not shrink the fixed
+                            # worker pool by letting cleanup escape this loop.
+                            logger.exception("[Manager] failed to release inbound dedupe key after worker error")
+                finally:
+                    self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
@@ -1639,8 +2083,7 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
-            # Non-command chat can be rejected before it consumes a semaphore
-            # slot. Commands are handled below because provider adapters consume
+            # Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
             bound_identity_rejection = None
@@ -1650,11 +2093,10 @@ class ChannelManager:
                 await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
                 return
 
-            async with self._semaphore:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg, bound_identity_checked=True)
+            if msg.msg_type == InboundMessageType.COMMAND:
+                await self._handle_command(msg)
+            else:
+                await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -1785,9 +2227,52 @@ class ChannelManager:
             user_id=msg.user_id,
         )
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
+    def _remember_thread_agent(self, thread_id: str, agent_name: str | None) -> None:
+        if len(self._thread_agent_names) > 4096:
+            self._thread_agent_names.clear()
+        self._thread_agent_names[thread_id] = agent_name
+
+    async def _load_thread_agent(self, client, msg: InboundMessage, thread_id: str) -> str | None:
+        """Load an explicit channel agent selection from durable thread metadata."""
+        if thread_id in self._thread_agent_names:
+            return self._thread_agent_names[thread_id]
+
+        get_kwargs: dict[str, Any] = {}
+        if owner_headers := _owner_headers(msg):
+            get_kwargs["headers"] = owner_headers
+        thread = await client.threads.get(thread_id, **get_kwargs)
+        metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
+        raw_agent_name = metadata.get(CHANNEL_AGENT_METADATA_KEY) if isinstance(metadata, Mapping) else None
+        agent_name: str | None = None
+        if isinstance(raw_agent_name, str) and raw_agent_name.strip():
+            if raw_agent_name.strip().lower() == DEFAULT_ASSISTANT_ID:
+                agent_name = DEFAULT_ASSISTANT_ID
+            else:
+                try:
+                    agent_name = _normalize_custom_agent_name(raw_agent_name)
+                except InvalidChannelSessionConfigError as exc:
+                    raise InvalidChannelSessionConfigError("This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation.") from exc
+        self._remember_thread_agent(thread_id, agent_name)
+        return agent_name
+
+    async def _create_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        *,
+        agent_name: str | None = None,
+    ) -> str:
         """Create a new thread through Gateway and store the mapping."""
         metadata = _thread_channel_metadata(msg)
+        if agent_name is not None:
+            metadata[CHANNEL_AGENT_METADATA_KEY] = agent_name
+            # Web thread search returns metadata but no run context. Persist the
+            # canonical key consumed by ``pathOfThread`` so opening this IM
+            # conversation in the browser keeps the same custom agent. The lead
+            # agent deliberately has no canonical key: it uses the ordinary chat
+            # route rather than a non-existent custom-agent route.
+            if agent_name != DEFAULT_ASSISTANT_ID:
+                metadata[THREAD_AGENT_METADATA_KEY] = agent_name
         owner_headers = _owner_headers(msg)
         # Some channels (notably GitHub) supply a deterministic preferred
         # thread id so a (repo, PR/issue number) always lands on the same
@@ -1844,9 +2329,11 @@ class ChannelManager:
                 exc.__class__.__name__,
             )
             await self._store_thread_id(msg, preferred_thread_id)
+            self._remember_thread_agent(preferred_thread_id, agent_name)
             return preferred_thread_id
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
+        self._remember_thread_agent(thread_id, agent_name)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
@@ -1865,20 +2352,13 @@ class ChannelManager:
             return thread_id, False
 
         key = (msg.channel_name, msg.chat_id, msg.topic_id)
-        lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
-        try:
-            async with lock:
-                # A concurrent message for the same chat may have created the
-                # thread while we were waiting on the lock.
-                thread_id = await self._lookup_thread_id(msg)
-                if thread_id:
-                    return thread_id, False
-                return await self._create_thread(client, msg), True
-        finally:
-            # Once the thread is stored, later messages short-circuit on the
-            # lookup above and never reach this lock, so it's safe to drop the
-            # entry and keep the registry bounded to in-flight conversations.
-            self._thread_create_locks.pop(key, None)
+        async with self._thread_create_locks.hold(key):
+            # A concurrent message for the same chat may have created the
+            # thread while we were waiting on the lock.
+            thread_id = await self._lookup_thread_id(msg)
+            if thread_id:
+                return thread_id, False
+            return await self._create_thread(client, msg), True
 
     async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
         """Best-effort source metadata backfill for existing IM-created threads."""
@@ -1925,6 +2405,7 @@ class ChannelManager:
         if not created:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
+            await self._load_thread_agent(client, msg, thread_id)
 
         serial_state, queued = self._begin_serialized_thread_run(
             channel_name=msg.channel_name,
@@ -2299,6 +2780,8 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "agent":
+            reply = await self._handle_agent_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "goal":
             reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
             if reply is None:
@@ -2312,14 +2795,19 @@ class ChannelManager:
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
+                "/agent list — List your Custom Agents\n"
+                "/agent use <name> — Start a new conversation with an agent\n"
                 "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
         elif reply is None:
+            thread_id = await self._lookup_thread_id(msg)
+            if thread_id:
+                await self._load_thread_agent(self._get_client(), msg, thread_id)
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
-                    self._resolve_available_skill_names(msg),
+                    self._resolve_available_skill_names(msg, thread_id),
                     self._get_skill_storage,
                 )
             )
@@ -2345,6 +2833,54 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_agent_command(self, msg: InboundMessage, args: str) -> str:
+        """List owner-scoped agents or pin one to a fresh conversation."""
+        parts = args.split()
+        if len(parts) == 1 and parts[0].lower() == "list":
+            user_id = _channel_storage_user_id(msg)
+            try:
+                agents = await asyncio.to_thread(list_custom_agents, user_id=user_id)
+            except Exception:
+                logger.exception("Failed to list custom agents for channel command")
+                return "Failed to list agents."
+
+            rows = ["• lead_agent — Default agent"]
+            sorted_agents = sorted(agents, key=lambda agent: agent.name)
+            for agent in sorted_agents[:MAX_CHANNEL_AGENT_LIST_ITEMS]:
+                description = " ".join((agent.description or "").split())[:MAX_CHANNEL_AGENT_DESCRIPTION_CHARS]
+                rows.append(f"• {agent.name} — {description}" if description else f"• {agent.name}")
+            if len(sorted_agents) > MAX_CHANNEL_AGENT_LIST_ITEMS:
+                rows.append(f"… and {len(sorted_agents) - MAX_CHANNEL_AGENT_LIST_ITEMS} more")
+            return "Available agents:\n" + "\n".join(rows)
+
+        if len(parts) == 2 and parts[0].lower() == "use":
+            raw_name = parts[1]
+            if raw_name.lower() == DEFAULT_ASSISTANT_ID:
+                agent_name = DEFAULT_ASSISTANT_ID
+                display_name = DEFAULT_ASSISTANT_ID
+            else:
+                try:
+                    agent_name = _normalize_custom_agent_name(raw_name)
+                except InvalidChannelSessionConfigError:
+                    return "Invalid agent name. Use letters, digits, and hyphens only."
+                try:
+                    await asyncio.to_thread(
+                        load_agent_config,
+                        agent_name,
+                        user_id=_channel_storage_user_id(msg),
+                    )
+                except FileNotFoundError:
+                    return f"Agent '{agent_name}' was not found. Use /agent list to see available agents."
+                except Exception:
+                    logger.exception("Failed to load custom agent for channel command")
+                    return f"Failed to select agent '{agent_name}'."
+                display_name = agent_name
+
+            await self._create_thread(self._get_client(), msg, agent_name=agent_name)
+            return f"Agent '{display_name}' selected. New conversation started."
+
+        return "Usage: /agent list or /agent use <name>"
 
     async def _goal_request(
         self,

@@ -173,7 +173,7 @@ def test_yaml_mode_change_is_rejected_when_graph_is_reconstructed(tmp_path, monk
     write_config("full")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
-    monkeypatch.setattr(lead_agent, "_make_lead_agent", lambda config, *, app_config: object())
+    monkeypatch.setattr(lead_agent, "_assemble_lead_agent", lambda config, *, app_config: SimpleNamespace(graph=object()))
     reset_app_config()
     try:
         lead_agent.make_lead_agent({"configurable": {}})
@@ -215,7 +215,7 @@ def test_yaml_snapshot_frequency_change_is_rejected_when_graph_is_reconstructed(
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
-    monkeypatch.setattr(lead_agent, "_make_lead_agent", lambda config, *, app_config: object())
+    monkeypatch.setattr(lead_agent, "_assemble_lead_agent", lambda config, *, app_config: SimpleNamespace(graph=object()))
     reset_app_config()
     try:
         lead_agent.make_lead_agent({"configurable": {}})
@@ -316,8 +316,8 @@ def test_direct_langgraph_request_cannot_select_delta_in_full_process(
     monkeypatch.setattr(lead_agent, "get_app_config", lambda: app_config)
     monkeypatch.setattr(
         lead_agent,
-        "_make_lead_agent",
-        lambda config, *, app_config: object(),
+        "_assemble_lead_agent",
+        lambda config, *, app_config: SimpleNamespace(graph=object()),
     )
 
     lead_agent.make_lead_agent(config)
@@ -343,8 +343,8 @@ def test_make_lead_agent_freezes_delta_snapshot_frequency_from_app_config(
     monkeypatch.setattr(lead_agent, "get_app_config", lambda: app_config)
     monkeypatch.setattr(
         lead_agent,
-        "_make_lead_agent",
-        lambda config, *, app_config: object(),
+        "_assemble_lead_agent",
+        lambda config, *, app_config: SimpleNamespace(graph=object()),
     )
 
     lead_agent.make_lead_agent({"configurable": {}})
@@ -379,8 +379,8 @@ def test_gateway_runtime_app_config_can_supply_its_frozen_internal_mode(
     )
     monkeypatch.setattr(
         lead_agent,
-        "_make_lead_agent",
-        lambda config, *, app_config: object(),
+        "_assemble_lead_agent",
+        lambda config, *, app_config: SimpleNamespace(graph=object()),
     )
 
     lead_agent.make_lead_agent(config)

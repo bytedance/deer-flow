@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 **実際のデモ**は[**公式ウェブサイト**](https://deerflow.tech)でご覧いただけます。
 
+## 姉妹プロジェクト
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - DeerFlow の秘密兵器をご紹介 — agent のアイデアをプロトタイピングし、ハーネスの各ステップを検査し、失敗を再生し、パフォーマンスをベンチマークするためのデスクトップツールです。
+
 ## ByteDance Volcengine のコーディングプラン
 
 - DeerFlowの実行には、Doubao-Seed-2.0-Code、DeepSeek v3.2、Kimi 2.5の使用を強く推奨します
@@ -482,7 +488,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = `get_effective_user_id()`から取得した有効なユーザー（認証なしモードでは`default`にフォールバック）
 - `trace_name` = assistant id（デフォルトは`lead-agent`）
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未設定の場合は省略）
-- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。リクエストトレース関連付けが有効な場合は`X-Trace-Id`と一致します
+- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。常に同じリクエストが返す`X-Trace-Id`レスポンスヘッダーと一致します（`logging.enhance.enabled`はこのidをログに出力するかどうかのみを制御します）
 
 これらは、gatewayパス（`runtime/runs/worker.py::run_agent`）と埋め込みパス（`client.py::DeerFlowClient.stream`）の両方で、グラフ呼び出しのルートで`RunnableConfig.metadata`に注入されるため、LangChain互換の任意のcallbackから読み取れます。`DEER_FLOW_ENV`（または`ENVIRONMENT`）を設定すると、デプロイ環境ごとにトレースにタグを付けられます。
 
@@ -664,7 +670,7 @@ DeerFlowには現在、ワークスペース内でファーストクラスのス
 
 - `/workspace/scheduled-tasks`でタスクを管理
 - 各スケジュールタスクがスレッドを再利用するか、実行ごとに新しいスレッドを作成するかを選択可能
-- `once`と`cron`のスケジュールをサポート
+- `once`、`cron`、`interval`のスケジュールをサポート
 - バックグラウンドのスケジュール実行を非対話型のDeerFlow runとして実行（`ask_clarification`はここでは公開されません）
 - 再利用された同じスレッド上でアクティブなrunと衝突する期限到来のcron実行に対して`skip`オーバーラップ挙動を使用
 - タスクの一時停止、再開、トリガー、履歴確認、削除
@@ -675,7 +681,6 @@ DeerFlowには現在、ワークスペース内でファーストクラスのス
 - 会話で`schedule_task`ツールを作成する機能はまだありません
 - テキストのみの通知ジョブはありません
 - チャネルやGitHubのディスパッチターゲットはありません
-- この最初のバージョンでは`interval`スケジュールタイプはありません
 
 `config.yaml -> scheduler.enabled`でバックグラウンドポーリングを有効にします。手動トリガーは同じスケジュールタスクリソースと実行パスを使用します。
 
@@ -756,4 +761,4 @@ DeerFlowはオープンソースコミュニティの素晴らしい成果の上
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)

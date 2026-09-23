@@ -1,3 +1,5 @@
+import ipaddress
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +12,19 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.gateway.auth.models import User
 from app.gateway.routers import browser as browser_router
-from app.gateway.routers.browser import _should_apply_browser_seed, _ws_origin_allowed
+from app.gateway.routers.browser import (
+    _negotiate_browser_frame_format,
+    _send_browser_frame,
+    _should_apply_browser_seed,
+    _ws_origin_allowed,
+)
+from deerflow.config.authorization_config import AuthorizationConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolate_route_authorization(monkeypatch):
+    # Existing routing/ownership tests must not inherit local operator policies.
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
 
 
 class _FakeWebSocket:
@@ -58,10 +72,11 @@ def test_browser_stream_closes_4404_when_thread_store_missing():
         _expect_ws_close(app, 4404)
 
 
-def test_browser_stream_rejects_legacy_null_owner_thread():
+@pytest.mark.parametrize("record", [None, {"user_id": None}, {"user_id": "another-user"}])
+def test_browser_stream_rejects_missing_or_unowned_thread(record):
     store = MagicMock()
     store.check_access = AsyncMock(return_value=True)
-    store.get = AsyncMock(return_value={"thread_id": "thread-1", "user_id": None})
+    store.get = AsyncMock(return_value=record)
     app = _browser_ws_app(store)
     with (
         patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
@@ -207,6 +222,64 @@ def test_ws_origin_allowed_same_origin_host():
     assert _ws_origin_allowed(ws) is True
 
 
+@pytest.mark.asyncio
+async def test_send_browser_frame_uses_binary_websocket_message_when_requested():
+    websocket = MagicMock()
+    websocket.send_bytes = AsyncMock()
+    websocket.send_text = AsyncMock()
+
+    await _send_browser_frame(websocket, b"\xff\xd8jpeg", binary=True)
+
+    websocket.send_bytes.assert_awaited_once_with(b"\xff\xd8jpeg")
+    websocket.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_browser_frame_keeps_legacy_base64_json_protocol():
+    websocket = MagicMock()
+    websocket.send_bytes = AsyncMock()
+    websocket.send_text = AsyncMock()
+
+    await _send_browser_frame(websocket, b"\xff\xd8jpeg", binary=False)
+
+    websocket.send_bytes.assert_not_awaited()
+    payload = json.loads(websocket.send_text.await_args.args[0])
+    assert payload == {"type": "frame", "data": "/9hq cGVn".replace(" ", "")}
+
+
+@pytest.mark.asyncio
+async def test_browser_frame_format_rejects_unknown_capability():
+    websocket = MagicMock()
+    websocket.query_params = {"frame_format": "avif"}
+    websocket.accept = AsyncMock()
+    websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
+
+    result = await _negotiate_browser_frame_format(websocket)
+
+    assert result is None
+    websocket.accept.assert_awaited_once()
+    payload = json.loads(websocket.send_text.await_args.args[0])
+    assert payload["type"] == "error"
+    assert "frame_format" in payload["message"]
+    websocket.close.assert_awaited_once_with(code=1008)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), [(None, False), ("binary", True)])
+async def test_browser_frame_format_accepts_legacy_and_binary(value, expected):
+    websocket = MagicMock()
+    websocket.query_params = {} if value is None else {"frame_format": value}
+    websocket.accept = AsyncMock()
+    websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
+
+    assert await _negotiate_browser_frame_format(websocket) is expected
+    websocket.accept.assert_awaited_once()
+    websocket.send_text.assert_not_awaited()
+    websocket.close.assert_not_awaited()
+
+
 def test_ws_origin_allowed_rejects_cross_origin():
     ws = _FakeWebSocket({"origin": "https://evil.example.com", "host": "app.example.com"})
     assert _ws_origin_allowed(ws) is False
@@ -268,4 +341,5 @@ def test_validate_browser_url_rejects_private_and_non_http(monkeypatch):
     assert validate_browser_url("file:///etc/passwd") is not None
     assert validate_browser_url("ftp://example.com") is not None
     # A normal public URL passes (returns None = allowed).
+    monkeypatch.setattr(browser_tools, "_resolve_host_addresses", lambda _host: [ipaddress.ip_address("93.184.215.14")])
     assert validate_browser_url("https://github.com/bytedance/deer-flow") is None

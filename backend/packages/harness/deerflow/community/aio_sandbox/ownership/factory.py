@@ -61,7 +61,10 @@ def resolve_ownership_config(config: SandboxOwnershipConfig | None, *, stream_br
     return SandboxOwnershipConfig()
 
 
-def _resolve_redis_url(config: SandboxOwnershipConfig) -> str:
+def resolve_ownership_redis_url(
+    config: SandboxOwnershipConfig,
+) -> str:
+    """Resolve the Redis endpoint shared by ownership-adjacent stores."""
     return config.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
 
@@ -96,7 +99,7 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
     if resolved.type == "redis":
         from .redis import RedisOwnershipStore
 
-        redis_url = _resolve_redis_url(resolved)
+        redis_url = resolve_ownership_redis_url(resolved)
         logger.info("Sandbox ownership store: redis (ttl=%.1fs, renewal=%.1fs)", ttl, resolved.renewal_interval_seconds)
         return RedisOwnershipStore(
             owner_id=effective_owner_id,

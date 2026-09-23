@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import type { HumanInputRequest } from "@/core/messages/human-input";
 
 const formRequest: HumanInputRequest = {
@@ -21,7 +22,7 @@ const formRequest: HumanInputRequest = {
 function renderCard() {
   return render(
     <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined }}
+      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
     >
       <HumanInputCard request={formRequest} onSubmit={() => undefined} />
     </I18nContext.Provider>,
@@ -65,7 +66,7 @@ describe("HumanInputCard form validation (DOM)", () => {
     const warnSpy = rs.spyOn(console, "warn").mockImplementation(() => ({}));
     render(
       <I18nContext.Provider
-        value={{ locale: "en-US", setLocale: () => undefined }}
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
       >
         <HumanInputCard
           request={{

@@ -9,7 +9,7 @@ DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，�
 - ✅ 支持多文件同时上传
 - ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
-- ✅ Agent 自动感知已上传的文件
+- ✅ Agent 自动感知当前消息中附带的文件
 - ✅ 支持文件列表查询和删除
 
 ## API 端点
@@ -116,23 +116,30 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ## Agent 集成
 
-### 自动文件列举
+### 当前消息中的文件上下文
 
-Agent 在每次请求时会自动收到已上传文件的列表，格式如下：
+发送消息时，前端会把该消息附带的上传文件元数据放入
+`HumanMessage.additional_kwargs.files`。`UploadsMiddleware` 只把当前消息中的文件
+注入 Agent 上下文，格式如下：
 
 ```xml
-<uploaded_files>
-The following files have been uploaded and are available for use:
+<current_uploads>
+The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
 
-- document.md (45.3 KB)
-  Path: /mnt/user-data/uploads/document.md
-
-You can read these files using the `read_file` tool with the paths shown above.
-</uploaded_files>
+To work with these files:
+- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- Use `grep` to search for keywords when you are not sure which section to look at.
+- Use `glob` to find files by name pattern.
+</current_uploads>
 ```
+
+以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
+`list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
+`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
@@ -228,6 +235,10 @@ backend/.deer-flow/threads/
 
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
+- 删除只作用于普通文件：上传目录中的符号链接不会被跟随，删除请求按文件不存在（404）处理
+- 删除文档不会一并删除其转换生成的 Markdown：该 `.md` 的归属无法从文件名确定（同主干名的另一个文档或用户自己上传的文件都可能占用该名称），因此不再依据推测删除。它仍会出现在上传列表中，可单独删除（见 issue #5672）
+- 上传（HTTP 与嵌入式 `DeerFlowClient`）不会写穿符号链接：目标名已是符号链接的文件会被跳过并列入 `skipped_files`，转换生成的 Markdown 也不会写入同名符号链接
+- 转换读取的是本次上传写入的字节，而非落盘后的文件名：HTTP 上传在 uploads 之外的私有副本上转换，嵌入式客户端转换调用方提供的源文件，因此沙箱替换该文件名无法让宿主文件内容被转换进 uploads
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
 - 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
@@ -240,8 +251,9 @@ backend/.deer-flow/threads/
    - 使用 markitdown 转换文档
 
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
-   - 在每次 Agent 请求前注入文件列表
-   - 自动生成格式化的文件列表消息
+   - 读取当前消息的 `additional_kwargs.files`
+   - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
+   - 历史上传由 `list_uploaded_files` 按需查询（可按文件名/扩展名过滤后再截断），不会每轮自动注入
 
 3. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API

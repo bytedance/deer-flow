@@ -39,18 +39,29 @@ class Session:
 
         Matches an existing thread by id first, then by exact title. Falls back to
         the literal ref (treated as an id) when nothing matches, so an unknown id
-        still continues/creates that namespace.
+        still continues/creates that namespace — provided it satisfies the
+        canonical thread ID contract.
         """
         try:
             threads = self.client.list_threads(limit=100).get("thread_list", [])
         except Exception:  # noqa: BLE001 - resolution is best-effort
-            return ref
+            return self._validated_literal_ref(ref)
         if any(t.get("thread_id") == ref for t in threads):
             return ref
         for thread in threads:
             if (thread.get("title") or "") == ref:
-                return thread.get("thread_id") or ref
-        return ref
+                return thread.get("thread_id") or self._validated_literal_ref(ref)
+        return self._validated_literal_ref(ref)
+
+    @staticmethod
+    def _validated_literal_ref(ref: str) -> str:
+        """Validate a literal ref before it is adopted as a thread id."""
+        from deerflow.utils.thread_id import validate_thread_id
+
+        try:
+            return validate_thread_id(ref)
+        except ValueError as exc:
+            raise ValueError(f"Thread reference {ref!r} matches no existing thread and is not a valid thread id (expected 1-64 ASCII letters, digits, hyphens, or underscores).") from exc
 
     def recent_threads(self, limit: int = 20) -> list[dict]:
         return self.client.list_threads(limit=limit).get("thread_list", [])

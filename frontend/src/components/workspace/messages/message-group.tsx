@@ -48,6 +48,8 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { isSafeHref, UnsafeLink } from "./markdown-link";
+import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
   className?: string;
@@ -75,7 +77,28 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const allSteps = useMemo(() => convertToSteps(messages), [messages]);
+  // Keep the original messages and tool associations intact. Only the display
+  // of clarification context moves outside the execution disclosure (#5503).
+  const clarificationTextSteps = useMemo(
+    () =>
+      allSteps.filter(
+        (step): step is CoTAssistantTextStep =>
+          step.type === "assistantText" && step.isClarificationContext === true,
+      ),
+    [allSteps],
+  );
+  const steps = useMemo(
+    () =>
+      allSteps.filter(
+        (step) => step.type !== "assistantText" || !step.isClarificationContext,
+      ),
+    [allSteps],
+  );
+  const stepIndexByStep = useMemo(
+    () => new Map(steps.map((step, index) => [step, index] as const)),
+    [steps],
+  );
   const debugStepByMessageId = useMemo(
     () =>
       new Map(
@@ -104,20 +127,20 @@ function MessageGroupComponent({
   }, [steps]);
   const aboveLastToolCallSteps = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(0, index);
     }
     return [];
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
   const afterLastToolCallAssistantTextSteps = useMemo(() => {
     if (!lastToolCallStep) {
       return [];
     }
-    const index = steps.indexOf(lastToolCallStep);
+    const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
     return steps
       .slice(index + 1)
       .filter((step) => step.type === "assistantText");
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
   const collapsibleAboveLastToolCallSteps = useMemo(
     () =>
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
@@ -125,13 +148,32 @@ function MessageGroupComponent({
   );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(index + 1).find((step) => step.type === "reasoning");
     } else {
       const filteredSteps = steps.filter((step) => step.type === "reasoning");
       return filteredSteps[filteredSteps.length - 1];
     }
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  // Assistant text emitted after the trailing reasoning is the answer that
+  // reasoning produced, so it renders below the reasoning disclosure. The
+  // settled assistant bubble always paints reasoning above content, and the
+  // streaming processing group has to agree or the two swap places the moment
+  // the turn ends (#4576). Text emitted before that reasoning keeps its
+  // earlier position.
+  const belowLastReasoningAssistantTextSteps = useMemo(() => {
+    if (!lastReasoningStep) {
+      return [];
+    }
+    const index = stepIndexByStep.get(lastReasoningStep) ?? -1;
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastReasoningStep, stepIndexByStep, steps]);
+  const belowLastReasoningSteps = useMemo(
+    () => new Set<CoTStep>(belowLastReasoningAssistantTextSteps),
+    [belowLastReasoningAssistantTextSteps],
+  );
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -241,6 +283,7 @@ function MessageGroupComponent({
         isLast={options?.isLast}
         isLoading={isLoading}
         deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -257,7 +300,7 @@ function MessageGroupComponent({
   );
 
   const renderStep = (step: CoTStep) => {
-    const stepIndex = steps.indexOf(step);
+    const stepIndex = stepIndexByStep.get(step) ?? -1;
     if (step.type === "assistantText") {
       return [
         renderDebugSummary(step.messageId, stepIndex),
@@ -290,7 +333,7 @@ function MessageGroupComponent({
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
 
-  return (
+  const processingPanel = (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
@@ -324,7 +367,10 @@ function MessageGroupComponent({
         </Button>
       )}
       {(lastToolCallStep ??
-        steps.some((step) => step.type === "assistantText")) && (
+        steps.some(
+          (step) =>
+            step.type === "assistantText" && !belowLastReasoningSteps.has(step),
+        )) && (
         <ChainOfThoughtContent className="px-4 pb-2">
           {(lastToolCallStep
             ? showAbove
@@ -332,18 +378,24 @@ function MessageGroupComponent({
               : aboveLastToolCallSteps.filter(
                   (step) => step.type === "assistantText",
                 )
-            : steps.filter((step) => step.type === "assistantText")
+            : steps.filter(
+                (step) =>
+                  step.type === "assistantText" &&
+                  !belowLastReasoningSteps.has(step),
+              )
           ).flatMap(renderStep)}
           {lastToolCallStep && (
             <>
               {renderDebugSummary(
                 lastToolCallStep.messageId,
-                steps.indexOf(lastToolCallStep),
+                stepIndexByStep.get(lastToolCallStep) ?? -1,
               )}
               <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
                 {renderToolCall(lastToolCallStep, { isLast: true })}
               </FlipDisplay>
-              {afterLastToolCallAssistantTextSteps.flatMap(renderStep)}
+              {afterLastToolCallAssistantTextSteps
+                .filter((step) => !belowLastReasoningSteps.has(step))
+                .flatMap(renderStep)}
             </>
           )}
         </ChainOfThoughtContent>
@@ -352,7 +404,7 @@ function MessageGroupComponent({
         <>
           {renderDebugSummary(
             lastReasoningStep.messageId,
-            steps.indexOf(lastReasoningStep),
+            stepIndexByStep.get(lastReasoningStep) ?? -1,
           )}
           <Button
             key={lastReasoningStep.id}
@@ -404,9 +456,25 @@ function MessageGroupComponent({
               ></ChainOfThoughtStep>
             </ChainOfThoughtContent>
           )}
+          {belowLastReasoningAssistantTextSteps.length > 0 && (
+            <ChainOfThoughtContent className="px-4 pb-2">
+              {belowLastReasoningAssistantTextSteps.flatMap(renderStep)}
+            </ChainOfThoughtContent>
+          )}
         </>
       )}
     </ChainOfThought>
+  );
+
+  return (
+    <>
+      {processingPanel}
+      {clarificationTextSteps.map((step) => (
+        <div key={step.id} className="w-full">
+          <MarkdownContent content={step.content} isLoading={isLoading} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -534,6 +602,26 @@ function browserToolLabel(
   }
 }
 
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+      return name;
+    default:
+      return "generic";
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -544,6 +632,8 @@ function ToolCall({
   isLoading = false,
   deferBrowserPreview = false,
   tokenDebugStep,
+  showDetails = false,
+  resultMessage,
   browserView,
   threadId,
 }: {
@@ -556,10 +646,13 @@ function ToolCall({
   isLoading?: boolean;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
   threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const browserViewPanel = useMaybeBrowserView();
@@ -573,7 +666,7 @@ function ToolCall({
       fallback
     );
   const writeFilePath =
-    (name === "write_file" || name === "str_replace") &&
+    (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
       ? args.path
       : undefined;
@@ -607,7 +700,7 @@ function ToolCall({
     return () => window.clearTimeout(timeout);
   }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
-  if (name.startsWith("browser_")) {
+  if (kind === "browser") {
     const shot = browserView?.screenshot;
     const previewUrl =
       shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
@@ -654,7 +747,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_search") {
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -667,18 +760,25 @@ function ToolCall({
       >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
+            {/* Tool args and results are model- or provider-controlled, so
+                every tool link passes the same scheme allowlist as markdown
+                links and degrades to the same UnsafeLink marker. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
-                  {item.title}
-                </a>
+                {isSafeHref(item.url) ? (
+                  <a href={item.url} target="_blank" rel="noopener noreferrer">
+                    {item.title}
+                  </a>
+                ) : (
+                  <UnsafeLink href={item.url}>{item.title}</UnsafeLink>
+                )}
               </ChainOfThoughtSearchResult>
             ))}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -702,32 +802,48 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => (
-                <Tooltip key={item.image_url} content={item.title}>
-                  <a
-                    className="size-24 overflow-hidden rounded-lg object-cover"
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div className="bg-accent size-24">
-                      <img
-                        className="size-full object-cover"
-                        src={item.thumbnail_url}
-                        alt={item.title}
-                        width={100}
-                        height={100}
-                      />
-                    </div>
-                  </a>
-                </Tooltip>
-              ))}
+              results.map((item) => {
+                const thumbnail = (
+                  <div className="bg-accent size-24">
+                    <img
+                      className="size-full object-cover"
+                      src={item.thumbnail_url}
+                      alt={item.title}
+                      width={100}
+                      height={100}
+                    />
+                  </div>
+                );
+                return (
+                  <Tooltip key={item.image_url} content={item.title}>
+                    {isSafeHref(item.source_url) ? (
+                      <a
+                        className="size-24 overflow-hidden rounded-lg object-cover"
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {thumbnail}
+                      </a>
+                    ) : (
+                      <UnsafeLink
+                        href={item.source_url}
+                        className="size-24 overflow-hidden rounded-lg"
+                      >
+                        {thumbnail}
+                      </UnsafeLink>
+                    )}
+                  </Tooltip>
+                );
+              })}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
-    const url = (args as { url: string })?.url;
+  } else if (kind === "web_fetch") {
+    // Models occasionally emit non-string args mid-stream; an object here
+    // would reach the JSX below and throw.
+    const url = typeof args.url === "string" ? args.url : undefined;
     let title = url;
     if (typeof result === "string") {
       const potentialTitle = extractTitleFromMarkdown(result);
@@ -742,20 +858,23 @@ function ToolCall({
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
-              {title}
-            </a>
-          )}
+          {url &&
+            (isSafeHref(url) ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cursor-pointer"
+              >
+                {title}
+              </a>
+            ) : (
+              <UnsafeLink href={url}>{title}</UnsafeLink>
+            ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -775,7 +894,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "read_file") {
+  } else if (kind === "read_file") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -795,7 +914,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "write_file" || name === "str_replace") {
+  } else if (kind === "write_file" || kind === "str_replace") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -823,7 +942,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -852,7 +971,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -860,7 +979,7 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -876,7 +995,16 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -895,10 +1023,12 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
 }
 
 interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  isClarificationContext?: boolean;
   content: string;
 }
 
@@ -913,6 +1043,7 @@ interface BrowserViewMeta {
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
 
   for (const message of messages) {
     if (message.type !== "tool" || !message.tool_call_id) {
@@ -920,10 +1051,13 @@ function indexToolCallData(messages: Message[]) {
     }
 
     const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
     if (!toolCallResults.has(toolCallId)) {
       const result = extractTextFromMessage(message);
       if (result) {
         toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
       }
     }
 
@@ -939,23 +1073,18 @@ function indexToolCallData(messages: Message[]) {
     }
   }
 
-  return { browserViews, toolCallResults };
+  return { browserViews, toolCallResults, resultMessages };
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
-      const content = extractContentFromMessage(message);
-      if (content) {
-        steps.push({
-          id: `${message.id ?? `ai-${messageIndex}`}-content`,
-          messageId: message.id,
-          type: "assistantText",
-          content,
-        });
-      }
+      // Reasoning precedes the answer text it produced, so it is pushed first:
+      // step order is what the group renders in, and a message carrying both
+      // would otherwise paint its answer above its own thinking (#4576).
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
         const step: CoTReasoningStep = {
@@ -966,6 +1095,18 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
+      const content = extractContentFromMessage(message);
+      if (content) {
+        steps.push({
+          id: `${message.id ?? `ai-${messageIndex}`}-content`,
+          messageId: message.id,
+          type: "assistantText",
+          content,
+          isClarificationContext: message.tool_calls?.some(
+            (toolCall) => toolCall.name === "ask_clarification",
+          ),
+        });
+      }
       for (const tool_call of message.tool_calls ?? []) {
         if (tool_call.name === "task") {
           continue;
@@ -975,12 +1116,16 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          // Persisted or mid-stream tool calls can omit args (or send null);
+          // every ToolCall branch reads them, so normalize once here.
+          args: tool_call.args ?? {},
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
           const toolCallResult = toolCallResults.get(toolCallId);
-          if (toolCallResult) {
+          step.resultMessage = resultMessages.get(toolCallId);
+          // Generic details preserve received text; specialized tools retain their parsing.
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;

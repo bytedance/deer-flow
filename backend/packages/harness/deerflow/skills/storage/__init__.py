@@ -29,7 +29,7 @@ _MAX_USER_SCOPED_STORAGES = 64
 # OrderedDict so that LRU eviction can remove the least-recently-used entry
 # via ``move_to_end`` + ``popitem(last=False)`` when the cache exceeds
 # ``_MAX_USER_SCOPED_STORAGES``.
-_user_scoped_storages: OrderedDict[str, UserScopedSkillStorage] = OrderedDict()
+_user_scoped_storages: OrderedDict[str, tuple[object, UserScopedSkillStorage]] = OrderedDict()
 _user_scoped_storage_lock = threading.Lock()
 
 
@@ -113,34 +113,40 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
     are safely bucketed before reaching :class:`UserScopedSkillStorage`, which
     calls :func:`_validate_user_id` internally.
 
-    Instances are cached by the *normalised* ``user_id`` with double-check
-    locking to prevent concurrent creation races. When the cache exceeds
-    ``_MAX_USER_SCOPED_STORAGES``, the least-recently-accessed entry is
-    evicted (true LRU, not FIFO).
+    Instances are cached by the *normalised* ``user_id`` and current
+    ``AppConfig`` identity with double-check locking to prevent concurrent
+    creation races. When the cache exceeds ``_MAX_USER_SCOPED_STORAGES``, the
+    least-recently-accessed entry is evicted (true LRU, not FIFO).
     """
+    from deerflow.config import get_app_config
     from deerflow.config.paths import make_safe_user_id
 
     safe_id = make_safe_user_id(user_id)
+    app_config = kwargs.get("app_config")
+    if app_config is None:
+        app_config = get_app_config()
+    kwargs["app_config"] = app_config
 
     # Always acquire lock so move_to_end is safe — makes this a true LRU
     # cache instead of FIFO. The overhead is negligible since dict ops are
     # fast and this function is called once per agent-creation cycle.
     with _user_scoped_storage_lock:
         cached = _user_scoped_storages.get(safe_id)
-        if cached is not None:
+        if cached is not None and cached[0] is app_config:
             _user_scoped_storages.move_to_end(safe_id)
-            return cached
+            return cached[1]
 
-        cached = UserScopedSkillStorage(safe_id, **kwargs)
-        _user_scoped_storages[safe_id] = cached
+        storage = UserScopedSkillStorage(safe_id, **kwargs)
+        _user_scoped_storages[safe_id] = (app_config, storage)
+        _user_scoped_storages.move_to_end(safe_id)
         # Evict least-recently-used entry if cache exceeds the ceiling.
         # Since we just moved the current user_id to the end, popitem(last=False)
         # will evict the oldest/least-recently-accessed entry (never the
         # one we just created).
         while len(_user_scoped_storages) > _MAX_USER_SCOPED_STORAGES:
-            evicted_key, evicted_val = _user_scoped_storages.popitem(last=False)
+            evicted_key, _ = _user_scoped_storages.popitem(last=False)
             logger.info("Evicted user-scoped skill storage for safe_id=%s (cache ceiling %d)", evicted_key, _MAX_USER_SCOPED_STORAGES)
-        return cached
+        return storage
 
 
 def user_should_see_legacy_skills(user_id: str, **kwargs) -> bool:

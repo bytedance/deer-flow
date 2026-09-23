@@ -4,15 +4,16 @@ from deerflow.subagents.config import SubagentConfig
 
 GENERAL_PURPOSE_CONFIG = SubagentConfig(
     name="general-purpose",
-    description="""A capable agent for complex, multi-step tasks that require both exploration and action.
+    description="""A capable agent for bounded exploration and action when there is clear delegation benefit.
 
 Use this subagent when:
-- The task requires both exploration and modification
-- Complex reasoning is needed to interpret results
-- Multiple dependent steps must be executed
-- The task would benefit from isolated context management
+- Its specialist tools, skills, model, or instructions materially improve the result
+- It owns one independent, non-overlapping part of genuinely parallel work
+- A bounded, context-heavy investigation should be isolated from the lead context
 
-Do NOT use for simple, single-step operations.""",
+Do NOT use merely because work is complex or multi-step, or merely because it is sequential;
+a bounded dependent chain may still be delegated when specialist or context-isolation benefit
+clearly wins. Do not use when it would duplicate repository discovery or overlap side effects.""",
     system_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
 
 <guidelines>

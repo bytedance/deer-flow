@@ -123,6 +123,12 @@ def raise_if_snapshot_incompatible(snapshot: Any, mode: CheckpointChannelMode) -
         raise CheckpointModeMismatchError("Thread requires delta mode; materialize and convert its checkpoints before using full mode.")
 
 
+def raise_if_checkpoint_tuple_incompatible(checkpoint_tuple: Any, mode: CheckpointChannelMode) -> None:
+    """Fail closed before exposing raw checkpoint metadata across modes."""
+    if mode == "full" and checkpoint_tuple_uses_delta(checkpoint_tuple):
+        raise CheckpointModeMismatchError("Thread requires delta mode; materialize and convert its checkpoints before using full mode.")
+
+
 def ensure_checkpoint_mode_compatible(checkpointer: Any, config: dict[str, Any], mode: CheckpointChannelMode) -> None:
     """Pre-write gate: a write cannot be un-applied, so it checks ahead of time.
 
@@ -131,12 +137,10 @@ def ensure_checkpoint_mode_compatible(checkpointer: Any, config: dict[str, Any],
     """
     if mode == "delta":
         return
-    if checkpoint_tuple_uses_delta(checkpointer.get_tuple(config)):
-        raise CheckpointModeMismatchError("Thread requires delta mode; materialize and convert its checkpoints before using full mode.")
+    raise_if_checkpoint_tuple_incompatible(checkpointer.get_tuple(config), mode)
 
 
 async def aensure_checkpoint_mode_compatible(checkpointer: Any, config: dict[str, Any], mode: CheckpointChannelMode) -> None:
     if mode == "delta":
         return
-    if checkpoint_tuple_uses_delta(await checkpointer.aget_tuple(config)):
-        raise CheckpointModeMismatchError("Thread requires delta mode; materialize and convert its checkpoints before using full mode.")
+    raise_if_checkpoint_tuple_incompatible(await checkpointer.aget_tuple(config), mode)

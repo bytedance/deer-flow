@@ -10,6 +10,7 @@ from deerflow.runtime.secret_context import (
     redact_metadata_secrets,
     validate_run_metadata_secrets,
 )
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 
 
 @pytest.mark.parametrize("value", ["secret", "", None, {"nested": True}])
@@ -70,6 +71,26 @@ def test_redact_config_secrets_hides_legacy_config_metadata_without_mutating_sou
     assert redacted is not source
     assert redacted["metadata"] is not source["metadata"]
     assert redacted["context"] is not source["context"]
+
+
+def test_redact_config_secrets_drops_trace_id_from_metadata_and_context():
+    """``body.config`` is persisted as ``runs.kwargs_json`` and echoed verbatim
+    by the runs API. ``deerflow_trace_id`` is ignored as an input everywhere
+    else, so echoing a caller-supplied one back would only manufacture
+    disagreement with the response header, the logs, and the run record."""
+    source = {
+        "metadata": {DEERFLOW_TRACE_METADATA_KEY: "forged-meta", "token_usage": 7},
+        "context": {DEERFLOW_TRACE_METADATA_KEY: "forged-ctx", "model_name": "default"},
+    }
+
+    redacted = redact_config_secrets(source)
+
+    assert redacted == {
+        "metadata": {"token_usage": 7},
+        "context": {"model_name": "default"},
+    }
+    assert source["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "forged-meta"
+    assert source["context"][DEERFLOW_TRACE_METADATA_KEY] == "forged-ctx"
 
 
 def test_run_response_hides_historical_auth_token_without_mutating_record():

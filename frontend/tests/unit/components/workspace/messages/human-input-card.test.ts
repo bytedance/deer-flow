@@ -8,6 +8,7 @@ import {
   shouldSubmitHumanInputTextOnKeyDown,
 } from "@/components/workspace/messages/human-input-card";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import type {
   HumanInputRequest,
   HumanInputResponse,
@@ -216,6 +217,7 @@ function renderCard(props: Partial<Parameters<typeof HumanInputCard>[0]> = {}) {
         value: {
           locale: "en-US",
           setLocale: () => undefined,
+          t: enUS,
         },
       },
       createElement(HumanInputCard, {

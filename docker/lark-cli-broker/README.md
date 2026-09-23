@@ -50,6 +50,12 @@ docker build -t deer-flow/lark-cli-broker:v1.0.65 \
 The tag should encode the lark-cli version so it can be bumped independently of
 the upstream `all-in-one-sandbox` image.
 
+CI publishes multi-arch (`linux/amd64,linux/arm64`) images to
+`ghcr.io/<owner>/deer-flow-lark-cli-broker:<lark-cli-version>` via
+`.github/workflows/lark-cli-images.yaml` (run it with a `lark_cli_version` input,
+or push a `lark-cli-v*` tag). This is decoupled from the DeerFlow `v*` release
+because the image tracks the upstream `larksuite/cli` version.
+
 ## Wiring it into the provisioner
 
 Broker mode is **opt-in** and off by default. Enable it by publishing this image
@@ -71,9 +77,9 @@ and pointing the provisioner at it:
   Lark integration sandbox-runtime readiness signal in
   `/api/integrations/lark/status` (`sandbox_runtime_mode: "broker"`).
 
-> Publishing note: this repository currently ships only backend/frontend images.
-> Publishing a `lark-cli-broker` tag is a fast-follow; until then the feature
-> stays behind the empty-default `LARK_CLI_BROKER_IMAGE`.
+> Opt-in note: broker mode stays off until `LARK_CLI_BROKER_IMAGE` is set on the
+> provisioner, so an unpublished or unconfigured image is a no-op (Pattern A /
+> legacy path, no behavior change).
 
 ## Broker HTTP contract (loopback)
 

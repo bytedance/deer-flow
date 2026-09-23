@@ -308,6 +308,181 @@ Phase 1 最低验证要求：
 - **延期：** Models、Skills、Sandbox 权限；前端 effective-permissions 展示；
   management route 的 provider 迁移。
 
+### 2026-07-28 — Phase 3 / Models authorization (list / use)
+
+- **背景：** Phase 2A 合并后，route-level 权限已由 provider 派生，但模型仍然对所有
+  已认证用户开放——`list_models` 返回全部模型，`_resolve_model_name` 不检查角色。
+  RFC §9 Phase 3 要求覆盖 Models/Skills/Sandbox 三个资源类型。
+- **决策（Gateway 路由层）：** 新增 `resolve_model_authorization(user, *, is_internal)`
+  返回 `(provider, principal)`，复用 Phase 2A 的 `_get_cached_route_provider` 和
+  `build_principal_from_context`，包括 `INTERNAL_SYSTEM_ROLE → None` pop。
+  `list_models` 使用 `provider.filter_resources(principal, "model", names)` 批量过滤；
+  `get_model` 使用 `provider.authorize(AuthzRequest(resource="model", action="use",
+  target=model_name))`。deny → 403（模型存在但角色无权使用），provider 解析失败 →
+  `_AuthorizationUnavailable`（携带 `fail_closed` 标志）。
+- **决策（运行时解析层）：** 新增 `_authorize_model_name(model_name, *, context,
+  app_config)` 在 `_resolve_model_name` 之后执行。deny 时按 RFC §9 优雅降级：回退到
+  `filter_resources` 返回的第一个允许模型并记录 warning，而不是崩溃。全部模型被拒 +
+  `fail_closed` → `ValueError`（与现有"无模型配置"契约一致）；fail-open 返回原名。
+  fallback 阶段对每个候选重新调 `authorize("model", "use", candidate)` 验证，避免
+  custom provider 在 `filter_resources`（action-agnostic）里可见但 `use` 被拒的模型被
+  静默选中。
+- **决策（embedded/library 路径）：** `_authorize_model_name` 同样接入
+  `DeerFlowClient._ensure_agent`（client.py），与 Gateway runtime 路径 `_make_lead_agent`
+  对称。否则 library/embedded 消费者启用 `authorization` + role-scoped model policy 时，
+  tools 会被过滤但模型仍可绕过 `model:use`。调用前先把 `None` 默认解析为第一个配置模型
+  （与 `create_chat_model(name=None)` 的语义一致），确保隐式默认模型也经过授权。
+- **否决方案：** 不为 `get_model` 引入 `"read"` action——RFC §9 将 `get_model` 映射到
+  `model:use`，引入第三个 action 会增加 RBAC 配置面而无实际收益。不在 `_resolve_model_name`
+  内部做授权——该函数是纯解析（request → config → default fallback），授权检查放在调用
+  点之后，保持单一职责。
+- **兼容性：** `authorization.enabled: false` 时两条路径均为 no-op（路由返回全部模型，
+  解析返回原名）。匿名请求（user=None）不触发过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS`
+  已包含 `"model": "models"`，无需 schema 变更。
+- **证据：** `tests/test_models_authorization.py`（24 tests）覆盖 disabled/anonymous/
+  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景，disabled/allowed/
+  graceful-fallback/all-denied-fail-closed/all-denied-fail-open/custom-provider-list-vs-use/
+  no-usable-fallback 运行时场景，以及 `DeerFlowClient._ensure_agent` 的 model:use 强制 +
+  None 默认解析 + disabled no-op 集成场景；
+  `test_authorization_*.py` + `test_lead_agent_model_resolution.py` +
+  `test_auth_middleware.py` 共 318 tests 全部通过。
+- **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
+  management route 的 provider 迁移。
+
+### 2026-08-02 — Phase 3 / Sandbox authorization (execute)
+
+- **背景：** Phase 3 Models 合并后，sandbox 仍只由 config presence
+  （`feat.sandbox is not False`）控制，任何已认证用户都能获得完整 sandbox 执行
+  （bash、文件 I/O）。RFC §9 要求 `SandboxMiddleware gates on
+  authorize("sandbox","execute")`，deny 时返回友好错误消息而非崩溃。
+- **决策（gate 位置）：** 与 Models/Skills 不同，sandbox 不是具名资源，而是一个
+  **执行环境** —— 多个工具（bash、read_file、write_file、glob、grep 等）都依赖它，
+  全部经过 `ensure_sandbox_initialized` / `ensure_sandbox_initialized_async`
+  （sandbox/tools.py）。选择在 **sandbox 获取的唯一入口** gate，而非在 middleware 里
+  维护"sandbox 工具名集合"（Shotgun Surgery，每加一个 sandbox 工具都要改 middleware）。
+  具体在两个 acquire 点之前调用共享的 `authorize_sandbox_execution` helper：
+  - lazy 路径：`ensure_sandbox_initialized` + async（覆盖所有 sandbox 工具）
+  - eager 路径：`SandboxMiddleware.before_agent` / `abefore_agent`（`lazy_init=False`）
+- **决策（授权语义）：** `authorize("sandbox", "execute", target="*")` —— **二元判断**
+  （"这个角色能否用 sandbox"），target 用 `"*"` 表示"sandbox 资源整体"。RBAC
+  `allow: ["*"]` / `allow: true` 允许，`allow: []` / `allow: false` 拒绝。
+- **决策（deny 行为）：** 新增 `SandboxAuthorizationError(SandboxError)`，deny 时抛出，
+  沿工具执行链传播 → agent 的 tool-error 处理转成友好 `ToolMessage`
+  （"sandbox execution is not permitted for your role"），符合 RFC §9 的"not a crash"。
+- **否决方案：** 不在 `SandboxMiddleware.wrap_tool_call` 里 per-tool gate —— middleware
+  无法区分哪些工具需要 sandbox，要么误伤非 sandbox 工具，要么维护硬编码工具名集合。
+  不为 sandbox 引入独立的 `SandboxMiddleware` 构造参数接收 provider —— lazy 路径不经过
+  middleware，gate 放在工具侧的 `ensure_sandbox_initialized` 才是 single source of truth。
+- **决策（Gateway 辅助同步路径）：** 多路径覆盖自审（pr-review 检查点 14）发现 4 个
+  绕过 `ensure_sandbox_initialized` 的直接 acquire：uploads.py（上传文件同步进 sandbox）、
+  artifacts.py（artifact 编辑后同步）、feishu.py / dingtalk.py（IM 下载文件同步）。
+  - uploads / artifacts（Gateway 路由，身份齐全）：加共享 helper `try_acquire_sandbox_for_request`（内部经 `authorize_sandbox_for_request` gate）
+    （gateway/authz.py，从 `request.state.user` 构造 Principal，含 INTERNAL_SYSTEM_ROLE pop）。
+    deny 时**跳过 sandbox 同步**（上传/artifact 编辑本身仍成功——deny 的 role 反正无法
+    通过 sandbox 消费这些文件）；provider 解析失败按 `fail_closed` 降级，不让 route 500。
+  - feishu / dingtalk（channel worker 路径）：**本 PR 不 gate**。理由：channel 文件下载路径
+    无法拿到完整授权身份（owner-user 解析依赖 run 启动时的 `inject_authenticated_user_context`，
+    文件下载时不可得）；且 deny 时同步的文件无法被 agent 消费，仅浪费一次幂等 acquire。
+    留作 follow-up（若维护者要求，可从 channel worker 的 run context 传递身份）。
+- **兼容性：** `authorization.enabled: false` 时 `authorize_sandbox_execution` 是 no-op
+  （直接返回）。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含 `"sandbox": "sandbox"`，
+  `provider.py` 已声明 `"sandbox"` 为有效 resource，无需 schema 变更。对 test mock
+  （SimpleNamespace app_config）安全：使用 `getattr` + `is not True` 防御。
+- **证据：** `tests/test_sandbox_authorization.py`（23 tests）覆盖 disabled/RBAC allow/deny/
+  deny-via-bool/no-policy-unrestricted/provider-error-fail-closed-fail-open/
+  internal-caller/default-role 场景，deny 错误携带 role，provider 收到正确的
+  resource/action/target；`ensure_sandbox_initialized` sync+async 的 deny（不 acquire）
+  + allow（acquire）集成场景；eager 路径（`before_agent` + `abefore_agent`）deny 跳过
+  acquire 而非 run 级报错；provider 解析错误的 fail-closed/fail-open（含 fail-open 语义
+  反转回归）；uploads/artifacts 路由 deny（acquire 不被调用、主操作仍成功）+ allow
+  （acquire 被调用）集成场景；request=None 容忍（直调测试路径）；无 config.yaml 时
+  gate no-op（CI 环境）；mock app_config（SimpleNamespace）防御回归；既有 `test_sandbox_middleware.py`（22 tests）、
+  `test_artifacts_router.py`、`test_uploads_manager.py` 全部通过
+  （authorization 禁用时 gate 是 no-op，不破坏现有行为）。
+- **延期：** Phase 3（Models/Skills/Sandbox）三资源类型完成；Phase 4 前端
+  effective-permissions 展示；management route 的 provider 迁移；
+  feishu/dingtalk 文件同步路径的 sandbox gate（身份传递机制待定）。
+
+### 2026-08-27 — Phase 3 / PR #5006 组合调用单次决策与异步阻塞收口
+
+- **背景：** review 在默认启用的 `ReadBeforeWriteMiddleware` 组合路径复现了一次工具
+  调用产生两次 provider 决策：读工具在 tool body 后重新读取以写 mark，写工具在
+  tool body 前读取以检查 gate。异步路径还在 event loop 上同步加载配置并解析 provider。
+- **决策（调用作用域）：** `sandbox_authorization_scope` / async counterpart 用 task-local
+  `ContextVar` 覆盖完整的组合工具调用，而不只覆盖 offload 的同步 tool body。读写 gate、
+  tool body 和 mark stamping 共用一次实时授权决策；下一个独立工具调用仍重新授权。
+- **决策（deny 语义）：** `ReadBeforeWriteMiddleware` 在作用域入口把
+  `SandboxAuthorizationError` 转成标准 error `ToolMessage`，并在 `_check_write_gate` 与
+  `_attach_read_mark` 中显式重新抛出该异常，禁止通用 fail-open 分支吞掉授权拒绝。
+- **决策（event-loop 边界）：** async config 加载通过 `safe_app_config_async()` offload；
+  `_resolve_authorization_inputs()` 也在线程中执行，避免每次复用 sandbox 时在 event loop
+  上 stat/hash 配置文件或 import/构造自定义 provider。只有 provider 的 `aauthorize()`
+  在异步调用路径上直接 await。
+- **证据：** `tests/test_sandbox_authorization.py` 新增 sync/async `read_file` 与
+  `write_file` 组合覆盖，断言每次调用恰好一个 provider 决策并验证 deny 不被 fail-open；
+  `tests/blocking_io/test_sandbox_authorization.py` 用真实阻塞文件探针固定配置与 provider
+  解析均不在 event loop 上执行。
+- **兼容性：** `authorization.enabled: false` 仍为 no-op；未启用
+  `ReadBeforeWriteMiddleware` 的普通 sandbox 工具继续在各自调用入口重新授权；同步与异步
+  deny 均保持工具级错误而非 run 级异常。
+
+#### PR #5006 review 补充：异步 provider 的构造线程
+
+- 自定义 provider 的模块发现可能触发阻塞 import，但 provider 构造函数也可能创建
+  asyncio loop-affine 客户端。`runtime.py` 因此把解析拆成两阶段：
+  `resolve_authorization_provider_spec()` 在线程池完成 class-path 发现，
+  `construct_authorization_provider()` 在调用方事件循环构造并校验实例。
+- 同步 `resolve_authorization_provider()` 继续组合这两个阶段，保持原有调用契约与错误语义。
+  async sandbox gate 的发现和构造任一失败仍统一遵循 `fail_closed` / `fail_open`。
+- 回归覆盖同时固定两个边界：阻塞文件探针证明 config hash 与 class discovery 不占用
+  event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
+  `aauthorize()` 验证仍是同一个 loop。
+
+### 2026-09-17 — Phase 4 / PR #5489 Skills listing visibility (list / detail)
+
+- **背景：** Phase 4 PR 1（#5228 `/me` route permissions）与 PR 2（#5294 前端权限门控）
+  合并后，模型已有 per-caller listing/use 授权（#4540），sandbox 已有 execute 授权
+  （#4911），但 skill 列表表面仍对全部已认证用户开放——`GET /api/skills`、
+  `GET /api/skills/custom`、`GET /api/skills/{name}` 不检查角色，是 Phase 3 资源类型
+  清单里最后未收口的 listing 面。
+- **决策（表面清单）：** 恰好三个非管理 GET 表面接入 per-caller 可见过滤：`list_skills`、
+  `list_custom_skills`、`get_skill`，共享 `_filter_visible_skills(request, config, skills)`
+  helper，语义镜像 `list_models`：`provider.filter_resources(principal, "skill", names)`
+  批量过滤；provider 解析失败 → `_AuthorizationUnavailable`（携带 `fail_closed` 标志）；
+  provider 抛错或返回非 `list[str]` → 空（fail-closed）或全量（fail-open）。skills.py
+  其余全部路由维持 `require_admin_user` 门控，不在本层重复过滤。
+- **决策（detail 404 而非 403）：** `get_skill` 对被过滤 skill 返回与真实缺失逐字一致的
+  404，而非 `get_model` 的 403。理由：`get_model` 执行的是 `authorize("model", "use")`
+  使用决策（模型存在但角色无权使用 → 403 合理）；本层只有 listing visibility，没有
+  skill 执行决策的对应物，403 会让 detail 端点变成过滤清单刚关掉的 existence oracle。
+- **决策（resolver 结构）：** 从 `resolve_model_authorization` 提取共享核心
+  `_resolve_route_scoped_authorization(user, *, is_internal)`，
+  `resolve_skill_authorization` 与 model 版本互为薄封装（含 `INTERNAL_SYSTEM_ROLE → None`
+  pop 与 internal-caller 语义）。RBAC `_RESOURCE_POLICY_KEYS` 已含 `"skill": "skills"`
+  （rbac.py），roles 的 `skills: {allow: [...]}` 直接生效，无 schema 变更。
+- **否决方案：** 不为 skill 引入 `authorize("skill", "read")` 逐名授权——listing 表面
+  用批量 `filter_resources` 一次往返即可，逐名决策增加配置面且与 `list_models` 不对称。
+  不只过滤 `/skills` 主列表——自审发现 `/skills/custom` 与 `/skills/{name}` 会原样
+  泄露主列表隐藏的名字，三个表面必须同批收口。
+- **兼容性：** `authorization.enabled: false` 时三表面均 no-op（返回全量）。匿名请求
+  （user=None）不过滤——生产 auth 开启时 `AuthMiddleware` 先行 401，该分支实际只覆盖
+  auth-disabled 本地模式，与 `list_models` 对齐。skill 管理端点（install/edit/export/
+  delete 等）保持 `require_admin_user`，不受本过滤影响。RBAC 缺 `skills` 键 = 放行，
+  `allow: []` = 全拒（与 `models` 键同语义）。
+- **证据：** `tests/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
+  allow/deny/wildcard/absent-policy、custom+public 一致过滤、provider error/unavailable/
+  坏返回类型 × fail-closed/fail-open、`("skill", [...])` 契约、custom 列表绕过封闭、
+  detail 404 与真实缺失逐字一致；`test_skills_router_authz.py` 与
+  `test_skills_custom_router.py` 的 fake config 补 `AuthorizationConfig`（含
+  `_make_test_app` 回填 shim）。review（willem-bd）在 head tree 执行验证：4 套件
+  78 tests 通过，且移除 custom-listing 过滤的突变使
+  `test_list_custom_skills_rbac_filters_by_deny` 变红，守护测试真实。
+- **延期：** #4541（Phase 3 执行层：assembly 过滤 + slash-activation 授权）与本 PR
+  互补（本 PR 管 listing visibility，#4541 管 runtime use），其 rebase 时需双向调和：
+  `config.example.yaml` roles 注释段两 PR 均改；本文件决策日志两 PR 也在同一插入点
+  各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
+  迁移（沿袭前阶段延期项）。
+
 ### 新记录模板
 
 ```markdown

@@ -14,10 +14,7 @@ import inspect
 import json
 import logging
 import os
-import threading
-import weakref
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -26,7 +23,9 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -56,30 +55,16 @@ _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
 
-_goal_locks_guard = threading.Lock()
-_goal_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_goal_locks = AsyncKeyedLockTable[str]()
 
 
 class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
 
 
-@asynccontextmanager
-async def goal_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize goal read-modify-write sequences within the current event loop."""
-    loop = asyncio.get_running_loop()
-    with _goal_locks_guard:
-        locks = _goal_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _goal_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _goal_locks.hold(thread_id)
 
 
 class GoalCommand(NamedTuple):
@@ -277,6 +262,8 @@ async def evaluate_goal_completion(
     thread_id: str | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> GoalEvaluation:
     """Ask a small non-thinking model whether the active goal is satisfied.
 
@@ -320,10 +307,26 @@ async def evaluate_goal_completion(
         environment=_resolve_environment(),
         deerflow_trace_id=deerflow_trace_id,
     )
-    response = await model.ainvoke(
-        [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
-        config=invoke_config,
-    )
+    prompt_messages = [
+        SystemMessage(content=system_instruction),
+        HumanMessage(content=user_content),
+    ]
+    if extensions is None:
+        response = await model.ainvoke(prompt_messages, config=invoke_config)
+    else:
+        from deerflow_extension_api import SystemOperationKind
+
+        from deerflow.extensions.notify import observe_system_model_call
+
+        response = await observe_system_model_call(
+            extensions,
+            SystemOperationKind.GOAL,
+            messages=prompt_messages,
+            model_name=model_name,
+            invoke_config=invoke_config,
+            invoke=lambda: model.ainvoke(prompt_messages, config=invoke_config),
+            task_store=task_store,
+        )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 
 
@@ -417,8 +420,11 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
     # Offload the synchronous checkpointer call so its blocking IO never runs on
-    # the event loop (backend/AGENTS.md blocking-IO gate).
-    result = await asyncio.to_thread(sync_method, *args, **kwargs)
+    # the event loop (backend/AGENTS.md blocking-IO gate). A sync checkpoint
+    # mutation must finish before cancellation propagates; otherwise the caller
+    # can observe cancellation while the worker commits state afterwards.
+    worker = asyncio.to_thread(sync_method, *args, **kwargs)
+    result = await await_drained(worker) if sync_name in {"put", "put_writes", "delete_thread"} else await worker
     return await result if inspect.isawaitable(result) else result
 
 

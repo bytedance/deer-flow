@@ -1,19 +1,8 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-async function openSkillSettings(page: Page) {
-  await page.goto("/workspace/chats/new");
-  const sidebar = page.locator("[data-sidebar='sidebar']");
-  await sidebar.getByRole("button", { name: /Settings and more/ }).click();
-  await page.getByRole("menuitem", { name: "Settings" }).click();
-  const dialog = page.getByRole("dialog", { name: "Settings" });
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Skills" }).click();
-  return dialog;
-}
-
-test.describe("Skill settings", () => {
+test.describe("Skill gallery", () => {
   test("shows a failure and keeps the toggle state when disabling a skill is rejected", async ({
     page,
   }) => {
@@ -47,10 +36,10 @@ test.describe("Skill settings", () => {
       return route.fallback();
     });
 
-    const dialog = await openSkillSettings(page);
-    const toggle = dialog.getByRole("switch");
+    await page.goto("/workspace/capabilities?tab=skills");
+    const toggle = page.getByRole("switch", { name: /toggle-skill/ });
 
-    await expect(dialog.getByText("toggle-skill")).toBeVisible();
+    await expect(page.getByText("toggle-skill")).toBeVisible();
     await expect(toggle).toBeChecked();
     await toggle.click();
 

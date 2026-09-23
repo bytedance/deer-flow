@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from typing import cast
 
 import anyio
+import pytest
 
+from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
@@ -104,13 +106,62 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_apply_prompt_template_uses_non_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
+    policy = RunInteractionPolicy(RunInteractionMode.SCHEDULED)
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config, interaction_policy=policy)
+
+    assert "There is no human available to answer a synchronous question" in prompt
+    assert "MUST call ask_clarification" not in prompt
+    assert "Do not wait for a human response" in prompt
+
+
+def test_apply_prompt_template_preserves_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    assert "**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**" in prompt
+    assert "DO NOT call any other tool in the same turn as ask_clarification" in prompt
+    assert "❌ DO NOT make assumptions when information is missing - ALWAYS ask" in prompt
+    assert '**Example:**\nUser: "Deploy the application"' in prompt
+    assert 'User: "staging"\nYou: "Deploying to staging..." [proceed]' in prompt
+
+
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
     tool_config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
-        memory=SimpleNamespace(enabled=True, mode="tool"),
+        memory=SimpleNamespace(enabled=True, mode="tool", injection_enabled=False),
         acp_agents={},
     )
     middleware_config = SimpleNamespace(
@@ -128,11 +179,15 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    stateless_agent_prompt = prompt_module.apply_prompt_template(app_config=tool_config, memory_enabled=False)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
 
     assert "<memory_tool_system>" in tool_prompt
     assert "memory_search" in tool_prompt
     assert "memory_add" in tool_prompt
+    assert "agent facts are not injected automatically" in tool_prompt
+    assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
+    assert "<memory_tool_system>" not in stateless_agent_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
@@ -212,6 +267,7 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
             mounts=[],
         ),
         subagents=SubagentsAppConfig(),
+        subagent_runtime=SimpleNamespace(max_running=4),
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
@@ -231,6 +287,10 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
 
     assert "MAXIMUM 3 `task` CALLS PER RESPONSE" in prompt
     assert "MAXIMUM 5 `task` CALLS PER RUN" in prompt
+    assert "Default to direct execution" in prompt
+    assert "DELEGATION CHECK" in prompt
+    assert "expected benefit from real parallel latency" in prompt
+    assert "HARD LIMITS ARE NON-NEGOTIABLE" in prompt
 
 
 def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeypatch):
@@ -241,6 +301,7 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
             mounts=[],
         ),
         subagents=SubagentsAppConfig(),
+        subagent_runtime=SimpleNamespace(max_running=4),
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
@@ -260,6 +321,39 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
 
     assert "MAXIMUM 4 `task` CALLS PER RESPONSE" in prompt
     assert "MAXIMUM 50 `task` CALLS PER RUN" in prompt
+
+
+def test_apply_prompt_template_prefers_startup_execution_capacity_after_reload(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(),
+        subagent_runtime=SimpleNamespace(max_running=12),
+        skills=SimpleNamespace(
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            get_skills_path=lambda: Path("/tmp/skills"),
+        ),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=10,
+        app_config=explicit_config,
+        subagent_execution_capacity=3,
+    )
+
+    assert "MAXIMUM 3 `task` CALLS PER RESPONSE" in prompt
+    assert "MAXIMUM 10 `task` CALLS PER RESPONSE" not in prompt
 
 
 def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypatch):
@@ -301,7 +395,12 @@ def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypa
     )
 
     assert f"MAXIMUM {enforced} `task` CALLS PER RESPONSE" in prompt
-    assert f"HARD LIMITS: max {enforced} `task` calls per response" in prompt
+    assert f"HARD LIMITS ARE NON-NEGOTIABLE: max {enforced} `task` calls per response" in prompt
+    assert "Expected benefit = specialist capability + context isolation" in prompt
+    assert "delegate only for material specialist or context-isolation benefit" in prompt
+    assert "expected benefit from real parallel latency" not in prompt
+    assert "material within-batch parallel savings" not in prompt
+    assert "Multi-batch example" not in prompt
 
 
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
@@ -327,7 +426,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -347,6 +446,58 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     }
 
 
+def test_get_memory_context_propagates_required_read_error_without_backend_config(monkeypatch):
+    from deerflow.agents.memory import MemoryReadError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryReadError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+
+    with pytest.raises(MemoryReadError, match="down"):
+        prompt_module._get_memory_context("agent-a", app_config=explicit_config)
+
+
+def test_get_memory_context_swallows_ordinary_manager_error(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True, backend_config={}),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+
+    assert prompt_module._get_memory_context("agent-a", app_config=explicit_config) == ""
+
+
+def test_get_memory_context_preserves_legacy_fail_closed_contract(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_closed"}},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    with pytest.raises(MemoryManagerError, match="down"):
+        prompt_module._get_memory_context(
+            "agent-a",
+            app_config=explicit_config,
+            user_id="user-1",
+        )
+
+
 def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True, injection_enabled=True),
@@ -356,7 +507,7 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     def fail_resolve_runtime_user_id(runtime):
         raise AssertionError("explicit user_id must bypass ambient identity resolution")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"

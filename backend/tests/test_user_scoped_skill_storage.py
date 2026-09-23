@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import stat
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from deerflow.config.paths import Paths
+from deerflow.skills.installer import SkillSecurityScanError
+from deerflow.skills.security_scanner import ScanResult
 from deerflow.skills.storage import reset_skill_storage, reset_user_skill_storage
+from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SkillCategory
 
@@ -87,6 +92,12 @@ class TestPathRedirection:
 
     def test_public_skill_paths_still_use_global_root(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         assert user_storage.get_skills_root_path() == skills_root
+
+    def test_managed_integration_skill_paths_use_global_root(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        assert user_storage.get_integrations_root() == base_dir / "integrations" / "skills"
+
+    def test_user_integrations_root_is_compatibility_alias(self, user_storage: UserScopedSkillStorage):
+        assert user_storage.get_user_integrations_root() == user_storage.get_integrations_root()
 
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"
@@ -281,6 +292,100 @@ class TestHistoryIsolation:
 
 class TestPathSafety:
     """UserScopedSkillStorage inherits path-traversal guards from LocalSkillStorage."""
+
+    def test_accepts_skill_files_from_all_allowed_roots(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        skill_files = [
+            skills_root / "public" / "public-skill" / "SKILL.md",
+            base_dir / "users" / "test-user" / "skills" / "custom" / "custom-skill" / "SKILL.md",
+            base_dir / "integrations" / "skills" / "lark-cli" / "lark-doc" / "SKILL.md",
+        ]
+        for skill_file in skill_files:
+            skill_file.parent.mkdir(parents=True, exist_ok=True)
+            skill_file.write_text(_skill_content(skill_file.parent.name), encoding="utf-8")
+
+        assert [user_storage.validate_skill_file_path(skill_file) for skill_file in skill_files] == [skill_file.resolve() for skill_file in skill_files]
+
+    def test_rejects_skill_file_outside_allowed_roots(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        skill_file = base_dir / "untrusted" / "escaped-skill" / "SKILL.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text(_skill_content("escaped-skill"), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(skill_file)
+
+    def test_accepts_external_skill_directory_symlink_but_not_file_symlink(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
+        external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
+        external_file.parent.mkdir(parents=True)
+        external_file.write_text(_skill_content("external-skill"), encoding="utf-8")
+
+        linked_dir = user_storage.get_user_custom_root() / "external-skill"
+        linked_file = linked_dir / "SKILL.md"
+        linked_dir.parent.mkdir(parents=True)
+        try:
+            linked_dir.symlink_to(external_file.parent, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        assert user_storage.validate_skill_file_path(linked_file) == external_file
+
+        file_link = user_storage.get_user_custom_root() / "file-link" / "SKILL.md"
+        file_link.parent.mkdir(parents=True)
+        try:
+            file_link.symlink_to(external_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(file_link)
+
+    def test_rejects_file_symlink_even_when_target_stays_inside_allowed_root(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
+        target_file = user_storage.get_user_custom_root() / "real-skill" / "SKILL.md"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text(_skill_content("real-skill"), encoding="utf-8")
+        linked_file = user_storage.get_user_custom_root() / "alias-skill" / "SKILL.md"
+        linked_file.parent.mkdir(parents=True)
+        try:
+            linked_file.symlink_to(target_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(linked_file)
+
+    def test_rejects_deeper_and_non_custom_directory_symlinks(self, user_storage: UserScopedSkillStorage, skills_root: Path, tmp_path: Path):
+        external_dir = tmp_path / "external-skills" / "nested"
+        external_dir.mkdir(parents=True)
+        external_file = external_dir / "SKILL.md"
+        external_file.write_text(_skill_content("nested-skill"), encoding="utf-8")
+
+        deep_parent = user_storage.get_user_custom_root() / "outer"
+        deep_parent.mkdir(parents=True)
+        deep_link = deep_parent / "link"
+        try:
+            deep_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        public_link = skills_root / SkillCategory.PUBLIC.value / "external-skill"
+        public_link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            public_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(deep_link / "SKILL.md")
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(public_link / "SKILL.md")
 
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):
@@ -513,11 +618,9 @@ class TestSkillLoadingRespectsGlobalDisable:
                         skills={"shared-skill": SimpleNamespace(enabled=False)},
                         is_skill_enabled=lambda name, _cat: not (name == "shared-skill"),
                     )
-                    # The function inside ``load_skills`` does a
-                    # function-local ``from deerflow.config.extensions_config
-                    # import get_extensions_config``, so patch the
-                    # extension_config module symbol.
-                    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=ext_cfg):
+                    # User-scoped loading re-reads disk state so another
+                    # worker's global disable is not hidden by a stale cache.
+                    with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=ext_cfg):
                         storage = get_or_new_user_skill_storage("alice", app_config=cfg)
                         loaded = storage.load_skills(enabled_only=False)
                         shared = [s for s in loaded if s.name == "shared-skill" and s.category == SkillCategory.LEGACY]
@@ -600,3 +703,132 @@ class TestEnabledSkillsByConfigCacheBounded:
         assert (id(new_cfg), "user-new") in kept
         assert (id(configs[2]), "user-2") not in kept, "LRU should have been evicted"
         assert len(prompt_module._enabled_skills_by_config_cache) == 4
+
+
+def _skills_root(base: Path) -> Path:
+    root = base / "skills"
+    root.mkdir()
+    (root / "public").mkdir()
+    (root / "custom").mkdir()
+    return root
+
+
+def _storage_config(skills_root: Path, *, scan_enabled: bool) -> SimpleNamespace:
+    """An app_config carrying the ``skill_scan.enabled`` kill switch."""
+    return SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        skill_scan=SimpleNamespace(enabled=scan_enabled),
+    )
+
+
+def _malicious_archive(directory: Path, skill_name: str = "evil-skill") -> Path:
+    """A well-formed archive whose SKILL.md carries CRITICAL private-key material."""
+    return _archive(directory, skill_name, extra="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n")
+
+
+def _archive(directory: Path, skill_name: str = "benign-skill", extra: str = "") -> Path:
+    """A well-formed archive containing one SKILL.md."""
+    path = directory / f"{skill_name}.skill"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            f"{skill_name}/SKILL.md",
+            f"---\nname: {skill_name}\ndescription: Demo skill\n---\n\n# {skill_name}\n\n{extra}",
+        )
+    return path
+
+
+def _install_outcome(storage, archive: Path) -> str:
+    try:
+        storage.install_skill_from_archive(archive)
+    except SkillSecurityScanError:
+        return "blocked"
+    return "installed"
+
+
+class TestInstallScanConfigParity:
+    """``ainstall_skill_from_archive`` resolves ``skill_scan.enabled`` from the
+    storage's own ``app_config`` — the same config the archive preflight it
+    inherits already reads — not from the process-global ``get_app_config()``.
+
+    The divergence is reachable whenever the storage outlives a config edit:
+    ``DeerFlowClient`` snapshots ``get_app_config()`` at construction, and the
+    Gateway hands its per-request ``get_config()`` to
+    ``get_or_new_user_skill_storage``, while ``get_app_config`` hot-reloads a
+    later edit of ``config.yaml``. Resolving the content scan from the process
+    global therefore let the two gates of a single install disagree.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _allow_llm_scan(self, monkeypatch):
+        """The per-file LLM scan is not gated by the kill switch; only the
+        static scan is. Stub it so the outcome reflects config resolution."""
+
+        async def _allow(*args, **kwargs):
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow)
+
+    def _local_storage(self, skills_root: Path, config: SimpleNamespace) -> LocalSkillStorage:
+        return LocalSkillStorage(host_path=str(skills_root), app_config=config)
+
+    def _user_storage(self, base: Path, skills_root: Path, config: SimpleNamespace) -> UserScopedSkillStorage:
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base)):
+            with patch("deerflow.config.paths._paths", None):
+                return UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=config)
+
+    def test_content_scan_honours_the_storages_own_config(self, tmp_path: Path, monkeypatch) -> None:
+        """Storage config ON, process global OFF: the archive must still be blocked."""
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(skill_scan=SimpleNamespace(enabled=False)))
+
+        skills_root = _skills_root(tmp_path)
+        archive = _malicious_archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=True)
+
+        assert _install_outcome(self._local_storage(skills_root, config), archive) == "blocked"
+        assert _install_outcome(self._user_storage(tmp_path, skills_root, config), archive) == "blocked"
+
+    def test_kill_switch_off_in_the_storages_own_config_skips_both_gates(self, tmp_path: Path, monkeypatch) -> None:
+        """Storage config OFF, process global ON: both storages accept it.
+
+        This direction pins the same resolution from the other side — an
+        operator who disables ``skill_scan`` in the config the storage was
+        handed gets no scan, regardless of what the hot-reloaded global says.
+        """
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(skill_scan=SimpleNamespace(enabled=True)))
+
+        skills_root = _skills_root(tmp_path)
+        archive = _malicious_archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=False)
+
+        assert _install_outcome(self._local_storage(skills_root, config), archive) == "installed"
+        assert _install_outcome(self._user_storage(tmp_path, skills_root, config), archive) == "installed"
+
+    def test_llm_scan_receives_the_storages_own_config(self, tmp_path: Path, monkeypatch) -> None:
+        """The per-file LLM scan resolves its config the same way.
+
+        ``skill_scan.enabled`` does not gate it — ``scan_skill_content`` always
+        runs — but it reads ``skill_evolution.moderation_model_name`` and builds
+        the model from its ``app_config``, so leaving it on the process global
+        keeps the two halves of one install on two different configs.
+        """
+        seen: list[object] = []
+
+        async def _record(*args, **kwargs):
+            seen.append(kwargs.get("app_config"))
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _record)
+
+        skills_root = _skills_root(tmp_path)
+        archive = _archive(tmp_path)
+        config = _storage_config(skills_root, scan_enabled=True)
+
+        self._local_storage(skills_root, config).install_skill_from_archive(archive)
+        self._user_storage(tmp_path, skills_root, config).install_skill_from_archive(archive)
+
+        assert seen, "the LLM scan should have run for the installed SKILL.md"
+        assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"

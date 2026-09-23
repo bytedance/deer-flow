@@ -13,6 +13,12 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Prerequisites
 
 - Docker Desktop or Docker Engine
+- Docker Compose **v2.24 or newer** (check with `docker compose version`). The dev
+  Compose file marks its `env_file` entries optional using the long-form
+  `path`/`required` syntax; older clients reject it with
+  `services.gateway.env_file.0 must be a string`. `make docker-start` verifies the
+  version and tells you to upgrade — direct `docker compose` callers get that raw
+  message instead.
 - pnpm (for caching optimization)
 
 #### Setup Steps
@@ -31,17 +37,39 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```bash
    make docker-init
    ```
-   This will:
-   - Build Docker images
-   - Install frontend dependencies (pnpm)
-   - Install backend dependencies (uv)
-   - Share pnpm cache with host for faster builds
+   This pulls the sandbox image that the container sandbox modes run, so the
+   first sandbox container does not wait on the download. It is a no-op in
+   local sandbox mode (the default), which needs no image.
 
 3. **Start development services**:
    ```bash
    make docker-start
    ```
    `make docker-start` reads `config.yaml` and starts `provisioner` only for provisioner/Kubernetes sandbox mode.
+
+   Prefer this wrapper over invoking Compose yourself: it checks your Compose
+   version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
+
+   If you do run Compose directly, run it **from the repository root** and set
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
+   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
+   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
+   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
+   silently miss your checkout instead of failing:
+
+   ```bash
+   # macOS / Linux
+   DEER_FLOW_ROOT="$PWD" docker compose -f docker/docker-compose-dev.yaml up --build
+   ```
+
+   ```powershell
+   # Windows PowerShell
+   $env:DEER_FLOW_ROOT = (Get-Location).Path
+   docker compose -f docker/docker-compose-dev.yaml up --build
+   ```
+
+   Do not reuse that `-f` path from inside `docker/` — it resolves to
+   `docker/docker/docker-compose-dev.yaml` and fails with a file-not-found error.
 
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
@@ -56,7 +84,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Docker Commands
 
 ```bash
-# Build the custom k3s image (with pre-cached sandbox image)
+# Pull the sandbox image used by the container sandbox modes
 make docker-init
 # Start Docker services (mode-aware, localhost:2026)
 make docker-start
@@ -70,7 +98,7 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
-If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-start`:
 
 ```bash
 export UV_INDEX_URL=https://pypi.org/simple
@@ -305,9 +333,16 @@ before review.
 ## Testing
 
 ```bash
-# Backend tests
+# Default backend tests (excludes live and blocking-I/O tests)
 cd backend
 make test
+
+# Strict blocking-I/O tests
+make test-blocking-io
+
+# Live DeerFlowClient integration tests (explicit opt-in)
+# Requires a valid root config.yaml and API credentials.
+make test-live
 
 # Frontend unit tests
 cd frontend
@@ -317,6 +352,11 @@ make test
 cd frontend
 make test-e2e
 ```
+
+`make test-live` calls real external APIs and may incur API costs or create
+local sandboxes, artifacts, and files. It is never run by the default backend
+test command or CI. Direct pytest invocations of `tests/test_client_live.py`
+must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 

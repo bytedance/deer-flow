@@ -1,4 +1,4 @@
 from .model import ScheduledTaskRow
-from .sql import ScheduledTaskRepository
+from .sql import ActiveScheduledTaskMutationConflict, ScheduledTaskRepository
 
-__all__ = ["ScheduledTaskRow", "ScheduledTaskRepository"]
+__all__ = ["ActiveScheduledTaskMutationConflict", "ScheduledTaskRow", "ScheduledTaskRepository"]

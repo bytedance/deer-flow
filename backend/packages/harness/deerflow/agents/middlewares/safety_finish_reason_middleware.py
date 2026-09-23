@@ -105,6 +105,28 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # Copy so caller mutations after construction don't leak into us.
         self._detectors: list[SafetyTerminationDetector] = list(detectors) if detectors else default_detectors()
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        detectors: list[dict[str, object]] = []
+        for detector in self._detectors:
+            detector_type = type(detector)
+            parameters: dict[str, object] = {}
+            for field_name in ("_finish_reasons", "_stop_reasons"):
+                value = getattr(detector, field_name, None)
+                if value is not None:
+                    # frozenset is not JSON-serialisable; project to a sorted list.
+                    parameters[field_name.removeprefix("_")] = sorted(value)
+            descriptor: dict[str, object] = {
+                "class": f"{detector_type.__module__}.{detector_type.__qualname__}",
+                "name": str(getattr(detector, "name", detector_type.__name__)),
+            }
+            if parameters:
+                descriptor["parameters"] = parameters
+            detectors.append(descriptor)
+        return {
+            "action": "suppress_tool_calls",
+            "detectors": detectors,
+        }
+
     @classmethod
     def from_config(cls, config: SafetyFinishReasonConfig) -> SafetyFinishReasonMiddleware:
         """Construct from validated Pydantic config, honouring the
@@ -179,7 +201,8 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         new_content = self._append_user_message(message.content, explanation)
 
         # clone_ai_message_with_tool_calls handles structured tool_calls,
-        # raw additional_kwargs.tool_calls, and function_call in one shot.
+        # raw additional_kwargs.tool_calls, function_call, and provider
+        # tool-call content blocks in one shot.
         # It only rewrites finish_reason when the old value was "tool_calls",
         # which is not our case — content_filter / refusal / SAFETY stay put
         # so downstream SSE / converters keep seeing the real provider reason.
@@ -351,12 +374,9 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         #      thread until a new chat is started. Backfill an explanation so
         #      the persisted message is non-empty.
         tool_calls = list(last.tool_calls or [])
-        # ``or ""`` normalizes every "no visible content" shape to blank:
-        # None, "", [] and whitespace all count. None is reachable via
-        # ``model_copy(update={"content": None})`` (a rewrite path that skips
-        # validation); without the guard message_content_to_text stringifies
-        # it to "None" and the backfill would be skipped, re-poisoning the
-        # thread this fix is meant to protect.
+        # Keep local falsey-content normalization as a defensive guard; the
+        # shared helper also handles None from validation-skipping rewrites.
+        # The trailing strip() makes whitespace-only content blank as well.
         content_is_blank = not message_content_to_text(last.content or "").strip()
         if not tool_calls and not content_is_blank:
             return None

@@ -16,7 +16,6 @@ Configuration example (``config.yaml``)::
       api_key: $TENKI_API_KEY          # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
       base_url: https://tenki.cloud    # optional; SDK default when omitted
       image: my-base-image             # optional; Tenki account default base image when omitted
-      project_id: proj_...             # optional; auto-selected if the account has exactly one
       workspace_id: ws_...             # optional; auto-selected if the account has exactly one
       cpu_cores: 2                     # optional per-sandbox vCPUs
       memory_mb: 2048                  # optional per-sandbox memory

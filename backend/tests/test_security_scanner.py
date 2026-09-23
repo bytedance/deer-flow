@@ -116,6 +116,37 @@ async def test_scan_skill_content_passes_run_name_to_model(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_scan_skill_content_parses_responses_api_text_blocks(monkeypatch):
+    _make_env(
+        monkeypatch,
+        [{"type": "text", "text": '{"decision":"allow","reason":"clean"}'}],
+    )
+
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert result.decision == "allow"
+    assert result.reason == "clean"
+
+
+@pytest.mark.anyio
+async def test_scan_skill_content_ignores_non_text_blocks_and_joins_text_blocks(monkeypatch):
+    _make_env(
+        monkeypatch,
+        [
+            {"type": "reasoning", "text": '{"decision":"block","reason":"fake"}'},
+            {"type": "text", "text": '{"decision":"allow",'},
+            {"type": "output_text", "text": '"reason":"clean"}'},
+            {"type": "tool_call", "text": '{"decision":"block","reason":"fake"}'},
+        ],
+    )
+
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+
+    assert result.decision == "allow"
+    assert result.reason == "clean"
+
+
+@pytest.mark.anyio
 async def test_scan_skill_content_blocks_when_model_unavailable(monkeypatch):
     config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)

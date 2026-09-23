@@ -58,11 +58,17 @@ test("uses provided context when pathOfThread is called with a thread id", () =>
   );
 });
 
-test("uses agent chat route when thread metadata has agent_name", () => {
+test("routes an IM-selected thread to its custom agent from search metadata", () => {
   expect(
     pathOfThread({
       thread_id: "thread-456",
-      metadata: { agent_name: "coder" },
+      // Thread-search results do not include run context. The channel manager
+      // therefore persists both its restart key and this canonical routing key.
+      metadata: {
+        channel_source: { type: "im_channel", provider: "telegram" },
+        channel_agent_name: "coder",
+        agent_name: "coder",
+      },
     }),
   ).toBe("/workspace/agents/coder/chats/thread-456");
 });
@@ -130,6 +136,23 @@ test("reads IM channel source metadata", () => {
     type: "im_channel",
     provider: "feishu",
     label: "Feishu",
+  });
+});
+
+test("formats the Buzz channel source label", () => {
+  expect(
+    channelSourceOfThread({
+      metadata: {
+        channel_source: {
+          type: "im_channel",
+          provider: "buzz",
+        },
+      },
+    }),
+  ).toEqual({
+    type: "im_channel",
+    provider: "buzz",
+    label: "Buzz",
   });
 });
 

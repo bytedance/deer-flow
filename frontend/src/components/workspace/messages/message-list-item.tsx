@@ -41,6 +41,7 @@ import {
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
+import { readConversationReferences } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -57,15 +58,19 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
+import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeSourcesPanel } from "../citations/knowledge-source";
+import { ConversationReferenceChip } from "../conversation-references/conversation-reference-chip";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
@@ -145,6 +150,7 @@ export function MessageListItem({
   threadId,
   artifactPaths = [],
   showCopyButton = true,
+  showWorkspaceChanges = false,
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
@@ -157,16 +163,26 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  showWorkspaceChanges?: boolean;
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const editableText = useMemo(
-    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
-    [isHuman, message],
+  // One derivation serves both editing and the toolbar, and only runs when
+  // either consumer can use it: assistant rows never render this toolbar
+  // (the sole call site passes showCopyButton only for non-assistant rows)
+  // and the toolbar stays unrendered while loading — matching the guard the
+  // pre-memo call sat behind instead of deriving for every settled row.
+  const copyData = useMemo(
+    () =>
+      isHuman || (!isLoading && showCopyButton)
+        ? (getMessageCopyData(message) ?? "")
+        : "",
+    [isHuman, isLoading, showCopyButton, message],
   );
+  const editableText = isHuman ? copyData : "";
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
@@ -213,6 +229,7 @@ export function MessageListItem({
         threadId={threadId}
         artifactPaths={artifactPaths}
         runId={runId}
+        showWorkspaceChanges={showWorkspaceChanges}
         editState={
           isHuman && isEditing
             ? {
@@ -236,7 +253,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton clipboardData={getMessageCopyData(message)} />
+            <CopyButton clipboardData={copyData} />
             {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
               <Tooltip content={t.common.editAndRerun}>
                 <Button
@@ -362,6 +379,7 @@ function MessageContent_({
   threadId,
   artifactPaths,
   runId,
+  showWorkspaceChanges = false,
   editState,
 }: {
   className?: string;
@@ -370,6 +388,7 @@ function MessageContent_({
   threadId: string;
   artifactPaths: readonly string[];
   runId?: string;
+  showWorkspaceChanges?: boolean;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -416,6 +435,11 @@ function MessageContent_({
         rawContent.includes("<uploaded_files>")
       ) {
         // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
+        // <uploaded_files> is display-only compat for pre-#4174 history (#4212).
+        // Accepted tradeoff (review): a live user typing the legacy spelling can
+        // fabricate chips / hide their own message text — display-only and
+        // self-inflicted, no backend semantics. Age-gating the legacy spelling
+        // is a possible follow-up if this ever matters.
         return parseUploadedFiles(rawContent);
       }
       return null;
@@ -430,6 +454,10 @@ function MessageContent_({
           context,
         }),
       ),
+    [message.additional_kwargs],
+  );
+  const conversationReferences = useMemo(
+    () => readConversationReferences(message.additional_kwargs),
     [message.additional_kwargs],
   );
 
@@ -496,6 +524,24 @@ function MessageContent_({
             testId="message-reference-attachment"
           />
         )}
+        {conversationReferences.length > 0 && (
+          <div
+            aria-label={t.inputBox.referencedConversations}
+            className="flex max-w-full flex-wrap justify-end gap-1"
+            data-testid="message-conversation-references"
+            role="group"
+          >
+            {conversationReferences.map((reference) => (
+              <ConversationReferenceChip
+                href={pathOfThread(reference.threadId, {
+                  agent_name: reference.agentName,
+                })}
+                key={reference.threadId}
+                title={reference.title || "Untitled"}
+              />
+            ))}
+          </div>
+        )}
         {filesList}
         {editState ? (
           <div className="bg-background border-border flex w-full min-w-0 flex-col gap-2 rounded-lg border p-2 shadow-sm">
@@ -548,6 +594,11 @@ function MessageContent_({
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         ) : null}
+        <KnowledgeScopeSummary
+          additionalKwargs={
+            message.additional_kwargs as Record<string, unknown> | undefined
+          }
+        />
       </div>
     );
   }
@@ -568,7 +619,8 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && (
+      <KnowledgeSourcesPanel content={contentToDisplay} />
+      {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}

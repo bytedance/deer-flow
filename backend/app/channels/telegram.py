@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Coroutine
@@ -15,6 +16,7 @@ from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
     InboundMessageType,
+    InboundReservation,
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
@@ -41,6 +43,41 @@ MAX_TRACKED_STREAM_MESSAGES = 256
 # Indirection so tests can patch the clock without touching the global time module.
 _monotonic = time.monotonic
 
+# Rich Messages only earn their keep when the text carries a construct that
+# renders natively: a fenced code block, emphasis, a table, a task list,
+# <details>, block math, or a link. Structured command/error replies are plain
+# text with none of these, so they stay plain and their newlines and
+# <placeholder> tokens survive verbatim instead of being collapsed by the
+# rich parser.
+#
+# The patterns are deliberately *well-formed*, not "contains this character":
+# a table must be a line that leads with a pipe, a link must be [text](url),
+# so a command line like "/goal [condition|clear]" (brackets + a mid-line pipe)
+# never trips the detector.
+_TELEGRAM_RICH_CONSTRUCT_RE = re.compile(
+    r"(?m)"
+    r"^\s*(`{3,}|~{3,})"  # fenced code block
+    r"|^\s*[-*+]\s+\[[ xX]\]"  # task list item
+    r"|^\s*\|.*\|"  # table row (line leads with a pipe)
+    r"|^\s*\|?\s*:?-{2,}\s*\|"  # table separator row (needs a pipe, so "--flag" stays plain)
+    r"|\[[^\]]*\]\("  # markdown link [text](url)
+    r"|\*\*[^*\n]+\*\*"  # bold
+    r"|\*(?!\s)[^*\n]+?(?<!\s)\*"  # italic (tight delimiters, so "2 * 3" stays plain)
+    r"|<details"  # collapsible details
+    r"|\$\$"  # block math
+)
+
+
+def _has_rich_constructs(text: str) -> bool:
+    """Whether *text* contains a construct that needs native rich rendering."""
+    return _TELEGRAM_RICH_CONSTRUCT_RE.search(text) is not None
+
+
+def _load_telegram_input_file(path, filename: str):
+    from telegram import InputFile
+
+    return InputFile(path.read_bytes(), filename=filename)
+
 
 class TelegramChannel(Channel):
     """Telegram bot channel using long-polling.
@@ -56,6 +93,14 @@ class TelegramChannel(Channel):
         self._thread: threading.Thread | None = None
         self._tg_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Dedicated Bot for inbound file downloads. The Application's Bot is
+        # built on the manager/main loop (see start()), so its httpx
+        # connection pool is bound to that loop; opening a fresh download
+        # connection from the Telegram loop then trips "Event bound to a
+        # different event loop". A Bot initialized on the Telegram loop keeps
+        # its pool on the loop that performs the download.
+        self._download_bot: Any = None
+        self._download_bot_lock = asyncio.Lock()
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
@@ -91,6 +136,7 @@ class TelegramChannel(Channel):
             return
 
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -104,6 +150,7 @@ class TelegramChannel(Channel):
         app.add_handler(CommandHandler("status", self._cmd_generic))
         app.add_handler(CommandHandler("models", self._cmd_generic))
         app.add_handler(CommandHandler("memory", self._cmd_generic))
+        app.add_handler(CommandHandler("agent", self._cmd_generic))
         app.add_handler(CommandHandler("goal", self._cmd_generic))
         app.add_handler(CommandHandler("help", self._cmd_generic))
 
@@ -128,6 +175,7 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
         shutdown_loop = asyncio.get_running_loop()
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
@@ -135,7 +183,7 @@ class TelegramChannel(Channel):
 
         try:
             if telegram_loop and telegram_loop.is_running():
-                drain_future = asyncio.run_coroutine_threadsafe(self._cancel_telegram_bridge_tasks(), telegram_loop)
+                drain_future = asyncio.run_coroutine_threadsafe(self._shutdown_telegram_resources(), telegram_loop)
                 try:
                     remaining = max(0.0, deadline - shutdown_loop.time())
                     await asyncio.wait_for(asyncio.wrap_future(drain_future), timeout=remaining)
@@ -144,9 +192,9 @@ class TelegramChannel(Channel):
                     raise
                 except TimeoutError:
                     drain_future.cancel()
-                    logger.warning("[Telegram] timed out cancelling inbound file downloads during shutdown")
+                    logger.warning("[Telegram] timed out shutting down Telegram loop resources during shutdown")
                 except Exception as exc:
-                    logger.warning("[Telegram] failed to cancel inbound file downloads during shutdown: %s", type(exc).__name__)
+                    logger.warning("[Telegram] failed to shut down Telegram loop resources during shutdown: %s", type(exc).__name__)
         finally:
             if telegram_loop and telegram_loop.is_running():
                 try:
@@ -300,7 +348,11 @@ class TelegramChannel(Channel):
         return False
 
     def _can_send_rich(self, text: str) -> bool:
-        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+        # Rich Messages are used only when rich_messages is on and the text
+        # actually contains a rich construct. Structured command/error replies
+        # are plain text with none, so they stay plain and their newlines and
+        # <placeholder> tokens are not collapsed into one line.
+        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH and _has_rich_constructs(text)
 
     async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
         """Replace a streamed preview with a persistent Telegram Rich Message."""
@@ -385,21 +437,17 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(msg.chat_id)
 
         try:
+            input_file = await asyncio.to_thread(_load_telegram_input_file, attachment.actual_path, attachment.filename)
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
-                with open(attachment.actual_path, "rb") as f:
-                    kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_photo(**kwargs)
+                kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_photo(**kwargs)
             else:
-                from telegram import InputFile
-
-                with open(attachment.actual_path, "rb") as f:
-                    input_file = InputFile(f, filename=attachment.filename)
-                    kwargs = {"chat_id": chat_id, "document": input_file}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_document(**kwargs)
+                kwargs = {"chat_id": chat_id, "document": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
@@ -422,7 +470,6 @@ class TelegramChannel(Channel):
         if not msg.files:
             return msg
 
-        bot = self._application.bot if self._application is not None else None
         materialized: list[dict[str, Any]] = []
         unavailable: list[str] = []
 
@@ -438,6 +485,24 @@ class TelegramChannel(Channel):
                 unavailable.append(f"{filename} (exceeds the 20 MB download limit)")
                 continue
 
+            # Resolve the loop-bound download Bot. It is created on the
+            # Telegram loop so its httpx pool is bound to the loop that
+            # performs the download (the Application's Bot is main-loop-bound).
+            # First-time resolution performs a network getMe, so it runs inside
+            # its own guard: an init failure must mark only this attachment
+            # unavailable, never abort the whole message.
+            try:
+                bot = await self._get_download_bot()
+            except Exception as exc:
+                logger.error(
+                    "[Telegram] failed to initialize download bot for inbound file %s: %s%s",
+                    filename,
+                    type(exc).__name__,
+                    self._describe_download_cause(exc),
+                )
+                unavailable.append(f"{filename} (download failed)")
+                continue
+
             if bot is None or not file_id:
                 logger.error("[Telegram] cannot download inbound file: %s", filename)
                 unavailable.append(f"{filename} (download unavailable)")
@@ -447,8 +512,14 @@ class TelegramChannel(Channel):
                 resolved_size, content = await self._run_on_telegram_loop(self._download_inbound_file(bot, file_id))
             except Exception as exc:
                 # Exception strings from HTTP clients can contain request URLs.
-                # Log only the class name so a Bot API token can never leak.
-                logger.error("[Telegram] failed to download inbound file %s: %s", filename, type(exc).__name__)
+                # Log only class names so a Bot API token can never leak, but
+                # include the cause chain to distinguish timeout / reset / TLS.
+                logger.error(
+                    "[Telegram] failed to download inbound file %s: %s%s",
+                    filename,
+                    type(exc).__name__,
+                    self._describe_download_cause(exc),
+                )
                 unavailable.append(f"{filename} (download failed)")
                 continue
 
@@ -479,6 +550,69 @@ class TelegramChannel(Channel):
         return msg
 
     # -- helpers -----------------------------------------------------------
+
+    def _describe_download_cause(self, exc: BaseException) -> str:
+        """Build a token-safe suffix describing a download failure's cause.
+
+        HTTP client exception strings can embed request URLs. Both Bot API URL
+        forms carry the token in the path — the file download URL
+        (``/file/bot<token>/…``) and the method URLs (``/bot<token>/getMe``,
+        ``/bot<token>/getFile``) — so the configured token is removed first and
+        any remaining Bot API URL is collapsed before the cause chain is logged.
+        The cause class and message are kept to distinguish timeout / reset / TLS.
+        """
+        cause = exc.__cause__ or exc.__context__
+        if cause is None:
+            return ""
+        token = self.config.get("bot_token", "")
+        cause_msg = str(cause)
+        if token:
+            cause_msg = cause_msg.replace(token, "[redacted]")
+        cause_msg = re.sub(r"api\.telegram\.org/bot[^/\s]+/", "api.telegram.org/bot[redacted]/", cause_msg)
+        cause_msg = re.sub(r"api\.telegram\.org/file/\S+", "api.telegram.org/file/[redacted]", cause_msg)
+        cause_msg = cause_msg[:200]
+        return f" caused_by={type(cause).__name__}:{cause_msg}"
+
+    async def _get_download_bot(self) -> Any:
+        """Return a PTB Bot whose httpx client is bound to the Telegram loop.
+
+        The Application's Bot is constructed on the manager/main loop, so its
+        shared connection pool is bound there; opening a fresh download
+        connection from the Telegram loop fails with "bound to a different
+        event loop". This dedicated Bot is created and initialized on the
+        Telegram loop, keeping its pool on the loop that performs downloads.
+        """
+        if self._download_bot is not None:
+            return self._download_bot
+        telegram_loop = self._tg_loop
+        if telegram_loop is None:
+            return None
+
+        async def _init() -> Any:
+            if self._download_bot is not None:
+                return self._download_bot
+            async with self._download_bot_lock:
+                if self._download_bot is not None:
+                    return self._download_bot
+                from telegram import Bot
+
+                bot = Bot(token=self.config.get("bot_token", ""))
+                try:
+                    await bot.initialize()
+                except BaseException:
+                    # initialize() performs a network getMe and may have left
+                    # partially-open HTTPX clients. Close them (no-op if the
+                    # request objects never initialized) before the error
+                    # propagates, and never cache a bot that failed to start.
+                    try:
+                        await bot.shutdown()
+                    except BaseException:
+                        logger.debug("[Telegram] failed to close partially-initialized download bot", exc_info=True)
+                    raise
+                self._download_bot = bot
+                return bot
+
+        return await self._run_on_telegram_loop(_init())
 
     async def _download_inbound_file(self, bot: Any, file_id: str) -> tuple[int | None, bytearray | None]:
         """Fetch one file entirely on the event loop that owns PTB's HTTP client."""
@@ -512,6 +646,32 @@ class TelegramChannel(Channel):
                 await asyncio.gather(*done, return_exceptions=True)
             if still_pending:
                 logger.warning("[Telegram] %d inbound file download task(s) did not cancel promptly", len(still_pending))
+
+    async def _shutdown_telegram_resources(self) -> None:
+        """Cancel in-flight PTB bridge work and close the download Bot.
+
+        Runs on the Telegram loop (scheduled from ``stop()``) and must finish
+        before that loop is stopped, so the download Bot's HTTPX clients are
+        shut down on the loop that owns them.
+        """
+        await self._cancel_telegram_bridge_tasks()
+        await self._shutdown_download_bot()
+
+    async def _shutdown_download_bot(self) -> None:
+        """Close the download Bot's HTTPX clients on the Telegram loop.
+
+        python-telegram-bot 22.7 exposes no ``Bot.session``; the HTTPX clients
+        are closed by ``Bot.shutdown()``, which is a no-op if the bot was never
+        initialized. Must run on the loop the bot was initialized on.
+        """
+        bot = self._download_bot
+        if bot is None:
+            return
+        try:
+            await bot.shutdown()
+        except Exception:
+            logger.debug("[Telegram] failed to shut down download bot", exc_info=True)
+        self._download_bot = None
 
     async def _run_on_telegram_loop(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         """Await a PTB coroutine without using its HTTP client across event loops."""
@@ -719,13 +879,18 @@ class TelegramChannel(Channel):
             return username
         return str(getattr(user, "id", ""))
 
-    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+    async def _bind_connection_from_start_token_on_main(
+        self,
+        update,
+        state_token: str,
+    ) -> bool:
+        """Run the bind flow on the main event loop (SQLAlchemy session is bound there)."""
         if self._connection_repo is None or not state_token:
             return False
 
         state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
         if state is None:
-            await update.message.reply_text("Telegram connection link is invalid or expired.")
+            await self._run_on_telegram_loop(update.message.reply_text("Telegram connection link is invalid or expired."))
             return True
 
         owner_user_id = state["owner_user_id"]
@@ -746,8 +911,29 @@ class TelegramChannel(Channel):
             status="connected",
         )
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await update.message.reply_text("Telegram connected to DeerFlow.")
+        await self._run_on_telegram_loop(update.message.reply_text("Telegram connected to DeerFlow."))
         return True
+
+    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+        """Dispatch the bind flow to the main loop if repo is configured."""
+        if self._connection_repo is None or not state_token:
+            return False
+
+        if self._main_loop and self._main_loop.is_running():
+            msg_id = getattr(getattr(update, "message", None), "message_id", None)
+            scheduled = self._submit_threadsafe_coroutine(
+                self._bind_connection_from_start_token_on_main(update, state_token),
+                self._main_loop,
+                name="bind_connection",
+                msg_id=msg_id,
+            )
+            if not scheduled:
+                logger.info("[Telegram] main loop stopped before channel connection bind could be scheduled")
+            # Schedule counts as handled so /start does not fall through to help
+            # while SQL runs on the main loop.
+            return scheduled
+        logger.warning("[Telegram] main loop not running, cannot bind channel connection")
+        return False
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -797,9 +983,41 @@ class TelegramChannel(Channel):
             return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
-    async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
-        await self._send_running_reply(chat_id, msg_id)
-        await self.bus.publish_inbound(inbound)
+    async def _process_incoming_with_reply(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        try:
+            await self._send_running_reply(chat_id, msg_id)
+            if reservation is None:
+                await self.bus.publish_inbound(inbound)
+            else:
+                self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            if reservation is not None:
+                reservation.release()
+
+    async def _process_incoming_with_identity(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        """Attach connection identity and dispatch on the main event loop.
+
+        This must run on the main loop because _attach_connection_identity
+        uses a SQLAlchemy session factory bound to that loop.  Calling it
+        from the Telegram polling thread's own loop raises
+        ``RuntimeError: got Future attached to a different loop``.
+        """
+        inbound = await self._attach_connection_identity(inbound)
+        await self._process_incoming_with_reply(chat_id, msg_id, inbound, reservation=reservation)
 
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
@@ -831,11 +1049,29 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_identity(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_identity",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved command could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
@@ -883,10 +1119,28 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_identity(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_identity",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved inbound could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")

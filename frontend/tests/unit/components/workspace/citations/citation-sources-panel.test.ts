@@ -5,6 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CitationSourcesPanel } from "@/components/workspace/citations/citation-sources-panel";
 import type { CitationSource } from "@/core/citations/sources";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 const sources: CitationSource[] = [
   {
@@ -80,6 +82,7 @@ function renderPanel(
         value: {
           locale: initialLocale,
           setLocale: () => undefined,
+          t: initialLocale === "zh-CN" ? zhCN : enUS,
         },
       },
       createElement(CitationSourcesPanel, { sources: panelSources }),

@@ -10,6 +10,7 @@ from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.suggestions_config import DEFAULT_MAX_SUGGESTIONS, MAX_SUGGESTIONS_LIMIT
 from deerflow.utils.oneshot_llm import run_oneshot_llm
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ async def get_suggestions_config(
 )
 @require_permission("threads", "read", owner_check=True)
 async def generate_suggestions(
-    thread_id: str,
+    thread_id: ThreadId,
     body: SuggestionsRequest,
     request: Request,
     config: AppConfig = Depends(get_config),

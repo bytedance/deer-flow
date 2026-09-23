@@ -291,11 +291,11 @@ The helper takes:
 
 ### Overlap semantics
 
-MVP uses one fixed overlap rule:
+The original MVP used one fixed overlap rule:
 
 - if the target thread already has a pending/running run, record the occurrence as `skipped`, update `next_run_at`, and do not launch another run.
 
-This is intentionally narrower than exposing multiple overlap policies in the first PR.
+This historical rule was superseded by the durable `enqueue` behavior documented in the current README: a busy occurrence waits in `queued`, survives Gateway restarts, and fails only after the configured queue timeout.
 
 ### Misfire semantics
 
@@ -522,7 +522,7 @@ The UI must not show a healthy-looking task row when the last scheduler attempt 
 4. next-run computation across timezone boundaries and DST-sensitive cases
 5. one-time schedule status transitions
 6. due-task claim logic and lease expiry
-7. overlap skip behavior
+7. original overlap skip behavior (superseded by durable queue coverage)
 8. misfire `run_once` behavior
 
 ### Backend integration tests

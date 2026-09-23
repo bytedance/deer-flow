@@ -4,6 +4,7 @@ import logging
 import os
 import stat
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -11,8 +12,9 @@ from typing import BinaryIO
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
+from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -22,6 +24,7 @@ from deerflow.uploads.manager import (
     UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
@@ -31,14 +34,35 @@ from deerflow.uploads.manager import (
     normalize_filename,
     upload_artifact_url,
     upload_virtual_path,
-    validate_upload_destination,
+    validate_path_traversal,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
+
+# Ingestion bridge surface (Phase-2 Slice C): the shared thread-upload
+# ingestion service (``app.gateway.upload_ingestion``) resolves these
+# collaborators through this module at call time, so the pre-extraction
+# upload tests keep patching one namespace for both this endpoint and the
+# project-shelf attach route. They are re-exported deliberately — do not
+# prune them as "unused".
+__all__ = [
+    "CONVERTIBLE_EXTENSIONS",
+    "UnsafeUploadPathError",
+    "claim_unique_filename",
+    "convert_file_to_markdown",
+    "ensure_uploads_dir",
+    "get_sandbox_provider",
+    "normalize_filename",
+    "router",
+    "try_acquire_sandbox_for_request",
+    "upload_artifact_url",
+    "upload_virtual_path",
+]
 
 UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
@@ -100,16 +124,11 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
     In AIO sandbox mode, the gateway writes the authoritative host-side file
     first, then the sandbox runtime may rewrite the same mounted path. Granting
     world-writable access here prevents permission mismatches between the
-    gateway user and the sandbox runtime user.
+    gateway user and the sandbox runtime user. Delegates to the shared
+    apply_upload_sandbox_permits helper so the change stays bound to the
+    validated upload inode (O_NOFOLLOW + fchmod).
     """
-    file_stat = os.lstat(file_path)
-    if stat.S_ISLNK(file_stat.st_mode):
-        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
-        return
-
-    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH
-    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
-    os.chmod(file_path, writable_mode, **chmod_kwargs)
+    apply_upload_sandbox_permits(file_path, stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH)
 
 
 def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
@@ -119,16 +138,10 @@ def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
     permissions, then bind-mounts the host directory into the container. The
     sandbox process inside the container runs as a non-root user and cannot
     read those files without group/other read bits. This function adds
-    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content.
+    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content, via the
+    shared apply_upload_sandbox_permits helper (O_NOFOLLOW + fchmod).
     """
-    file_stat = os.lstat(file_path)
-    if stat.S_ISLNK(file_stat.st_mode):
-        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
-        return
-
-    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
-    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
-    os.chmod(file_path, readable_mode, **chmod_kwargs)
+    apply_upload_sandbox_permits(file_path, stat.S_IRGRP | stat.S_IROTH)
 
 
 def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
@@ -177,9 +190,32 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
+def _pure_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
+    """Normalize + type/confinement-check a destination name.
+
+    The ``lstat`` rejects only a NON-REGULAR destination (a planted symlink
+    must never become a write target — and following one during the
+    confinement check would misreport a traversal): a stable property, unlike
+    the old ``nlink > 1`` check, which raced the atomic link commit (the
+    winner's link→unlink pair briefly shows ``nlink == 2`` on the name) and
+    misclassified ordinary collisions as unsafe. Existence itself is decided
+    by the commit's atomic link, never here.
+    """
+    base = Path(uploads_dir)
+    file_path = base / normalize_filename(display_filename)
+    try:
+        st = os.lstat(file_path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {display_filename}")
+    validate_path_traversal(file_path, base)
+    return file_path
+
+
 def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> _UploadTempFile:
     uploads_dir_path = Path(uploads_dir)
-    file_path = validate_upload_destination(uploads_dir_path, display_filename)
+    file_path = _pure_destination(uploads_dir_path, display_filename)
     temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
     temp_path = Path(temp_path_str)
     try:
@@ -197,6 +233,92 @@ def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_fil
     return _UploadTempFile(file_path=file_path, temp_path=temp_path, handle=handle)
 
 
+def _link_staged_no_overwrite(
+    staged_path: Path,
+    uploads_dir: os.PathLike[str] | str,
+    display_filename: str,
+    *,
+    unlink_staged: bool = True,
+) -> Path:
+    """Worker: publish *staged_path* under *display_filename* atomically, never overwriting.
+
+    The ``os.link`` itself is the whole no-overwrite guard: it fails with
+    :class:`FileExistsError` when the name exists as ANYTHING — a regular
+    file collision (the caller retries with the next suffix), a symlink, a
+    hardlink — and a link never writes through an existing file. The
+    destination is NOT lstat-validated beforehand: the winner's link→unlink
+    pair briefly shows ``nlink == 2`` on the name, so a pre-link multi-link
+    check misclassifies an ordinary collision as unsafe (observed as
+    intermittent 500s on concurrent same-name uploads). Classification
+    happens AFTER the atomic failure: an existing non-regular file (a planted
+    symlink — symlinks are excluded from the seeded listing, so one could
+    only come from outside) stays an unsafe destination; anything else is a
+    plain collision to retry. Any other failure removes the staged file and
+    propagates; success unlinks it. Staging and destination are co-located in
+    the uploads dir, so the hard link is always same-filesystem.
+
+    ``unlink_staged=False`` publishes the link but leaves the staged name in
+    place, for a caller that still holds a descriptor on the staged inode and
+    therefore must remove it itself. Windows refuses to remove a file that
+    has an open handle, so the removal cannot happen here in that case; the
+    caller owns the staged path from the moment this returns.
+    """
+    file_path = _pure_destination(uploads_dir, display_filename)
+    try:
+        os.link(staged_path, file_path)
+    except FileExistsError:
+        try:
+            if not stat.S_ISREG(os.lstat(file_path).st_mode):
+                raise UnsafeUploadPathError(f"Upload destination is not a regular file: {display_filename}") from None
+        except FileNotFoundError:
+            pass  # The winner vanished between link and lstat — plain retry.
+        raise
+    except Exception:
+        try:
+            os.unlink(staged_path)
+        except FileNotFoundError:
+            pass
+        raise
+    if unlink_staged:
+        os.unlink(staged_path)
+    return file_path
+
+
+def _commit_upload_temp_no_overwrite(
+    upload_temp: _UploadTempFile,
+    uploads_dir: os.PathLike[str] | str,
+    display_filename: str,
+    *,
+    unlink_staged: bool = True,
+) -> Path:
+    """Worker: close the staged handle and publish the ``.part`` atomically via ``os.link``.
+
+    Same no-overwrite contract as :func:`_link_staged_no_overwrite`:
+    :class:`FileExistsError` leaves the staged part in place for a
+    next-suffix retry (the handle's second ``close`` is idempotent); any
+    other failure removes it. ``unlink_staged=False`` hands the staged name
+    back to the caller, which still holds a descriptor on its inode.
+    """
+    upload_temp.handle.close()
+    return _link_staged_no_overwrite(upload_temp.temp_path, uploads_dir, display_filename, unlink_staged=unlink_staged)
+
+
+def _remove_staged_file(staged_path: os.PathLike[str] | str) -> None:
+    """Worker: remove a staged ``.part`` name whose inode is no longer held open.
+
+    The deferred half of ``unlink_staged=False``. Removal is best-effort: the
+    name is already unreachable through the uploads listing, and failing an
+    otherwise-committed upload over leftover staging bytes would be worse than
+    leaving them for the startup sweep.
+    """
+    try:
+        os.unlink(staged_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
+
+
 def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
     upload_temp.handle.write(chunk)
 
@@ -205,22 +327,11 @@ def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
     try:
         upload_temp.handle.close()
     finally:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
-
-
-def _commit_upload_temp(upload_temp: _UploadTempFile) -> None:
-    upload_temp.handle.close()
-    try:
-        os.replace(upload_temp.temp_path, upload_temp.file_path)
-    except Exception:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
-        raise
+        # Best-effort, not ``os.unlink``: an abandoned duplication worker can
+        # still hold this inode open (Windows refuses to remove it then), and
+        # raising here would replace the caller's cancellation or original
+        # failure with a secondary permission error.
+        _remove_staged_file(upload_temp.temp_path)
 
 
 def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
@@ -246,39 +357,13 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
 
 def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+    return delete_file_safe(uploads_dir, filename)
 
 
-async def _write_upload_file_with_limits(
-    file: UploadFile,
-    *,
-    uploads_dir: os.PathLike[str] | str,
-    display_filename: str,
-    max_single_file_size: int,
-    max_total_size: int,
-    total_size: int,
-) -> tuple[os.PathLike[str] | str, int, int]:
-    file_size = 0
-    upload_temp: _UploadTempFile | None = None
-    try:
-        upload_temp = await run_file_io(_prepare_upload_destination, uploads_dir, display_filename)
-        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
-            file_size += len(chunk)
-            total_size += len(chunk)
-            if file_size > max_single_file_size:
-                raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
-            if total_size > max_total_size:
-                raise HTTPException(status_code=413, detail="Total upload size too large")
-            await run_file_io(_write_upload_chunk, upload_temp, chunk)
-
-        await run_file_io(_commit_upload_temp, upload_temp)
-        file_path = upload_temp.file_path
-        upload_temp = None
-    except Exception:
-        if upload_temp is not None:
-            await run_file_io(_abort_upload_temp, upload_temp)
-        raise
-    return file_path, file_size, total_size
+async def _stream_upload_file(file: UploadFile) -> AsyncIterator[bytes]:
+    """Adapt an ``UploadFile`` to the ingestion service's chunk stream."""
+    while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+        yield chunk
 
 
 def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
@@ -299,12 +384,22 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 @router.post("", response_model=UploadResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     files: list[UploadFile] = File(...),
     config: AppConfig = Depends(get_config),
 ) -> UploadResponse:
-    """Upload multiple files to a thread's uploads directory."""
+    """Upload multiple files to a thread's uploads directory.
+
+    Thin adapter over the shared thread-upload ingestion service
+    (``app.gateway.upload_ingestion``, Phase-2 spec §7.3 item 3), which owns
+    staging, filename claiming, size checks, conversion, permissions and
+    sandbox sync. When the sandbox provider is not thread-mounted, uploaded
+    files are also synced into the thread's sandbox. Under
+    ``authorization.enabled``, a caller denied ``sandbox:execute`` skips that
+    sync (the upload itself still succeeds — files stay in the uploads dir;
+    a sandbox-denied agent cannot consume them anyway).
+    """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -312,140 +407,59 @@ async def upload_files(
     if len(files) > limits.max_files:
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
-    try:
-        effective_user_id = get_effective_user_id()
-        uploads_dir = await run_file_io(ensure_uploads_dir, thread_id, user_id=effective_user_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = uploads_dir
+    # Setup runs INSIDE the cleanup scope: open() can acquire the sandbox
+    # request lease and then raise (e.g. the acquired lease yields no
+    # sandbox), and the finally's aclose() is what releases that partially
+    # acquired holder.
+    service = ThreadUploadIngestionService(request=request, thread_id=thread_id, user_id=get_effective_user_id(), app_config=config)
     uploaded_files = []
-    written_paths = []
-    sandbox_sync_targets = []
     skipped_files = []
-    total_size = 0
-    # Track filenames within this request so duplicate form parts do not
-    # silently truncate each other. Existing uploads keep the historical
-    # overwrite behavior for a single replacement upload.
-    seen_filenames: set[str] = set()
-
-    sandbox_provider = get_sandbox_provider()
-    sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
-    sandbox = None
-    if sync_to_sandbox:
-        sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-        sandbox = sandbox_provider.get(sandbox_id)
-        if sandbox is None:
-            raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
-    auto_convert_documents = _auto_convert_documents_enabled(config)
-
-    for file in files:
-        if not file.filename:
-            continue
-
+    try:
         try:
-            original_filename = normalize_filename(file.filename)
-            safe_filename = claim_unique_filename(original_filename, seen_filenames)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
-
-        try:
-            file_path, file_size, total_size = await _write_upload_file_with_limits(
-                file,
-                uploads_dir=uploads_dir,
-                display_filename=safe_filename,
-                max_single_file_size=limits.max_file_size,
-                max_total_size=limits.max_total_size,
-                total_size=total_size,
-            )
-            written_paths.append(file_path)
-
-            virtual_path = upload_virtual_path(safe_filename)
-
-            if sync_to_sandbox:
-                sandbox_sync_targets.append((file_path, virtual_path))
-
-            file_info = {
-                "filename": safe_filename,
-                "size": file_size,
-                "path": str(sandbox_uploads / safe_filename),
-                "virtual_path": virtual_path,
-                "artifact_url": upload_artifact_url(thread_id, safe_filename),
-            }
-            if safe_filename != original_filename:
-                file_info["original_filename"] = original_filename
-
-            logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
-
-            file_ext = file_path.suffix.lower()
-            if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                # Reserve the companion .md name in this request's seen set
-                # before writing so conversion cannot silently truncate another
-                # uploaded or derived file (same invariant as form-part dedupe).
-                provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
-                md_output = file_path.with_name(unique_md_name)
-                md_path = await convert_file_to_markdown(file_path, output_path=md_output)
-                if md_path:
-                    written_paths.append(md_path)
-                    md_virtual_path = upload_virtual_path(md_path.name)
-
-                    if sync_to_sandbox:
-                        sandbox_sync_targets.append((md_path, md_virtual_path))
-
-                    file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                    file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                else:
-                    # Conversion failed and wrote nothing, so release the claim;
-                    # holding it would rename a later same-stem upload against
-                    # a name nothing occupies.
-                    seen_filenames.discard(unique_md_name)
-
+            await service.open()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        for file in files:
+            if not file.filename:
+                continue
+            try:
+                file_info = await service.ingest_chunks(_stream_upload_file(file), display_name=file.filename)
+            except UnsafeFilenameError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
+            except UnsafeUploadDestinationError as e:
+                logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+                skipped_files.append(e.filename)
+                continue
+            except HTTPException as e:
+                await service.cleanup_written()
+                raise e
+            except Exception as e:
+                logger.error(f"Failed to upload {file.filename}: {e}")
+                await service.cleanup_written()
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
             uploaded_files.append(file_info)
 
-        except HTTPException as e:
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise e
-        except UnsafeUploadPathError as e:
-            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
-            skipped_files.append(safe_filename)
-            continue
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+        await service.finalize()
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
+        message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+        if skipped_files:
+            message += f"; skipped {len(skipped_files)} unsafe file(s)"
 
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
-
-    message = f"Successfully uploaded {len(uploaded_files)} file(s)"
-    if skipped_files:
-        message += f"; skipped {len(skipped_files)} unsafe file(s)"
-
-    return UploadResponse(
-        success=not skipped_files,
-        files=uploaded_files,
-        message=message,
-        skipped_files=skipped_files,
-    )
+        return UploadResponse(
+            success=not skipped_files,
+            files=uploaded_files,
+            message=message,
+            skipped_files=skipped_files,
+        )
+    finally:
+        await service.aclose()
 
 
 @router.get("/limits", response_model=UploadLimits)
 @require_permission("threads", "read", owner_check=True)
 async def get_upload_limits(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     config: AppConfig = Depends(get_config),
 ) -> UploadLimits:
@@ -455,7 +469,7 @@ async def get_upload_limits(
 
 @router.get("/list", response_model=UploadListResponse)
 @require_permission("threads", "read", owner_check=True)
-async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
+async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
     try:
         result = await run_file_io(_list_uploaded_files_for_thread, thread_id, get_effective_user_id())
@@ -467,7 +481,7 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
 
 @router.delete("/{filename}")
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
-async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
+async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
         return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())

@@ -26,10 +26,15 @@ bucket semantics, distinct from the AUTO/None sentinel used by the async
 from __future__ import annotations
 
 import abc
+import logging
 from collections.abc import Hashable
 from typing import Any, Literal
 
+from pydantic import ValidationError
+
 from deerflow.config.agents_config import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 
 def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
@@ -44,7 +49,17 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
         data["name"] = name
     known_fields = set(AgentConfig.model_fields.keys())
     data = {k: v for k, v in data.items() if k in known_fields}
-    return AgentConfig(**data)
+    try:
+        return AgentConfig(**data)
+    except ValidationError as exc:
+        if not any(error["loc"] == ("display_name",) for error in exc.errors()):
+            raise
+        # A cosmetic value in old/hand-edited storage must not make the agent
+        # inaccessible. Retry only without that field: other errors still fail.
+        data.pop("display_name", None)
+        config = AgentConfig(**data)
+        logger.warning("Ignoring invalid stored agent display_name for agent %r", name)
+        return config
 
 
 # Delete outcome, mirroring the agents router's result:
@@ -126,6 +141,6 @@ class AgentStore(abc.ABC):
 
         Equal tokens mean "nothing changed since last read". The GitHub registry
         keys its cache off this instead of ``stat()`` so it works for both
-        backends (mtime triples for ``file``; ``max(updated_at)`` + row count for
-        ``db``).
+        backends (mtime triples for ``file``; a deterministic digest of stored
+        agent contents for ``db``).
         """

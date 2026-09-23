@@ -342,6 +342,18 @@ def test_update_agent_preserves_github_block_on_description_change(tmp_path, pat
     assert cfg["github"] == github_block
 
 
+def test_update_agent_preserves_display_name_on_description_change(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path)
+    config_path = agent_dir / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["display_name"] = "代码审查助手"
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    update_agent.func(runtime=_runtime(), description="refined desc")
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["display_name"] == "代码审查助手"
+    assert updated["name"] == "test-agent"
+
+
 def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, patched_paths):
     """UI/API-owned model behavior must survive agent self-edits.
 
@@ -500,7 +512,14 @@ def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
     """
     _seed_agent(tmp_path, description="legacy")
 
-    fake_cfg = AgentConfig(name="test-agent", description="legacy", skills=["s1"], tool_groups=["g1"], model="m1")
+    fake_cfg = AgentConfig(
+        name="test-agent",
+        description="legacy",
+        skills=["s1"],
+        tool_groups=["g1"],
+        model="m1",
+        allowed_subagents=["planner"],
+    )
     fake_app_config = MagicMock()
     fake_app_config.get_model_config.return_value = object()
     with patch("deerflow.tools.builtins.update_agent_tool.load_agent_config", return_value=fake_cfg):
@@ -512,6 +531,7 @@ def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
     assert cfg["skills"] == ["s1"]
     assert cfg["tool_groups"] == ["g1"]
     assert cfg["model"] == "m1"
+    assert cfg["allowed_subagents"] == ["planner"]
 
 
 def test_update_agent_refuses_on_webhook_channel(tmp_path, patched_paths):

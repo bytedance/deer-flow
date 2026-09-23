@@ -242,11 +242,7 @@ async def _skill_manage_impl(
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if path is None:
                 raise ValueError("path is required for remove_file.")
-            target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
-            if not await _to_thread(target.exists):
-                raise FileNotFoundError(f"Supporting file '{path}' not found for skill '{name}'.")
-            prev_content = await _to_thread(target.read_text, encoding="utf-8")
-            await _to_thread(target.unlink)
+            prev_content = await _to_thread(skill_storage.remove_custom_skill_file, name, path)
             await _to_thread(
                 skill_storage.append_history,
                 name,

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
+
+MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 
 
 def validate_timezone(timezone_name: str) -> str:
@@ -19,6 +21,13 @@ def normalize_cron_expression(expr: str) -> str:
     if len(parts) != 5:
         raise ValueError("Cron expression must contain exactly 5 fields")
     return " ".join(parts)
+
+
+def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
+    raw = schedule_spec.get("every_seconds")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("interval schedule requires every_seconds as a positive integer")
+    return raw
 
 
 def next_run_at(
@@ -41,6 +50,10 @@ def next_run_at(
             # A naive run_at means "wall-clock time in the task's declared
             # timezone", matching how cron schedules interpret it.
             run_at = run_at.replace(tzinfo=ZoneInfo(timezone_name))
+        # Normalize to UTC like the cron branch: next_run_at is persisted to
+        # timezone-discarding columns (SQLite), where a non-UTC offset shifts
+        # the effective fire time by the whole offset.
+        run_at = run_at.astimezone(UTC)
         return run_at if run_at > now else None
 
     if schedule_type == "cron":
@@ -51,5 +64,9 @@ def next_run_at(
         if next_local.tzinfo is None:
             next_local = next_local.replace(tzinfo=zone)
         return next_local.astimezone(UTC)
+
+    if schedule_type == "interval":
+        every_seconds = parse_interval_seconds(schedule_spec)
+        return now.astimezone(UTC) + timedelta(seconds=every_seconds)
 
     raise ValueError(f"Unsupported schedule_type: {schedule_type}")

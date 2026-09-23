@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +76,60 @@ async def _reclaim_prepare_and_cleanup(prepare: asyncio.Future[tuple[list[Worksp
         await _remove_text_cache_dir(orphaned)
 
 
+def _consume_cancelled_scan_outcome(scan: asyncio.Future[WorkspaceSnapshot], *, thread_id: str) -> None:
+    """Consume a completed scan and retain diagnostics after caller cancellation."""
+    try:
+        scan.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.warning(
+            "Workspace scan failed after snapshot cancellation for thread %s",
+            thread_id,
+            exc_info=True,
+        )
+
+
+async def _drain_scan_and_cleanup(
+    scan: asyncio.Future[WorkspaceSnapshot],
+    text_cache_dir: Path,
+    *,
+    thread_id: str,
+) -> None:
+    """Let a cancelled scan finish before removing the cache it may still use."""
+    if not scan.done():
+        logger.info(
+            "Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup for thread %s",
+            thread_id,
+        )
+
+    while not scan.done():
+        try:
+            await asyncio.shield(scan)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            break
+
+    # Cancellation remains the caller-visible outcome, but consume any late scan
+    # failure so the drained task cannot emit an un-retrieved exception warning.
+    _consume_cancelled_scan_outcome(scan, thread_id=thread_id)
+
+    cleanup = asyncio.create_task(_remove_text_cache_dir(text_cache_dir))
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            pass
+
+
 async def capture_workspace_snapshot(
     thread_id: str,
     *,
     user_id: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
@@ -103,14 +152,34 @@ async def capture_workspace_snapshot(
             except asyncio.CancelledError:
                 pass
         raise
-    try:
-        return await asyncio.to_thread(
+
+    scan = asyncio.ensure_future(
+        asyncio.to_thread(
             scan_workspace_roots,
             roots,
             limits=limits,
             include_text=include_text,
             text_cache_dir=text_cache_dir,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
+    )
+    try:
+        return await asyncio.shield(scan)
+    except asyncio.CancelledError:
+        # A metadata-only scan has no cache resource to protect. It still runs in
+        # the worker after caller cancellation, so retain ownership only long
+        # enough to consume/log its eventual outcome instead of delaying the
+        # cancellation until a full workspace scan finishes.
+        if text_cache_dir is None:
+            scan.add_done_callback(partial(_consume_cancelled_scan_outcome, thread_id=thread_id))
+            raise
+
+        # Text capture is different: the worker may still read/write the cache,
+        # so deleting it immediately would race the scan. Keep the cache alive
+        # until the worker drains, then remove it before propagating cancellation.
+        # Repeated cancellation must not abandon either phase.
+        await _drain_scan_and_cleanup(scan, text_cache_dir, thread_id=thread_id)
+        raise
     except Exception:
         if text_cache_dir is not None:
             await _remove_text_cache_dir(text_cache_dir)
@@ -125,6 +194,7 @@ async def record_workspace_changes(
     *,
     user_id: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> dict | None:
     try:
         roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
@@ -133,6 +203,7 @@ async def record_workspace_changes(
             roots,
             limits=limits,
             include_text=False,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
         changed_paths = get_changed_paths(before, after_metadata)
         after = await asyncio.to_thread(
@@ -141,6 +212,7 @@ async def record_workspace_changes(
             limits=limits,
             include_text=True,
             text_paths=changed_paths,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
         result = compare_snapshots(before, after, limits=limits)
         if not result.has_changes():
