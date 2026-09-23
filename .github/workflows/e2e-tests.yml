@@ -2,7 +2,7 @@ name: E2E Tests
 
 on:
   push:
-    branches: [ 'main', '2.0.x-dev' ]
+    branches: [ 'main', '*-dev' ]
     paths:
       - 'frontend/**'
       - '.github/workflows/e2e-tests.yml'
