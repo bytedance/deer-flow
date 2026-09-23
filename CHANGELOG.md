@@ -941,6 +941,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** Pausing a scheduled task no longer loses the pause when a
+  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
+  owner — which pausing clears — but read the row without taking SQLite's
+  writer, so a stale read passed the guard and wrote the task back to
+  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
+  the API had reported as paused. The read now takes the writer first, as every
+  other mutating path in that repository does. PostgreSQL was unaffected.
+  ([#5777])
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
@@ -4371,3 +4379,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5777]: https://github.com/bytedance/deer-flow/pull/5777
