@@ -189,7 +189,6 @@ class _PendingTeardown:
 
     pool: Any
     prepared: Any
-    retire_all: bool
 
 
 def _canonical_server_snapshot(server) -> str:
@@ -356,8 +355,14 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     )
 
 
-def _plan_cache_transition() -> _McpReconciliationPlan | None:
+def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _McpReconciliationPlan | None:
     """Classify the on-disk effective MCP config against the applied baseline.
+
+    ``fence_in_flight_initialization`` distinguishes an explicit config-change
+    path from an ordinary read. An explicit change must void a first
+    initialization that has no applied baseline yet, because that discovery may
+    have been started against the superseded config. A concurrent read must
+    instead wait for and share that initialization.
 
     Returns:
         ``None`` when nothing MCP-relevant changed, otherwise the plan to apply.
@@ -367,7 +372,7 @@ def _plan_cache_transition() -> _McpReconciliationPlan | None:
     # Nothing has been published or reconciled yet: never stale (PR1 contract),
     # and deployments without MCP pay no config-hashing cost.
     if not _cache_initialized and _mcp_applied_servers is None:
-        if _initializing_generation is not None:
+        if fence_in_flight_initialization and _initializing_generation is not None:
             logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
             return _full_reset_plan()
         return None
@@ -511,9 +516,10 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
 
     if plan.transition.retire_servers is None:
         retired_pool = reset_session_pool()
+        prepared = retired_pool.prepare_retire_all() if retired_pool is not None else None
         _reset_mcp_tools_cache_state()
         _clear_applied_revision()
-        return _PendingTeardown(pool=retired_pool, prepared=None, retire_all=True)
+        return _PendingTeardown(pool=retired_pool, prepared=prepared)
 
     pool = get_session_pool()
     prepared = pool.reconcile_bindings(plan.active, plan.removed)
@@ -522,7 +528,7 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
     _reset_mcp_tools_cache_state()
     if incoming is not None:
         _record_applied_revision(incoming)
-    return _PendingTeardown(pool=pool, prepared=prepared, retire_all=False)
+    return _PendingTeardown(pool=pool, prepared=prepared)
 
 
 _pending_teardowns: set[asyncio.Task[Any]] = set()
@@ -532,8 +538,6 @@ def _pending_teardown_work(pending: _PendingTeardown) -> Callable[[], None] | No
     """The blocking teardown callable, or ``None`` when there is nothing to do."""
     if pending.pool is None:
         return None
-    if pending.retire_all:
-        return pending.pool.close_all_sync
     prepared = pending.prepared
     if prepared is None or (not prepared.entries and not prepared.inflight):
         return None  # Nothing was detached: never schedule an empty teardown.
@@ -818,13 +822,7 @@ def refresh_mcp_cache_if_active() -> bool:
     with _init_condition:
         if not _cache_initialized and _initializing_generation is None and _mcp_applied_servers is None:
             return False
-        plan = _plan_cache_transition()
-        if plan is None and _initializing_generation is not None and _mcp_applied_servers is None:
-            # An initialization is in flight and no revision has ever been
-            # applied, so there is no baseline to classify against. Conservatively
-            # void the in-flight initialization instead of letting tools
-            # discovered under the superseded config publish.
-            plan = _full_reset_plan()
+        plan = _plan_cache_transition(fence_in_flight_initialization=True)
         if plan is not None:
             pending_teardown = _apply_reconciliation_locked(plan)
             retired = True
@@ -851,7 +849,7 @@ def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
     pending_teardown = None
     with _init_condition:
         if changed is None:
-            plan = _plan_cache_transition()
+            plan = _plan_cache_transition(fence_in_flight_initialization=True)
         else:
             plan = _plan_explicit_reconciliation(frozenset(str(name) for name in changed))
         if plan is None:

@@ -425,6 +425,33 @@ class MCPSessionPool:
         with self._lock:
             self._retired = True
 
+    def prepare_retire_all(self) -> PreparedRetirement:
+        """Fence, detach, and signal every owner in one critical section.
+
+        Whole-pool retirement has the same cancellation hazard as per-server
+        reconciliation: once an owner is removed from ``_entries``/``_inflight``
+        it is no longer reachable, so its close signal must be delivered before
+        the caller can be cancelled or the returned teardown can be skipped.
+        This method performs only that non-waiting hand-off; callers wait for the
+        returned owners outside every lock via ``close_prepared_owners_sync``.
+        """
+        entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
+        inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
+        with self._lock:
+            self._retired = True
+            entries = list(self._entries.values())
+            self._entries.clear()
+            inflight = list(self._inflight.values())
+            self._inflight.clear()
+
+            for _session, loop, _task, close_evt in entries:
+                self._signal_close(loop, close_evt)
+            for loop, ready, task, close_evt in inflight:
+                self._signal_close(loop, close_evt)
+                self._cancel_owner(loop, task, ready)
+
+        return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
+
     # ------------------------------------------------------------------
     # Session owner task
     # ------------------------------------------------------------------
