@@ -107,8 +107,7 @@ def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp
     # valid reference into a resource.missing finding or orphan the real file.
     _write(
         tmp_path / "SKILL.md",
-        _valid_skill()
-        + "\nRead references/setup.md.\nAlso see references/usage.md!\n",
+        _valid_skill() + "\nRead references/setup.md.\nAlso see references/usage.md!\n",
     )
     _write(tmp_path / "references" / "setup.md", "# Setup\n")
     _write(tmp_path / "references" / "usage.md", "# Usage\n")
@@ -118,10 +117,7 @@ def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp
     for target in ("references/setup.md", "references/usage.md"):
         assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
         assert target not in facts["resources"]["orphans"]
-    assert not any(
-        f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md"
-        for f in facts["findings"]
-    )
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
 def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
@@ -129,8 +125,7 @@ def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
     # link target or a path token must keep its dots, not be stripped.
     _write(
         tmp_path / "SKILL.md",
-        _valid_skill()
-        + "\nSee [config](references/config.yaml) and references/v1.0.md.\n",
+        _valid_skill() + "\nSee [config](references/config.yaml) and references/v1.0.md.\n",
     )
     _write(tmp_path / "references" / "config.yaml", "a: 1\n")
     _write(tmp_path / "references" / "v1.0.md", "# v1.0\n")
@@ -140,10 +135,7 @@ def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
     for target in ("references/config.yaml", "references/v1.0.md"):
         assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
         assert target not in facts["resources"]["orphans"]
-    assert not any(
-        f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md"
-        for f in facts["findings"]
-    )
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
