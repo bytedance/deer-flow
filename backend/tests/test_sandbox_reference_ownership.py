@@ -10,10 +10,12 @@ import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from langgraph.types import Overwrite
 
 from app.gateway.routers import runs, thread_runs, threads
 from app.gateway.services import normalize_input, strip_server_owned_state_metadata
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
@@ -210,6 +212,37 @@ async def test_checkpoint_sandbox_is_resolved_against_current_identity_before_as
     assert provider.acquire_calls == [("thread-a", "user-a")]
     assert provider.scoped_get_calls == [(FOREIGN_SANDBOX_ID, "thread-a", "user-a")]
     assert FOREIGN_SANDBOX_ID not in provider.get_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("fork_restored", [False, True], ids=["checkpoint", "fork"])
+@pytest.mark.parametrize("with_lease_owner", [False, True], ids=["unleased", "leased"])
+async def test_checkpoint_sandbox_without_thread_id_fails_closed(async_path, fork_restored, with_lease_owner):
+    provider = _IdentityScopedProvider()
+    set_sandbox_provider(provider)
+    runtime = _runtime_with_foreign_checkpoint()
+    runtime.context.pop("thread_id")
+    runtime.config = {}
+    if not with_lease_owner:
+        runtime.context.pop(SANDBOX_LEASE_OWNER_CONTEXT_KEY)
+    if fork_restored:
+        runtime.state["sandbox"] = Overwrite(runtime.state["sandbox"])
+    original_state = runtime.state["sandbox"]
+    try:
+        with pytest.raises(SandboxRuntimeError, match="Thread ID not available"):
+            if async_path:
+                await ensure_sandbox_initialized_async(runtime)
+            else:
+                ensure_sandbox_initialized(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.get_calls == []
+    assert provider.scoped_get_calls == []
+    assert provider.acquire_calls == []
+    assert runtime.state["sandbox"] is original_state
+    assert "sandbox_id" not in runtime.context
 
 
 def test_matching_checkpoint_sandbox_is_reused_without_acquire():

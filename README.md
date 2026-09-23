@@ -589,7 +589,8 @@ DeerFlow supports multiple sandbox execution modes:
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user
-and thread before a tool can reuse it.
+and thread before a tool can reuse it. A missing runtime thread ID raises an
+error even when the referenced sandbox is cached.
 
 When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
 

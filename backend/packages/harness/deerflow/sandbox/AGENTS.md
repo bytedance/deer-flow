@@ -1,5 +1,7 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
+Sandbox restore requires a thread ID, even forks.
+
 **Network approval policy**: Sync/async `SandboxMiddleware` wrappers use
 `resolve_run_interaction_policy()` to gate lead-run network approval cards.
 Explicit `autonomous`, `webhook`, and `scheduled` modes auto-deny pending requests,
