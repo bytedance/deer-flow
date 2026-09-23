@@ -874,7 +874,7 @@ def test_url_redaction_filter_collapses_credentials_carried_by_the_traceback() -
 
     from deerflow.logging_config import UrlRedactionFilter
 
-    payload = "Set-Cookie: session=CookieSecret\\r\\n"
+    payload = "Set-Cookie: session=CookieSecret\r\n"
     record = logging.LogRecord("urllib3.connection", logging.WARNING, __file__, 1, "Failed to parse headers (url=%s): %s", ("https://cdn.example.com/tenant-42/x?sig=UrlSecret", HeaderParsingError([], payload)), None)
     record.exc_info = (HeaderParsingError, HeaderParsingError([], "Set-Cookie: session=CookieSecret\r\n"), None)
 
