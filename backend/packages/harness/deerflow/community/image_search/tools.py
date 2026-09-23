@@ -2,6 +2,7 @@
 Image Search Tool - Search images using DuckDuckGo for reference in image generation.
 """
 
+import asyncio
 import json
 import logging
 
@@ -93,7 +94,7 @@ def _search_images(
 
 
 @tool("image_search", parse_docstring=True)
-def image_search_tool(
+async def image_search_tool(
     query: str,
     max_results: int = 5,
     size: str | None = None,
@@ -131,7 +132,11 @@ def image_search_tool(
         max_results = config.model_extra.get("max_results", max_results)
     max_results = _coerce_max_results(max_results)
 
-    results = _search_images(
+    # ddgs has no async API; offload the blocking call to a thread so the
+    # agent's event loop stays responsive (same pattern as the readability
+    # extraction in the infoquest/jina_ai tools).
+    results = await asyncio.to_thread(
+        _search_images,
         query=query,
         max_results=max_results,
         size=size,
