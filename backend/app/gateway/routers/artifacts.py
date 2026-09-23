@@ -171,6 +171,7 @@ async def _commit_artifact_update(
         # finishes, so cache invalidation belongs to the drained commit too.
         _sha256_of_file_cached.cache_clear()
     except Exception:
+        logger.exception("Failed to commit artifact update before rollback: %s", virtual_path)
         if sandbox is not None:
             try:
                 await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, current)

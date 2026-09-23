@@ -479,6 +479,53 @@ def test_update_artifact_cancellation_drains_remote_sync_before_releasing_write(
     assert cancellation_waited_for_sync
 
 
+def test_update_artifact_logs_primary_failure_when_cancelled_commit_fails(tmp_path, monkeypatch, caplog) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_failing_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+            raise RuntimeError("sandbox sync failed after cancellation")
+        original_sync(sandbox, virtual_path, content)
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_failing_sync)
+    caplog.set_level("ERROR", logger=artifacts_router.logger.name)
+
+    async def run_cancelled_failure() -> None:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        allow_sync.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_failure())
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"before")]
+    assert provider.released == ["sandbox-1"]
+    assert artifact_path.read_text(encoding="utf-8") == "before"
+    assert any("Failed to commit artifact update before rollback" in record.getMessage() and record.exc_info is not None for record in caplog.records)
+
+
 def test_update_artifact_rejects_oversized_content(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("before", encoding="utf-8")
