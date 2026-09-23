@@ -457,7 +457,7 @@ async def test_remote_task_session_initialization_respects_configured_timeout(tr
                 user_id="user-1",
                 thread_id="thread-1",
                 thread_incarnation=None,
-            )
+            ),
         )
 
     session.call_tool.assert_not_awaited()
@@ -497,7 +497,7 @@ async def test_remote_task_call_respects_configured_timeout(transport: str) -> N
                 user_id="user-1",
                 thread_id="thread-1",
                 thread_incarnation=None,
-            )
+            ),
         )
 
     session.call_tool.assert_awaited_once_with(
