@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import stat
+import threading
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -424,6 +425,58 @@ def test_update_artifact_rolls_back_remote_when_local_replace_fails(tmp_path, mo
     ]
     assert provider.released == ["sandbox-1"]
     assert artifact_path.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_cancellation_drains_remote_sync_before_releasing_write(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    sync_finished = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+        try:
+            original_sync(sandbox, virtual_path, content)
+        finally:
+            if content == b"after":
+                sync_finished.set()
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_sync)
+
+    async def run_cancelled_update() -> bool:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        # Yield once so the cancellation reaches update_artifact while the
+        # worker is still blocked; no wall-clock timing is involved.
+        await asyncio.sleep(0)
+        cancellation_waited_for_sync = not task.done() and provider.released == []
+        allow_sync.set()
+        assert await asyncio.to_thread(sync_finished.wait, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return cancellation_waited_for_sync
+
+    cancellation_waited_for_sync = asyncio.run(run_cancelled_update())
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+    assert cancellation_waited_for_sync
 
 
 def test_update_artifact_rejects_oversized_content(tmp_path, monkeypatch) -> None:
