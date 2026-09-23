@@ -129,6 +129,10 @@ Every destructive migration first writes a verified `{manifest_filename}.v1.bak`
 Missing or mismatched backups abort migration without changing v1 data.
 Delete legacy agent JSON only after safe summary adoption or equality checks.
 Summary conflicts keep the source file and return an error.
+Compare both summary operands after additive normalization; preserve extension
+fields and keep fact migration validation strict. Replacement imports reject
+invalid fact containers or unusable content before normalization or storage
+access; recoverable metadata may default, but malformed facts never mean clear.
 
 Run the proactive migration from `backend/`:
 

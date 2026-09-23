@@ -158,23 +158,30 @@ def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
     return fact
 
 
-def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Return a canonical compatibility document without mutating the caller."""
-    normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
+def _normalize_memory_summaries(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize additive summary fields without relaxing fact validation."""
     empty = create_empty_memory()
-
+    summaries: dict[str, Any] = {}
     for section_name, section_keys in (
         ("user", ("workContext", "personalContext", "topOfMind", "cognitiveStyle")),
         ("history", ("recentMonths", "earlierContext", "longTermBackground")),
     ):
-        incoming = normalized.get(section_name)
+        incoming = data.get(section_name)
         incoming = incoming if isinstance(incoming, dict) else {}
         complete = copy.deepcopy(empty[section_name])
         for key, value in incoming.items():
             complete[key] = _normalize_context_section(value) if key in section_keys else copy.deepcopy(value)
         for key in section_keys:
             complete[key] = _normalize_context_section(complete.get(key))
-        normalized[section_name] = complete
+        summaries[section_name] = complete
+
+    return summaries
+
+
+def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a canonical compatibility document without mutating the caller."""
+    normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
+    normalized.update(_normalize_memory_summaries(normalized))
 
     facts = normalized.get("facts")
     normalized["facts"] = [fact for value in facts if (fact := _normalize_legacy_import_fact(value)) is not None] if isinstance(facts, list) else []
@@ -1229,16 +1236,13 @@ class FileMemoryStorage(MemoryStorage):
         if not sources:
             return False, from_version, []
 
-        base = normalize_memory_data(global_memory or create_empty_memory())
-        migrated_summaries = {
-            "user": copy.deepcopy(base.get("user", {})),
-            "history": copy.deepcopy(base.get("history", {})),
-        }
+        migrated_summaries = _normalize_memory_summaries(global_memory or {})
         if legacy_memory is not None and adopt_legacy_summaries:
+            legacy_summaries = _normalize_memory_summaries(legacy_memory)
             for section in ("user", "history"):
                 migrated_summaries[section] = _merge_legacy_summary_section(
                     canonical=migrated_summaries[section],
-                    legacy=legacy_memory.get(section, {}),
+                    legacy=legacy_summaries[section],
                     section=section,
                     legacy_path=legacy_path,
                 )

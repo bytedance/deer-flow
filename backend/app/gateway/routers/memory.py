@@ -430,6 +430,8 @@ async def import_memory(request: MemoryResponse, http_request: Request) -> Memor
         raise _unsupported_501(manager, "import memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
         raise _map_memory_manager_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid memory import: facts must be a list of objects with non-empty content.") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 

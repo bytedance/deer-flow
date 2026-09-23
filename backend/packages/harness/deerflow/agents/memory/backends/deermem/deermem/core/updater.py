@@ -964,6 +964,11 @@ class MemoryUpdater:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
+        # Replacement imports must not turn malformed facts into deletions.
+        # Validate before lenient compatibility normalization or any storage read.
+        raw_facts = memory_data.get("facts")
+        if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
+            raise ValueError("memory_data.facts must be a list of facts with non-empty content")
         memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
