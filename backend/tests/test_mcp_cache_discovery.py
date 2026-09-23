@@ -1052,3 +1052,22 @@ def test_user_filtered_mcp_tools_do_not_replace_full_server_scoped_cache(cache_g
     assert uncensored[0] is old_a
     assert uncensored[1] is old_b
     assert [tool.metadata["deerflow_mcp_source"]["server_name"] for tool in uncensored] == ["A", "B"]
+
+
+def test_shared_binding_check_covers_transport_pool_epoch_and_fingerprint():
+    from deerflow.mcp.cache import _binding_matches
+    from deerflow.mcp.session_pool import MCPSessionPool
+
+    pool = MCPSessionPool()
+    binding = pool.bind_server("A", "old-fingerprint")
+    stdio = ServerDiscoveryResult(tools=(), pool=pool, binding=binding)
+    http = ServerDiscoveryResult(tools=())
+
+    assert _binding_matches(http, "A", None, None)
+    assert not _binding_matches(stdio, "A", None, pool)
+    assert not _binding_matches(http, "A", "old-fingerprint", pool)
+    assert _binding_matches(stdio, "A", "old-fingerprint", pool)
+    assert not _binding_matches(stdio, "A", "old-fingerprint", MCPSessionPool())
+    assert not _binding_matches(stdio, "A", "different-fingerprint", pool)
+    pool.bind_server("A", "new-fingerprint")
+    assert not _binding_matches(stdio, "A", "old-fingerprint", pool)

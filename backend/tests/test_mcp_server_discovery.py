@@ -365,3 +365,69 @@ async def test_task_snapshot_guard_validates_full_config_before_selected_discove
         assert "durable background task" in agent_tools[0].description
     finally:
         set_mcp_task_config_snapshot(None)
+
+
+@pytest.mark.asyncio
+async def test_selected_invalid_connection_logs_selected_names_not_no_enabled(monkeypatch, caplog):
+    import logging
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {"enabled": True, "type": "http", "url": "https://a.example/mcp"},
+                "B": {"enabled": True, "type": "http", "url": "https://b.example/mcp"},
+            }
+        }
+    )
+
+    def reject_connection(name, server):
+        raise ValueError(f"invalid connection for {name}")
+
+    monkeypatch.setattr("deerflow.mcp.client.build_server_params", reject_connection)
+    with caplog.at_level(logging.INFO, logger="deerflow.mcp.tools"):
+        result = await get_mcp_tools_by_server(config, server_names={"A"})
+
+    assert result == {}
+    assert "No valid MCP connections for selected servers: ['A']" in caplog.text
+    assert "No enabled MCP servers configured" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_discovery_log_counts_only_selected_successful_groups(monkeypatch, caplog):
+    import logging
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {"enabled": True, "type": "http", "url": "https://a.example/mcp"},
+                "B": {"enabled": True, "type": "http", "url": "https://b.example/mcp"},
+                "C": {"enabled": True, "type": "http", "url": "https://c.example/mcp"},
+            }
+        }
+    )
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            return [_tool("A_search")] if server_name == "A" else []
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+    with caplog.at_level(logging.INFO, logger="deerflow.mcp.tools"):
+        groups = await get_mcp_tools_by_server(config, server_names={"A", "B"})
+
+    assert list(groups) == ["A", "B"]
+    assert len(groups["A"].tools) == 1
+    assert groups["B"].tools == ()
+    assert "Discovered 1 tool(s) from 2 MCP server(s)" in caplog.text
+    assert "Successfully loaded" not in caplog.text

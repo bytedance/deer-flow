@@ -998,7 +998,7 @@ async def get_mcp_tools_by_server(
     selected_view = config.model_copy(update={"mcp_servers": {name: all_enabled[name] for name in all_enabled if name in selected}})
     connections = build_servers_config(selected_view)
     if not connections:
-        logger.info("No enabled MCP servers configured")
+        logger.info("No valid MCP connections for selected servers: %s", sorted(selected))
         return {}
 
     stdio_names = [name for name, connection in connections.items() if connection.get("transport", "stdio") == "stdio"]
@@ -1019,7 +1019,7 @@ async def get_mcp_tools_by_server(
         )
     )
     groups = {name: result for name, result in pairs if result is not None}
-    logger.info("Successfully loaded %d tool(s) from MCP servers", sum(len(result.tools) for result in groups.values()))
+    logger.info("Discovered %d tool(s) from %d MCP server(s)", sum(len(result.tools) for result in groups.values()), len(groups))
     return groups
 
 

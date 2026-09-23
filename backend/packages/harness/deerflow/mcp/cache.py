@@ -46,26 +46,23 @@ def _evict_server_tool_entries_locked(incoming_servers: Mapping[str, str]) -> No
             del _server_tool_cache[name]
 
 
-def _is_reusable_server_entry(
-    entry: _ServerToolCacheEntry,
-    *,
+def _binding_matches(
+    result: ServerDiscoveryResult,
     name: str,
-    incoming_connection: str | None,
+    expected_connection: str | None,
     pool: MCPSessionPool | None,
 ) -> bool:
-    """Return whether an unchanged entry still matches its live pool binding."""
-    if incoming_connection is None:
-        return entry.result.pool is None and entry.result.binding is None
-    if pool is None:
-        return False
-    if entry.result.pool is not pool:
+    """Validate a discovery result against current transport and binding.
+
+    Call under ``_init_condition`` both before reuse and immediately before
+    publication, so neither path can silently relax the ownership fence.
+    """
+    if expected_connection is None:
+        return result.pool is None and result.binding is None
+    if pool is None or result.pool is not pool:
         return False
     active_binding = pool.active_binding(name)
-    if entry.result.binding != active_binding:
-        return False
-    if entry.result.binding is None:
-        return False
-    return entry.result.binding.fingerprint == incoming_connection
+    return result.binding is not None and result.binding == active_binding and result.binding.fingerprint == expected_connection
 
 
 def _reusable_server_entries_locked(
@@ -79,7 +76,7 @@ def _reusable_server_entries_locked(
         entry = _server_tool_cache.get(name)
         if entry is None or entry.snapshot != snapshot:
             continue
-        if not _is_reusable_server_entry(entry, name=name, incoming_connection=incoming_connections.get(name), pool=pool):
+        if not _binding_matches(entry.result, name, incoming_connections.get(name), pool):
             continue
         reusable[name] = entry
     return reusable
@@ -211,11 +208,10 @@ class _McpCacheTransition:
     ``retire_servers is None`` is the conservative whole-pool reset (config path
     switch, ``mcpInterceptors`` change, unreadable/unstable config, or a missing
     applied baseline). Otherwise ``retire_servers`` names exactly the servers
-    whose pooled sessions must be torn down, and ``rebuild_servers`` names every
-    server whose tools must be rediscovered.
+    whose pooled sessions must be torn down. Tool rediscovery is decided by
+    missing per-server cache entries against the effective config snapshot.
     """
 
-    rebuild_servers: frozenset[str]
     retire_servers: frozenset[str] | None
 
 
@@ -356,7 +352,7 @@ def _clear_applied_revision() -> None:
 def _full_reset_plan() -> _McpReconciliationPlan:
     """The conservative whole-pool reset plan."""
     return _McpReconciliationPlan(
-        transition=_McpCacheTransition(frozenset(), None),
+        transition=_McpCacheTransition(None),
         incoming=None,
         active={},
         removed=frozenset(),
@@ -386,7 +382,7 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     if incoming.interceptors != _mcp_applied_interceptors:
         logger.info("MCP interceptors changed; the whole MCP session pool must be reset")
         return _McpReconciliationPlan(
-            transition=_McpCacheTransition(frozenset(), None),
+            transition=_McpCacheTransition(None),
             incoming=incoming,
             active={},
             removed=frozenset(),
@@ -396,8 +392,8 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     rebuild = {name for name, snapshot in incoming_servers.items() if applied_servers.get(name) != snapshot}
     rebuild |= removed
 
-    # Declaration order feeds tool ordering, so a pure reorder must rebuild every
-    # server's tools. It must NOT retire anything: the connections are unchanged.
+    # Declaration order changes the flattened tool order, even if every server
+    # snapshot is unchanged. No session retires and cached groups remain reusable.
     if incoming_order != applied_order and set(incoming_order) == set(applied_order):
         rebuild = set(incoming_servers)
 
@@ -408,7 +404,7 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     removed_connections = {name for name in applied_connections if name not in incoming_connections}
     active = {name: fingerprint for name, fingerprint in incoming_connections.items() if applied_connections.get(name) != fingerprint}
     return _McpReconciliationPlan(
-        transition=_McpCacheTransition(frozenset(rebuild), frozenset(removed | connection_changed | removed_connections)),
+        transition=_McpCacheTransition(frozenset(removed | connection_changed | removed_connections)),
         incoming=incoming,
         active=active,
         removed=frozenset(removed | removed_connections),
@@ -519,7 +515,7 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
         return _full_reset_plan()
     if incoming.interceptors != _mcp_applied_interceptors:
         return _McpReconciliationPlan(
-            transition=_McpCacheTransition(frozenset(), None),
+            transition=_McpCacheTransition(None),
             incoming=incoming,
             active={},
             removed=frozenset(),
@@ -550,7 +546,7 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
     connection_changed = {name for name in relevant if name in applied_connections and name in incoming_connections and applied_connections[name] != incoming_connections[name]}
     active = {name: incoming_connections[name] for name in relevant if name in incoming_connections and applied_connections.get(name) != incoming_connections[name]}
     return _McpReconciliationPlan(
-        transition=_McpCacheTransition(frozenset(relevant), frozenset(removed | connection_changed)),
+        transition=_McpCacheTransition(frozenset(removed | connection_changed)),
         incoming=incoming,
         active=active,
         removed=frozenset(removed),
@@ -598,29 +594,6 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
 
 
 _pending_teardowns: set[asyncio.Task[Any]] = set()
-
-
-def _candidate_binding_is_current(
-    entry: _ServerToolCacheEntry,
-    *,
-    name: str,
-    loaded_connections: Mapping[str, str],
-    current_pool: MCPSessionPool | None,
-) -> bool:
-    """Return whether a discovered candidate still matches the live binding."""
-    loaded_connection = loaded_connections.get(name)
-    if loaded_connection is None:
-        return entry.result.pool is None and entry.result.binding is None
-    if current_pool is None:
-        return False
-    if entry.result.pool is not current_pool:
-        return False
-    active_binding = current_pool.active_binding(name)
-    if entry.result.binding != active_binding:
-        return False
-    if entry.result.binding is None:
-        return False
-    return entry.result.binding.fingerprint == loaded_connection
 
 
 def _pending_teardown_work(pending: _PendingTeardown) -> Callable[[], None] | None:
@@ -814,15 +787,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
             else:
                 current_pool = get_session_pool() if loaded_connections else None
-                candidates_valid = all(
-                    _candidate_binding_is_current(
-                        entry,
-                        name=name,
-                        loaded_connections=loaded_connections,
-                        current_pool=current_pool,
-                    )
-                    for name, entry in candidates.items()
-                )
+                candidates_valid = all(_binding_matches(entry.result, name, loaded_connections.get(name), current_pool) for name, entry in candidates.items())
                 if not candidates_valid:
                     logger.warning("MCP session binding changed during initialization; discarding stale result")
                     retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()

@@ -73,7 +73,7 @@ def test_secret_bearing_mcp_revision_and_plan_repr_omit_values():
         interceptors=secret,
     )
     plan = _McpReconciliationPlan(
-        transition=_McpCacheTransition(frozenset({"server"}), frozenset({"server"})),
+        transition=_McpCacheTransition(frozenset({"server"})),
         incoming=revision,
         active={"server": fingerprint},
         removed=frozenset({"server"}),
@@ -330,7 +330,7 @@ def test_metadata_only_edit_rebuilds_without_retiring(cache_globals, monkeypatch
 
     _write_config(cfg, {"A": _stdio("npx", description="described"), "B": _stdio("uvx")})
 
-    assert cache_module._classify_cache_transition() == _McpCacheTransition(frozenset({"A"}), frozenset())
+    assert cache_module._classify_cache_transition() == _McpCacheTransition(frozenset())
     assert cache_module.refresh_mcp_cache_if_active() is True
 
     # Nothing retired: the binding epoch and both live sessions survive.
@@ -355,7 +355,7 @@ def test_connection_change_retires_only_that_server(cache_globals, monkeypatch, 
 
     _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
 
-    assert cache_module._classify_cache_transition() == _McpCacheTransition(frozenset({"A"}), frozenset({"A"}))
+    assert cache_module._classify_cache_transition() == _McpCacheTransition(frozenset({"A"}))
     assert cache_module.refresh_mcp_cache_if_active() is True
 
     assert pool.active_binding("A") != old_binding_a
@@ -384,7 +384,7 @@ def test_added_server_is_rebuilt_not_retired(cache_globals, monkeypatch, tmp_pat
     _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx"), "C": _stdio("node")})
 
     transition = cache_module._classify_cache_transition()
-    assert transition == _McpCacheTransition(frozenset({"C"}), frozenset())
+    assert transition == _McpCacheTransition(frozenset())
     assert cache_module.refresh_mcp_cache_if_active() is True
 
     # A/B keep their epochs and sessions; C is seeded for its first discovery.
@@ -412,7 +412,6 @@ def test_removed_or_disabled_server_is_retired_others_survive(cache_globals, mon
 
     transition = cache_module._classify_cache_transition()
     assert transition is not None
-    assert transition.rebuild_servers == frozenset({"A"})
     assert transition.retire_servers == frozenset({"A"})
     assert cache_module.refresh_mcp_cache_if_active() is True
 
@@ -483,7 +482,7 @@ def test_removed_or_disabled_server_readd_gets_fresh_tool_and_binding_while_B_su
     assert _entry(reset_pool, "B", owner_loop) is None
 
 
-def test_declaration_order_change_rebuilds_all_without_retiring(cache_globals, monkeypatch, tmp_path, owner_loop):
+def test_declaration_order_change_reorders_cached_tools_without_retiring(cache_globals, monkeypatch, tmp_path, owner_loop):
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
     pool = get_session_pool()
@@ -495,14 +494,14 @@ def test_declaration_order_change_rebuilds_all_without_retiring(cache_globals, m
     _write_config(cfg, {"B": _stdio("uvx"), "A": _stdio("npx")})
 
     transition = cache_module._classify_cache_transition()
-    assert transition == _McpCacheTransition(frozenset({"A", "B"}), frozenset())
+    assert transition == _McpCacheTransition(frozenset())
     assert cache_module.refresh_mcp_cache_if_active() is True
 
     assert pool.active_binding("A") == binding_a
     assert pool.active_binding("B") == binding_b
     assert _entry(pool, "A", owner_loop)[0] is session_a
     assert _entry(pool, "B", owner_loop)[0] is session_b
-    # ordered tools are rebuilt from the new declaration order
+    # The flat list follows the new declaration order without rediscovering unchanged groups.
     assert [t.name for t in cache_module.get_cached_mcp_tools()] == ["B:uvx", "A:npx"]
 
 
@@ -729,7 +728,7 @@ def test_back_to_back_change_diffs_against_the_applied_snapshot(cache_globals, m
 
         # Diffs against the applied baseline (npx-2), not a cleared one.
         transition = cache_module._classify_cache_transition()
-        assert transition == _McpCacheTransition(frozenset({"A"}), frozenset({"A"}))
+        assert transition == _McpCacheTransition(frozenset({"A"}))
 
         assert cache_module.refresh_mcp_cache_if_active() is True
         assert pool.active_binding("B") == binding_b
@@ -1262,3 +1261,9 @@ def test_explicit_reconciliation_unions_the_full_diff(cache_globals, monkeypatch
     _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
     assert cache_module.reconcile_mcp_servers(["B"]) is True
     assert pool.active_binding("B") != old_binding_b
+
+
+def test_transition_exposes_only_session_retirement_decision():
+    transition = _McpCacheTransition(retire_servers=frozenset({"A"}))
+    assert transition.retire_servers == frozenset({"A"})
+    assert not hasattr(transition, "rebuild_servers")
