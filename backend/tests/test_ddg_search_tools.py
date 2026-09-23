@@ -10,6 +10,44 @@ import pytest
 from deerflow.community.ddg_search import tools
 
 
+@pytest.mark.parametrize(
+    ("configured_limit", "call_args", "expected_count"),
+    [
+        pytest.param("$DDG_TEST_MAX_RESULTS", {"max_results": 2}, 3, id="environment-variable"),
+        pytest.param("3", {"max_results": 2}, 3, id="numeric-string"),
+        pytest.param(3, {"max_results": 2}, 3, id="integer-config"),
+        pytest.param(None, {"max_results": 2}, 2, id="call-argument"),
+        pytest.param(None, {}, 5, id="default"),
+    ],
+)
+def test_web_search_tool_max_results_with_real_ddgs(monkeypatch, configured_limit, call_args, expected_count) -> None:
+    """Exercise SDK count arithmetic and slicing without contacting search engines."""
+    from ddgs.ddgs import DDGS
+    from ddgs.results import TextResult
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.tool_config import ToolConfig
+
+    monkeypatch.setenv("DDG_TEST_MAX_RESULTS", "3")
+    raw_config = {"name": "web_search", "group": "web", "use": "deerflow.community.ddg_search.tools:web_search_tool"}
+    if configured_limit is not None:
+        raw_config["max_results"] = configured_limit
+    tool_config = ToolConfig.model_validate(AppConfig.resolve_env_variables(raw_config))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: tool_config))
+
+    rows = [TextResult(title=f"Result {i}", href=f"https://example.com/{i}", body=f"Snippet {i}") for i in range(10)]
+    engine = SimpleNamespace(provider="offline", name="offline", search=MagicMock(return_value=rows))
+    monkeypatch.setattr(DDGS, "_get_network_client", lambda self: None)
+    monkeypatch.setattr(DDGS, "_get_engines", lambda self, category, backend: [engine])
+
+    parsed = json.loads(tools.web_search_tool.invoke({"query": "Result", **call_args}))
+
+    assert "error" not in parsed
+    assert parsed["total_results"] == len(parsed["results"]) == expected_count
+    assert all(result["url"].startswith("https://example.com/") for result in parsed["results"])
+    engine.search.assert_called_once()
+
+
 def test_resolve_ddgs_region_maps_worldwide_chinese_query_for_wikipedia() -> None:
     assert tools._resolve_ddgs_region("\u4e16\u754c\u676f\u65b0\u95fb 2026", "wt-wt", "auto") == "cn-zh"
 

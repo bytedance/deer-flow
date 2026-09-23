@@ -134,6 +134,9 @@ def _search_text(
     ddgs = DDGS(timeout=30)
 
     try:
+        # Config extras retain strings resolved from $ENV_VAR references.
+        if isinstance(max_results, str):
+            max_results = int(max_results)
         backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
