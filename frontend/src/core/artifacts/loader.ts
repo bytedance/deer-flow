@@ -38,7 +38,7 @@ async function sha256OfText(content: string): Promise<string> {
 
 export const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
 
-function parseContentRange(value: string | null) {
+export function parseContentRange(value: string | null) {
   const match = value?.match(/^bytes (?:(\d+)-(\d+)|\*)\/(\d+)$/);
   if (!match) return undefined;
   return {

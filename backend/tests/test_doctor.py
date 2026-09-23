@@ -7,6 +7,7 @@ Run from repo root:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -187,6 +188,14 @@ class TestCheckModelsConfigured:
         result = doctor.check_models_configured(tmp_path / "config.yaml")
         assert result.status == "skip"
 
+    def test_commented_out_models_block(self, tmp_path):
+        # config.example.yaml ships a `models:` key whose entries are all
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        result = doctor.check_models_configured(cfg)
+        assert result.status == "fail"
+
 
 # ---------------------------------------------------------------------------
 # check_llm_api_key
@@ -216,6 +225,14 @@ class TestCheckLLMApiKey:
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
         assert results == []
 
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        # Regression: iterating a null `models:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        results = doctor.check_llm_api_key(cfg)
+        assert results == []
+
 
 # ---------------------------------------------------------------------------
 # check_llm_auth
@@ -230,12 +247,163 @@ class TestCheckLLMAuth:
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
 
+    def test_codex_auth_file_without_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text("{}")
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_supported_token_shapes_passes(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        for payload in (
+            '{"access_token": "codex-token"}',
+            '{"token": "codex-token"}',
+            '{"tokens": {"access_token": "codex-token"}}',
+        ):
+            auth_path.write_text(payload)
+            results = doctor.check_llm_auth(cfg)
+
+            assert any(result.status == "ok" and "Codex CLI auth available" in result.label for result in results)
+
     def test_claude_oauth_env_passes(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_without_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text("{}")
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_expired_credentials_file_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text('{"claudeAiOauth": {"accessToken": "expired-token", "expiresAt": 1}}')
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Claude auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_with_token_passes(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        credentials_path.write_text('{"claudeAiOauth": {"accessToken": "claude-token"}}')
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_malformed_json_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text("not json")
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_non_object_json_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text('["access_token"]')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_path_pointing_at_directory_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.mkdir()
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_codex_auth_file_with_blank_token_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text('{"access_token": "   "}')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+
+    def test_claude_credentials_file_with_invalid_expires_at_fails(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
+        credentials_path = tmp_path / "credentials.json"
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(credentials_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"):
+            monkeypatch.delenv(name, raising=False)
+
+        for expires_at in ("soon", True, [1]):
+            credentials_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "claude-token", "expiresAt": expires_at}}))
+            results = doctor.check_llm_auth(cfg)
+
+            assert any(result.status == "fail" and "Claude auth available" in result.label for result in results), expires_at
+
+    def test_undecodable_auth_file_keeps_other_model_results(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\nmodels:\n"
+            "  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n"
+            "  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n"
+        )
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_bytes(b'{"access_token": "\xff\xfe"}')
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-token")
+
+        results = doctor.check_llm_auth(cfg)
+
+        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+        assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        assert doctor.check_llm_auth(cfg) == []
+        assert doctor.check_llm_package(cfg) == []
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +420,24 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
+
+    def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
+        # config.example.yaml ships a `tools:` key whose entries can all be
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  # - name: web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
+    def test_scalar_tools_entry_warns_without_traceback(self, tmp_path):
+        # A bare string entry is not a mapping; `t.get("name")` used to raise
+        # AttributeError, which the broad handler rendered as the check result.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
 
     def test_tavily_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
@@ -301,6 +487,22 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "BRAVE_SEARCH_API_KEY set from config" in result.detail
+
+    def test_sofya_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOFYA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "sofya" in result.detail
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
 
     def test_serper_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-key")
@@ -422,6 +624,14 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "warn"
         assert "FIRECRAWL_API_KEY" in (result.fix or "")
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.sofya.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
 
     def test_no_fetch_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
@@ -612,6 +822,17 @@ class TestCheckSandbox:
         cfg.write_text("config_version: 5\n")
         results = doctor.check_sandbox(cfg)
         assert results[0].status == "fail"
+
+    def test_commented_out_tools_block_reports_no_traceback(self, tmp_path):
+        # Regression: iterating a null `tools:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\ntools:\n  # - name: bash\n")
+        results = doctor.check_sandbox(cfg)
+        # Empty `tools:` means no bash tool, so the path is deterministic.
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        assert results[0].detail == "Local sandbox"
 
     def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"

@@ -14,6 +14,7 @@ from deerflow.mcp.tasks import (
 )
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.mcp_tasks import McpTaskRepository
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -67,6 +68,7 @@ def _request(remote_id: str) -> TaskSubmitRequest:
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -80,12 +82,29 @@ def _request(remote_id: str) -> TaskSubmitRequest:
     )
 
 
+async def _create_thread(repo: McpTaskRepository) -> None:
+    now = datetime.now(UTC)
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="incarnation-1",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
     repo = McpTaskRepository(session_factory)
+    await _create_thread(repo)
     fake_server = FakeMcpServer()
     submitted_at = datetime.now(UTC)
     fake_server.status_results.extend(
@@ -116,7 +135,7 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     restarted_process = _service(repo, fake_server)
     await restarted_process.run_once(now=datetime.now(UTC) + timedelta(seconds=2))
 
-    completed = await repo.get(created["id"], user_id="user-1")
+    completed = await repo.get(created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
     assert completed is not None
     assert completed["status"] == "completed"
     assert completed["result"] == {"report": "ready"}
@@ -135,7 +154,7 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     )
     await restarted_process.run_once(now=datetime.now(UTC))
 
-    failed = await repo.get(failed_created["id"], user_id="user-1")
+    failed = await repo.get(failed_created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["error"] == "report generation failed"
@@ -147,6 +166,7 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
     session_factory = get_session_factory()
     assert session_factory is not None
     repo = McpTaskRepository(session_factory)
+    await _create_thread(repo)
     fake_server = FakeMcpServer()
     service = _service(repo, fake_server)
     submitted_at = datetime.now(UTC)
@@ -172,7 +192,7 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
 
     await service.run_once(now=submitted_at + timedelta(seconds=2))
 
-    retrying = await repo.get(created["id"], user_id="user-1")
+    retrying = await repo.get(created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
     assert retrying is not None
     assert retrying["status"] == "submitted"
     assert retrying["consecutive_poll_error_count"] == 1
@@ -181,7 +201,7 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
 
     await service.run_once(now=datetime.now(UTC) + timedelta(seconds=10))
 
-    failed = await repo.get(created["id"], user_id="user-1")
+    failed = await repo.get(created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["error"] == "report generation failed"

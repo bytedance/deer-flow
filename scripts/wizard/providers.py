@@ -656,6 +656,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="sofya",
+        display_name="Sofya",
+        description="Search results include page content, API key required",
+        use="deerflow.community.sofya.tools:web_search_tool",
+        env_var="SOFYA_API_KEY",
+        extra_config={"max_results": 5, "contents_max_characters": 2000},
+    ),
+    SearchProvider(
         name="groundroute",
         display_name="GroundRoute",
         description="One key across six engines, price-routed with failover, API key required",
@@ -714,6 +722,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Firecrawl-compatible web scraper with markdown output, self-host or cloud",
         use="deerflow.community.fastcrw.tools:web_fetch_tool",
         env_var="CRW_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="sofya",
+        display_name="Sofya",
+        description="Page as markdown, API key required",
+        use="deerflow.community.sofya.tools:web_fetch_tool",
+        env_var="SOFYA_API_KEY",
         tool_name="web_fetch",
     ),
     WebProvider(

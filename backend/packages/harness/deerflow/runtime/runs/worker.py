@@ -25,8 +25,8 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,7 +40,12 @@ from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import TOOL_RESULTS_DIRNAME
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -52,7 +57,13 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    DEFAULT_AGENT_NAME_METADATA_VALUE,
+    PROJECT_CONTEXT_KEY,
+    checkpoint_agent_binding_metadata,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -73,12 +84,16 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
@@ -88,9 +103,9 @@ from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+_THREAD_INCARNATION_UNSET = object()
 
-_checkpoint_locks_guard = threading.Lock()
-_checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_checkpoint_locks = AsyncKeyedLockTable[str]()
 
 # Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
 # instances in unreachable reference cycles. They are collectable, but a busy
@@ -161,16 +176,6 @@ def _schedule_terminal_cycle_collection() -> None:
     loop.call_later(delay, _start_collection, context=Context())
 
 
-async def _close_agent_stream(stream: Any) -> None:
-    """Close a LangGraph stream deterministically after completion or early exit."""
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
-
-
 def _remove_callback(config: dict[str, Any], handler: Any) -> None:
     callbacks = config.get("callbacks")
     if isinstance(callbacks, list):
@@ -193,6 +198,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        CONVERSATION_READER_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -216,6 +222,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -228,22 +235,9 @@ def _release_run_scoped_references(
             runtime_context.pop(key, None)
 
 
-@asynccontextmanager
-async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize checkpoint mutations for one thread without blocking goal commands."""
-    loop = asyncio.get_running_loop()
-    with _checkpoint_locks_guard:
-        locks = _checkpoint_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _checkpoint_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _checkpoint_locks.hold(thread_id)
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
@@ -519,11 +513,27 @@ class _LargeFileToolChunkBatcher:
 # strips ``__``-prefixed keys in build_run_config, but embedded harness callers
 # have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
 # by it anyway.
-_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
-        DEERFLOW_TRACE_METADATA_KEY,
-    }
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
+    frozenset(
+        {
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            DEERFLOW_TRACE_METADATA_KEY,
+            CONVERSATION_READER_CONTEXT_KEY,
+            THREAD_INCARNATION_CONTEXT_KEY,
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
+            # The Gateway pins the run's project snapshot under this key at
+            # admission (spec §7.1); a caller-supplied value in
+            # ``config['context']`` must never be merged (§12).
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
+        }
+    )
+    | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
 
@@ -534,6 +544,9 @@ def _build_runtime_context(
     app_config: AppConfig | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
+    conversation_reader: Any | None = None,
+    *,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -548,6 +561,8 @@ def _build_runtime_context(
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    if thread_incarnation is not _THREAD_INCARNATION_UNSET:
+        runtime_ctx[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
             if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
@@ -555,6 +570,8 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if conversation_reader is not None:
+        runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -571,6 +588,23 @@ def _build_runtime_context(
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
+
+
+def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject the admission-pinned project snapshot into the runtime context.
+
+    The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
+    after stripping client-supplied values at admission (``build_run_config``
+    drops ``__``-prefixed context keys; the services pop-set covers both
+    sections), so a value surviving to this point is server-authoritative.
+    ``_build_runtime_context`` refuses server-owned keys from the caller
+    merge, and ``_install_runtime_context`` treats the runtime context as the
+    authoritative view — hoisting here is what lets middleware and tools read
+    exactly the snapshot admission pinned.
+    """
+    caller_context = config.get("context")
+    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+        runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
 
 
 @dataclass(frozen=True)
@@ -595,24 +629,31 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    # The host binds this capability to one run's authenticated reader and references.
+    conversation_reader: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    # Configurable participates in lead-agent option merging and checkpoint
+    # persistence; the reader capability belongs only to host-owned context.
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict):
+        configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
-        # Assigned, not setdefault: this is a server-owned key, the same rule
-        # _bind_trace_id applies to the runtime context and the run metadata. A
-        # deerflow_trace_id the caller put in body.config.context is an echo of
-        # a past output, not an input, and leaving it would make this one dict
-        # disagree with the response header and the logs.
-        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context[DEERFLOW_TRACE_METADATA_KEY] = runtime_context[DEERFLOW_TRACE_METADATA_KEY]
+        # Keep both context views authoritative. A server-owned value is
+        # assigned from the runtime context when present and removed otherwise,
+        # so an embedded caller cannot preserve a forged lifecycle identity in
+        # ``config['context']`` after it was rejected by _build_runtime_context.
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            if key in runtime_context:
+                existing_context[key] = runtime_context[key]
+            else:
+                existing_context.pop(key, None)
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
-        if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
-            existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
         return
 
     config["context"] = dict(runtime_context)
@@ -737,6 +778,36 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     return trace_id
 
 
+def _defer_finalization_interrupt(
+    deferred: BaseException | None,
+    interrupt: BaseException,
+) -> BaseException:
+    """Preserve the first interrupt while allowing terminal awaits to finish."""
+    if isinstance(interrupt, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+    return deferred if deferred is not None else interrupt
+
+
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -746,10 +817,12 @@ async def run_agent(
     agent_factory: Any,
     graph_input: dict,
     config: dict,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
+    knowledge_scope: dict[str, Any] | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -777,7 +850,7 @@ async def run_agent(
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
-    deferred_stop_interrupt: BaseException | None = None
+    deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -885,9 +958,13 @@ async def run_agent(
         # cancellation cannot strand a pending RunRecord or stream subscriber.
         if ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
+                if thread_incarnation is _THREAD_INCARNATION_UNSET:
+                    raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
+                assert thread_incarnation is None or isinstance(thread_incarnation, str)
                 task_rows = await ctx.mcp_task_repo.list_by_thread(
                     thread_id,
                     user_id=record.user_id,
+                    thread_incarnation=thread_incarnation,
                     limit=20,
                 )
                 graph_input = {
@@ -1012,7 +1089,27 @@ async def run_agent(
             ctx.app_config,
             task_store,
             extensions,
+            ctx.conversation_reader,
+            thread_incarnation=thread_incarnation,
         )
+        # Bind every checkpoint produced by this run to the effective agent
+        # identity that produced its state. Manual compaction uses only this
+        # server-overwritten value for memory policy; request metadata cannot
+        # forge it, and an explicit default sentinel distinguishes new default
+        # checkpoints from unbound legacy state.
+        if "agent_name" in runtime_ctx:
+            checkpoint_agent_name = runtime_ctx["agent_name"]
+        else:
+            configurable = config.get("configurable")
+            checkpoint_agent_name = configurable.get("agent_name") if isinstance(configurable, dict) else None
+        checkpoint_metadata = config.get("metadata")
+        if not isinstance(checkpoint_metadata, dict):
+            checkpoint_metadata = {}
+            config["metadata"] = checkpoint_metadata
+        checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        _pin_admission_project_context(config, runtime_ctx)
+        if knowledge_scope is not None:
+            runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
@@ -1066,7 +1163,11 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1165,7 +1266,7 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1179,7 +1280,10 @@ async def run_agent(
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                if single_mode != "custom":
+                                    # Custom frames carry task_* events whose payload can hold a delegated
+                                    # subagent's messages; see the multi-mode branch below.
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1190,7 +1294,7 @@ async def run_agent(
                         finally:
                             close_error = sys.exception()
                             try:
-                                await _close_agent_stream(stream)
+                                await close_agent_stream(stream)
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1219,10 +1323,12 @@ async def run_agent(
                             if mode is None:
                                 continue
 
-                            if not namespace:
+                            if not namespace and mode != "custom":
                                 # Only root-graph frames may decide the parent run's error
                                 # fallback: a delegated subagent's marked fallback is the
-                                # executor's to map (task_failed), not this run's.
+                                # executor's to map (task_failed), not this run's. That
+                                # includes the child messages task_running custom events
+                                # carry, which are root frames too.
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             await _publish_stream_item(
                                 bridge=bridge,
@@ -1237,7 +1343,7 @@ async def run_agent(
                     finally:
                         close_error = sys.exception()
                         try:
-                            await _close_agent_stream(stream)
+                            await close_agent_stream(stream)
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
@@ -1280,6 +1386,7 @@ async def run_agent(
                 deerflow_trace_id=deerflow_trace_id,
                 task_store=task_store,
                 extensions=extensions,
+                run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -1543,12 +1650,23 @@ async def run_agent(
                     await ctx.on_run_completed(record)
                 except Exception:
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A terminal hook must not leave replacement runs blocked or
+                    # stream consumers waiting indefinitely.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing finalization first",
+                        run_id,
+                    )
 
             if task_info is not None and task_store is not None:
                 # Keep the finalizing barrier held until stop observers finish, so
                 # a same-thread replacement cannot overlap this task's lifecycle.
-                try:
-                    await notify_task_stop(
+                task_stop = asyncio.create_task(
+                    notify_task_stop(
                         extensions,
                         task_store,
                         task_info,
@@ -1557,6 +1675,13 @@ async def run_agent(
                             succeeded=record.status == RunStatus.success,
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    ),
+                    name=f"extension-task-stop-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
                     )
                 except Exception:
                     logger.warning(
@@ -1567,7 +1692,10 @@ async def run_agent(
                 except BaseException as exc:
                     # Cancellation here must not strand the finalizing barrier or
                     # leave stream consumers waiting for the end frame.
-                    deferred_stop_interrupt = exc
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
                     logger.warning(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
@@ -1577,8 +1705,8 @@ async def run_agent(
 
             await bridge.publish_end(run_id)
 
-            if deferred_stop_interrupt is not None:
-                raise deferred_stop_interrupt
+            if deferred_finalization_interrupt is not None:
+                raise deferred_finalization_interrupt
         finally:
             try:
                 if journal is not None:
@@ -1587,11 +1715,28 @@ async def run_agent(
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
-                _release_run_scoped_references(
-                    runnable_configs,
-                    runtime_ctx,
-                    journal,
-                )
+                lease_cleanup_interrupt: BaseException | None = None
+                try:
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+
+                    await release_sandbox_execution_lease_async(runtime_ctx)
+                except Exception:
+                    logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
+                except BaseException as exc:
+                    # release_async completes the underlying cleanup before it
+                    # re-raises cancellation. Defer that interruption until the
+                    # worker has dropped all other run-scoped references too.
+                    lease_cleanup_interrupt = exc
+                    logger.warning(
+                        "Sandbox execution lease cleanup was interrupted for run %s; completing local cleanup first",
+                        run_id,
+                    )
+                finally:
+                    _release_run_scoped_references(
+                        runnable_configs,
+                        runtime_ctx,
+                        journal,
+                    )
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
@@ -1617,6 +1762,9 @@ async def run_agent(
                 # through RunStore.
                 _create_contextless_task(run_manager.cleanup(run_id))
                 _schedule_terminal_cycle_collection()
+
+                if lease_cleanup_interrupt is not None:
+                    raise lease_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -1683,6 +1831,23 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     if not visible_messages:
         return False
     return _message_type(visible_messages[-1]) == "ai"
+
+
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. The goal evaluator only reads human and AI text and never sees it.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
 
 
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
@@ -1784,6 +1949,7 @@ async def _prepare_goal_continuation_input(
     deerflow_trace_id: str | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
+    run_stop_reason: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1840,6 +2006,19 @@ async def _prepare_goal_continuation_input(
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(
@@ -1921,6 +2100,11 @@ async def _prepare_goal_continuation_input(
         return None
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
+    if stand_down_reason is None and run_stop_reason == "token_capped":
+        # The run already used up its token budget, and continuations share that
+        # budget, so another hidden turn would spend one more model call only to
+        # have its tool calls stripped.
+        stand_down_reason = "token_capped"
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
@@ -2137,6 +2321,7 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
     # middleware channel can be restored. Reducer channels need Overwrite to
@@ -2226,8 +2411,13 @@ async def _rollback_to_pre_run_checkpoint(
             operation="rollback",
         )
     else:
-        restore_config = rollback_point.config
+        restore_config = {
+            **rollback_point.config,
+            "configurable": dict(rollback_point.config.get("configurable", {})),
+        }
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
+    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
 
     restored_config = await mutation_accessor.aupdate(
         restore_config,

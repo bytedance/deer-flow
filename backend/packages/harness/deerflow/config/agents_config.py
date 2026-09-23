@@ -9,12 +9,14 @@ per-user layout.
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,20 @@ logger = logging.getLogger(__name__)
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 MAX_AGENT_OUTPUT_TOKENS = 200_000
+
+
+def _validate_display_name(value: object) -> object:
+    # Check before trimming so leading/trailing controls cannot disappear.
+    # Keep ordinary RTL text, ZWNJ in Persian/Indic text and ZWJ in emoji.
+    if isinstance(value, str):
+        if re.search(r"[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b\u200e-\u200f\u2028-\u202e\u2060-\u2069\ufeff]", value):
+            raise ValueError("Display name must not contain control characters or invisible formatting controls")
+        if value.strip() and all(unicodedata.category(char)[0] in {"C", "M", "Z"} for char in value):
+            raise ValueError("Display name must contain visible text")
+    return value
+
+
+AgentDisplayName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), BeforeValidator(_validate_display_name)]
 
 
 def _blank_to_none(value: str | None) -> str | None:
@@ -192,6 +208,7 @@ class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: AgentDisplayName | None = None
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
@@ -201,6 +218,12 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Stable MCP installation IDs. None inherits all; [] selects none.
+    # This is tool selection, not a replacement for host authorization.
+    mcp_plugins: list[str] | None = None
+    # Default for new Gateway turns; explicit message scope overrides it.
+    # Kept outside managed fields so harness self-updates preserve the binding.
+    knowledge_scope: KnowledgeScope | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to
@@ -215,6 +238,9 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Disable every memory path for stateless execution-oriented agents while
+    # preserving the global memory configuration for all other agents.
+    memory_enabled: bool = True
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.

@@ -17,6 +17,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
+from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
@@ -52,15 +53,17 @@ class BackgroundTaskState(TypedDict):
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
-    Only lightweight metadata is persisted in checkpoint state; the actual
-    image bytes are read on-demand from disk when the model needs them.
-    This avoids duplicating large base64 payloads across every checkpoint
-    (see #4138).
+    Only lightweight metadata is persisted in checkpoint state. Image bytes are
+    read on-demand from the active sandbox or from a synchronized host copy whose
+    size and SHA-256 match the previously viewed bytes. This avoids duplicating
+    large base64 payloads across every checkpoint (see #4138).
     """
 
     mime_type: str
     size: int
     actual_path: str
+    sha256: str
+    source_sandbox_id: NotRequired[str]
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -286,6 +289,8 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
+    task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
 
@@ -403,6 +408,7 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "promoted",
         "delegations",
         "skill_context",
+        "task_notes",
     }
 )
 

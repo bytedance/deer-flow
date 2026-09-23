@@ -20,6 +20,7 @@ from skill_review_waivers import (
     parse_manifest,
     validate_manifest_against_facts,
 )
+from support.symlinks import symlink_or_skip
 
 from deerflow.skills.review.analyzer import analyze_skill_package
 from deerflow.skills.review.readers import LocalDirectoryReader
@@ -34,7 +35,12 @@ def _write_target(repo_root: Path, content: bytes = b"safe subprocess invocation
     return target, f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
-def _waiver(*, digest: str, expires_on: date = date(2027, 2, 28)) -> SkillReviewWaiver:
+def _waiver(
+    *,
+    digest: str,
+    expires_on: date = date(2027, 2, 28),
+    preapproved_file_sha256s: tuple[str, ...] = (),
+) -> SkillReviewWaiver:
     return SkillReviewWaiver(
         package="skills/public/demo",
         source="skillscan",
@@ -45,6 +51,7 @@ def _waiver(*, digest: str, expires_on: date = date(2027, 2, 28)) -> SkillReview
         file_sha256=digest,
         reason="Fixed executable and argv invocation with shell disabled.",
         expires_on=expires_on,
+        preapproved_file_sha256s=preapproved_file_sha256s,
     )
 
 
@@ -60,7 +67,13 @@ def _finding(*, severity: str = "error", line: int = 12) -> dict[str, object]:
     }
 
 
-def _payload(*, digest: str, path: str = "scripts/run.py", duplicate: bool = False) -> bytes:
+def _payload(
+    *,
+    digest: str,
+    path: str = "scripts/run.py",
+    duplicate: bool = False,
+    preapproved_file_sha256s: object | None = None,
+) -> bytes:
     entry = {
         "package": "skills/public/demo",
         "source": "skillscan",
@@ -72,6 +85,8 @@ def _payload(*, digest: str, path: str = "scripts/run.py", duplicate: bool = Fal
         "reason": "Fixed executable and argv invocation with shell disabled.",
         "expires_on": "2027-02-28",
     }
+    if preapproved_file_sha256s is not None:
+        entry["preapproved_file_sha256s"] = preapproved_file_sha256s
     return json.dumps({"schema_version": SCHEMA_VERSION, "waivers": [entry, entry] if duplicate else [entry]}).encode()
 
 
@@ -84,6 +99,8 @@ def test_committed_manifest_matches_schema_and_strict_parser() -> None:
     parsed = parse_manifest(manifest_path.read_bytes(), source=str(manifest_path))
 
     assert len(parsed.waivers) == 2
+    assert parsed.waivers[0].preapproved_file_sha256s == ("sha256:2877bde08bf3f437b9dae3d57585a0840b9b1024736d2e5c6c657b71899269d0",)
+    assert parsed.waivers[1].preapproved_file_sha256s == ("sha256:ea2521ba41c8fd16b2900758c890bb6c6d2b4b01da10b4a860facb8587ed0bde",)
 
 
 def test_skill_creator_waivers_match_current_error_findings() -> None:
@@ -115,6 +132,27 @@ def test_parser_rejects_duplicate_exact_waivers(tmp_path: Path) -> None:
         parse_manifest(_payload(digest=digest, duplicate=True), source="test manifest")
 
 
+@pytest.mark.parametrize(
+    ("preapproved", "error"),
+    [
+        ("sha256:" + "1" * 64, "must be an array"),
+        (["sha256:" + "1" * 63], "64 lowercase hex characters"),
+        (["sha256:" + "1" * 64] * 2, "entries must be unique"),
+        (["PRIMARY"], "must not repeat file_sha256"),
+        ([f"sha256:{index:064x}" for index in range(9)], "at most 8 entries"),
+    ],
+)
+def test_parser_rejects_invalid_preapproved_hashes(tmp_path: Path, preapproved: object, error: str) -> None:
+    _, digest = _write_target(tmp_path)
+    value = [digest] if preapproved == ["PRIMARY"] else preapproved
+
+    with pytest.raises(WaiverManifestError, match=error):
+        parse_manifest(
+            _payload(digest=digest, preapproved_file_sha256s=value),
+            source="test manifest",
+        )
+
+
 def test_missing_manifest_at_ref_means_no_waivers(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         waiver_support.subprocess,
@@ -138,12 +176,53 @@ def test_matching_waiver_requires_exact_finding_and_current_file_hash(tmp_path: 
     assert matching_waiver(_finding(), package="skills/public/demo", manifest=manifest, repo_root=tmp_path, today=date(2026, 8, 31)) is None
 
 
+def test_preapproved_file_hash_authorizes_a_later_file_revision(tmp_path: Path) -> None:
+    target, current_digest = _write_target(tmp_path)
+    future_content = b"safe subprocess invocation with explicit UTF-8\n"
+    future_digest = f"sha256:{hashlib.sha256(future_content).hexdigest()}"
+    waiver = _waiver(digest=current_digest, preapproved_file_sha256s=(future_digest,))
+    manifest = WaiverManifest((waiver,))
+    facts = {"findings": [_finding()]}
+
+    assert (
+        validate_manifest_against_facts(
+            manifest,
+            facts_by_package={waiver.package: facts},
+            repo_root=tmp_path,
+            today=date(2026, 8, 31),
+        )
+        == []
+    )
+
+    target.write_bytes(future_content)
+
+    assert (
+        matching_waiver(
+            _finding(),
+            package=waiver.package,
+            manifest=manifest,
+            repo_root=tmp_path,
+            today=date(2026, 8, 31),
+        )
+        is waiver
+    )
+    assert (
+        validate_manifest_against_facts(
+            manifest,
+            facts_by_package={waiver.package: facts},
+            repo_root=tmp_path,
+            today=date(2026, 8, 31),
+        )
+        == []
+    )
+
+
 def test_matching_waiver_rejects_symlinked_package_outside_repository(tmp_path: Path) -> None:
     external_root = tmp_path.parent / f"{tmp_path.name}-external"
     external_target, digest = _write_target(external_root)
     public_root = tmp_path / "skills/public"
     public_root.mkdir(parents=True)
-    (public_root / "demo").symlink_to(external_target.parents[1], target_is_directory=True)
+    symlink_or_skip(public_root / "demo", external_target.parents[1], target_is_directory=True)
 
     assert (
         matching_waiver(

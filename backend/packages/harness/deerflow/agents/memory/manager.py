@@ -17,10 +17,13 @@ do not impede pluggability.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import os
+import sys
 import threading
 from abc import abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -41,6 +44,23 @@ _MANAGER_CLASS_ATTR = "MANAGER_CLASS"
 _memory_manager: MemoryManager | None = None
 _backends_cache: dict[str, type[MemoryManager]] | None = None
 _manager_lock = threading.Lock()
+
+
+def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
+    """Pass the optional hint only when a backend accepts that keyword.
+
+    Older plugins need no signature change. An uninspectable callable keeps
+    the old call contract; backend TypeErrors must never trigger a retry.
+    """
+    if query is None:
+        return {}
+    try:
+        parameters = inspect.signature(get_context).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "query" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"query": query}
+    return {}
 
 
 class MemoryCallbacks:
@@ -84,6 +104,10 @@ class MemoryCallbacks:
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
+
+
+class MemoryReadError(MemoryManagerError):
+    """A required memory read failed, so callers must not continue without it."""
 
 
 class MemoryConflictError(MemoryManagerError):
@@ -166,6 +190,28 @@ class MemoryManager(BaseModel):
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        """Honor legacy fail_closed using only in-memory config; do not perform I/O."""
+
+        failure_policy = backend_config.get("failure_policy") if isinstance(backend_config, dict) else None
+        return isinstance(failure_policy, dict) and failure_policy.get("read") == "fail_closed"
+
+    @property
+    def read_failures_are_fatal(self) -> bool:
+        """Whether caller-owned timeouts must abort instead of degrading.
+
+        Backends that require memory context override the class-level config
+        resolver so this remains available before or after manager creation.
+        The default honors legacy ``fail_closed``; other settings are permissive
+        unless the backend overrides the config resolver.
+        """
+
+        return type(self).read_failures_are_fatal_for_config(self.backend_config)
+
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
         """Cross-field invariants every backend must satisfy at instantiation.
@@ -228,13 +274,25 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
+
+        ``query`` is an optional current-turn query hint. Backends that
+        support query-aware ranking (DeerMem with
+        ``retrieval_relevance_enabled``) may rank injected facts against it;
+        other backends ignore it. ``None`` must preserve legacy behavior.
 
         Implementations load their memory and format it however they choose;
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+
+        Backends configured to tolerate read failures return an empty string.
+        Backends configured to require memory context raise
+        :class:`MemoryReadError`, which callers must propagate, and expose
+        ``read_failures_are_fatal`` so caller-owned timeouts preserve the same
+        policy before a backend call returns.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -313,6 +371,36 @@ class MemoryManager(BaseModel):
         ``NotImplementedError``); backends that support clearing override.
         """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
+
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Cancel buffered memory-extraction work for a scope.
+
+        Backends without a debounce queue have nothing to cancel and inherit
+        the default ``0``. DeerMem drops matching pending contexts so a deleted
+        or cleared agent cannot be resurrected by a late timer fire.
+
+        Scope (must stay symmetric with ``clear_memory`` / storage buckets):
+
+        - ``user_id`` selects the user bucket. ``user_id=None`` means the
+          **legacy no-user root only**, never "every user in the process".
+        - ``agent_name=None`` cancels every agent bucket inside that user
+          scope (including the default/global bucket).
+        - An explicit ``agent_name`` cancels only that agent's pending
+          contexts inside the same user scope.
+
+        There is no "cancel the whole process-local queue" form of this
+        method; callers that need a broader sweep must iterate known user
+        scopes explicitly.
+
+        Returns:
+            Number of pending contexts cancelled. Default: ``0``.
+        """
+        return 0
 
     def import_memory(
         self,
@@ -467,8 +555,9 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id, **context_query_kwargs(self.get_context, query))
 
     async def asearch(
         self,
@@ -560,7 +649,7 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
     return registry
 
 
-def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
+def _resolve_manager_class(manager_class: str, *, allow_discovery: bool = True) -> type[MemoryManager]:
     """Resolve a ``manager_class`` config value to a concrete class.
 
     Resolution order:
@@ -575,7 +664,9 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     is resolved eagerly at startup so it can be warmed) so the operator fixes
     ``memory.manager_class`` instead of discovering the mismatch later.
     """
-    registry = _scan_backends()
+    # Timeout preparation may only inspect already-loaded backends. Do not
+    # turn a cold registry or dotted import into event-loop file/import I/O.
+    registry = _scan_backends() if allow_discovery else (_backends_cache or {})
     if manager_class in registry:
         return registry[manager_class]
 
@@ -587,11 +678,14 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
         module_path, _, attr = manager_class.rpartition(".")
     if module_path and attr:
         try:
-            module = importlib.import_module(module_path)
+            module = importlib.import_module(module_path) if allow_discovery else sys.modules.get(module_path)
         except ImportError as e:
             dotted_error = f"cannot import module {module_path!r}: {e}"
         else:
-            cls = getattr(module, attr, None)
+            if allow_discovery:
+                cls = getattr(module, attr, None)
+            else:
+                cls = vars(module).get(attr) if module is not None else None
             if cls is None:
                 dotted_error = f"attribute {attr!r} not found in {module_path!r}"
             elif not (isinstance(cls, type) and issubclass(cls, MemoryManager)):
@@ -898,6 +992,33 @@ def get_memory_manager() -> MemoryManager:
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
+
+
+def memory_read_failures_are_fatal(
+    manager_class: str,
+    backend_config: dict[str, Any] | None,
+    *,
+    resolved_only: bool = False,
+) -> bool | None:
+    """Resolve strict-read capability without constructing a new manager.
+
+    With ``resolved_only``, never scan/import backends; return ``None`` when
+    the class is not already loaded. The caller can finish discovery inside
+    its bounded worker. Invalid config and full-resolution failures fail closed.
+    """
+
+    try:
+        cls = _resolve_manager_class(manager_class, allow_discovery=not resolved_only)
+    except Exception:
+        if resolved_only:
+            return None
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
+    try:
+        return cls.read_failures_are_fatal_for_config(backend_config)
+    except Exception:
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
 
 
 def reset_memory_manager() -> None:

@@ -4,6 +4,7 @@ host-path masking avoids process-global regex retention.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -63,7 +64,9 @@ def test_empty_mappings_yield_no_pattern(tmp_path):
 
 def test_command_paths_resolved_to_local(tmp_path):
     sb = _make_sandbox(tmp_path)
-    ws_local = str((tmp_path / "workspace").resolve())
+    # Command resolution spells the local path with forward slashes so bash
+    # never sees backslash escape sequences on Windows hosts.
+    ws_local = str((tmp_path / "workspace").resolve()).replace("\\", "/")
     out = sb._resolve_paths_in_command("cat /mnt/user-data/workspace/foo.txt")
     assert out == f"cat {ws_local}/foo.txt"
     # Calling again uses the cached pattern and produces the same result.
@@ -202,8 +205,11 @@ def test_resolved_paths_and_sorted_views_are_cached(tmp_path):
 def test_forward_resolution_behavior_unchanged(tmp_path):
     sb = _make_sandbox(tmp_path)
     ws_local = str((tmp_path / "workspace").resolve())
+    # _resolve_path feeds file operations, so the resolved path keeps the
+    # native separator spelling (os.path.join/realpath).
+    expected = os.path.join(ws_local, "sub", "foo.txt")
     # Container path resolves to the mapped local path.
-    assert sb._resolve_path("/mnt/user-data/workspace/sub/foo.txt") == f"{ws_local}/sub/foo.txt"
+    assert sb._resolve_path("/mnt/user-data/workspace/sub/foo.txt") == expected
     # An unmapped path is returned unchanged.
     assert sb._resolve_path("/etc/hosts") == "/etc/hosts"
 

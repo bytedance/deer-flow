@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from _host_path_helpers import posix_path
 
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
@@ -602,11 +603,11 @@ class TestThreeWayMountEndToEnd:
 
         assert "/mnt/skills/custom" in mount_entries
         assert "dst=/mnt/skills/custom" in mount_entries["/mnt/skills/custom"]
-        assert "users/noob/skills_view/custom" in mount_entries["/mnt/skills/custom"]
+        assert "users/noob/skills_view/custom" in posix_path(mount_entries["/mnt/skills/custom"])
 
         assert "/mnt/skills/integrations" in mount_entries
         assert "dst=/mnt/skills/integrations" in mount_entries["/mnt/skills/integrations"]
-        assert "users/noob/skills_view/integrations" in mount_entries["/mnt/skills/integrations"]
+        assert "users/noob/skills_view/integrations" in posix_path(mount_entries["/mnt/skills/integrations"])
 
         # noob has no per-user custom → legacy is mounted
         assert "/mnt/skills/legacy" in mount_entries

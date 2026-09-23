@@ -5,11 +5,27 @@ on:
     branches: [ 'main', '2.0.x-dev' ]
     paths:
       - 'frontend/**'
+      - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/packages/harness/deerflow/config/plugin_settings.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'examples/deerflow-extension-bookmarks/**'
       - '.github/workflows/e2e-tests.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'frontend/**'
+      - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/packages/harness/deerflow/config/plugin_settings.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'examples/deerflow-extension-bookmarks/**'
       - '.github/workflows/e2e-tests.yml'
 
 concurrency:
@@ -23,11 +39,27 @@ jobs:
   e2e-tests:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # The bookmark browser test starts the real Python action/router fixture.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Keep aligned with backend/Dockerfile and other backend workflows.
+          version: "0.11.1"
+
+      - name: Install backend dependencies (bookmark plugin gateway)
+        working-directory: backend
+        run: uv sync --locked
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

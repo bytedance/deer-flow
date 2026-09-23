@@ -13,6 +13,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
@@ -23,22 +24,11 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegations",
-        "messages",
-        "skill_context",
-        "thread_data",
-        "viewed_images"
-      ]
-    },
-    {
-      "event": "values",
-      "keys": [
-        "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
         "thread_data",
-        "uploaded_files",
         "viewed_images"
       ]
     },
@@ -46,6 +36,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
@@ -58,6 +49,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
@@ -70,6 +62,20 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
@@ -83,6 +89,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "skill_context",
@@ -96,6 +103,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",
@@ -110,6 +118,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",
@@ -124,6 +133,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",
@@ -138,6 +148,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",
@@ -152,6 +163,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",
@@ -166,6 +178,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "background_tasks",
         "delegations",
         "messages",
         "sandbox",

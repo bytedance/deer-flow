@@ -22,6 +22,8 @@ from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 def _stub_app_config(monkeypatch):
     """Keep router tests independent from a developer-local config.yaml."""
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
@@ -1222,3 +1224,182 @@ def test_disconnect_connection_is_current_user_scoped(tmp_path):
     assert anyio.run(get_connection_status) == "connected"
 
     anyio.run(repo.close)
+
+
+@pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}])
+def test_wechat_qr_login_saves_credentials_without_exposing_token(monkeypatch, worker_env):
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    for name, value in worker_env.items():
+        monkeypatch.setenv(name, value)
+    app = _make_app(_enabled_connections_config(), None, {})
+    login = WechatQRLogin()
+    login.request = AsyncMock(side_effect=[{"qrcode": "poll-secret", "qrcode_img_content": "scan-url"}, {"status": "confirmed", "bot_token": "new-secret", "ilink_bot_id": "bot-1"}])
+    app.state.wechat_qr_login = login
+    restart = AsyncMock(return_value=True)
+    monkeypatch.setattr(channel_connections, "_restart_runtime_channel_if_available", restart)
+    with TestClient(app) as client:
+        started = client.post("/api/channels/wechat/qr-login")
+        assert started.status_code == 200
+        assert started.headers["cache-control"] == "no-store"
+        assert "poll-secret" not in started.text
+        url = f"/api/channels/wechat/qr-login/{started.json()['id']}"
+        confirmed = client.post(f"{url}/poll")
+        assert confirmed.status_code == 200
+        assert confirmed.json()["status"] == "confirmed"
+        assert confirmed.json()["provider"]["credential_values"]["bot_token"] == "********"
+        assert "new-secret" not in confirmed.text
+        assert app.state.channels_config["wechat"]["bot_token"] == "new-secret"
+        assert app.state.channels_config["wechat"]["ilink_bot_id"] == "bot-1"
+        saved = ChannelRuntimeConfigStore(app.state.channel_runtime_config_store._path).get_provider_config("wechat")
+        assert saved["bot_token"] == "new-secret"
+        assert saved["ilink_bot_id"] == "bot-1"
+        client.post(f"{url}/poll")
+        restart.assert_awaited_once()
+        assert client.delete(url).status_code == 204
+        assert client.post(f"{url}/poll").status_code == 404
+
+
+def test_wechat_qr_login_requires_admin_before_any_provider_calls():
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    app = make_authed_test_app(user_factory=_non_admin_user)
+    login = WechatQRLogin()
+    login.request = AsyncMock()
+    app.state.wechat_qr_login = login
+    app.include_router(channel_connections.router)
+    with TestClient(app) as client:
+        assert client.post("/api/channels/wechat/qr-login").status_code == 403
+        assert client.post("/api/channels/wechat/qr-login/id/poll").status_code == 403
+        assert client.delete("/api/channels/wechat/qr-login/id").status_code == 403
+    login.request.assert_not_awaited()
+
+
+def test_wechat_qr_login_respects_disabled_provider():
+    app = _make_app(ChannelConnectionsConfig.model_validate({"enabled": True, "wechat": {"enabled": False}}), None)
+    with TestClient(app) as client:
+        assert client.post("/api/channels/wechat/qr-login").status_code == 400
+
+
+@pytest.mark.parametrize("method,path", [("POST", "/api/channels/wechat/qr-login"), ("POST", "/api/channels/wechat/qr-login/session/poll"), ("DELETE", "/api/channels/wechat/qr-login/session")])
+def test_wechat_qr_routes_reject_cookie_requests_without_csrf(method, path):
+    from app.gateway.csrf_middleware import CSRFMiddleware
+
+    app = _make_app(_enabled_connections_config(), None)
+    app.add_middleware(CSRFMiddleware)
+    with TestClient(app) as client:
+        response = client.request(method, path, headers={"Cookie": "session=browser-session"})
+    assert response.status_code == 403
+
+
+def test_manual_wechat_setup_invalidates_pending_qr(monkeypatch):
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    app = _make_app(_enabled_connections_config(), None)
+    login = WechatQRLogin()
+    login.request = AsyncMock(return_value={"qrcode": "id", "qrcode_img_content": "scan"})
+    app.state.wechat_qr_login = login
+    monkeypatch.setattr(channel_connections, "_restart_runtime_channel_if_available", AsyncMock(return_value=True))
+    with TestClient(app) as client:
+        session = client.post("/api/channels/wechat/qr-login").json()
+        assert client.post("/api/channels/wechat/runtime-config", json={"values": {"bot_token": "manual-token"}}).status_code == 200
+        assert client.post(f"/api/channels/wechat/qr-login/{session['id']}/poll").status_code == 404
+    assert app.state.channels_config["wechat"]["bot_token"] == "manual-token"
+
+
+def test_wechat_pairing_code_is_validated_and_forwarded_without_echo(monkeypatch):
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    app = _make_app(_enabled_connections_config(), None, {})
+    login = WechatQRLogin()
+    login.request = AsyncMock(
+        side_effect=[
+            {"qrcode": "private-id", "qrcode_img_content": "scan-url"},
+            {"status": "need_verifycode"},
+            {"status": "confirmed", "bot_token": "new-secret", "baseurl": "https://ilinkai2.weixin.qq.com/"},
+        ]
+    )
+    app.state.wechat_qr_login = login
+    monkeypatch.setattr(channel_connections, "_restart_runtime_channel_if_available", AsyncMock(return_value=True))
+    with TestClient(app) as client:
+        session = client.post("/api/channels/wechat/qr-login").json()
+        poll_url = f"/api/channels/wechat/qr-login/{session['id']}/poll"
+        assert client.post(poll_url).json()["status"] == "verification_required"
+        assert client.post(poll_url, json={"verify_code": "not-a-code"}).status_code == 422
+        result = client.post(poll_url, json={"verify_code": "123456"})
+        assert result.status_code == 200
+        assert result.json()["status"] == "confirmed"
+        assert "123456" not in result.text
+        assert "new-secret" not in result.text
+        assert login.request.call_args.kwargs["verify_code"] == "123456"
+        saved = ChannelRuntimeConfigStore(app.state.channel_runtime_config_store._path).get_provider_config("wechat")
+        assert saved["base_url"] == "https://ilinkai2.weixin.qq.com"
+
+
+@pytest.mark.parametrize(
+    "returned_fields,expected_id",
+    [({}, "existing-bot"), ({"ilink_bot_id": None}, "existing-bot"), ({"ilink_bot_id": ""}, "existing-bot"), ({"ilink_bot_id": "   "}, "existing-bot"), ({"ilink_bot_id": "  replacement-bot  "}, "replacement-bot")],
+)
+def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, returned_fields, expected_id):
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    existing = {"enabled": True, "bot_token": "old-token", "ilink_bot_id": "existing-bot"}
+    app = _make_app(_enabled_connections_config(), None, {"wechat": existing})
+    app.state.channel_runtime_config_store.set_provider_config("wechat", existing)
+    login = WechatQRLogin()
+    login.request = AsyncMock(side_effect=[{"qrcode": "private-id", "qrcode_img_content": "scan-url"}, {"status": "confirmed", "bot_token": "new-token", **returned_fields}])
+    app.state.wechat_qr_login = login
+    restart = AsyncMock(return_value=True)
+    monkeypatch.setattr(channel_connections, "_restart_runtime_channel_if_available", restart)
+
+    with TestClient(app) as client:
+        started = client.post("/api/channels/wechat/qr-login")
+        assert started.status_code == 200
+        result = client.post(f"/api/channels/wechat/qr-login/{started.json()['id']}/poll")
+        assert result.status_code == 200
+        assert result.json()["status"] == "confirmed"
+
+    expected = {**existing, "bot_token": "new-token", "ilink_bot_id": expected_id}
+    restart.assert_awaited_once_with("wechat", expected)
+    assert app.state.channels_config["wechat"] == expected
+    saved = ChannelRuntimeConfigStore(app.state.channel_runtime_config_store._path).get_provider_config("wechat")
+    assert saved == expected
+
+
+@pytest.mark.parametrize("worker_env", [{"GATEWAY_WORKERS": "2"}, {"GATEWAY_WORKERS": "4"}, {"WEB_CONCURRENCY": "2"}, {"GATEWAY_WORKERS": "invalid"}])
+@pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
+def test_wechat_qr_routes_reject_unsupported_workers_before_session_access(monkeypatch, worker_env, method, suffix):
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    for name, value in worker_env.items():
+        monkeypatch.setenv(name, value)
+    app = _make_app(_enabled_connections_config(), None)
+    login = WechatQRLogin()
+    session = {"id": "session", "status": "pending", "qrcode_content": "scan-url", "expires_in": 180}
+    login.start = AsyncMock(return_value=session)
+    login.poll = AsyncMock(return_value=session)
+    login.cancel = AsyncMock(return_value=None)
+    app.state.wechat_qr_login = login
+
+    with TestClient(app) as client:
+        result = client.request(method, f"/api/channels/wechat/qr-login{suffix}")
+
+    assert result.status_code == 503
+    assert "single Gateway worker" in result.json()["detail"]
+    assert "GATEWAY_WORKERS=1" in result.json()["detail"]
+    login.start.assert_not_awaited()
+    login.poll.assert_not_awaited()
+    login.cancel.assert_not_awaited()
+
+
+def test_manual_wechat_setup_remains_available_with_multiple_workers(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    app = _make_app(_enabled_connections_config(), None)
+    restart = AsyncMock(return_value=True)
+    monkeypatch.setattr(channel_connections, "_restart_runtime_channel_if_available", restart)
+
+    with TestClient(app) as client:
+        result = client.post("/api/channels/wechat/runtime-config", json={"values": {"bot_token": "manual-token"}})
+    assert result.status_code == 200
+    assert app.state.channels_config["wechat"]["bot_token"] == "manual-token"
+    restart.assert_awaited_once()

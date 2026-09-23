@@ -683,7 +683,7 @@ Capacités actuelles du MVP :
 
 - Gérer les tâches depuis `/workspace/scheduled-tasks`
 - Choisir si chaque tâche planifiée réutilise un thread ou crée un nouveau thread à chaque exécution
-- Prendre en charge les planifications `once` et `cron`
+- Prendre en charge les planifications `once`, `cron` et `interval`
 - Exécuter les tâches planifiées en arrière-plan comme des exécutions DeerFlow non interactives (`ask_clarification` n'y est pas exposé)
 - Utiliser le comportement de chevauchement `skip` pour les exécutions cron dues qui entrent en collision avec une exécution active sur le même thread réutilisé
 - Mettre en pause, reprendre, déclencher, inspecter l'historique et supprimer les tâches
@@ -694,7 +694,6 @@ Limites actuelles du MVP :
 - Pas encore d'outil `schedule_task` créable depuis la conversation
 - Pas de tâches de notification en texte seul
 - Pas de cibles de dispatch canal ou GitHub
-- Pas de type de planification `interval` dans cette première version
 
 Activez le polling en arrière-plan avec `config.yaml -> scheduler.enabled`. Le déclenchement manuel utilise la même ressource scheduled-task et le même chemin d'exécution.
 

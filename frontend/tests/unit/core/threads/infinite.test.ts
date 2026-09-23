@@ -5,6 +5,7 @@ import {
   type InfiniteData,
 } from "@tanstack/react-query";
 
+import { PROJECTS_QUERY_KEY } from "@/core/projects/api";
 import {
   fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,
@@ -324,7 +325,7 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       false,
     ]);
-    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
   });
 
   test("preserves loaded history pages while invalidating", () => {
@@ -360,7 +361,7 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       true,
     ]);
-    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
   });
 
   test("wraps SDK stop and refreshes caches after it resolves", async () => {
@@ -495,4 +496,22 @@ describe("invalidateStoppedThreadCaches", () => {
       rs.useRealTimers();
     }
   });
+});
+
+test("run-created snapshots without archive metadata cannot insert into filtered lists", () => {
+  const client = new QueryClient();
+  const recentKey = [...INFINITE_THREADS_QUERY_KEY_PREFIX, { archived: false }];
+  const archivedKey = [
+    ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+    { archived: true },
+  ];
+  const empty = makeInfiniteData([[]]);
+  client.setQueryData(recentKey, empty);
+  client.setQueryData(archivedKey, empty);
+  upsertThreadInInfiniteCache(client, makeThread("running-thread"));
+  expect(client.getQueryData(recentKey)).toEqual(empty);
+  expect(client.getQueryData(archivedKey)).toEqual(empty);
+  expect(client.getQueryState(recentKey)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(archivedKey)?.isInvalidated).toBe(true);
+  client.clear();
 });

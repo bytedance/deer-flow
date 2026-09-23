@@ -1,16 +1,14 @@
 name: Sandbox Image Smoke
 
-# Real-image validation of the Docker sandbox hardening: pulls the shipped
-# AIO image and drives it through the production readiness deadline
-# (SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT). The offline unit suite (-m "not
-# live") never runs this, so this dedicated job is the only place the
-# known-bad capability/startup regressions are caught before merge.
+# Real-image validation of the Docker sandbox hardening. The job preserves
+# baseline coverage for the repository-configured/default AIO image and also
+# exercises the 1.11.0 startup path that requires FOWNER for chmod on
+# /run/user/1000. The offline unit suite (-m "not live") never runs these.
 #
-# Reproducibility: the image reference comes from the repository variable
-# SANDBOX_SMOKE_IMAGE (pin a digest there, e.g.
-# registry/.../all-in-one-sandbox@sha256:...). When unset it falls back to
-# the mutable :latest tag and the resolved digest is printed to the job
-# summary so a failure can be reproduced against the exact image tested.
+# Reproducibility: SANDBOX_SMOKE_IMAGE can pin the baseline image. Both that
+# image (or the :latest fallback) and the explicit 1.11.0 regression image are
+# pulled first and converted to immutable repo@sha256 references; the exact
+# digests are printed to the job summary before either live test runs.
 
 on:
   workflow_dispatch:
@@ -31,27 +29,36 @@ permissions:
 jobs:
   sandbox-image-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       SANDBOX_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
+      FOWNER_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_FOWNER_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Resolve an immutable image reference for this run
-        # Pull once on the runner's platform and export the immutable
-        # repo@sha256 reference through GITHUB_ENV: the test then runs the
-        # exact image recorded here, and a tag moving between steps cannot
-        # make the summary name a different image than the one executed.
-        # (docker manifest inspect + jq is not used because picking a
-        # manifest from the index by hand can miss the runner's platform.)
+      - name: Resolve immutable image references for this run
+        # Pull on the runner's platform, then pass only immutable repo@sha256
+        # references to pytest. This keeps both the baseline and the 1.11.0
+        # regression run reproducible even if either source tag moves later.
         run: |
           set -euo pipefail
-          docker pull "$SANDBOX_SMOKE_IMAGE_REF" >/dev/null
-          repo_digest="$(docker image inspect "$SANDBOX_SMOKE_IMAGE_REF" --format '{{index .RepoDigests 0}}')"
-          echo "DEER_FLOW_SANDBOX_SMOKE_IMAGE=$repo_digest" >> "$GITHUB_ENV"
-          echo "Smoke-testing immutable reference: $repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          resolve_image() {
+            local source_ref="$1"
+            local output_var="$2"
+            local label="$3"
+            local repo_digest
+
+            docker pull "$source_ref" >/dev/null
+            repo_digest="$(docker image inspect "$source_ref" --format '{{index .RepoDigests 0}}')"
+            echo "$output_var=$repo_digest" >> "$GITHUB_ENV"
+            printf '%s: `%s`\n' "$label" "$repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+
+          resolve_image "$SANDBOX_SMOKE_IMAGE_REF" DEER_FLOW_SANDBOX_SMOKE_IMAGE "Configured/default smoke image"
+          resolve_image "$FOWNER_SMOKE_IMAGE_REF" DEER_FLOW_SANDBOX_FOWNER_SMOKE_IMAGE "FOWNER regression image (1.11.0)"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -68,6 +75,6 @@ jobs:
         working-directory: backend
         run: uv sync --group dev
 
-      - name: Run the live real-image smoke test
+      - name: Run the live real-image smoke tests
         working-directory: backend
         run: uv run pytest -m live tests/test_aio_sandbox_local_backend.py -v

@@ -32,10 +32,16 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.lease import (
+    get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
+    sandbox_command_scope,
+    sandbox_lease_owner,
+)
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -61,6 +67,7 @@ _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
 _DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
+_LOCAL_BASH_PATH_RECOVERY_GUIDANCE = "For environment questions, use command-only probes such as uname; otherwise use an allowed virtual path. Do not repeat the rejected path."
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -597,6 +604,10 @@ def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> 
 
 def _format_glob_results(root_path: str, matches: list[str], truncated: bool) -> str:
     if not matches:
+        # A remote search can hit its output cap before any path survives the
+        # Python-side filters; that is not evidence that nothing matches.
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no files matched in the part it covered; results are incomplete. Narrow the path or pattern."
         return f"No files matched under {root_path}"
 
     lines = [f"Found {len(matches)} paths under {root_path}"]
@@ -610,6 +621,8 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
 
 def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
     if not matches:
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no matches in the part it covered; results are incomplete. Narrow the path or add a glob filter."
         return f"No matches found under {root_path}"
 
     lines = [f"Found {len(matches)} matches under {root_path}"]
@@ -787,8 +800,10 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     # ``deerflow.sandbox.path_patterns`` so the static regex path and dynamic
     # scanner cannot drift.
     #
-    # ``separator_agnostic=True`` is the one thing this site does differently:
-    # output separators are outside this layer's control.
+    # ``separator_agnostic=True`` is required here: output separators are
+    # outside this layer's control. ``LocalSandbox`` needs it for the same
+    # reason — its forward resolution spells Windows paths with forward
+    # slashes even though its bases are resolved natively.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
@@ -860,7 +875,7 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             matched_path = match.group(0)
             if matched_path == _base:
                 return _virtual
-            relative = matched_path[len(_base) :].lstrip("/\\")
+            relative = normalize_mask_tail(matched_path[len(_base) :])
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)
@@ -1255,7 +1270,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
     if file_url_match:
-        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
@@ -1275,7 +1290,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -1404,6 +1419,44 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     return sandbox
 
 
+def _rollback_failed_sandbox_lookup(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Undo an acquire whose active client disappeared before lookup."""
+    try:
+        if owner_id is not None:
+            get_sandbox_lease_manager(provider).release(owner_id)
+        else:
+            provider.release(sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
+async def _rollback_failed_sandbox_lookup_async(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Async rollback without blocking the event loop on provider cleanup."""
+    try:
+        if owner_id is not None:
+            await get_sandbox_lease_manager(provider).release_async(owner_id)
+        else:
+            await asyncio.to_thread(provider.release, sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after async post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
 @contextmanager
 def sandbox_authorization_scope(runtime: Runtime) -> Iterator[None]:
     """Authorize once for one complete synchronous sandbox tool invocation."""
@@ -1440,6 +1493,14 @@ async def sandbox_authorization_scope_async(runtime: Runtime) -> AsyncIterator[N
         _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
+def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
+    """Resolve the thread identity consistently for reuse and acquisition."""
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    return thread_id
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1473,30 +1534,72 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
-    # Check if sandbox already exists in state
-    # Discarding fork_restored is safe: after_agent short-circuits on the
-    # still-wrapped state before the context-based release branch, so this
-    # reuse path never releases the parent sandbox.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    # Check if sandbox already exists in state. A fork-restored execution keeps
+    # the wrapper so after_agent cannot park the parent's sandbox, but it still
+    # binds a non-releasing holder: parent cleanup cannot close the client under
+    # the child, and the child's outer fence can clean its command scope.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
-                return sandbox
-            # Sandbox was released, fall through to acquire new one
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = provider.acquire(thread_id, user_id=user_id)
+                elif fork_restored:
+                    # Only the server-created fork wrapper may borrow a sandbox
+                    # from a different thread identity. Ordinary checkpoint ids
+                    # are resolved again from the authenticated user/thread.
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    return sandbox
+            # Missing thread scope or released sandbox: use the lazy path below.
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    if owner_id is None:
+        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+    else:
+        sandbox_id = get_sandbox_lease_manager(provider).acquire(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+        )
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1504,6 +1607,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1532,31 +1636,71 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
-    # Same discard as the sync path above: the reuse path never releases,
-    # because after_agent short-circuits on the still-wrapped state first.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    # Same borrowed-holder rule as the sync path above: keep the fork wrapper
+    # while counting the child as an active client user.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id
-                return sandbox
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+                elif fork_restored:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id
+                    return sandbox
 
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    if owner_id is None:
+        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+    else:
+        sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+        )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1577,11 +1721,35 @@ async def _run_sync_tool_after_async_sandbox_init(
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await asyncio.to_thread(func, runtime, *args)
+            return await run_sync_lifecycle_operation(func, runtime, *args)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+
+
+def _execute_bash_command(
+    sandbox: Sandbox,
+    command: str,
+    *,
+    runtime: Runtime,
+    env: dict[str, str] | None,
+    timeout: float | None = None,
+) -> str:
+    """Route subagent bash calls through their isolated shell-session scope."""
+    scope_id = sandbox_command_scope(runtime.context)
+    scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
+    if scope_id is not None and callable(scoped_execute):
+        return scoped_execute(
+            command,
+            env=env,
+            timeout=timeout,
+            scope_id=scope_id,
+        )
+    # Keep duck-typed custom providers and test doubles compatible: the scoped
+    # method is an additive Sandbox API, and ordinary/lead executions retain
+    # the original execute_command path.
+    return sandbox.execute_command(command, env=env, timeout=timeout)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1713,11 +1881,94 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
     return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}" + preserved
 
 
-def _truncate_read_file_output(output: str, max_chars: int) -> str:
+# A read_file cut prefers the last line boundary before the limit, so the model
+# never sees a partial line that reads as complete and the marker can name the
+# exact next ``start_line``. When the partial line at the cut is longer than
+# this, dropping it would throw away most of the budget (minified sources,
+# one-line JSON), so the cut stays at the character limit and the marker names
+# the line it fell inside instead.
+_READ_FILE_LINE_CUT_SLACK = 4096
+
+
+def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_lines: int, kept: int, total: int, inside_line: int | None, continuation: str, ends_at_eof: bool = True) -> str:
+    """Marker appended to a truncated read_file result.
+
+    Line numbers are file line numbers: ``line_offset`` is the number of file
+    lines before the first line of ``output`` (``start_line - 1`` for a ranged
+    read), so a continuation named here can be passed straight back to
+    ``read_file``. ``inside_line`` is None when the kept text ends on a line
+    boundary; otherwise it is the 1-based line of ``output`` the cut fell in
+    and ``continuation`` says how to go on from there ("next", "whole_line" or
+    "bash"). ``ends_at_eof`` is False when ``output`` is a bounded slice that
+    may stop before the end of the file, so a line after its last line can
+    still be named. The continuation is stated in lines because that is what
+    ``start_line`` and ``end_line`` take; character counts are kept for
+    reference.
+    """
+    first = line_offset + 1
+    span = f"of {total_lines}" if line_offset == 0 else f"of {first}-{line_offset + total_lines}"
+    if inside_line is None:
+        shown = f"first {shown_lines}" if line_offset == 0 else f"lines {first}-{line_offset + shown_lines}"
+        return f"... [truncated: showing {shown} {span} lines ({kept} of {total} chars). Continue with start_line={line_offset + shown_lines + 1}, or use start_line/end_line to read a specific range] ..."
+    line = line_offset + inside_line
+    head = f"\n... [truncated: showing first {kept} of {total} chars, cut inside line {line} {span} lines"
+    if continuation == "next":
+        return f"{head}. Continue with start_line={line}, or use start_line/end_line to read a specific range] ..."
+    if continuation == "whole_line":
+        # The line is longer than a read that also has to carry a marker, but
+        # a read of that line alone comes back whole. After the last line of a
+        # read that reached the end of the file there is nothing to name; a
+        # bounded slice may stop mid-file, and a read one past the end only
+        # answers that the line does not exist.
+        after = f", then continue with start_line={line + 1}" if inside_line < total_lines or not ends_at_eof else ""
+        return f"{head}. Read that line whole with start_line={line}, end_line={line}{after}] ..."
+    return f"{head}; that line is longer than a read can return. Use bash (for example cut -c) to read the rest of that line, or start_line/end_line for other lines] ..."
+
+
+# Digits assumed when estimating the marker a follow-up read will carry. The
+# follow-up may span more of the file than the current read did, so its counts
+# are unknown here; over-reserving by a few characters only makes the "fits a
+# fresh read" decision more cautious.
+_READ_FILE_PESSIMISTIC_COUNT = 999_999_999
+
+
+def _read_file_marker_reserve(*, line_offset: int, total_lines: int, total: int) -> int:
+    """Longest marker any form can produce for these bounds (every field at its maximum)."""
+    forms = [
+        dict(shown_lines=total_lines, inside_line=None, continuation="next"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="next"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="whole_line"),
+        dict(shown_lines=0, inside_line=total_lines, continuation="bash"),
+    ]
+    return max(len(_read_file_truncation_marker(line_offset=line_offset, total_lines=total_lines, kept=total, total=total, **form)) for form in forms)
+
+
+# Emitted when the budget cannot even hold a marker: the model must still
+# learn the output was cut and how to read it in pieces.
+_READ_FILE_TINY_BUDGET_MARKER = "... [truncated: {total} chars exceed the {max_chars}-char read limit; use start_line/end_line to read a smaller range] ..."
+
+
+def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int = 0, joined_lines: bool = False, ends_at_eof: bool = True) -> str:
     """Head-truncate read_file output, preserving the beginning of the file.
 
     Source code and documents are read top-to-bottom; the head contains the
     most context (imports, class definitions, function signatures).
+
+    The cut lands on the last line boundary the budget allows, so the kept
+    text ends with a complete line and the marker names the next
+    ``start_line`` in file line numbers (``line_offset`` is the number of file
+    lines before ``output``, i.e. ``start_line - 1`` of a ranged read;
+    ``joined_lines`` says the output is a provider slice of lines joined with
+    newlines, where a trailing newline is an empty last line rather than a
+    line terminator; ``ends_at_eof`` is False for a slice bounded by an
+    ``end_line`` that may stop before the end of the file). Only when the
+    line at the cut is longer than
+    ``_READ_FILE_LINE_CUT_SLACK`` does
+    the cut stay at the character limit; the marker then names the line it
+    fell inside and a continuation that is guaranteed to make progress: a
+    read from that line when the whole line fits such a read, a single-line
+    read when only the line alone fits, and bash when even that cannot return
+    it.
 
     The returned string (including the truncation marker) is guaranteed to be
     no longer than max_chars characters. Pass max_chars=0 to disable truncation
@@ -1728,13 +1979,33 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
     total = len(output)
-    # Compute the exact worst-case marker length: both numeric fields are at
-    # their maximum (total chars), so this is a tight upper bound.
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ...")
-    kept = max(0, max_chars - marker_max_len)
+    total_lines = output.count("\n") + (1 if joined_lines or not output.endswith("\n") else 0)
+    # Reserve the longest marker plus one character, so a newline sitting
+    # exactly at the budget can still be kept as a complete line.
+    kept = max(0, max_chars - _read_file_marker_reserve(line_offset=line_offset, total_lines=total_lines, total=total) - 1)
     if kept == 0:
-        return output[:max_chars]
-    marker = f"\n... [truncated: showing first {kept} of {total} chars. Use start_line/end_line to read a specific range] ..."
+        # Too small a budget for any text plus a marker: say so instead of
+        # returning a bare prefix that reads as the whole file.
+        return _READ_FILE_TINY_BUDGET_MARKER.format(total=total, max_chars=max_chars)[:max_chars]
+    boundary = output.rfind("\n", 0, kept + 1)
+    if boundary != -1 and kept - (boundary + 1) <= _READ_FILE_LINE_CUT_SLACK:
+        kept = boundary + 1
+        marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=output[:kept].count("\n"), total_lines=total_lines, kept=kept, total=total, inside_line=None, continuation="next")
+        return f"{output[:kept]}{marker}"
+    line_start = boundary + 1
+    line_end = output.find("\n", kept)
+    line_len = (total if line_end == -1 else line_end) - line_start
+    inside_line = output[:kept].count("\n") + 1
+    # What a read starting at this line could keep, estimated pessimistically:
+    # its marker may carry larger counts than this read's.
+    next_kept = max_chars - _read_file_marker_reserve(line_offset=line_offset + inside_line - 1, total_lines=_READ_FILE_PESSIMISTIC_COUNT, total=_READ_FILE_PESSIMISTIC_COUNT) - 1
+    if line_len <= next_kept:
+        continuation = "next"
+    elif line_len <= max_chars:
+        continuation = "whole_line"
+    else:
+        continuation = "bash"
+    marker = _read_file_truncation_marker(line_offset=line_offset, shown_lines=0, total_lines=total_lines, kept=kept, total=total, inside_line=inside_line, continuation=continuation, ends_at_eof=ends_at_eof)
     return f"{output[:kept]}{marker}"
 
 
@@ -1886,12 +2157,18 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a bash command in the configured execution environment.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - When running against the local host via host bash, inspect the current environment instead of
+      guessing. For OS detection, start with `uname -s`; on Darwin follow with `sw_vers`. On Linux,
+      start with `uname -a` and read host system files such as `/etc/os-release` only when the active
+      sandbox policy permits it.
+    - If local host bash rejects a path, do not repeat the rejected command. For environment questions,
+      retry with command-only probes; otherwise use allowed virtual paths or explain the restriction.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until
@@ -1936,7 +2213,13 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             except Exception:
                 max_chars = 20000
                 command_timeout = None
-            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            output = _execute_bash_command(
+                sandbox,
+                command,
+                runtime=runtime,
+                env=injected_env,
+                timeout=command_timeout,
+            )
             return _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
                 max_chars,
@@ -1952,7 +2235,18 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
+        return _truncate_bash_output(
+            mask_secret_values(
+                _execute_bash_command(
+                    sandbox,
+                    command,
+                    runtime=runtime,
+                    env=injected_env,
+                ),
+                injected_env,
+            ),
+            max_chars,
+        )
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -2249,6 +2543,15 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     return _read_file_from_sandbox(runtime, path)
 
 
+def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> bool:
+    """Whether ``line`` exists, given that a ranged read of it came back empty.
+
+    Providers join selected lines with newlines, so reading the previous line
+    together with this one yields a newline only if this line exists.
+    """
+    return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -2286,6 +2589,11 @@ def read_file_tool(
             content = read_current_file_content(runtime, path)
         if not content:
             if start_line is not None and start_line > 1:
+                # A blank line and a line past the end both read back as "";
+                # tell them apart so a continuation named by a truncation
+                # marker is not reported as beyond the file.
+                if _ranged_read_hits_a_line(runtime, path, start_line):
+                    return "(empty)"
                 return "(start_line exceeds file length)"
             return "(empty)"
         try:
@@ -2295,7 +2603,8 @@ def read_file_tool(
             max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
         except Exception:
             max_chars = 50000
-        return _truncate_read_file_output(content, max_chars)
+        # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
+        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
