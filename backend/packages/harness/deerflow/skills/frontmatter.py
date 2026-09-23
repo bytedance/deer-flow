@@ -45,6 +45,10 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
     message intentionally avoids host paths so callers can reuse it in
     deterministic review output.
     """
+    # A leading BOM (U+FEFF) is an encoding artifact added by Windows editors
+    # (Notepad, PowerShell 5.1), not a content decision; strip it so the
+    # front-matter anchor is evaluated against the real first line.
+    content = content.lstrip("\ufeff")
     match = _FRONTMATTER_RE.match(content)
     if not match:
         return None, "No YAML frontmatter found"

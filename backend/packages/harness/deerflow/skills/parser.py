@@ -213,7 +213,11 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         return None
 
     try:
-        content = skill_file.read_text(encoding="utf-8")
+        # "utf-8-sig" decodes plain UTF-8 unchanged and strips a leading BOM
+        # (U+FEFF) added by Windows editors (Notepad, PowerShell 5.1), which
+        # would otherwise break the front-matter anchor and silently drop the
+        # skill from the catalog.
+        content = skill_file.read_text(encoding="utf-8-sig")
 
         # Keep parser diagnostics richer than the pure helper's host-path-free
         # error string; tests and authoring UX depend on the line-specific hint.

@@ -24,7 +24,9 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     if not skill_md.exists():
         return False, f"{SKILL_MD_FILE} not found", None
 
-    content = skill_md.read_text(encoding="utf-8")
+    # "utf-8-sig" strips a leading BOM (U+FEFF) added by Windows editors;
+    # a BOM would otherwise make valid front matter read as absent.
+    content = skill_md.read_text(encoding="utf-8-sig")
     return validate_skill_frontmatter_text(content)
 
 
