@@ -16,6 +16,8 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from deerflow.utils.file_io import await_drained
+
 # Recycle pooled Postgres connections before stale idle sockets can hang
 # pool_pre_ping. The command timeout bounds stalled ORM queries independently.
 POSTGRES_POOL_RECYCLE_SECONDS = 300
@@ -79,7 +81,11 @@ async def _auto_create_postgres_db(url: str) -> None:
             await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
         logger.info("Auto-created PostgreSQL database: %s", db_name)
     finally:
-        await maint_engine.dispose()
+        # Drain: the maintenance engine is local to this helper, so an
+        # abandoned dispose leaves its pool to the ``postgres`` database with
+        # nothing left to close it. Host cancellation must therefore be
+        # delivered only after disposal actually finishes.
+        await await_drained(maint_engine.dispose())
 
 
 async def init_engine(
@@ -266,10 +272,21 @@ def get_engine() -> AsyncEngine | None:
 
 
 async def close_engine() -> None:
-    """Dispose the engine, release all connections."""
+    """Dispose the engine before releasing the process-global ownership."""
     global _engine, _session_factory
-    if _engine is not None:
-        await _engine.dispose()
+
+    engine = _engine
+    if engine is None:
+        _session_factory = None
+        return
+
+    async def dispose_and_clear() -> None:
+        global _engine, _session_factory
+
+        await engine.dispose()
         logger.info("Persistence engine closed")
-    _engine = None
-    _session_factory = None
+        if _engine is engine:
+            _engine = None
+            _session_factory = None
+
+    await await_drained(dispose_and_clear())

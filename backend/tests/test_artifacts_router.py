@@ -498,6 +498,7 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("inline;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
     assert invalid.status_code == 416
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
@@ -562,6 +563,7 @@ def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
     assert response.headers.get("etag") == f'"{expected}"'
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
@@ -575,6 +577,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     # The forced-download branch must carry a real SHA-256 ETag so the
     # frontend can enable inline editing (see issue #4864 review feedback).
     assert response.headers.get("etag") == f'"{hashlib.sha256(content.encode()).hexdigest()}"'
@@ -591,6 +594,7 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     assert bytes(response.body) == content.encode("utf-8")
 
 
@@ -622,6 +626,7 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
+        "image/svg",
         "text/xml",
         "application/xml",
         "text/xsl",
@@ -632,8 +637,8 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
     ],
 )
 def test_is_active_content_mime_type_covers_html_and_xml_documents(mime_type: str) -> None:
-    # Whether .rss or .atom guess to a +xml type depends on the host's
-    # mime.types file, so the classification is pinned on MIME types directly.
+    # MIME guesses depend on the host database (Windows uses image/svg), so
+    # classification is pinned on MIME types directly.
     assert artifacts_router._is_active_content_mime_type(mime_type)
 
 
@@ -665,6 +670,7 @@ def test_get_artifact_xml_download_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("attachment;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeypatch) -> None:
@@ -682,6 +688,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.text == "hello"
     assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypatch) -> None:

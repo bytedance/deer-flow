@@ -19,8 +19,15 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.community.ragflow.sources import cited_source_artifact
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -96,6 +103,9 @@ class _ParentLoopMiddlewareRecorderProxy:
     """
 
     def __init__(self, journal: Any, loop: asyncio.AbstractEventLoop) -> None:
+        journal_owner_loop = getattr(journal, "_owner_loop", None)
+        if isinstance(journal_owner_loop, asyncio.AbstractEventLoop) and journal_owner_loop is not loop:
+            raise ValueError("subagent middleware recorder loop must match the RunJournal owner loop")
         self._journal = journal
         self._loop = loop
         self._state_lock = threading.Lock()
@@ -612,6 +622,7 @@ def _task_result_command(
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
+    source_messages: list[dict] | None = None,
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
 ) -> Command:
@@ -627,6 +638,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
+                    artifact=cited_source_artifact(source_messages or [], content),
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,
@@ -843,6 +855,8 @@ async def task_tool(
     # tool call delegated to a subagent (user_role=None).
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
+    if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
@@ -864,6 +878,9 @@ async def task_tool(
     # runtime context is authoritative (worker._bind_trace_id always fills it);
     # the ambient fallback covers tools invoked outside a Gateway run.
     deerflow_trace_id = resolve_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY))
+    knowledge_scope = None
+    if KNOWLEDGE_SCOPE_RUNTIME_KEY in parent_context:
+        knowledge_scope = execution_scope(parent_context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -894,10 +911,14 @@ async def task_tool(
         "subagent_enabled": False,
         "include_upload_tool": upload_state_available,
     }
+    if metadata.get("mcp_plugins") is not None:
+        available_tools_kwargs["mcp_plugins"] = metadata["mcp_plugins"]
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
     # Assemble off-loop: tool assembly may block on MCP cache initialization,
     # which must not stall the calling event loop (issue #5172).
+    if run_extensions is not None:
+        available_tools_kwargs["extensions"] = run_extensions
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
@@ -919,6 +940,7 @@ async def task_tool(
         "is_internal": is_internal,
         "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
+        "knowledge_scope": knowledge_scope,
         # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
         # executor, which appends them to the subagent's task HumanMessage as
         # untrusted data (sanitized and boundary-framed by
@@ -927,6 +949,10 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    # Carry the host-captured lifecycle, including legacy None, without
+    # inventing a legacy scope for missing context or re-reading thread state.
+    if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
+        executor_kwargs["thread_incarnation"] = parent_context[THREAD_INCARNATION_CONTEXT_KEY]
     if context_snapshot is not None:
         executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None
@@ -941,6 +967,7 @@ async def task_tool(
         )
         executor_kwargs["loop_detection_recorder"] = middleware_recorder
         executor_kwargs["tool_promotion_recorder"] = middleware_recorder
+        executor_kwargs["tool_progress_recorder"] = middleware_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
@@ -1080,6 +1107,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=receipts,
+                    source_messages=getattr(result, "ai_messages", None),
                     receipt_verdict=receipt_verdict,
                     acceptance_verdict=acceptance_verdict,
                 )
@@ -1108,6 +1136,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -1130,6 +1159,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -1152,6 +1182,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
 
             # Still running, wait before next poll
@@ -1188,6 +1219,7 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                     tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively, then

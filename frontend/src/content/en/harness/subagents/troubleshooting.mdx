@@ -1,0 +1,176 @@
+---
+title: Troubleshooting
+description: Subagent problems indexed by symptom. Card state anomalies, capped runs, capacity rejections, missing catalog entries, lost sandbox sessions, repeated delegation, and unexpected acceptance results, each with cause, fix, and the related change.
+---
+
+import { Callout } from "nextra/components";
+
+# Troubleshooting
+
+This chapter is organized by **what you see**. Each entry gives the cause, the fix, and the pull request that introduced or fixed the behavior so you can match it to your version.
+
+## Cards and statuses
+
+### A subtask card spins forever, or flips back to in progress after a reload
+
+**Cause**: older versions derived card state from a thread-level loading flag, so a card could stay running after the user stopped mid-run. Cards now stay in progress only while the current turn is loading or a matching tool result exists, and are marked failed otherwise ([#3639](https://github.com/bytedance/deer-flow/pull/3639)).
+
+**Fix**: if it still happens after upgrading, check whether the run is really still running (`GET /api/threads/{thread_id}/runs`) and stop the conversation if needed.
+
+### The card shows failed but the Lead Agent's answer looks fine
+
+Expected. A failed subagent is an ordinary tool result; the parent run does not become `error`, and the Lead Agent sees the error text and decides how to continue ([#5407](https://github.com/bytedance/deer-flow/pull/5407)). Expand the card and read the red error line. A common cause is parallel subagents exhausting retries on provider 429 rate limits; lower the request context's `max_concurrent_subagents` or tighten burst limits in the LLM concurrency configuration.
+
+### The result starts with `Task Succeeded (capped: turn budget)`, or an older version reports `GraphRecursionError: Recursion limit of N reached`
+
+**Cause**: the subagent exhausted `max_turns`. It used to end as `FAILED` and throw away finished work; it now keeps the partial result and marks it `turn_capped` ([#3949](https://github.com/bytedance/deer-flow/pull/3949), [#3980](https://github.com/bytedance/deer-flow/pull/3980)). Older versions also passed `max_turns` verbatim as LangGraph's super-step limit, so more middlewares meant fewer real turns; since [#5485](https://github.com/bytedance/deer-flow/pull/5485) it is converted from real turns.
+
+**Fix**: raise `subagents.agents.<name>.max_turns` for that subagent and raise `timeout_seconds` with it, otherwise the failure just moves from turns to timeout ([#3610](https://github.com/bytedance/deer-flow/pull/3610)).
+
+### The result is marked `token_capped` or `loop_capped`
+
+**Cause**: the token budget or loop detection hard stop fired ([#3931](https://github.com/bytedance/deer-flow/pull/3931), [#3980](https://github.com/bytedance/deer-flow/pull/3980)).
+
+**Fix**: first check the step timeline for the same tool being called over and over. If more budget is genuinely needed, adjust `subagents.token_budget.max_tokens` or `loop_detection.tool_freq_overrides`. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
+
+### Status `failed` with the error `Reached max_turns=N`
+
+The turns ran out and the last assistant message had no usable text; the result reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. Same fix as above.
+
+## Capacity and limits
+
+### `Subagent execution capacity is full (3 running, 64 queued)`
+
+**Cause**: process-wide capacity is full and the queue is full, or `admission_policy: reject` ([#4998](https://github.com/bytedance/deer-flow/pull/4998)).
+
+**Fix**: adjust `subagent_runtime.max_running`, `max_queued`, or `admission_policy`, then restart the Gateway. With an AIO sandbox, check `MAX_SHELL_SESSIONS` at the same time.
+
+### `Timed out after 300s waiting for a subagent execution slot`
+
+The delegation waited longer than `subagent_runtime.queue_timeout_seconds`. Either add capacity or lower the per-response concurrency.
+
+### The assistant message ends with `[SUBAGENT LIMIT REACHED]`
+
+The run's delegation total (`subagents.max_total_per_run`, default 6) is exhausted ([#4115](https://github.com/bytedance/deer-flow/pull/4115)). This is a deliberate backstop against the Lead Agent launching a fresh legal-sized batch at every planning checkpoint. Only the current run counts; older thread history does not consume the allowance. Raise the value (up to 50) when more is needed.
+
+### Only one subagent at a time is wanted, but two run
+
+Older versions clamped the concurrency floor at 2. Since [#4081](https://github.com/bytedance/deer-flow/pull/4081) the floor is 1, so `max_concurrent_subagents: 1` is honored.
+
+## Catalog and availability
+
+### `Unknown subagent type 'xxx'. Available: ...`
+
+Check in order:
+
+1. Whether the conversation is in Ultra mode, and whether the Custom Agent's subagent setting is "no subagents" or does not select that name ([#4887](https://github.com/bytedance/deer-flow/pull/4887)).
+2. If the name is `bash`, see the next entry.
+3. Whether a managed definition shares its name with a built-in or `config.yaml` entry and is therefore excluded; Settings shows a conflict marker.
+4. Whether the definition is disabled (`enabled: false`).
+
+### `Bash subagent is disabled for LocalSandboxProvider`
+
+The local sandbox does not allow host command execution by default. Set `sandbox.allow_host_bash: true` only in a fully trusted local environment, or switch to a container sandbox.
+
+### A subagent reports `Error: task is not a valid tool`
+
+The subagent inferred from the parent's context that `task` exists and tried to delegate further. The tool was never registered; [#4161](https://github.com/bytedance/deer-flow/pull/4161) added an explicit `tool_restrictions` block to the `general-purpose` prompt. Custom subagent prompts should state the same.
+
+## Sandbox
+
+### Concurrent subagents get `404 Session not found`, or their shell state bleeds into each other
+
+**Cause**: subagents shared the AIO implicit shell session, or the session count exceeded the image limit and sessions were evicted. [#5134](https://github.com/bytedance/deer-flow/pull/5134) gives every subagent its own execution lease and persistent session, and [#5178](https://github.com/bytedance/deer-flow/pull/5178) raises `MAX_SHELL_SESSIONS` to `max_running + 1` automatically when that exceeds the image default of 10 and you have not set it; an explicit value below `max_running + 1` is rejected with a `ValueError`.
+
+**Fix**: after upgrading, make sure `sandbox.environment.MAX_SHELL_SESSIONS` is not explicitly set below `max_running + 1`. In provisioner mode upgrade the provisioner too, or the Gateway reports that it did not return `max_shell_sessions`.
+
+### After one subagent finishes, every other subagent's sandbox command fails
+
+Older versions released the shared sandbox when any subagent finished. Since [#5134](https://github.com/bytedance/deer-flow/pull/5134) the provider is released only when the last lease goes away.
+
+## Delegation behavior
+
+### The same task is delegated again and again
+
+**Cause**: summarization compacted the completed `task` results out of context, so the Lead Agent lost the evidence that the work was done. [#3877](https://github.com/bytedance/deer-flow/pull/3877) introduced the system-maintained delegation ledger, re-injected before every call, and [#3887](https://github.com/bytedance/deer-flow/pull/3887) moved it into thread state so it survives compaction.
+
+**Fix**: when building the graph directly with `create_deerflow_agent`, make sure your version includes [#5488](https://github.com/bytedance/deer-flow/pull/5488); before it the factory chain lacked `DurableContextMiddleware` and the ledger was never written.
+
+### After stopping, the Lead Agent keeps being told the task is "already delegated, do not repeat"
+
+The in-progress delegation had no tool result when the user stopped, so the ledger entry stayed `in_progress` forever. Since [#5507](https://github.com/bytedance/deer-flow/pull/5507) it is flipped to `cancelled` when the next run starts.
+
+### The Lead Agent delegates everything
+
+[#4384](https://github.com/bytedance/deer-flow/pull/4384) changed the prompt to default to direct execution and delegate only for clear net benefit. If delegation is still frequent, check whether a custom Lead Agent system prompt overrides that policy.
+
+### A subagent "forgets" its role or report contract after compaction
+
+The subagent's system prompt is the first message in state, and older index-based compaction summarized it away. Since [#5454](https://github.com/bytedance/deer-flow/pull/5454) compaction preserves system messages explicitly.
+
+### After compaction the provider returns 400 complaining that history starts with an assistant message
+
+[#4040](https://github.com/bytedance/deer-flow/pull/4040) added `DurableContextMiddleware` before summarization on the subagent chain so that `summary_text` is re-injected. Upgrade.
+
+## Context and skills
+
+### A subagent cannot see the user's custom skills
+
+Older versions read the global skill catalog only. Since [#4356](https://github.com/bytedance/deer-flow/pull/4356) skills load under the parent run's user identity. If a passive skill declaring `allowed-tools` stripped ordinary tools such as `write_file` from a subagent, that was the behavior before [#4497](https://github.com/bytedance/deer-flow/pull/4497); skills are now lazily activated and only a selected skill applies its tool restrictions.
+
+### A subagent does not know today's date, or is a day off
+
+Subagents receive a `current_date` reminder from `SubagentDateContextMiddleware` ([#4797](https://github.com/bytedance/deer-flow/pull/4797)). The date is formatted in the server timezone, and containers default to UTC; set the `DEER_FLOW_DATE_TIMEZONE` environment variable to an IANA zone such as `Asia/Shanghai` ([#5154](https://github.com/bytedance/deer-flow/pull/5154)).
+
+### A subagent cannot find a file I uploaded earlier
+
+Ordinary `task` delegations get `list_uploaded_files` only when the parent run's `uploaded_files` state is valid ([#5170](https://github.com/bytedance/deer-flow/pull/5170)). `batch_task` workers never have the tool. You can also give the path under `/mnt/user-data/uploads/` directly in the `prompt`.
+
+## Acceptance and receipts
+
+### The checklist says `UNVERIFIED` although the file exists
+
+Check each of these:
+
+- The path resolves under the thread's workspace or outputs. Anywhere else is `UNVERIFIED`.
+- It is a symlink. A local-sandbox link pointing outside, or any link on a remote sandbox, is not followed.
+- An empty file on a remote sandbox was misclassified as non-regular before [#5559](https://github.com/bytedance/deer-flow/pull/5559); after it, `exists` and `file_written` hold for empty files and `non-empty` explicitly does not.
+- The file is larger than 50,000 bytes, so only a size probe runs; an undeterminable size is `UNVERIFIED`.
+- The wording is one of the four canonical forms. Other natural-language conditions are never checked.
+
+### `tests_passed` does not hold although the tests passed
+
+Check that the record contains a **successful** bash execution with the complete command text; that it did not run in a persistent shell session (which does not count, because earlier state cannot be proven clean); and that the output shows a passing summary with no failing or zero-test shape. The evidence window is the last 20 bash executions and the last 1,000 characters of output.
+
+### On Windows the acceptance tests fail to collect, or an out-of-scope `cd` counts as valid evidence
+
+[#5162](https://github.com/bytedance/deer-flow/pull/5162) normalizes paths with POSIX semantics on every host and recognizes drive-qualified paths.
+
+### The ledger shows `citations: UNVERIFIED — action claims without receipt citations`
+
+The subagent's report cited no `[rN]` receipts but describes actions. This is not a failure, only missing evidence. If a custom subagent overrides the output format, make sure nothing conflicts with the report contract; also check whether `verification.receipts_enabled` was turned off.
+
+## Observability
+
+### Subagent traces are missing in Langfuse
+
+Subagent spans belong to the parent thread's session with the trace name `subagent:<name>` ([#3611](https://github.com/bytedance/deer-flow/pull/3611)). Look under the parent thread in the Sessions view, or filter by the tag `subagent:<name>`.
+
+### All token usage is charged to the Lead Agent's model
+
+Since [#3658](https://github.com/bytedance/deer-flow/pull/3658) usage is attributed to the actual model. Legacy runs without a per-model breakdown still fall back to the run-level model name.
+
+### Subtask steps disappear after a reload
+
+Steps are backfilled from `subagent.step` run events ([#3845](https://github.com/bytedance/deer-flow/pull/3845)). Older versions dropped a batch when the event store write failed; since [#4082](https://github.com/bytedance/deer-flow/pull/4082) it is re-buffered and retried. Check that the run event store is writable.
+
+### The chat page suddenly shows only the subagent's conversation
+
+Subgraph stream frames were impersonating root frames. Fixed in [#4407](https://github.com/bytedance/deer-flow/pull/4407) together with the namespace inheritance from [#4215](https://github.com/bytedance/deer-flow/pull/4215). Upgrade.
+
+<Callout type="tip">
+  Start any investigation with two ids: the task card's `tool_call_id`, and
+  the short trace id printed as `[trace=...]` in the Gateway log. The first
+  queries run events; the second stitches one delegation's log output
+  together.
+</Callout>

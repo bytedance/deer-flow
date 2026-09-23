@@ -870,4 +870,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         after = client.get(f"/api/threads/{thread_id}/state")
         assert after.status_code == 200, after.text
         assert after.json()["values"]["title"] == "Before rollback"
-        assert after.json()["values"]["messages"] == [{"type": "human", "content": "before"}]
+        # Admission canonicalizes messages; rollback must restore that exact
+        # checkpoint, including normalized message metadata.
+        assert after.json()["values"]["messages"] == before.json()["values"]["messages"]

@@ -12,6 +12,7 @@ from deerflow.models.credential_loader import (
     load_claude_code_credential,
     load_codex_cli_credential,
 )
+from deerflow.models.openai_codex_provider import CodexChatModel
 
 
 @pytest.fixture(autouse=True)
@@ -248,6 +249,113 @@ def test_load_claude_code_credential_falls_back_to_default_file_when_override_is
     assert cred.source == "claude-cli-file"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"claudeAiOauth": None},
+        {"claudeAiOauth": "sk-ant-oat01-raw"},
+        {"claudeAiOauth": []},
+        {"claudeAiOauth": 5},
+        [],
+    ],
+)
+def test_load_claude_code_credential_ignores_malformed_oauth_container(tmp_path, monkeypatch, payload):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    assert load_claude_code_credential() is None
+
+
+def test_load_claude_code_credential_falls_back_to_default_when_override_container_is_malformed(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    override_path = tmp_path / "credentials.json"
+    override_path.write_text(json.dumps({"claudeAiOauth": None}), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-default",
+                    "refreshToken": "sk-ant-ort01-default",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-default"
+    assert cred.refresh_token == "sk-ant-ort01-default"
+    assert cred.source == "claude-cli-file"
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "1773430695128",
+        None,
+        [],
+        {},
+    ],
+)
+def test_load_claude_code_credential_ignores_non_numeric_expires_at(tmp_path, monkeypatch, expires_at):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-test", "expiresAt": expires_at}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    assert load_claude_code_credential() is None
+
+
+def test_load_claude_code_credential_falls_back_to_default_when_override_expires_at_is_non_numeric(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    override_path = tmp_path / "credentials.json"
+    override_path.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-override", "expiresAt": "1773430695128"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-default",
+                    "refreshToken": "sk-ant-ort01-default",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-default"
+    assert cred.refresh_token == "sk-ant-ort01-default"
+    assert cred.source == "claude-cli-file"
+
+
 def test_load_codex_cli_credential_supports_nested_tokens_shape(tmp_path, monkeypatch):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
@@ -279,4 +387,64 @@ def test_load_codex_cli_credential_supports_legacy_top_level_shape(tmp_path, mon
 
     assert cred is not None
     assert cred.access_token == "legacy-access-token"
+    assert cred.account_id == ""
+
+
+@pytest.mark.parametrize("payload", [[], "codex-access-token", 5])
+def test_load_codex_cli_credential_ignores_non_object_auth_file(tmp_path, monkeypatch, payload):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps(payload))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None
+
+
+def test_codex_chat_model_reports_missing_credential_for_non_object_auth_file(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps([]))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    with pytest.raises(ValueError, match="Codex CLI credential not found"):
+        CodexChatModel(model="gpt-5.4")
+
+
+def test_load_codex_cli_credential_defaults_null_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "codex-access-token",
+                    "account_id": None,
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "codex-access-token"
+    assert cred.account_id == ""
+
+
+def test_load_codex_cli_credential_ignores_non_string_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "codex-access-token",
+                    "account_id": 12345,
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "codex-access-token"
     assert cred.account_id == ""

@@ -136,6 +136,20 @@ def _make_terminal_response_middleware():
     return TerminalResponseMiddleware()
 
 
+def _make_llm_error_handling_middleware():
+    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    return LLMErrorHandlingMiddleware(app_config=AppConfig(sandbox=SandboxConfig(use="test")))
+
+
+def _make_model_length_finish_reason_middleware():
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    return ModelLengthFinishReasonMiddleware()
+
+
 def _make_todo_middleware():
     from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 
@@ -199,7 +213,7 @@ def _make_system_message_coalescing_middleware():
 def _make_dynamic_context_middleware():
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    return DynamicContextMiddleware()
+    return DynamicContextMiddleware(memory_enabled=False)
 
 
 def _make_subagent_date_context_middleware():
@@ -219,6 +233,12 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.loop_detection_middleware", "LoopDetectionMiddleware", _make_loop_detection_middleware),
     ("deerflow.agents.middlewares.subagent_limit_middleware", "SubagentLimitMiddleware", _make_subagent_limit_middleware),
     ("deerflow.agents.middlewares.terminal_response_middleware", "TerminalResponseMiddleware", _make_terminal_response_middleware),
+    ("deerflow.agents.middlewares.llm_error_handling_middleware", "LLMErrorHandlingMiddleware", _make_llm_error_handling_middleware),
+    (
+        "deerflow.agents.middlewares.model_length_finish_reason_middleware",
+        "ModelLengthFinishReasonMiddleware",
+        _make_model_length_finish_reason_middleware,
+    ),
     # DeerFlow's own subclass, not the LangChain base class re-exported into
     # this module under the same import path (TodoListMiddleware).
     ("deerflow.agents.middlewares.todo_middleware", "TodoMiddleware", _make_todo_middleware),

@@ -226,6 +226,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             # display) — must never reach the provider client, which would
             # forward unknown kwargs into the completion request payload.
             "pricing",
+            "request_admission",
         },
     )
     # Layer per-caller sampling overrides (e.g. a custom agent's temperature /
@@ -325,9 +326,25 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # explicit profile from a caller or model_overrides is never clobbered.
     translate_context_window = bool(model_config.context_window) and "profile" not in kwargs and "profile" not in model_settings_from_config
 
+    if model_config.request_admission is not None:
+        from deerflow.models.request_admission import get_request_admission
+
+        if "rate_limiter" in kwargs or "rate_limiter" in model_settings_from_config:
+            raise ValueError("request_admission cannot be combined with a custom rate_limiter")
+        model_settings_from_config["rate_limiter"] = get_request_admission(name, model_config.request_admission)
+        # SDK-internal retries do not re-enter BaseChatModel's admission hook.
+        # Keep retries at the middleware layer where each attempt is paced.
+        if "max_retries" in model_class.model_fields:
+            kwargs.pop("max_retries", None)
+            model_settings_from_config["max_retries"] = 0
+
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    # 配置提供默认值，调用方显式传入的非空参数统一覆盖配置。
+    # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
+    effective_model_settings = dict(model_settings_from_config)
+    effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:
         # Applied *after* construction and merged into the provider's inferred

@@ -277,7 +277,29 @@ supplies none.
 
 Gateway services start in registration order after the persistence engine and session
 factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
-app store, projected host policy, and session factory. Start failures are attributed and
+app store, projected host policy, session factory, and optional read-only
+`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
+scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
+be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
+and sort by run id. Deletion is deliberately not represented by a tombstone, so the feed
+covers creations and changes to retained rows only; synchronization consumers must poll
+`get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
+is required. A DB run store preserves positions across restarts, while memory only provides
+process-lifetime ordering. Per-run events retain the event store's thread-scoped
+`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
+and status comes from the authoritative run store. The reader passes its fixed scope to
+event reads explicitly, including global `None`, so ambient request identity cannot
+change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
+fields are frozen, but nested containers remain locally mutable without touching host
+storage. The production Gateway injects one
+app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
+global cross-user visibility because services have no request principal. A host embedding
+the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+already retain `session_factory` and execute with Gateway privileges. Empty pages mean
+caught up or not visible, never unsupported -- absence is represented
+by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
+`NotImplementedError`. Start failures are attributed and
 fail open. The runtime captures `app.state.extensions` once, registers cleanup before the
 start batch, and stops the attempted service prefix in reverse order after run/subagent
 drain but before store, checkpointer, and engine teardown. Each stop has an independent
@@ -355,3 +377,14 @@ that the current host silently ignores.
 `test_extension_manager.py` creates temporary Git repositories for local extension sources.
 Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
 Tests for hook behavior must create and invoke their own hook fixtures.
+
+## Full-stack contributions
+
+`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
+and model tools under one deployment-owned namespace. The public method defaults to False
+for older hosts; accepted contributions share source attribution and positional rollback.
+`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
+No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
+the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
+public-field projection is an allowlist. Package code is trusted, not sandboxed. See
+`docs/full-stack-plugins.md` and the independently packaged bookmark example.

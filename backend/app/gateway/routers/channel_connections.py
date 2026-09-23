@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from app.channels.runtime_config_store import (
     apply_runtime_connection_config,
     merge_runtime_channel_configs,
 )
+from app.channels.wechat_qr_login import QRLoginError, WechatQRLogin
 from app.gateway.deps import require_admin_user
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -78,6 +80,19 @@ class ChannelConnectResponse(BaseModel):
     code: str
     instruction: str
     expires_in: int
+
+
+class WechatQRLoginResponse(BaseModel):
+    id: str
+    status: Literal["pending", "scanned", "verification_required", "confirmed", "expired", "failed"]
+    qrcode_content: str
+    expires_in: int
+    provider: ChannelProviderResponse | None = None
+    error: Literal["network", "invalid_response", "verification_rejected", "verification_blocked", "already_bound"] | None = None
+
+
+class WechatQRLoginPollRequest(BaseModel):
+    verify_code: str | None = Field(default=None, pattern=r"^[0-9]{1,16}$")
 
 
 class ChannelRuntimeConfigRequest(BaseModel):
@@ -570,6 +585,13 @@ async def disconnect_channel_connection(connection_id: str, request: Request) ->
 @router.delete("/{provider}/runtime-config", response_model=ChannelProviderResponse)
 async def disconnect_channel_provider_runtime(provider: str, request: Request) -> ChannelProviderResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    if provider == "wechat":
+        async with _get_wechat_qr_login(request).mutation():
+            return await _disconnect_channel_provider_runtime(provider, request)
+    return await _disconnect_channel_provider_runtime(provider, request)
+
+
+async def _disconnect_channel_provider_runtime(provider: str, request: Request) -> ChannelProviderResponse:
     config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
@@ -656,6 +678,13 @@ async def configure_channel_provider_runtime(
     request: Request,
 ) -> ChannelProviderResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    if provider == "wechat":
+        async with _get_wechat_qr_login(request).mutation():
+            return await _configure_channel_provider_runtime(provider, body, request)
+    return await _configure_channel_provider_runtime(provider, body, request)
+
+
+async def _configure_channel_provider_runtime(provider: str, body: ChannelRuntimeConfigRequest, request: Request) -> ChannelProviderResponse:
     config = await _get_channel_connections_config(request)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="Channel connections are disabled")
@@ -680,9 +709,10 @@ async def configure_channel_provider_runtime(
         # cached by get_app_config().
         runtime_config["bot_username"] = values["bot_username"]
 
-    candidate_channels_config = dict(channels_config)
-    candidate_channels_config[provider] = runtime_config
+    return await _apply_runtime_channel_config(request, config, provider, runtime_config)
 
+
+async def _apply_runtime_channel_config(request: Request, config: ChannelConnectionsConfig, provider: str, runtime_config: dict[str, Any]) -> ChannelProviderResponse:
     started = await _restart_runtime_channel_if_available(provider, runtime_config)
     if started is False:
         display_name = _PROVIDER_META[provider]["display_name"]
@@ -699,3 +729,71 @@ async def configure_channel_provider_runtime(
     request.app.state.channels_config = live_channels_config
 
     return _provider_response(config, live_channels_config, provider, _PROVIDER_META[provider])
+
+
+def _get_wechat_qr_login(request: Request) -> WechatQRLogin:
+    manager = getattr(request.app.state, "wechat_qr_login", None)
+    if manager is None:
+        manager = WechatQRLogin()
+        request.app.state.wechat_qr_login = manager
+    return manager
+
+
+async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    config = await _get_channel_connections_config(request)
+    if not config.enabled or not config.wechat.enabled:
+        raise HTTPException(status_code=400, detail="WeChat channel connections are disabled")
+    # QR sessions and mutation locks live in one process. Reject every QR route
+    # before session access when requests could land on different workers.
+    # WEB_CONCURRENCY is Uvicorn's fallback when no worker count is supplied.
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", os.environ.get("WEB_CONCURRENCY", "1")))
+    except ValueError:
+        workers = 0
+    if workers != 1:
+        raise HTTPException(
+            status_code=503,
+            detail="WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), or enter a bot token manually.",
+        )
+    return config
+
+
+@router.post("/wechat/qr-login", response_model=WechatQRLoginResponse)
+async def start_wechat_qr_login(request: Request, response: Response) -> dict[str, Any]:
+    await _require_wechat_qr_login(request)
+    channels = await _get_channels_config(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await _get_wechat_qr_login(request).start(str(_get_user_id(request)), channels.get("wechat") or {})
+    except QRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+
+
+@router.post("/wechat/qr-login/{session_id}/poll", response_model=WechatQRLoginResponse)
+async def poll_wechat_qr_login(session_id: str, request: Request, response: Response, body: WechatQRLoginPollRequest | None = None) -> dict[str, Any]:
+    config = await _require_wechat_qr_login(request)
+    response.headers["Cache-Control"] = "no-store"
+
+    async def apply(credentials: dict[str, str]) -> dict[str, Any]:
+        channels = await _get_channels_config(request)
+        runtime_config = dict(channels.get("wechat") or {})
+        runtime_config.update(credentials)
+        runtime_config["enabled"] = True
+        provider = await _apply_runtime_channel_config(request, config, "wechat", runtime_config)
+        return provider.model_dump()
+
+    try:
+        return await _get_wechat_qr_login(request).poll(str(_get_user_id(request)), session_id, apply, verify_code=body.verify_code if body else None)
+    except QRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+
+
+@router.delete("/wechat/qr-login/{session_id}", status_code=204)
+async def cancel_wechat_qr_login(session_id: str, request: Request) -> Response:
+    await _require_wechat_qr_login(request)
+    try:
+        await _get_wechat_qr_login(request).cancel(str(_get_user_id(request)), session_id)
+    except QRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
