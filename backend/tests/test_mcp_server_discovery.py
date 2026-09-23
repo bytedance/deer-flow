@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -59,6 +60,84 @@ async def test_selected_discovery_never_builds_an_unselected_client(monkeypatch)
     assert created == [{"A"}]
     assert list(result) == ["A"]
     assert [t.name for t in result["A"].tools] == ["A_search"]
+
+
+@pytest.mark.asyncio
+async def test_removed_server_does_not_leak_credentials_into_reused_server_client(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    first_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://a.example/mcp",
+                    "headers": {"X-Token": "A-secret"},
+                    "oauth": {"enabled": True, "token_url": "https://auth.example/a"},
+                },
+                "B": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://b.example/mcp",
+                    "headers": {"X-Token": "B-secret"},
+                    "oauth": {"enabled": True, "token_url": "https://auth.example/b"},
+                },
+            }
+        }
+    )
+    second_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "B": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://b.example/mcp",
+                    "headers": {"X-Token": "B-secret"},
+                    "oauth": {"enabled": True, "token_url": "https://auth.example/b"},
+                },
+            }
+        }
+    )
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.connections = connections
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            async def observe_connections():
+                return {name: dict(connection) for name, connection in self.connections.items()}
+
+            return [
+                StructuredTool.from_function(
+                    coroutine=observe_connections,
+                    name=f"{server_name}_observe",
+                    description="observe client connections",
+                )
+            ]
+
+    async def fake_oauth_headers(_config, *, server_names=None):
+        return {name: f"Bearer {name}-token" for name in (server_names or ())}
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", fake_oauth_headers)
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    first = await get_mcp_tools_by_server(first_config)
+    first_observed = await first["B"].tools[0].ainvoke({})
+    assert set(first_observed) == {"B"}
+
+    second = await get_mcp_tools_by_server(second_config)
+    second_observed = await second["B"].tools[0].ainvoke({})
+
+    assert set(second_observed) == {"B"}
+    assert "A" not in second_observed
+    assert second_observed["B"]["headers"]["Authorization"] == "Bearer B-token"
+    assert "A-secret" not in repr(second_observed)
+    assert "Bearer A-token" not in repr(second_observed)
 
 
 @pytest.mark.asyncio
@@ -146,6 +225,47 @@ async def test_successful_empty_is_present_but_failure_is_absent(monkeypatch):
 
     assert result["EMPTY"].tools == ()
     assert "FAIL" not in result
+
+
+@pytest.mark.asyncio
+async def test_discovery_timeout_is_absent_and_retried(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "SLOW": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://slow.example/mcp",
+                    "session_init_timeout": 0.01,
+                },
+            }
+        }
+    )
+    attempts = 0
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            nonlocal attempts
+            attempts += 1
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    first = await get_mcp_tools_by_server(config)
+    second = await get_mcp_tools_by_server(config)
+
+    assert "SLOW" not in first
+    assert "SLOW" not in second
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
