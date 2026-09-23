@@ -40,7 +40,7 @@ def install(registry, config):
 | `app_store`           | `ExtensionData`                      | 应用作用域的类型化存储，与中间件贡献者和生命周期钩子收到的 `app_store` 是同一个对象                |
 | `policy`              | `HostPolicySnapshot`                 | 宿主实际执行的限制：token 预算设置（仅在 `token_budget.enabled` 时填充），以及来自 `subagents.max_total_per_run` 的 `max_subagents_per_run` |
 | `session_factory`     | SQLAlchemy `async_sessionmaker` 或 `None` | Gateway 的数据库会话工厂。`database.backend` 为 `memory` 时为 `None`                          |
-| `run_evidence_reader` | `RunEvidenceReader` 或 `None`        | 对所有用户的运行及其持久化事件的只读视图。路由处理函数请改用限定调用方的读取器。见[运行证据](/docs/harness/extensions/run-evidence) |
+| `run_evidence_reader` | `RunEvidenceReader` 或 `None`        | 对所有用户的运行及其持久化事件的只读视图。永远不要在路由中返回它的数据。见[运行证据](/docs/harness/extensions/run-evidence) |
 
 `session_factory` 就是宿主自己的数据库连接，没有任何沙箱。用它的服务可以读写宿主的每一张表。如果扩展有自己的表，请在它的 `plugins:` 记录里声明 `table_prefix`，这样 `alembic revision --autogenerate` 就不会去动它们。
 
@@ -142,10 +142,6 @@ class ExtensionPrincipal:
 `roles` 保存调用方唯一的系统角色，例如 `("admin",)` 或 `("user",)`。对于 Gateway 自身组件用内部服务令牌发出的请求（例如 IM 渠道桥接），`is_internal` 为 `true`；这类调用方的角色是 `internal`，不是管理员。用**个人访问令牌**认证的请求永远不带管理员权限：即使令牌属于管理员，`is_admin` 也是 `False`，`roles` 为空。
 
 两个辅助函数都是同步的，在同步和异步处理函数里都能用。它们与框架无关，所以要自己把结果映射成 HTTP 状态码：`None` 映射为 `401`，`PermissionError` 映射为 `403`。
-
-### 在路由中读取运行证据
-
-不要在路由里返回服务的 `run_evidence_reader` 中的数据：它能看到所有用户。请改为调用 `require_run_evidence_reader(request)`。只要调用方持有 `runs:read` 权限，宿主就返回一个限定到该已认证调用方的读取器。把 `PermissionError` 映射为 `403`，`NotImplementedError` 映射为 `503`。规则和一个完整的路由见[运行证据](/docs/harness/extensions/run-evidence)。
 
 ## 示例：一个状态 API
 
@@ -253,4 +249,4 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
 - **通用路径。** 宿主命名空间下的路径会被拒绝，别的扩展先注册的路径会胜出。请使用你自己拥有的前缀。
 - **把 `resolve_principal` 当作认证。** 宿主已经拒绝了未认证的请求。principal 用于你路由内部的授权，为 `None` 时要按拒绝处理。
 - **以为令牌能带来管理员权限。** 个人访问令牌按设计永远无法通过 `require_admin`。
-- **在路由中返回服务读取器的数据。** 服务读取器是全局的。路由请使用限定调用方的请求读取器。
+- **在路由中返回运行证据。** 服务读取器是全局的：它能看到所有用户的运行。

@@ -2981,14 +2981,13 @@ This release closes that milestone with **765 merged pull requests**.
   page links keep working; deep links to sections of the old page now land
   on the index.
 - **docs:** Add an extension developer manual under `harness/extensions/` in
-  both languages, covering the `deerflow-extension-api` 0.2.3 contract: when
+  both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
   to write an extension, a quick start, the runtime model, middleware
   placements, lifecycle and observer hooks, services and routes, the run
-  evidence reader, experimental full-stack plugins, operating extensions,
-  troubleshooting by error message, and a reference of every public name
-  with the contract's version history. Also correct stale descriptions of
-  the contribution kinds in `AGENTS.md` and of the plugin `mount` return
-  value in `docs/full-stack-plugins.md`.
+  evidence reader, operating extensions, troubleshooting by error message,
+  and a reference of every public name with the contract's version history.
+  Also correct stale descriptions of the contribution kinds and of run
+  evidence metadata redaction in `AGENTS.md`.
 
 ### Internal
 

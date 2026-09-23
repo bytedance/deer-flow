@@ -49,20 +49,20 @@ ExtensionLoadError: required extension acme_audit:install failed to install
 
 ### 版本检查
 
-没有标记时跳过检查。否则，1.0 之前的规则是：major 和 minor 与宿主相同，且 patch 不高于宿主；1.0 之后将是：major 相同，且 minor 和 patch 不高于宿主。以宿主 `0.2.3` 为例：
+没有标记时跳过检查。否则，1.0 之前的规则是：major 和 minor 与宿主相同，且 patch 不高于宿主；1.0 之后将是：major 相同，且 minor 和 patch 不高于宿主。以宿主 `0.2.1` 为例：
 
 | `@extension(api=...)`         | 结果                                               |
 | ----------------------------- | -------------------------------------------------- |
 | 未装饰                        | 加载                                               |
-| `"0.2"`、`"0.2.0"`、`"0.2.3"` | 加载                                               |
-| `"0.2.4"`                     | 拒绝：扩展可能用到本宿主没有的新增内容             |
+| `"0.2"`、`"0.2.0"`、`"0.2.1"` | 加载                                               |
+| `"0.2.2"`                     | 拒绝：扩展可能用到本宿主没有的新增内容             |
 | `"0.1.9"`、`"0.3.0"`、`"1.0"` | 拒绝：1.0 之前的 minor 不同，或 major 不同         |
 | `"0.2.x"`                     | 拒绝：不是点分数字版本                             |
 
 拒绝信息会给出应安装的范围：
 
 ```text
-Extension acme_audit:install: extension requires extension-api 0.2.4, host provides 0.2.3. Install a matching version: pip install 'deerflow-extension-api>=0.2.4,<0.3'
+Extension acme_audit:install: extension requires extension-api 0.2.2, host provides 0.2.1. Install a matching version: pip install 'deerflow-extension-api>=0.2.2,<0.3'
 ```
 
 这个标记是为 `--no-deps` 安装和 editable checkout 准备的安全网。包里对 `deerflow-extension-api` 声明的依赖范围才是主要的兼容性机制。

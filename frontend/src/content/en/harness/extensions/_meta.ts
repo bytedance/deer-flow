@@ -19,9 +19,6 @@ const meta: MetaRecord = {
   "run-evidence": {
     title: "Run Evidence",
   },
-  plugins: {
-    title: "Full-Stack Plugins",
-  },
   operations: {
     title: "Operating Extensions",
   },

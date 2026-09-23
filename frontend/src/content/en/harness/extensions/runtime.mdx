@@ -49,20 +49,20 @@ Reserve `required: true` for extensions whose absence makes the deployment wrong
 
 ### Version check
 
-A missing marker skips the check. Otherwise the rule before 1.0 is: same major and minor as the host, and a patch no newer than the host's. From 1.0 on it will be: same major, and a minor and patch no newer than the host's. With the host at `0.2.3`:
+A missing marker skips the check. Otherwise the rule before 1.0 is: same major and minor as the host, and a patch no newer than the host's. From 1.0 on it will be: same major, and a minor and patch no newer than the host's. With the host at `0.2.1`:
 
 | `@extension(api=...)` | Result                                                                          |
 | --------------------- | ------------------------------------------------------------------------------- |
 | not decorated         | Loaded                                                                          |
-| `"0.2"`, `"0.2.0"`, `"0.2.3"` | Loaded                                                                  |
-| `"0.2.4"`             | Refused: the extension may use additions this host lacks                         |
+| `"0.2"`, `"0.2.0"`, `"0.2.1"` | Loaded                                                                  |
+| `"0.2.2"`             | Refused: the extension may use additions this host lacks                         |
 | `"0.1.9"`, `"0.3.0"`, `"1.0"` | Refused: a different pre-1.0 minor or a different major                  |
 | `"0.2.x"`             | Refused: not a dotted numeric version                                            |
 
 A refusal names the range to install:
 
 ```text
-Extension acme_audit:install: extension requires extension-api 0.2.4, host provides 0.2.3. Install a matching version: pip install 'deerflow-extension-api>=0.2.4,<0.3'
+Extension acme_audit:install: extension requires extension-api 0.2.2, host provides 0.2.1. Install a matching version: pip install 'deerflow-extension-api>=0.2.2,<0.3'
 ```
 
 The marker is a safety net for `--no-deps` installs and editable checkouts. Your package's `deerflow-extension-api` dependency range is the primary compatibility mechanism.

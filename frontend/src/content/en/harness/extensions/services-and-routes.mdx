@@ -40,7 +40,7 @@ Every service receives the same `ExtensionRuntimeDeps` snapshot:
 | `app_store`           | `ExtensionData`             | The app-scoped typed store, the same object middleware contributors and lifecycle hooks receive as `app_store` |
 | `policy`              | `HostPolicySnapshot`        | The limits the host enforces: token-budget settings (populated only when `token_budget.enabled`) and `max_subagents_per_run` from `subagents.max_total_per_run` |
 | `session_factory`     | SQLAlchemy `async_sessionmaker` or `None` | The Gateway's database session factory. `None` when `database.backend` is `memory`                    |
-| `run_evidence_reader` | `RunEvidenceReader` or `None` | A read-only view of every user's runs and persisted events. Route handlers use a caller-scoped reader instead. See [Run Evidence](/docs/harness/extensions/run-evidence) |
+| `run_evidence_reader` | `RunEvidenceReader` or `None` | A read-only view of every user's runs and persisted events. Never return its data from a route. See [Run Evidence](/docs/harness/extensions/run-evidence) |
 
 `session_factory` is the host's own database connection, not a sandboxed one. A service that uses it can read and write every host table. If your extension keeps its own tables, declare a `table_prefix` in its `plugins:` record so that `alembic revision --autogenerate` leaves them alone.
 
@@ -143,10 +143,6 @@ class ExtensionPrincipal:
 `roles` holds the caller's single system role, such as `("admin",)` or `("user",)`. `is_internal` is `true` for requests the Gateway's own components send with its internal service token, such as the IM channel bridge; those callers carry the role `internal` and are not admins. A request authenticated with a **personal access token** never carries admin rights: `is_admin` is `False` and `roles` is empty even when the token belongs to an admin.
 
 Both helpers are synchronous, so they work in sync and async handlers alike. They are framework-neutral, so map their results to HTTP status codes yourself: `None` to `401`, `PermissionError` to `403`.
-
-### Reading run evidence in a route
-
-Do not serve data from the service's `run_evidence_reader` in a route: it sees every user. Call `require_run_evidence_reader(request)` instead. The host returns a reader scoped to the authenticated caller, provided they hold the `runs:read` permission. Map `PermissionError` to `403` and `NotImplementedError` to `503`. [Run Evidence](/docs/harness/extensions/run-evidence) covers the rules and a complete route.
 
 ## Example: a status API
 
@@ -254,4 +250,4 @@ Against a Gateway with the memory database backend, the routes answer:
 - **Generic paths.** Anything under a host namespace is rejected, and a path another extension registered first wins. Use a prefix you own.
 - **Treating `resolve_principal` as authentication.** The host already rejected unauthenticated requests. Use the principal for authorization within your routes, and fail closed when it is `None`.
 - **Assuming admin from a token.** Personal access tokens never grant admin through `require_admin`, by design.
-- **Returning service-reader data from a route.** The service reader is global. Routes use the caller-scoped request reader.
+- **Returning run evidence from a route.** The service reader is global: it sees every user's runs.
