@@ -90,6 +90,7 @@ async def test_wait_for_task_until_repeated_cancellation_keeps_original_deadline
     event.set()
     await child
 
+
 class _RecordingAsyncContext:
     def __init__(self, *, suppress: bool = False, exit_error: Exception | None = None) -> None:
         self.suppress = suppress
@@ -181,4 +182,3 @@ async def test_drained_async_context_drains_repeated_cancellation_during_exit():
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
