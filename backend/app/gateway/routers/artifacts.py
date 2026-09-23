@@ -167,10 +167,11 @@ async def _commit_artifact_update(
         if sandbox is not None:
             await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
         await asyncio.to_thread(_replace_artifact_atomically, actual_path, updated, file_stat)
-        # Cancellation is delivered to the caller only after this coroutine
-        # finishes, so cache invalidation belongs to the drained commit too.
-        _sha256_of_file_cached.cache_clear()
     except Exception:
+        # Non-cancelled failures are logged again by the outer route handler.
+        # Keep this inner log because await_drained re-raises caller cancellation
+        # after consuming the drained task's exception, which would otherwise make
+        # a cancelled-then-failed commit silent.
         logger.exception("Failed to commit artifact update before rollback: %s", virtual_path)
         if sandbox is not None:
             try:
