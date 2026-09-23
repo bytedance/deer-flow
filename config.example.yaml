@@ -20,7 +20,14 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 47
+config_version: 48
+
+# Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
+# lead_prompt_overlay:
+#   prepend: "Apply our organization-wide writing conventions."
+#   append: "End reports with a concise decision summary."
+# Subagents: subagents.agents.<name>.prompt_overlay.{prepend,append}
+# DeerMem: memory.backend_config.{prompt_prepend,prompt_append}
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:

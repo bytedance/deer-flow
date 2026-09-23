@@ -1,5 +1,10 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+`subagents.agents.<name>.prompt_overlay` adds operator-owned literal prepend/append
+instructions through `get_subagent_config`. Apply it with `dataclasses.replace`
+alongside other overrides, never by mutating `BUILTIN_SUBAGENTS`; repeated and
+concurrent assemblies with different configuration snapshots must stay isolated.
+
 **Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
 `regular file` and `regular empty file` as regular files. Empty files satisfy
 `exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and

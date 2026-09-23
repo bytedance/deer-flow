@@ -46,6 +46,9 @@ class DeerMemModelConfig(BaseModel):
 class DeerMemConfig(BaseModel):
     """DeerMem-private configuration (self-contained, host-agnostic)."""
 
+    prompt_prepend: str = Field(default="", strict=True, description="Literal operator instructions prepended to the memory-update system message")
+    prompt_append: str = Field(default="", strict=True, description="Literal operator instructions appended to the memory-update system message")
+
     # ── Storage ──────────────────────────────────────────────────────────
     storage_path: str = Field(
         default="",
