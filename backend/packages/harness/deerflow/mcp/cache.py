@@ -1,10 +1,15 @@
 """Cache for MCP tools to avoid repeated loading."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import threading
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
@@ -42,6 +47,26 @@ _mcp_config_snapshot: str | None = None
 # picked up) from "config deleted after a successful load" (fail-soft: keep
 # serving the last-known-good tools).
 _initialized_without_config = False
+
+# ---------------------------------------------------------------------------
+# Applied MCP revision
+#
+# The *pool-applied* effective MCP revision: the revision the session pool has
+# been reconciled to and the tools were built from. Unlike the published tool
+# cache, it deliberately survives ``_reset_mcp_tools_cache_state()``. A config
+# change clears the tool cache and starts rediscovery; a second change landing
+# while that rediscovery is still pending must diff against the revision the pool
+# was last reconciled to, never against an erased snapshot.
+#
+# These values may embed resolved credentials: they are never logged or
+# persisted.
+# ---------------------------------------------------------------------------
+_mcp_applied_servers: dict[str, str] | None = None  # canonical per-server config JSON, declaration order
+_mcp_applied_order: tuple[str, ...] | None = None
+_mcp_applied_connections: dict[str, str] | None = None  # stdio base-connection fingerprints
+_mcp_applied_interceptors: str | None = None
+_mcp_applied_path: Path | None = None
+_mcp_applied_signature: _ConfigSignature | None = None
 
 
 def _resolve_config_path() -> Path | None:
@@ -88,7 +113,7 @@ def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
     return config_path, _get_config_signature(config_path)
 
 
-def _effective_server_config(server) -> dict:
+def effective_server_config(server) -> dict:
     """Return a parsed server config with alias-only fields normalized away."""
     dumped = server.model_dump(mode="json")
     # ``transport`` is an MCP-spec alias for ``type``. The model validator
@@ -113,19 +138,113 @@ def _effective_mcp_config_snapshot(config) -> str:
     is never logged or written back to disk.
     """
     relevant = {
-        "enabled_servers": [(name, _effective_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
+        "enabled_servers": [(name, effective_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
         "mcpInterceptors": (config.model_extra or {}).get("mcpInterceptors"),
     }
     return json.dumps(relevant, sort_keys=True, ensure_ascii=False)
 
 
-def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSignature) -> str | None:
-    """Parse the config and return its MCP snapshot only if the file was stable.
+@dataclass(frozen=True)
+class _McpCacheTransition:
+    """Per-server classification of an effective MCP-config change.
+
+    ``retire_servers is None`` is the conservative whole-pool reset (config path
+    switch, ``mcpInterceptors`` change, unreadable/unstable config, or a missing
+    applied baseline). Otherwise ``retire_servers`` names exactly the servers
+    whose pooled sessions must be torn down, and ``rebuild_servers`` names every
+    server whose tools must be rediscovered.
+    """
+
+    rebuild_servers: frozenset[str]
+    retire_servers: frozenset[str] | None
+
+
+@dataclass(frozen=True)
+class _McpIncomingRevision:
+    """One parsed, signature-verified effective MCP revision read from disk."""
+
+    config: Any
+    path: Path | None
+    signature: _ConfigSignature | None
+    snapshot: str
+    servers: dict[str, str]
+    order: tuple[str, ...]
+    connections: dict[str, str]
+    interceptors: str
+
+
+@dataclass(frozen=True)
+class _McpReconciliationPlan:
+    """A classified transition plus the pool operations it requires."""
+
+    transition: _McpCacheTransition
+    incoming: _McpIncomingRevision | None
+    active: dict[str, str]
+    removed: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _PendingTeardown:
+    """Detached-owner teardown to run *outside* every cache/pool lock."""
+
+    pool: Any
+    prepared: Any
+    retire_all: bool
+
+
+def _canonical_server_snapshot(server) -> str:
+    """Canonical per-server effective config JSON (declaration order kept outside)."""
+    return json.dumps(effective_server_config(server), sort_keys=True, ensure_ascii=False)
+
+
+def _stdio_connection_fingerprint(server_name: str, server) -> str | None:
+    """Normalized base stdio connection fingerprint, or ``None`` when unpooled.
+
+    Only stdio servers are pooled, and only the base connection identity is
+    compared: per-call workspace ``cwd``/``TMPDIR`` additions are applied to a
+    copy at call time and never reach this fingerprint. A server whose params
+    cannot be built (an invalid stdio config) is treated as unpooled, exactly as
+    ``build_servers_config`` drops it during discovery.
+    """
+    from deerflow.mcp.client import build_server_params
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
+
+    try:
+        params = build_server_params(server_name, server)
+    except Exception:
+        return None
+    if params.get("transport") != "stdio":
+        return None
+    return normalized_connection_fingerprint(params)
+
+
+def _revision_from_config(config, *, path: Path | None, signature: _ConfigSignature | None) -> _McpIncomingRevision:
+    """Build the revision view for an already-parsed extensions config."""
+    enabled = config.get_enabled_mcp_servers()
+    connections: dict[str, str] = {}
+    for name, server in enabled.items():
+        fingerprint = _stdio_connection_fingerprint(name, server)
+        if fingerprint is not None:
+            connections[name] = fingerprint
+    return _McpIncomingRevision(
+        config=config,
+        path=path,
+        signature=signature,
+        snapshot=_effective_mcp_config_snapshot(config),
+        servers={name: _canonical_server_snapshot(server) for name, server in enabled.items()},
+        order=tuple(enabled.keys()),
+        connections=connections,
+        interceptors=json.dumps((config.model_extra or {}).get("mcpInterceptors"), sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _read_stable_mcp_revision(config_path: Path, expected_signature: _ConfigSignature) -> _McpIncomingRevision | None:
+    """Parse the config and return its MCP revision only if the file was stable.
 
     ``expected_signature`` is the signature observed by the caller. The file is
     re-hashed after parsing: a mismatch means the config changed while it was
-    being read, so no snapshot can be attributed to a single revision and the
-    caller must treat the cache as stale. Parse failures also return ``None``
+    being read, so no revision can be attributed to a single state and the caller
+    must treat the cache as stale. Parse failures also return ``None``
     (conservative: never reuse tools on an unreadable config).
     """
     from deerflow.config.extensions_config import ExtensionsConfig
@@ -146,20 +265,47 @@ def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSign
         logger.info("Extensions config changed while it was being read; treating the MCP cache as stale")
         return None
 
-    return _effective_mcp_config_snapshot(config)
+    return _revision_from_config(config, path=config_path, signature=expected_signature)
 
 
-def _is_cache_stale() -> bool:
-    """Check if the cache is stale due to config file changes.
+def _record_applied_revision(revision: _McpIncomingRevision) -> None:
+    """Publish *revision* as the applied baseline (call under ``_init_condition``)."""
+    global _mcp_applied_servers, _mcp_applied_order, _mcp_applied_connections
+    global _mcp_applied_interceptors, _mcp_applied_path, _mcp_applied_signature
 
-    The cache is stale when the resolved extensions config path changed, or when
-    the ``(mtime, size, sha256)`` content signature differs from the one recorded
-    at initialization. Using content equality (``!=``) instead of a strict mtime
-    ``>`` comparison detects same-second edits and backward mtime moves, and
-    tracking the resolved path detects a switch to a different config file.
-    A content change alone is not sufficient: the file also carries skills and
-    middleware settings, so the effective MCP slice is compared before the
-    cache is retired.
+    _mcp_applied_servers = dict(revision.servers)
+    _mcp_applied_order = tuple(revision.order)
+    _mcp_applied_connections = dict(revision.connections)
+    _mcp_applied_interceptors = revision.interceptors
+    _mcp_applied_path = revision.path
+    _mcp_applied_signature = revision.signature
+
+
+def _clear_applied_revision() -> None:
+    """Drop the applied baseline (whole-pool resets only, not cache clears)."""
+    global _mcp_applied_servers, _mcp_applied_order, _mcp_applied_connections
+    global _mcp_applied_interceptors, _mcp_applied_path, _mcp_applied_signature
+
+    _mcp_applied_servers = None
+    _mcp_applied_order = None
+    _mcp_applied_connections = None
+    _mcp_applied_interceptors = None
+    _mcp_applied_path = None
+    _mcp_applied_signature = None
+
+
+def _full_reset_plan() -> _McpReconciliationPlan:
+    """The conservative whole-pool reset plan."""
+    return _McpReconciliationPlan(
+        transition=_McpCacheTransition(frozenset(), None),
+        incoming=None,
+        active={},
+        removed=frozenset(),
+    )
+
+
+def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliationPlan | None:
+    """Diff *incoming* against the applied baseline.
 
     When the file signature changes but the effective MCP configuration does
     not, this function adopts the new signature into ``_config_signature`` and
@@ -167,12 +313,69 @@ def _is_cache_stale() -> bool:
     invoke it under ``_init_condition``, the same lock the mutating paths use.
 
     Returns:
-        True if the cache should be invalidated, False otherwise.
+        ``None`` when the effective MCP slice is unchanged (PR1's
+        skills/middleware-only no-op), otherwise the transition plus the exact
+        pool operations it requires.
     """
-    global _config_signature
+    applied_servers = _mcp_applied_servers or {}
+    applied_order = _mcp_applied_order or ()
+    applied_connections = _mcp_applied_connections or {}
+    incoming_servers = incoming.servers
+    incoming_order = incoming.order
+    incoming_connections = incoming.connections
 
-    if not _cache_initialized:
-        return False  # Not initialized yet, not stale
+    if incoming.interceptors != _mcp_applied_interceptors:
+        logger.info("MCP interceptors changed; the whole MCP session pool must be reset")
+        return _McpReconciliationPlan(
+            transition=_McpCacheTransition(frozenset(), None),
+            incoming=incoming,
+            active={},
+            removed=frozenset(),
+        )
+
+    removed = {name for name in applied_servers if name not in incoming_servers}
+    rebuild = {name for name, snapshot in incoming_servers.items() if applied_servers.get(name) != snapshot}
+    rebuild |= removed
+
+    # Declaration order feeds tool ordering, so a pure reorder must rebuild every
+    # server's tools. It must NOT retire anything: the connections are unchanged.
+    if incoming_order != applied_order and set(incoming_order) == set(applied_order):
+        rebuild = set(incoming_servers)
+
+    if not rebuild:
+        return None
+
+    connection_changed = {name for name, fingerprint in incoming_connections.items() if name in applied_connections and applied_connections[name] != fingerprint}
+    removed_connections = {name for name in applied_connections if name not in incoming_connections}
+    active = {name: fingerprint for name, fingerprint in incoming_connections.items() if applied_connections.get(name) != fingerprint}
+    return _McpReconciliationPlan(
+        transition=_McpCacheTransition(frozenset(rebuild), frozenset(removed | connection_changed | removed_connections)),
+        incoming=incoming,
+        active=active,
+        removed=frozenset(removed | removed_connections),
+    )
+
+
+def _plan_cache_transition() -> _McpReconciliationPlan | None:
+    """Classify the on-disk effective MCP config against the applied baseline.
+
+    Returns:
+        ``None`` when nothing MCP-relevant changed, otherwise the plan to apply.
+    """
+    global _config_signature, _mcp_applied_signature
+
+    # Nothing has been published or reconciled yet: never stale (PR1 contract),
+    # and deployments without MCP pay no config-hashing cost.
+    if not _cache_initialized and _mcp_applied_servers is None:
+        if _initializing_generation is not None:
+            logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
+            return _full_reset_plan()
+        return None
+
+    if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
+        # The tool cache claims to be published but no trustworthy applied
+        # baseline survives: only a whole-pool reset is safe.
+        return _full_reset_plan()
 
     current_path, current_signature = _current_config_state()
 
@@ -186,36 +389,211 @@ def _is_cache_stale() -> bool:
     # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
     # oversight — a future change that wants "config deleted" to tear down
     # MCP tools needs its own explicit signal here, not an inferred one.
-    if _config_signature is None:
+    if _mcp_applied_signature is None:
         # A config that appears after an unconfigured initialization must be
         # picked up; a config deleted after a successful load keeps the
-        # last-known-good fail-soft contract below.
+        # last-known-good fail-soft contract.
         if _initialized_without_config and current_signature is not None:
             logger.info("Extensions config appeared after an unconfigured MCP cache; cache is stale")
-            return True
-        return False
+            return _full_reset_plan()
+        return None
 
     if current_signature is None:
-        return False
+        return None
 
-    if current_path != _config_path:
-        logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
-        return True
+    if current_path != _mcp_applied_path:
+        logger.info("MCP config path changed (%s -> %s), cache is stale", _mcp_applied_path, current_path)
+        return _full_reset_plan()
 
-    if current_signature == _config_signature:
-        return False
+    if current_signature == _mcp_applied_signature:
+        return None  # Unchanged-signature fast path.
 
-    # The file changed, but it also carries skills and middleware settings.
-    # Retire MCP state only when the effective MCP slice actually changed.
-    if current_path is not None and _mcp_config_snapshot is not None:
-        current_snapshot = _read_stable_mcp_snapshot(current_path, current_signature)
-        if current_snapshot is not None and current_snapshot == _mcp_config_snapshot:
-            logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
-            _config_signature = current_signature
-            return False
+    if current_path is None:
+        return None
 
-    logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
-    return True
+    incoming = _read_stable_mcp_revision(current_path, current_signature)
+    if incoming is None:
+        # Unreadable config, or one that changed while it was being read: no
+        # revision can be trusted, so the whole pool is reset.
+        logger.info("MCP config could not be read as a single stable revision; resetting the whole MCP cache")
+        return _full_reset_plan()
+
+    plan = _classify_against_applied(incoming)
+    if plan is None:
+        # The file changed, but it also carries skills and middleware settings.
+        logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
+        _config_signature = current_signature
+        _mcp_applied_signature = current_signature
+        return None
+    return plan
+
+
+def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPlan | None:
+    """Plan a reconciliation for an explicitly reported change set.
+
+    Used by the Gateway's config-mutation endpoints, which have already committed
+    the write to disk. Names the config does not know about are a no-op unless
+    the full on-disk diff reveals a missed change; a global change (resolved
+    config path or ``mcpInterceptors``) still takes the conservative whole-pool
+    reset.
+    """
+    if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
+        if _initializing_generation is not None:
+            logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
+            return _full_reset_plan()
+        return None  # Nothing has been reconciled yet: nothing to reconcile.
+
+    current_path, current_signature = _current_config_state()
+    if current_path is None or current_signature is None:
+        return None  # Fail-soft: keep serving the last-known-good state.
+    if _mcp_applied_path is not None and current_path != _mcp_applied_path:
+        return _full_reset_plan()
+
+    incoming = _read_stable_mcp_revision(current_path, current_signature)
+    if incoming is None:
+        return _full_reset_plan()
+    if incoming.interceptors != _mcp_applied_interceptors:
+        return _McpReconciliationPlan(
+            transition=_McpCacheTransition(frozenset(), None),
+            incoming=incoming,
+            active={},
+            removed=frozenset(),
+        )
+
+    applied_servers = _mcp_applied_servers
+    applied_connections = _mcp_applied_connections
+    incoming_servers = incoming.servers
+    incoming_connections = incoming.connections
+
+    known = set(applied_servers) | set(incoming_servers) | set(applied_connections) | set(incoming_connections)
+    # Defense in depth: the caller's reported set is a hint, not the source of
+    # truth. A writer can miss a removal/change (or another process can land one
+    # between the write and this read), and trusting only the reported names
+    # would strand that server's old epoch/session in the pool while dropping it
+    # from the applied baseline. Union in the complete effective diff so every
+    # missed server is still classified.
+    diff_names = {name for name in known if applied_servers.get(name) != incoming_servers.get(name) or applied_connections.get(name) != incoming_connections.get(name)}
+    relevant = {name for name in names if name in known} | diff_names
+    if not relevant:
+        return None  # Unknown names: no-op.
+
+    removed = {name for name in relevant if name not in incoming_servers}
+    removed |= {name for name in relevant if name in applied_connections and name not in incoming_connections}
+    if not removed and all(applied_servers.get(name) == incoming_servers.get(name) for name in relevant):
+        return None  # The reported names are byte-identical: no-op.
+
+    connection_changed = {name for name in relevant if name in applied_connections and name in incoming_connections and applied_connections[name] != incoming_connections[name]}
+    active = {name: incoming_connections[name] for name in relevant if name in incoming_connections and applied_connections.get(name) != incoming_connections[name]}
+    return _McpReconciliationPlan(
+        transition=_McpCacheTransition(frozenset(relevant), frozenset(removed | connection_changed)),
+        incoming=incoming,
+        active=active,
+        removed=frozenset(removed),
+    )
+
+
+def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardown:
+    """Apply *plan*; caller MUST hold ``_init_condition``.
+
+    This never awaits and never runs owner teardown: the blocking teardown is
+    returned to the caller so it happens outside ``_init_condition`` and outside
+    ``pool._lock`` (and off the event loop when one is running).
+    """
+    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+
+    incoming = plan.incoming
+    if incoming is not None:
+        # A frozen durable-task configuration must reject the change BEFORE any
+        # session is retired, so a rejected update leaves the pool untouched.
+        from deerflow.mcp.tasks.runtime import validate_mcp_task_config_snapshot
+
+        validate_mcp_task_config_snapshot(incoming.config)
+
+    if plan.transition.retire_servers is None:
+        retired_pool = reset_session_pool()
+        _reset_mcp_tools_cache_state()
+        _clear_applied_revision()
+        return _PendingTeardown(pool=retired_pool, prepared=None, retire_all=True)
+
+    pool = get_session_pool()
+    prepared = pool.reconcile_bindings(plan.active, plan.removed)
+    # Retain the just-applied revision across the tool-cache clear so a
+    # back-to-back edit diffs against it rather than an erased snapshot.
+    _reset_mcp_tools_cache_state()
+    if incoming is not None:
+        _record_applied_revision(incoming)
+    return _PendingTeardown(pool=pool, prepared=prepared, retire_all=False)
+
+
+_pending_teardowns: set[asyncio.Task[Any]] = set()
+
+
+def _pending_teardown_work(pending: _PendingTeardown) -> Callable[[], None] | None:
+    """The blocking teardown callable, or ``None`` when there is nothing to do."""
+    if pending.pool is None:
+        return None
+    if pending.retire_all:
+        return pending.pool.close_all_sync
+    prepared = pending.prepared
+    if prepared is None or (not prepared.entries and not prepared.inflight):
+        return None  # Nothing was detached: never schedule an empty teardown.
+    return lambda: pending.pool.close_prepared_owners_sync(prepared)
+
+
+def _run_pending_teardown(pending: _PendingTeardown | None) -> None:
+    """Run detached-owner teardown outside every lock and off the event loop.
+
+    Blocking here is deliberate for synchronous callers: an owner on a foreign
+    loop is waited on with the pool's bounded timeout. The cache entry points are
+    also called from async contexts, so when a running loop exists the blocking
+    wait is handed to a worker thread instead of stalling the loop. Owners are
+    already signalled inside the pool-lock critical section, so a cancellation
+    here cannot strand them.
+    """
+    if pending is None:
+        return
+    work = _pending_teardown_work(pending)
+    if work is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        work()
+        return
+    task = loop.create_task(asyncio.to_thread(work))
+    _pending_teardowns.add(task)
+    task.add_done_callback(_pending_teardowns.discard)
+
+
+def _classify_cache_transition() -> _McpCacheTransition | None:
+    """Classify the current effective MCP config against the applied baseline.
+
+    The cache is stale when the resolved extensions config path changed, when
+    ``mcpInterceptors`` changed, when the effective per-server configuration
+    changed, or when no trustworthy applied baseline exists. Using content
+    equality (``!=``) instead of a strict mtime ``>`` comparison detects
+    same-second edits and backward mtime moves, and tracking the resolved path
+    detects a switch to a different config file. A content change alone is not
+    sufficient: the file also carries skills and middleware settings, so the
+    effective MCP slice is compared before any MCP state is retired.
+
+    Returns:
+        ``None`` when nothing MCP-relevant changed, otherwise the per-server
+        transition to apply. ``retire_servers is None`` means the whole pool must
+        be reset.
+    """
+    plan = _plan_cache_transition()
+    return None if plan is None else plan.transition
+
+
+def _is_cache_stale() -> bool:
+    """Compatibility wrapper over :func:`_classify_cache_transition`.
+
+    Not a read-only predicate: the planner adopts the new file signature when
+    the effective MCP configuration is unchanged, and production callers run it
+    under ``_init_condition``, the same lock the mutating paths use.
+    """
+    return _classify_cache_transition() is not None
 
 
 def _wait_for_initialization(generation: int | None) -> None:
@@ -258,6 +636,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     post_path = None
     post_sig = None
     post_snapshot = None
+    post_revision = None
     init_succeeded = False
     try:
         logger.info("Initializing MCP tools...")
@@ -280,7 +659,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
         post_path, post_sig = _current_config_state()
         if post_path is not None and post_sig is not None:
-            post_snapshot = _read_stable_mcp_snapshot(post_path, post_sig)
+            post_revision = _read_stable_mcp_revision(post_path, post_sig)
+            post_snapshot = post_revision.snapshot if post_revision is not None else None
         elif post_path is not None:
             # The path resolved but its signature could not be read. Publishing
             # here would record an unpinned cache that later checks could never
@@ -291,15 +671,20 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             # config that appeared mid-flight is not published as an unpinned
             # cache; the snapshot comparison still rejects a different revision.
             try:
-                fallback_snapshot = _effective_mcp_config_snapshot(ExtensionsConfig.from_file())
+                fallback_revision = _revision_from_config(ExtensionsConfig.from_file(), path=None, signature=None)
             except Exception as exc:
                 logger.warning(
                     "Could not load extensions config after MCP tool discovery (%s); discarding result",
                     type(exc).__name__,
                 )
-                fallback_snapshot = None
+                fallback_revision = None
             recheck_path, recheck_sig = _current_config_state()
-            post_snapshot = fallback_snapshot if recheck_path is None and recheck_sig is None else None
+            if recheck_path is None and recheck_sig is None:
+                post_revision = fallback_revision
+                post_snapshot = fallback_revision.snapshot if fallback_revision is not None else None
+            else:
+                post_revision = None
+                post_snapshot = None
         init_succeeded = True
     finally:
         if not init_succeeded:
@@ -325,6 +710,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 _config_path, _config_signature = post_path, post_sig
                 _mcp_config_snapshot = post_snapshot
                 _initialized_without_config = post_path is None
+                # Publishing a fresh revision also makes it the pool-applied
+                # baseline: discovery seeded/validated every stdio binding
+                # against exactly this revision.
+                if post_revision is not None:
+                    _record_applied_revision(post_revision)
                 logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
                 return _mcp_tools_cache
         finally:
@@ -351,21 +741,29 @@ def get_cached_mcp_tools() -> list[BaseTool]:
         List of cached MCP tools.
     """
     while True:
-        retired_pool = None
-        with _init_lock:
-            if _is_cache_stale():
-                logger.info("MCP cache is stale, resetting for re-initialization...")
-                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+        pending_teardown = None
+        result: list[BaseTool] | None = None
+        wait_for_initialization = False
+        with _init_condition:
+            plan = _plan_cache_transition()
+            if plan is not None:
+                logger.info("MCP cache is stale, reconciling the session pool for re-initialization...")
+                pending_teardown = _apply_reconciliation_locked(plan)
 
             if _cache_initialized:
-                return _mcp_tools_cache or []
-
-            if _initializing_generation is not None:
+                result = _mcp_tools_cache or []
+            elif _initializing_generation is not None:
                 _init_condition.wait_for(lambda: _initializing_generation is None or _cache_initialized)
-                continue
+                wait_for_initialization = True
 
-        if retired_pool is not None:
-            retired_pool.close_all_sync()
+        # Teardown always runs outside every lock, and never on the event loop.
+        _run_pending_teardown(pending_teardown)
+
+        if result is not None:
+            return result
+
+        if wait_for_initialization:
+            continue
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
         try:
@@ -406,23 +804,61 @@ def refresh_mcp_cache_if_active() -> bool:
       config-hashing cost;
     * it invalidates an in-flight initialization (bumping the cache generation)
       so tools discovered under the superseded config cannot publish;
-    * it retires the pool outside the lock, matching ``get_cached_mcp_tools``.
+    * it reconciles the pool per server — a change that retires only the changed
+      servers leaves every unrelated live session attached;
+    * it runs owner teardown outside every lock, matching
+      ``get_cached_mcp_tools``.
 
     Returns:
         True when existing cache state or an in-flight initialization was
         retired.
     """
-    retired_pool = None
+    pending_teardown = None
     retired = False
     with _init_condition:
-        if not _cache_initialized and _initializing_generation is None:
+        if not _cache_initialized and _initializing_generation is None and _mcp_applied_servers is None:
             return False
-        if _initializing_generation is not None or _is_cache_stale():
-            retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+        plan = _plan_cache_transition()
+        if plan is None and _initializing_generation is not None and _mcp_applied_servers is None:
+            # An initialization is in flight and no revision has ever been
+            # applied, so there is no baseline to classify against. Conservatively
+            # void the in-flight initialization instead of letting tools
+            # discovered under the superseded config publish.
+            plan = _full_reset_plan()
+        if plan is not None:
+            pending_teardown = _apply_reconciliation_locked(plan)
             retired = True
-    if retired_pool is not None:
-        retired_pool.close_all_sync()
+    _run_pending_teardown(pending_teardown)
     return retired
+
+
+def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
+    """Reconcile pooled MCP sessions and the tool cache with the on-disk config.
+
+    This is the shared entry point for the Gateway's configuration-mutation
+    endpoints and for cross-process lazy detection, so both paths make the same
+    session-ownership decisions (I8).
+
+    Args:
+        changed: The server names whose effective configuration the caller just
+            changed. ``None`` reads and classifies the whole on-disk effective
+            MCP config against the applied baseline instead.
+
+    Returns:
+        True when MCP state was reconciled (tools cleared and/or servers
+        retired), False for a no-op.
+    """
+    pending_teardown = None
+    with _init_condition:
+        if changed is None:
+            plan = _plan_cache_transition()
+        else:
+            plan = _plan_explicit_reconciliation(frozenset(str(name) for name in changed))
+        if plan is None:
+            return False
+        pending_teardown = _apply_reconciliation_locked(plan)
+    _run_pending_teardown(pending_teardown)
+    return True
 
 
 def _reset_mcp_tools_cache_state() -> None:
@@ -452,6 +888,7 @@ def _reset_mcp_tools_cache_state_and_retire_pool_locked():
 
     retired_pool = reset_session_pool()
     _reset_mcp_tools_cache_state()
+    _clear_applied_revision()
     return retired_pool
 
 
@@ -484,6 +921,7 @@ def reset_mcp_tools_cache() -> None:
             # them after this reset replaces the singleton.
             retired_pool = reset_session_pool()
             _reset_mcp_tools_cache_state()
+            _clear_applied_revision()
 
         if retired_pool is not None:
             retired_pool.close_all_sync()

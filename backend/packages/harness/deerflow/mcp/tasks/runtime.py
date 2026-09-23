@@ -11,6 +11,10 @@ from deerflow.mcp.tasks.models import TaskSubmitRequest
 class McpTaskConfigurationError(RuntimeError):
     """The configured long-running MCP contract cannot run safely."""
 
+    def __init__(self, message: str, *, changed_servers: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.changed_servers = changed_servers
+
 
 class McpTaskSubmitter(Protocol):
     async def submit(
@@ -78,7 +82,10 @@ def validate_mcp_task_config_snapshot(extensions_config: ExtensionsConfig) -> No
     if current_interceptors != startup_interceptors:
         changed.append("mcpInterceptors")
     names = ", ".join(changed) or "<unknown>"
-    raise McpTaskConfigurationError(f"MCP task-enabled server configuration changed after Gateway startup ({names}); restart DeerFlow before using durable task tools")
+    raise McpTaskConfigurationError(
+        f"MCP task-enabled server configuration changed after Gateway startup ({names}); restart DeerFlow before using durable task tools",
+        changed_servers=tuple(changed),
+    )
 
 
 def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:

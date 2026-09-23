@@ -22,7 +22,13 @@ from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPSessionPool,
+    ServerBinding,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -485,6 +491,9 @@ def _make_session_pool_tool(
     tool_call_timeout: float | None = None,
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
+    *,
+    pool: MCPSessionPool,
+    binding: ServerBinding,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -495,6 +504,15 @@ def _make_session_pool_tool(
 
     The configured ``tool_interceptors`` (OAuth, custom) are preserved and
     applied on every call before invoking the pooled session.
+
+    ``pool`` and ``binding`` are REQUIRED and keyword-only: the caller must
+    capture the pool and resolve the binding from the server's BASE connection
+    before the first discovery await (see ``_resolve_discovery_binding`` /
+    ``get_mcp_tools``). Keeping them together prevents a global reset during
+    discovery from pairing an old epoch with a replacement pool that reused the
+    same initial epoch. ``binding`` is the server's epoch identity, and passing
+    it to every ``get_session`` keeps per-call workspace ``cwd``/``TMPDIR`` from
+    ever being folded into that identity (I9).
     """
     # Strip only prefixes added by the adapter. An unprefixed server may expose
     # a tool whose own name happens to start with ``<server_name>_``.
@@ -502,8 +520,6 @@ def _make_session_pool_tool(
     prefix = f"{server_name}_"
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
-
-    pool = get_session_pool()
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
@@ -560,7 +576,7 @@ def _make_session_pool_tool(
             # so a hung server cannot leak a session or block the turn.
             try:
                 session = await asyncio.wait_for(
-                    pool.get_session(server_name, scope_key, session_connection),
+                    pool.get_session(server_name, scope_key, session_connection, binding=binding),
                     timeout=session_init_timeout,
                 )
             except TimeoutError:
@@ -575,7 +591,7 @@ def _make_session_pool_tool(
                 )
                 raise
         else:
-            session = await pool.get_session(server_name, scope_key, session_connection)
+            session = await pool.get_session(server_name, scope_key, session_connection, binding=binding)
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -780,6 +796,25 @@ def _configure_task_tools_for_server(
     return configured
 
 
+def _resolve_discovery_binding(
+    pool: MCPSessionPool,
+    server_name: str,
+    connection: Mapping[str, Any],
+) -> ServerBinding:
+    """Resolve *server_name*'s binding BEFORE the first discovery await (I9).
+
+    The fingerprint is taken from the BASE stdio connection only. Per-call
+    workspace ``cwd``/``TMPDIR`` are applied to a *copy* at invocation time and
+    never reach this function, so they cannot change a server's identity.
+
+    Delegates to :meth:`MCPSessionPool.ensure_binding`, which performs the
+    first-seen seed, the idempotent re-resolve, and the stale/tombstone fence
+    under a single ``_lock`` acquisition — so a reconciliation that commits
+    concurrently can never be overwritten by this discovery.
+    """
+    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection))
+
+
 async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
@@ -816,6 +851,17 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
     if not servers_config:
         logger.info("No enabled MCP servers configured")
         return []
+
+    # Bind every enabled stdio server to its base-connection identity BEFORE the
+    # first discovery await. Resolving here (outside the broad try below) means a
+    # superseded binding raises StaleMCPBindingError instead of being swallowed
+    # by the discovery-failure handler. Only stdio servers are pooled; HTTP/SSE
+    # connections stay nonpooled and are deliberately skipped.
+    pool = get_session_pool()
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in servers_config.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = _resolve_discovery_binding(pool, server_name, server_connection)
 
     try:
         # Create the multi-server MCP client
@@ -951,6 +997,8 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
+                            pool=pool,
+                            binding=server_bindings[source_name],
                         )
                     )
                 else:
