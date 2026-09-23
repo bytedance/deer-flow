@@ -7,6 +7,7 @@ Validates that the LangGraph auth layer enforces the same rules as Gateway:
 import asyncio
 import os
 import sys
+from contextvars import ContextVar
 from datetime import timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -269,6 +270,7 @@ def test_run_admission_uses_persisted_incarnation_and_scrubs_client_values():
     thread_id = uuid4()
     run_id = uuid4()
     value = {
+        "assistant_id": uuid4(),
         "thread_id": thread_id,
         "run_id": run_id,
         "metadata": {
@@ -344,6 +346,7 @@ def test_existing_legacy_thread_uses_explicit_none_without_backfill():
         incarnation = asyncio.run(
             auth_module._ensure_standalone_thread_incarnation(
                 uuid4(),
+                uuid4(),
                 _make_ctx("user-a", action="create_run"),
                 create_if_missing=False,
             )
@@ -363,13 +366,21 @@ def test_implicit_create_accepts_legacy_thread_created_by_mixed_version_peer():
     async def _put_rows():
         yield {"metadata": {"legacy": True}}
 
+    async def _assistant_rows():
+        yield {"metadata": {"created_by": "system"}}
+
     put = AsyncMock(return_value=_put_rows())
     runtime_package = ModuleType("langgraph_runtime")
     runtime_package.__path__ = []
     database_module = ModuleType("langgraph_runtime.database")
     database_module.connect = _Connection
     ops_module = ModuleType("langgraph_runtime.ops")
+    ops_module.Assistants = SimpleNamespace(
+        get=AsyncMock(return_value=_assistant_rows()),
+    )
     ops_module.Threads = SimpleNamespace(put=put)
+    utils_module = ModuleType("langgraph_api.utils")
+    utils_module.AuthContext = ContextVar("test_runtime_auth_context", default=None)
 
     with (
         patch.object(
@@ -383,11 +394,13 @@ def test_implicit_create_accepts_legacy_thread_created_by_mixed_version_peer():
                 "langgraph_runtime": runtime_package,
                 "langgraph_runtime.database": database_module,
                 "langgraph_runtime.ops": ops_module,
+                "langgraph_api.utils": utils_module,
             },
         ),
     ):
         incarnation = asyncio.run(
             auth_module._ensure_standalone_thread_incarnation(
+                uuid4(),
                 uuid4(),
                 _make_ctx("user-a", action="create_run"),
                 create_if_missing=True,
@@ -401,6 +414,7 @@ def test_implicit_create_accepts_legacy_thread_created_by_mixed_version_peer():
 @pytest.mark.parametrize("persisted_incarnation", [None, "versioned-incarnation"])
 def test_run_admission_preserves_persisted_incarnation_value(persisted_incarnation):
     value = {
+        "assistant_id": uuid4(),
         "thread_id": uuid4(),
         "metadata": {},
         "kwargs": {},
@@ -426,6 +440,7 @@ def test_run_admission_preserves_persisted_incarnation_value(persisted_incarnati
 
 def test_run_admission_does_not_invent_incarnation_for_missing_rejected_thread():
     value = {
+        "assistant_id": uuid4(),
         "thread_id": uuid4(),
         "metadata": {THREAD_INCARNATION_CONTEXT_KEY: "attacker"},
         "kwargs": {
@@ -453,6 +468,7 @@ def test_run_admission_does_not_invent_incarnation_for_missing_rejected_thread()
 
 def test_run_admission_rejects_invalid_persisted_incarnation():
     value = {
+        "assistant_id": uuid4(),
         "thread_id": uuid4(),
         "metadata": {},
         "kwargs": {},
@@ -484,6 +500,7 @@ def test_run_admission_rejects_invalid_persisted_incarnation():
 
 def test_temporary_run_gets_explicit_legacy_incarnation():
     value = {
+        "assistant_id": uuid4(),
         "thread_id": None,
         "metadata": {},
         "kwargs": {
