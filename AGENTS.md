@@ -66,8 +66,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/deerflow-extension-example/ # Standalone package demonstrating five extension contribution kinds
-├── examples/deerflow-extension-bookmarks/ # Full-stack plugin example: browser page, conversation action, backend actions
+├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks}
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -76,18 +75,14 @@ deer-flow/
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
 kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, task lifecycle, system-model, agent-assembly and context-compaction observers,
-Gateway services, FastAPI HTTP routers, and experimental full-stack plugins. The
-[reference extension](examples/deerflow-extension-example/) demonstrates middleware, task
-lifecycle, a system-model observer, a service, and a router; the
-[bookmarks extension](examples/deerflow-extension-bookmarks/) demonstrates a plugin. Manage
-extensions with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
+middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
+full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
 `make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
 hooks and extension code execute with Gateway privileges, so only trusted operator sources
 belong in this path. The manager transaction, accepted source forms, lock discipline, and
 contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user-facing
-extension manual lives at `frontend/src/content/{en,zh}/harness/extensions/`.
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
+is `frontend/src/content/{en,zh}/harness/extensions/`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
