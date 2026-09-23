@@ -2,6 +2,10 @@
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts retain backend ownership through exit: drain cache/bridge `aclose()`/`close()` and SQLite/PostgreSQL checkpointer/Store `__aexit__` across cancellation before it propagates.
 
+### Agent Stream Teardown
+
+`runtime/runs/stream_cleanup.py::close_agent_stream()` owns the asynchronous close awaitable in a separate task and shields it from host cancellation until teardown completes. It consumes only additional cancellation requests that it suppresses while teardown drains; cancellation counts already present on entry remain caller-owned, whether their delivery is still pending or was caught earlier. When an ordinary stream exception is already authoritative, a pending cancellation is checkpointed without replacing that exception. An already-propagating `CancelledError` keeps its original cancellation count. When close began on an otherwise healthy path, the first deferred host cancellation is re-raised after teardown and keeps its count; later requests suppressed during the drain are balanced. A stream-originated `CancelledError` becomes `AgentStreamCloseCancelledError` with the original cancellation as its cause, so worker/subagent code treats a broken close as a failure rather than a user cancellation. Other close failures stay visible, or become the cause of a deferred host cancellation. Do not add a timeout that releases graph, provider, sandbox, or tool resources while their stream can still be unwinding.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
