@@ -8,7 +8,7 @@ The read-only `search_bookmarks`
 model tool searches the authenticated user's saved excerpts. Each user sees only
 their own data, including when the Agent calls the tool.
 
-**Requires a host with the full-stack plugin contract and extension-api 0.2.2.** Pi's original labels session entries; this web
+**Requires a host with the full-stack plugin contract and extension-api 0.2.3.** Pi's original labels session entries; this web
 adaptation is independently implemented. See [attribution](THIRD_PARTY_NOTICES.md).
 
 ## Deployment
@@ -78,8 +78,8 @@ file above stores user bookmarks, not deployment settings.
 
 ## Host contract exercised
 
-`PluginContribution` packages one `BrowserModule`, five `BackendAction`s and one
-`ModelTool`. The module contributes a conversation action and a `page` DOM surface.
+`PluginContribution` packages one `BrowserAssets` declaration, five `BackendAction`s and one
+`ModelTool`. The entry module contributes a conversation action and a `page` DOM surface.
 The page declares `navigation: { label: "My bookmarks", labelZh: "我的书签", icon: "bookmark" }`.
 The host builds the route from the namespace and surface ID and adds the optional
 sidebar entry; the plugin cannot claim arbitrary host URLs. Disabled/unloaded pages
@@ -100,3 +100,13 @@ repairs navigation for existing bookmarks without migrating the SQLite schema.
 A missing/inaccessible conversation shows an error instead of opening the default
 agent. Hosts without this optional navigation helper cannot reopen conversations
 from this version of the example.
+
+## Browser resource layout
+
+`ui_manifest.json` explicitly lists `static/dist/index.mjs`, its relative page module
+under `chunks/`, the stylesheet and the bookmark SVG. These files ship in the Python
+wheel. The host validates/snapshots the manifest at registration and exposes private,
+revisioned URLs. The page resolves CSS and its image against `import.meta.url`, using
+credentialed resource requests for split-origin Gateway deployments. No JavaScript
+build step is needed for this dependency-free example; larger plugins can ship
+bundler output using the same relative-path manifest contract.

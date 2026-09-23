@@ -294,8 +294,15 @@ change its visibility. Content and redacted metadata are deep-copied snapshots: 
 fields are frozen, but nested containers remain locally mutable without touching host
 storage. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
-global cross-user visibility because services have no request principal. A host embedding
-the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+global cross-user visibility because services have no request principal. User-facing contributed
+routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
+the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
+The resolver requires the request's effective `runs:read` permission and never widens admin
+or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
+helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
+these to 503/403 at their HTTP boundary. The public API remains framework-independent.
+A host embedding the harness may instead bind a reader to one user. This is not a sandbox boundary: services
 already retain `session_factory` and execute with Gateway privileges. Empty pages mean
 caught up or not visible, never unsupported -- absence is represented
 by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
