@@ -1,3 +1,6 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 from langchain_core.tools import StructuredTool
 
 from deerflow.mcp.tools import ServerDiscoveryResult, _flatten_server_tool_groups
@@ -21,3 +24,165 @@ def test_flatten_order_preserves_tool_identity_and_empty_success():
     assert flattened == [b, a]
     assert flattened[0] is b and flattened[1] is a
     assert "EMPTY" in grouped and grouped["EMPTY"].tools == ()
+
+
+@pytest.mark.asyncio
+async def test_selected_discovery_never_builds_an_unselected_client(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {"enabled": True, "type": "http", "url": "https://a.example/mcp"},
+                "B": {"enabled": True, "type": "http", "url": "https://b.example/mcp"},
+            }
+        }
+    )
+    created: list[set[str]] = []
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            created.append(set(connections))
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            return [_tool(f"{server_name}_search")]
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    result = await get_mcp_tools_by_server(config, server_names={"A"})
+
+    assert created == [{"A"}]
+    assert list(result) == ["A"]
+    assert [t.name for t in result["A"].tools] == ["A_search"]
+
+
+@pytest.mark.asyncio
+async def test_selected_empty_set_builds_no_client(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {"enabled": True, "type": "http", "url": "https://a.example/mcp"},
+            }
+        }
+    )
+    client = AsyncMock()
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", client)
+
+    assert await get_mcp_tools_by_server(config, server_names=set()) == {}
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_one_server_discovery_failure_does_not_hide_successful_sibling(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "GOOD": {"enabled": True, "type": "http", "url": "https://good.example/mcp"},
+                "FAIL": {"enabled": True, "type": "http", "url": "https://fail.example/mcp"},
+            }
+        }
+    )
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            if server_name == "FAIL":
+                raise RuntimeError("offline")
+            return [_tool(f"{server_name}_search")]
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    result = await get_mcp_tools_by_server(config)
+
+    assert list(result) == ["GOOD"]
+    assert [t.name for t in result["GOOD"].tools] == ["GOOD_search"]
+
+
+@pytest.mark.asyncio
+async def test_successful_empty_is_present_but_failure_is_absent(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "EMPTY": {"enabled": True, "type": "http", "url": "https://empty.example/mcp"},
+                "FAIL": {"enabled": True, "type": "http", "url": "https://fail.example/mcp"},
+            }
+        }
+    )
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            self.callbacks = None
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+
+        async def get_tools(self, *, server_name=None):
+            if server_name == "FAIL":
+                raise RuntimeError("offline")
+            return []
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    result = await get_mcp_tools_by_server(config)
+
+    assert result["EMPTY"].tools == ()
+    assert "FAIL" not in result
+
+
+@pytest.mark.asyncio
+async def test_initial_oauth_headers_only_fetch_selected_names(monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.oauth import get_initial_oauth_headers
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "A": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://a.example/mcp",
+                    "oauth": {"enabled": True, "token_url": "https://auth.example/a"},
+                },
+                "B": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://b.example/mcp",
+                    "oauth": {"enabled": True, "token_url": "https://auth.example/b"},
+                },
+            }
+        }
+    )
+    manager = MagicMock()
+    manager.has_oauth_servers.return_value = True
+    manager.oauth_server_names.return_value = ("A", "B")
+    manager.get_authorization_header = AsyncMock(side_effect=lambda name: f"Bearer {name}")
+    monkeypatch.setattr(
+        "deerflow.mcp.oauth.OAuthTokenManager.from_extensions_config",
+        lambda config: manager,
+    )
+
+    assert await get_initial_oauth_headers(config, server_names={"A"}) == {"A": "Bearer A"}
+    manager.get_authorization_header.assert_awaited_once_with("A")
+
+    manager.get_authorization_header.reset_mock()
+    assert await get_initial_oauth_headers(config, server_names=set()) == {}
+    manager.get_authorization_header.assert_not_awaited()
