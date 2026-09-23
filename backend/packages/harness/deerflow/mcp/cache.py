@@ -161,6 +161,11 @@ def _is_cache_stale() -> bool:
     middleware settings, so the effective MCP slice is compared before the
     cache is retired.
 
+    When the file signature changes but the effective MCP configuration does
+    not, this function adopts the new signature into ``_config_signature`` and
+    returns False. It is therefore not a read-only predicate; production callers
+    invoke it under ``_init_condition``, the same lock the mutating paths use.
+
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
