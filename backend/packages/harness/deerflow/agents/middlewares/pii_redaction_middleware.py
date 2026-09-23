@@ -2,34 +2,38 @@
 
 Detects personally identifiable information in the two untrusted-content entry
 points — genuine user messages and remote-content tool results — and rewrites
-it to irreversible value-derived placeholders (128-bit HMAC digests over
-base-26 letters) before it reaches the model.
+it to keyed, value-derived placeholders (128-bit HMAC digests over base-26
+letters, keyed by the deployment-scoped ``token_secret``) before it reaches
+the model.
 Complements the structural guardrails: ``InputSanitizationMiddleware``
 neutralizes injection tags in user input and ``ToolResultSanitizationMiddleware``
 does the same for remote tool results; neither inspects *content* for PII.
 
 v1 is deterministic-only: fixed regex detectors with checksum validation where
 the identifier format defines one (Luhn for card numbers, mod-11 for CN resident
-IDs and CPF), no model calls, no new dependencies. Redaction is irreversible —
-no mapping table is stored, so there is nothing to protect and no
-re-identification path.
+IDs and CPF), no model calls, no new dependencies. Placeholders are HMAC-keyed
+with the deployment-scoped ``token_secret`` (required whenever redaction is
+enabled) and no mapping table is stored, so tokens cannot be re-derived
+offline — neither from the repository nor from an observed token.
 
 Scope model (mirrors the structural guardrails):
 
 * the user-message rewrite is request-scoped — thread state keeps the raw text,
   so the UI still shows the original message and the whole conversation is
   re-redacted on every model call. Placeholders are value-derived
-  (a 128-bit digest of the value): the same raw value always renders the same token, so
-  identities stay stable across turns, compaction, enqueues, and downstream
-  content-signature deduplication — without any stored mapping;
+  (a 128-bit HMAC of the value under the deployment secret): the same raw
+  value always renders the same token, so identities stay stable across
+  turns, compaction, enqueues, and downstream content-signature
+  deduplication — without any stored mapping;
 * tool-result redaction runs at the tool boundary (``wrap_tool_call``) with the
   same allowlist as ``ToolResultSanitizationMiddleware`` (first-party web tools
   by name, MCP tools via their ``deerflow_mcp`` tag), so redacted text is what
   enters model context in the first place;
 * subagents are covered because ``build_subagent_runtime_middlewares`` reuses
   this base;
-* NOT covered in v1: the memory-extraction path (follow-up slice per the issue
-  discussion). Allowlisted tool results are redacted before budget externalization.
+* The memory-enqueue path is covered by the follow-up slice (#5577):
+  ``redact_queued_messages`` (memory middleware) applies the same configured
+  policy to the extraction payloads queued for the memory backend.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
@@ -221,7 +225,7 @@ def _make_redactor(config: PiiRedactionConfig | None) -> _Redactor:
     return _Redactor(active_pii_detectors(config), config.token_secret)
 
 
-def _placeholder_token(category: str, value: str, token_key: str | None) -> str:
+def _placeholder_token(category: str, value: str, token_key: str) -> str:
     """Value-derived, deterministic placeholder (128-bit HMAC digest, base-26 letters).
 
     Three properties the token format must uphold:
@@ -238,14 +242,17 @@ def _placeholder_token(category: str, value: str, token_key: str | None) -> str:
       ``[EMAIL_…[PHONE_…]…`` corruption);
     * **Deployment-scoped linkability** — the digest is an HMAC over the
       deployment-scoped ``token_secret``: tokens are linkable only within one
-      deployment and cannot be re-derived offline without the secret. With
-      ``token_secret=None`` the digest degrades to a publicly computable
-      fingerprint — linkable across deployments and confirmable by guessing
-      for known-format values — which is the documented trade for
-      deployments that opt out. 128 bits keep distinct identities
+      deployment and cannot be re-derived offline without the secret. The
+      config model rejects enabling redaction without a non-empty secret, and
+      the empty-key guard below is the backstop that keeps every code path on
+      keyed digests (an unkeyed digest would be a publicly computable
+      fingerprint, linkable across deployments and confirmable by guessing
+      for low-entropy values). 128 bits keep distinct identities
       collision-free at any realistic volume.
     """
-    key_bytes = (token_key or "").encode("utf-8")
+    if not token_key:
+        raise ValueError("placeholder tokens require the configured non-empty token_secret")
+    key_bytes = token_key.encode("utf-8")
     digest = hmac.new(key_bytes, f"{category}\x00{value}".encode(), hashlib.sha256).digest()
     alphabet = "abcdefghijklmnopqrstuvwxyz"
     number = int.from_bytes(digest[:16], "big")
@@ -341,7 +348,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
     # -- model-call boundary: genuine user messages ---------------------------
 
     def _process_request(self, request: ModelRequest) -> ModelRequest:
-        redactor = _Redactor(self._detectors)
+        redactor = _Redactor(self._detectors, self._token_key)
         messages = list(request.messages)
         state = getattr(request, "state", None) or {}
         summary = state.get("summary_text")

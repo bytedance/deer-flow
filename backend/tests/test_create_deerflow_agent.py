@@ -176,7 +176,7 @@ def test_factory_threads_pii_redaction_config(mock_create_agent):
     """#5577 review: the SDK-path wiring must not silently drop the knob —
     both MemoryMiddleware and DurableContextMiddleware carry the config."""
     mock_create_agent.return_value = MagicMock()
-    pii = PiiRedactionConfig(enabled=True)
+    pii = PiiRedactionConfig(enabled=True, token_secret="sdk-path-pii-redaction-secret")
 
     create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(memory=True), pii_redaction_config=pii)
 

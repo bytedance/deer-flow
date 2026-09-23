@@ -11,7 +11,9 @@ from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 
-EMAIL_TOKEN = redact_text("alice@example.com", PiiRedactionConfig(enabled=True))
+_TOKEN_SECRET = "unit-test-deployment-secret-0123456789"
+
+EMAIL_TOKEN = redact_text("alice@example.com", PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
 
 
 def _middleware(pii_config):
@@ -32,7 +34,7 @@ def _run(mw, manager, monkeypatch, messages):
 
 
 def test_queue_payload_redacted_when_enabled(monkeypatch):
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     call = _run(mw, manager, monkeypatch, [HumanMessage("reach alice@example.com"), AIMessage("noted")])
     queued = call.args[1]
     assert EMAIL_TOKEN in queued[0].content and "alice@example.com" not in queued[0].content
@@ -52,20 +54,20 @@ def test_queue_payload_untouched_when_disabled(monkeypatch):
 
 
 def test_detector_toggles_respected(monkeypatch):
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True, redact_email=False))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, redact_email=False, token_secret=_TOKEN_SECRET))
     call = _run(mw, manager, monkeypatch, [HumanMessage("reach alice@example.com")])
     assert "alice@example.com" in call.args[1][0].content
 
 
 def test_original_messages_not_mutated(monkeypatch):
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     original = HumanMessage("reach alice@example.com")
     _run(mw, manager, monkeypatch, [original])
     assert original.content == "reach alice@example.com"
 
 
 def test_same_value_shares_token_across_turns(monkeypatch):
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     call = _run(
         mw,
         manager,
@@ -82,15 +84,15 @@ def test_existing_placeholder_in_later_message_keeps_identity_stable(monkeypatch
     # message's token depend on batch contents (a higher existing placeholder
     # in a later batch would shift it, breaking OpenViking capture dedup).
     # Value-derived tokens keep the unchanged message's identity stable.
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
-    alice_token = redact_text("alice@example.com", PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
+    alice_token = redact_text("alice@example.com", PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     messages = [
         HumanMessage("Bob's email is bob@example.com"),
         AIMessage(f"Alice's email is {alice_token} and Bob's email is [EMAIL_2]"),
     ]
     first = _run(mw, manager, monkeypatch, messages).args[1]
     second = _run(mw, manager, monkeypatch, messages).args[1]
-    bob_token = redact_text("bob@example.com", PiiRedactionConfig(enabled=True))
+    bob_token = redact_text("bob@example.com", PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     assert first[0].content == f"Bob's email is {bob_token}"
     assert second[0].content == first[0].content
     assert f"Alice's email is {alice_token}" in first[1].content
@@ -120,7 +122,7 @@ def test_compaction_flush_hook_redacts_queued_payload(monkeypatch):
     # after-agent redaction can never repair a raw batch queued here.
     queued = _flush_hook_call(
         monkeypatch,
-        PiiRedactionConfig(enabled=True),
+        PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET),
         [HumanMessage("reach alice@example.com"), AIMessage("noted")],
     )
     assert EMAIL_TOKEN in queued[0].content and "alice@example.com" not in queued[0].content
@@ -140,7 +142,7 @@ def test_compaction_flush_hook_untouched_when_disabled(monkeypatch):
 def test_tool_call_args_redacted(monkeypatch):
     # OpenViking-style retention keeps the full message object, including
     # parsed tool_calls and provider-format arguments in additional_kwargs.
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     ai = AIMessage(
         content="",
         tool_calls=[{"name": "memory_search", "args": {"query": "alice@example.com"}, "id": "call_1"}],
@@ -161,7 +163,7 @@ def test_tool_call_args_redacted(monkeypatch):
 def test_non_text_block_text_field_redacted(monkeypatch):
     # DeerMem's format_conversation_for_update reads the "text" value of any
     # dict block, not only type=="text" — the helper must follow.
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     call = _run(mw, manager, monkeypatch, [HumanMessage([{"type": "custom_card", "text": "alice@example.com"}])])
     block = call.args[1][0].content[0]
     assert block["text"] == EMAIL_TOKEN
@@ -169,7 +171,7 @@ def test_non_text_block_text_field_redacted(monkeypatch):
 
 def test_tool_argument_keys_redacted(monkeypatch):
     # Review round 6: tool arguments can carry user data in mapping keys.
-    mw, manager = _middleware(PiiRedactionConfig(enabled=True))
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     ai = AIMessage(
         content="",
         tool_calls=[
@@ -186,7 +188,7 @@ def test_distinct_identities_keep_distinct_tokens():
     # Review round 6: a 24-bit truncation collided distinct identities; at
     # 128 bits the review's collision pair stays distinct, including when
     # both appear together in one message.
-    cfg = PiiRedactionConfig(enabled=True)
+    cfg = PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)
     a = redact_text("contact3513@example.com", cfg)
     b = redact_text("contact3727@example.com", cfg)
     assert a != b

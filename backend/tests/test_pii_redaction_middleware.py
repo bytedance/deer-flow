@@ -16,7 +16,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, get_buffer_string
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.types import Command
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
@@ -26,7 +26,9 @@ from deerflow.agents.middlewares.pii_redaction_middleware import (
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY
 
-_PII_CFG = PiiRedactionConfig(enabled=True)
+_TOKEN_SECRET = "unit-test-deployment-secret-0123456789"
+
+_PII_CFG = PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)
 
 EMAIL_ALICE = redact_text("alice@example.com", _PII_CFG)
 EMAIL_BOB_COM = redact_text("bob@example.com", _PII_CFG)
@@ -48,7 +50,7 @@ ID_CPF = redact_text("529.982.247-25", _PII_CFG)
 
 
 def _make_middleware(**config_overrides) -> PiiRedactionMiddleware:
-    return PiiRedactionMiddleware(PiiRedactionConfig(enabled=True, **config_overrides))
+    return PiiRedactionMiddleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET, **config_overrides))
 
 
 class _FakeRequest:
@@ -426,7 +428,7 @@ class TestReleasePolicy:
     "config",
     [
         PiiRedactionConfig(enabled=False),
-        PiiRedactionConfig(enabled=True),
+        PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET),
     ],
 )
 def test_config_defaults_are_consistent(config):
@@ -461,7 +463,7 @@ class TestChainWiring:
         from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
 
         middlewares = build_lead_runtime_middlewares(
-            app_config=_wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True)),
+            app_config=_wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)),
         )
         types = [type(m) for m in middlewares]
         assert PiiRedactionMiddleware in types
@@ -472,7 +474,7 @@ class TestChainWiring:
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         middlewares = build_subagent_runtime_middlewares(
-            app_config=_wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True)),
+            app_config=_wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)),
         )
         assert PiiRedactionMiddleware in [type(m) for m in middlewares]
 
@@ -490,10 +492,10 @@ class TestRedactTextSharedSeam:
         assert redact_text("alice@example.com", PiiRedactionConfig(enabled=False)) == "alice@example.com"
 
     def test_enabled_config_redacts(self):
-        assert redact_text("call alice@example.com", PiiRedactionConfig(enabled=True)) == f"call {EMAIL_ALICE}"
+        assert redact_text("call alice@example.com", PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)) == f"call {EMAIL_ALICE}"
 
     def test_non_string_passthrough(self):
-        assert redact_text(None, PiiRedactionConfig(enabled=True)) is None
+        assert redact_text(None, PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)) is None
 
 
 class _StateRequest:
@@ -517,7 +519,7 @@ class TestDurableContextReinjection:
         return DurableContextMiddleware(pii_redaction_config=config)
 
     def test_reinjected_summary_redacted(self):
-        mw = self._make_dc(PiiRedactionConfig(enabled=True))
+        mw = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
         request = _StateRequest({"summary_text": "summary of alice@example.com"}, [HumanMessage("hi")])
         final = mw._inject(request)
         # insert_after_leading_system_messages puts the injected pair up front:
@@ -532,7 +534,7 @@ class TestDurableContextReinjection:
         assert "alice@example.com" in final.messages[1].content
 
     def test_policy_declares_pii_gate(self):
-        enabled = self._make_dc(PiiRedactionConfig(enabled=True)).release_policy_parameters()
+        enabled = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)).release_policy_parameters()
         disabled = self._make_dc(None).release_policy_parameters()
         assert enabled["pii_redaction_enabled"] is True
         assert disabled["pii_redaction_enabled"] is False
@@ -555,7 +557,7 @@ class TestSummarizationCompactionInput:
         )
 
     def test_compaction_input_redacted(self):
-        mw = self._middleware(PiiRedactionConfig(enabled=True))
+        mw = self._middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
         prompt = mw._build_summary_prompt([HumanMessage("reach alice@example.com")], previous_summary=None)
         assert prompt is not None
         assert EMAIL_ALICE in prompt and "alice@example.com" not in prompt
@@ -588,7 +590,7 @@ async def test_async_graph_redacts_configured_title_model_input(monkeypatch, ena
     from deerflow.config.title_config import TitleConfig
     from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
-    pii = PiiRedactionConfig(enabled=enabled)
+    pii = PiiRedactionConfig(enabled=enabled, token_secret=_TOKEN_SECRET)
     config = _wiring_app_config(pii_redaction=pii, title=TitleConfig(enabled=True, model_name="title-model"))
     primary = _RecordingPiiModel(responses=[AIMessage(content="Reply to charlie@example.net")])
     title = Mock(ainvoke=AsyncMock(return_value=AIMessage(content="Contact records")))
@@ -619,7 +621,7 @@ def test_compiled_graph_keeps_summary_and_retained_pii_distinct(async_mode):
     from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
     from deerflow.agents.thread_state import ThreadState
 
-    pii = PiiRedactionConfig(enabled=True)
+    pii = PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)
     config = _wiring_app_config(pii_redaction=pii)
     summary = _RecordingPiiModel(responses=[AIMessage(content="unused")], echo_summary=True)
     primary = _RecordingPiiModel(responses=[AIMessage(content="done")])
@@ -646,7 +648,7 @@ def test_compiled_graph_keeps_summary_and_retained_pii_distinct(async_mode):
 
 
 def test_existing_placeholder_text_passes_through_and_new_value_gets_token():
-    config = PiiRedactionConfig(enabled=True)
+    config = PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)
     # Placeholder text is not a detector match, so pre-existing tokens pass
     # through unchanged while the new raw value gets its own token.
     assert redact_text("Alice [EMAIL_1], Bob bob@example.com", config) == f"Alice [EMAIL_1], Bob {EMAIL_BOB_COM}"
@@ -660,7 +662,7 @@ def test_existing_placeholder_in_later_content_block_keeps_identity():
 def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 
-    pii = PiiRedactionConfig(enabled=True)
+    pii = PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)
     state = {"summary_text": "Alice alice@example.com"}
     request = _StateRequest(state, [HumanMessage(content="Alice alice@example.com; Bob bob@example.com")])
     redacted = PiiRedactionMiddleware(pii)._process_request(request)
@@ -673,7 +675,7 @@ def test_raw_legacy_summary_and_retained_messages_share_request_allocation():
 
 
 def test_repeated_compaction_keeps_prior_summary_tokens():
-    middleware = TestSummarizationCompactionInput()._middleware(PiiRedactionConfig(enabled=True))
+    middleware = TestSummarizationCompactionInput()._middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     prompt = middleware._build_summary_prompt([HumanMessage("Carol carol@example.com")], previous_summary="Alice [EMAIL_1], Bob [EMAIL_2]")
     assert "Alice [EMAIL_1], Bob [EMAIL_2]" in prompt
     assert f"Carol {EMAIL_CAROL}" in prompt
@@ -682,7 +684,7 @@ def test_repeated_compaction_keeps_prior_summary_tokens():
 def test_title_redacts_identifiers_before_field_truncation():
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
-    config = _wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True))
+    config = _wiring_app_config(pii_redaction=PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     prompt, fallback = TitleMiddleware(app_config=config)._build_title_prompt({"messages": [HumanMessage(content="x " * 246 + "alice@example.com"), AIMessage(content="done")]})
     assert "alice" not in prompt
     assert fallback.endswith("alice@example.com")  # Local display fallback preserves the original user text.
@@ -693,7 +695,7 @@ def test_minted_tokens_survive_later_detectors():
     # digit-anchored detectors re-scan, corrupting minted tokens into nested
     # placeholders (user280@example.com -> [EMAIL_…[PHONE_…]…]). Base-26
     # letters contain no digits, so the token survives the full pinned order.
-    result = redact_text("contact user280@example.com today", PiiRedactionConfig(enabled=True))
+    result = redact_text("contact user280@example.com today", PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
     assert result.startswith("contact [EMAIL_") and result.endswith("] today")
     assert result.count("[") == 1 and result.count("]") == 1
     assert "@" not in result and "user280" not in result
@@ -702,14 +704,43 @@ def test_minted_tokens_survive_later_detectors():
 def test_token_secret_scopes_linkability():
     # Review round 10: unkeyed digests are publicly computable fingerprints,
     # linkable across deployments. A deployment secret scopes the tokens.
-    cfg_a = PiiRedactionConfig(enabled=True, token_secret="deployment-a")
-    cfg_b = PiiRedactionConfig(enabled=True, token_secret="deployment-b")
+    cfg_a = PiiRedactionConfig(enabled=True, token_secret="deployment-a-secret-value")
+    cfg_b = PiiRedactionConfig(enabled=True, token_secret="deployment-b-secret-value")
     assert redact_text("alice@example.com", cfg_a) != redact_text("alice@example.com", cfg_b)
     assert redact_text("alice@example.com", cfg_a) == redact_text("alice@example.com", cfg_a)
 
 
 def test_hmac_tokens_still_letters_only():
-    cfg = PiiRedactionConfig(enabled=True, token_secret="s3cret")
+    cfg = PiiRedactionConfig(enabled=True, token_secret="s3cret-with-enough-length")
     result = redact_text("contact user280@example.com today", cfg)
     assert result.count("[") == 1 and result.count("]") == 1
     assert "@" not in result and "user280" not in result
+
+
+def test_enabled_config_rejects_missing_or_weak_token_secret():
+    # Review round 11 on #5577: with token_secret optional, the default
+    # enabled configuration minted empty-key HMAC digests — publicly
+    # computable, globally linkable fingerprints of the raw values. Enabling
+    # redaction now requires a usable deployment key, with the unkeyed mode
+    # gone entirely.
+    with pytest.raises(ValidationError):
+        PiiRedactionConfig(enabled=True)
+    with pytest.raises(ValidationError):
+        PiiRedactionConfig(enabled=True, token_secret="   ")
+    with pytest.raises(ValidationError):
+        PiiRedactionConfig(enabled=True, token_secret="short")
+
+
+def test_disabled_config_still_defaults_off_without_secret():
+    config = PiiRedactionConfig(enabled=False)
+    assert config.token_secret is None
+    assert redact_text("alice@example.com", config) == "alice@example.com"
+
+
+def test_user_message_boundary_mints_the_keyed_token():
+    # The request-scoped redactor must carry the configured deployment key
+    # like every other seam: _process_request built its redactor without the
+    # token key, so user-message placeholders silently diverged from
+    # redact_text / tool-result / memory-queue placeholders for the same value.
+    messages, _ = _run_model_call(_make_middleware(), [HumanMessage("Contact alice@example.com")])
+    assert messages[0].content == f"Contact {EMAIL_ALICE}"
