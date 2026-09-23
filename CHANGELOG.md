@@ -2792,6 +2792,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
+  first-boot requests both create an admin. The handler counted admins in one
+  session and created the account in another, so two requests with different
+  emails both saw an empty system; the loser now gets the documented
+  `409 system_already_initialized`. The count and the insert share one
+  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
+  PostgreSQL advisory lock). ([#5776])
 - **uploads:** Document conversion no longer re-opens the upload by name. The
   Gateway converted the committed file and the embedded client converted the
   copy it had just placed in the thread's uploads directory, so a sandbox that
@@ -4371,3 +4378,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776
