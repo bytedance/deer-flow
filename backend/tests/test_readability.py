@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from deerflow.utils.readability import ReadabilityExtractor
+from deerflow.utils.readability import Article, ReadabilityExtractor
 
 
 def test_extract_article_falls_back_when_readability_js_fails(monkeypatch):
@@ -53,3 +53,15 @@ def test_extract_article_re_raises_unexpected_exception(monkeypatch):
     with pytest.raises(RuntimeError, match="unexpected parser failure"):
         ReadabilityExtractor().extract_article("<html><body>test</body></html>")
     assert calls == [True]
+
+
+def test_article_to_message_keeps_absolute_image_url():
+    article = Article("Image", '<img src="https://example.com/photo.png" alt="Photo">')
+
+    assert {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}} in article.to_message()
+
+
+def test_article_to_message_resolves_relative_image_url():
+    article = Article("Image", '<img src="../photo.png" alt="Photo">', url="https://example.com/posts/one")
+
+    assert {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}} in article.to_message()
