@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import runpy
+import sys
 from pathlib import Path
 
 import httpx
@@ -222,7 +223,11 @@ def test_live_script_checks_all_required_settings_before_requests(jev, monkeypat
         monkeypatch.setenv(missing, value)
     requests = transport(monkeypatch)
     script = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-context/scripts/verify_live.py"
+    original_search_path = sys.path
+    original_entries = list(original_search_path)
+    monkeypatch.setattr(sys, "path", list(sys.path))
     main = runpy.run_path(str(script))["main"]
+    assert original_search_path == original_entries
     with pytest.raises(SystemExit, match=f"^Set {missing} before running this opt-in smoke test$"):
         asyncio.run(main())
     assert not requests
