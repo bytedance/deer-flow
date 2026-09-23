@@ -81,6 +81,15 @@ def test_search_and_read_are_manifest_gated(tmp_path, monkeypatch):
     assert "path" not in page
 
 
+def test_search_matches_unsegmented_chinese_question(tmp_path, monkeypatch):
+    _install_release(tmp_path, monkeypatch)
+
+    search = json.loads(tool_module._search("云HIS如何规划", None, 5))
+
+    assert search["status"] == "ok"
+    assert search["pages"][0]["page_id"] == "concept:cloud-his"
+
+
 def test_evidence_must_be_declared_by_the_selected_page(tmp_path, monkeypatch):
     _install_release(tmp_path, monkeypatch)
 

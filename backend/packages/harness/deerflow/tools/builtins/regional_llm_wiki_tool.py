@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -138,15 +139,26 @@ def _evidence(release: _Release, evidence_id: str) -> dict[str, Any]:
     raise _ReleaseError("not_found")
 
 
+def _search_terms(query: str) -> list[str]:
+    """Produce deterministic CJK-friendly terms without an external tokenizer."""
+    normalized = query.casefold()
+    compact = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
+    terms = [term for term in re.findall(r"[0-9a-z]+|[\u3400-\u9fff]+", normalized) if term]
+    if compact:
+        terms.append(compact)
+        terms.extend(compact[index : index + 2] for index in range(max(0, len(compact) - 1)))
+    return list(dict.fromkeys(term for term in terms if len(term) >= 2 or term.isascii()))
+
+
 def _search(query: str, domain: str | None, limit: int) -> str:
-    if not isinstance(query, str) or not query.strip() or len(query) > _MAX_QUERY_CHARS:
+    if not isinstance(query, str) or not query.strip() or len(query) > _MAX_QUERY_CHARS or not isinstance(limit, int) or isinstance(limit, bool):
         return _response("invalid_request")
     try:
         release = _open_release()
         if domain is not None and (not isinstance(domain, str) or len(domain) > 128):
             return _response("invalid_request")
         requested_limit = min(max(1, limit), release.max_search_results)
-        terms = [term for term in query.casefold().split() if term]
+        terms = _search_terms(query)
         candidates: list[tuple[int, dict[str, Any]]] = []
         for page in release.manifest["pages"]:
             if not isinstance(page, dict) or not isinstance(page.get("page_id"), str):
@@ -154,7 +166,8 @@ def _search(query: str, domain: str | None, limit: int) -> str:
             if domain is not None and page.get("domain") != domain:
                 continue
             searchable = " ".join(str(page.get(key, "")) for key in ("page_id", "title", "type", "domain", "summary", "keywords")).casefold()
-            score = sum(searchable.count(term) for term in terms)
+            searchable_compact = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", searchable)
+            score = sum(searchable.count(term) + searchable_compact.count(term) for term in terms)
             if score:
                 candidates.append((score, page))
         candidates.sort(key=lambda entry: (-entry[0], str(entry[1]["page_id"])))
