@@ -1498,6 +1498,29 @@ def test_secret_assignment_still_flags_python_parameter_default(tmp_path: Path) 
     assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
 
 
+def test_secret_assignment_still_flags_python_lambda_parameter_default(tmp_path: Path) -> None:
+    """A credential baked into a ``lambda`` default binds as firmly as a ``def`` default.
+
+    The line-oriented sweep this rule replaced matched ``name=value`` and so reported the
+    lambda form too; ``_python_secret_bindings`` walked only ``def``/``async def`` defaults,
+    so moving the assignment into a lambda walked out of the gate.
+    """
+    source = 'handler = lambda api_key="9f8e7d6c5b4a3210ff": api_key\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_still_flags_python_lambda_keyword_only_default(tmp_path: Path) -> None:
+    """The keyword-only lambda spelling binds the same literal and must stay reported."""
+    source = 'handler = lambda *, token="9f8e7d6c5b4a3210ff": token\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
+
+
 def test_secret_assignment_still_flags_python_walrus_binding(tmp_path: Path) -> None:
     """``(token := "…")`` is an assignment written as an expression."""
     source = 'if (secret := "9f8e7d6c5b4a3210ff"):\n    use(secret)\n'

@@ -374,7 +374,7 @@ def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
             # ``**spread`` carries ``arg=None`` and binds no name of its own.
             if node.arg is not None:
                 bindings.append((node.arg, node.value))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             params = [*node.args.posonlyargs, *node.args.args]
             if node.args.defaults:
                 # Positional defaults align with the trailing parameters.
