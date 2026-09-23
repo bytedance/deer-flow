@@ -2222,9 +2222,21 @@
 - **文档：** 自定义智能体文档与 API 对齐（中英文 agents / threads / lead-agent
   页面）：必填的 ASCII `name` 请求字段、小写存储、`/api/agents/check` 的名称可用
   性行为，以及不再声称从 `display_name` 自动派生 slug。([#4944])
+- **文档：** 将子 Agent 文档重构为中英文各十一章的用户手册（`harness/subagents/`）：
+  概念、快速上手、目录、委派用法、结果与验收、限制与容量、沙箱与隔离、可观测性、
+  按症状排查、开发者集成，以及附带 2026 年 6 月至 9 月变更记录的参考附录。原单页
+  成为该章节的索引页，指向该页面的已有链接保持有效；指向旧页面小节锚点的深链接
+  会落到索引页。
 
 ### 内部改进
 
+- **依赖：** `langgraph-checkpoint` 下限提升到 `>=4.2.0,<5.0`，
+  `langgraph-checkpoint-postgres` 提升到 `>=3.1.2,<3.2`，并移除
+  `InMemorySaver` delta-history 兼容补丁。上游 4.2.0 修复了 full → delta
+  迁移后首条写入丢失（langchain-ai/langgraph#8526），postgres 新版本能定位
+  plain-value delta 种子（langchain-ai/langgraph#8535），因此由依赖下限取代
+  补丁；full → delta 迁移合约测试保留为门禁。`langgraph` 与
+  `langgraph-checkpoint-sqlite` 不变。 ([#5734])
 - **测试：** 前端单元测试迁移到 rstest，并在 DOM 环境运行 hook 级测试。([#3703]、[#4453])
 - **测试：** live client 测试要求显式 opt-in。([#4482])
 - **测试：** LLM 错误测试替身不再复用共享 `FakeError`。([#4744])
@@ -3527,3 +3539,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734

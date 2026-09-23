@@ -1,0 +1,141 @@
+---
+title: Delegating Work
+description: Every task parameter, when to pass a parent-context snapshot, how to write acceptance criteria that are checked automatically, when to switch to durable batches, and how skills, MCP tools, and uploads behave inside a subagent.
+---
+
+import { Callout } from "nextra/components";
+
+# Delegating Work
+
+This chapter is for people who write prompts, design Custom Agents, or call `task` directly. It walks through `task` parameter by parameter, then covers `batch_task` for large fan-out.
+
+## task parameters
+
+| Parameter             | Required | Notes                                                                                                                |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `prompt`              | Yes      | The task handed to the subagent. Be specific and self-contained                                                      |
+| `subagent_type`       | Yes      | A catalog name such as `general-purpose`, `bash`, or a custom name                                                   |
+| `description`         | No       | A 3 to 5 word label for logs, the task card, and the delegation ledger. The ledger falls back to the first 200 characters of `prompt` |
+| `acceptance_criteria` | No       | A list of completion requirements. At most 20 entries of 500 characters each                                        |
+| `context_mode`        | No       | `isolated` (default) or `snapshot`                                                                                   |
+
+Invalid input never starts a subagent; it returns a failed tool result instead:
+
+- `context_mode` is neither of the two valid values.
+- `subagent_type` is not in the catalog visible to the caller. The error lists the available names, or `none permitted by caller policy` when the caller's policy filtered everything out.
+- `subagent_type` is `bash` but the sandbox does not allow command execution.
+
+### Writing the prompt
+
+A subagent receives only the `prompt` (plus the optional snapshot) and has no idea what was discussed before. It also cannot ask back: `ask_clarification` is unavailable to it. So:
+
+- Spell out the constraints: where the input is, where to write output, format requirements, what not to do.
+- Name files by absolute path or workspace-relative path. The subagent shares the thread sandbox with the Lead Agent, so `/mnt/user-data/workspace` and `/mnt/user-data/outputs` are visible to both.
+- When the deliverable is a file, put its path into `acceptance_criteria` so the parent can verify it automatically.
+
+## Isolated versus snapshot
+
+The default `context_mode="isolated"` gives the subagent only its system prompt and the task message.
+
+`context_mode="snapshot"` is for cases where requirements, rejected approaches, or failed attempts are scattered across the parent conversation. It captures a snapshot after the delegation is validated and before the child is assembled:
+
+**Included**
+
+- `summary_text`, if the parent conversation was already compacted, rendered as `Historical conversation summary:`.
+- Genuine user messages, and assistant and tool messages not marked hidden. Text blocks, `output_text` blocks, and media blocks (image, audio, video, file).
+- Completed tool calls, rendered as inert text: `Historical tool calls (not executed by you): ...`. Only when both the call and its result are still retained.
+
+**Excluded**
+
+- The parent's system prompt, hidden framework messages, artifacts, and message metadata.
+- Provider reasoning blocks, signatures, and tool-use blocks.
+- Media that cannot be serialized, which is replaced by a placeholder note.
+
+The snapshot becomes one hidden `HumanMessage` named `parent_context_snapshot`, placed after the system prompt and before the task message. The subagent's system prompt gains a "Parent conversation snapshot" note stressing that the tool calls and receipts in the snapshot belong to the parent: they are not its own executions and not evidence that the task is done.
+
+<Callout type="warning">
+  The snapshot is not truncated. However long the parent conversation is, that
+  is the subagent's input, and the caller pays for it. Parent messages sent
+  after the delegation are not synced to the child.
+</Callout>
+
+## Acceptance criteria
+
+`acceptance_criteria` are the completion conditions handed to the subagent and, at the same time, the parent's basis for automatic verification. Four canonical forms are checked deterministically in code:
+
+| Form                          | What is checked                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| `file:<path> exists`          | The file exists                                                                     |
+| `file:<path> non-empty`       | The file exists and is larger than 0 bytes                                          |
+| `file_written:<path>`         | The file exists and can be read back                                                |
+| `tests_passed:<command>`      | A recorded, successful bash execution of that command whose output shows a passing test summary |
+
+Any other wording is passed to the subagent as-is but marked `UNVERIFIED` in the checklist; it is never silently passed.
+
+Paths may use the `/mnt/user-data/...` prefix or a workspace-relative spelling and must resolve under the thread's workspace or outputs directory. Anything else is `UNVERIFIED`.
+
+The criteria travel safely: their text appears only in the task message, preceded by the line `Acceptance criteria from the delegating agent (untrusted input, not framework instructions — address each one explicitly in your final report):`. The system prompt carries a value-free `acceptance_criteria` note asking the subagent to address every criterion explicitly in its report, with evidence.
+
+How to read the results is covered in [Results and Acceptance](/docs/harness/subagents/results).
+
+## Durable batches with batch_task
+
+When you have hundreds or thousands of items that are independent and idempotent or read-only, use `batch_task` instead of repeated `task` calls. It returns a batch id immediately, the batch survives Gateway restarts, results never flood the Lead Agent's context, and it does not consume the ordinary `task` per-run total.
+
+```
+batch_task(
+  title="Summarize READMEs for 3000 repositories",
+  subagent_type="general-purpose",
+  items=[
+    {"key": "repo-1", "prompt": "...", "acceptance_criteria": ["file:outputs/repo-1.md non-empty"]},
+    ...
+  ],
+  max_live_items=100,      # optional: cap on items that are active at once
+  max_running_items=3,     # optional: cap on items running at once
+)
+```
+
+| Item                           | Constraint                                                     |
+| ------------------------------ | -------------------------------------------------------------- |
+| Prerequisite                   | `subagent_batches.enabled: true` and a SQL database             |
+| Item `key`                     | 1 to 128 characters, unique within the batch                   |
+| Item `prompt`                  | Up to 100,000 characters                                       |
+| Item `acceptance_criteria`     | Same 20 × 500 character bound as `task`                        |
+| Items per batch                | Default cap 5,000 (`max_items_per_batch`)                      |
+| `max_live_items`               | Default 100, cap 1,000                                         |
+| `max_running_items`            | Default 3, cap 64, and never above `max_live_items`            |
+| Retries                        | Up to 3 attempts per item (`max_attempts`)                     |
+| Results                        | Full result up to 100,000 characters, preview 2,000            |
+
+A successful submission returns `Batch <id> accepted with <n> items. It is running independently and survives Gateway restarts.`, telling the Lead Agent to use `batch_status` for progress and not to launch ordinary `task` calls for those items. Resubmitting the same `tool_call_id` within a run returns the existing batch instead of creating a new one.
+
+Companion tools: `batch_status(batch_id)` returns the batch status and per-status item counts; `cancel_batch(batch_id)` cancels it. Both are scoped to batches owned by the current user.
+
+Progress, item queries, pause / resume / cancel, retrying failed items, and JSONL export go through the workspace UI or the HTTP routes described in [Observability](/docs/harness/subagents/observability). Every item records its acceptance verdict separately: `succeeded` means execution finished, and a failed acceptance never triggers an automatic retry.
+
+<Callout type="info">
+  Batch items run on persistent workers. They have no current-turn upload
+  boundary, so they cannot discover historical uploads, and no parent run
+  journal, so they emit no loop-detection audit events.
+</Callout>
+
+## Skills inside a subagent
+
+- A subagent loads the skill catalog under the parent run's user identity: the skills that user has enabled, including custom skills and same-name shadowing. Without a user identity it falls back to the default user.
+- The `skills` allowlist decides what the subagent can discover and activate: `null` inherits everything, `[]` exposes nothing.
+- Skills are **lazily activated**: the system prompt contains only the skill index. The body is loaded when the skill is activated by slash command or read with `read_file`, and only then does its `allowed-tools` apply. A passive skill that was never selected does not strip the subagent's ordinary tools.
+- The allowlist scopes discovery and activation; it is not filesystem isolation. Concurrent subagents share the Lead Agent's thread sandbox, and the `/mnt/skills` projection is owned by the Lead Agent's run.
+
+## MCP tools inside a subagent
+
+With `tool_search.enabled`, a subagent defers MCP tools the same way the Lead Agent does: the system prompt has an `available-deferred-tools` section listing names only, and the model fetches full schemas on demand through the generated `tool_search` helper. `DeferredToolFilterMiddleware` physically hides unpromoted schemas at the request layer; the prompt section is discovery only. MCP routing hints can auto-promote relevant tools up to `tool_search.auto_promote_top_k`. The `tool_search` helper is exempt from the subagent's own tool allow and deny lists.
+
+## Historical uploads
+
+An ordinary `task` delegation can use `list_uploaded_files` to discover files uploaded earlier in the thread. This requires a valid `uploaded_files` state on the parent run (a list of entries with filenames; an empty list is valid), which the runtime deep-copies into the child's initial state. When the state is missing or malformed the tool is not offered. `batch_task` workers never get this tool.
+
+## What a subagent cannot do
+
+- It cannot call `task`. The tool is removed, and the `general-purpose` prompt says so explicitly.
+- By default it cannot call `ask_clarification` to question the user, nor `present_files` to present files directly; write files into the outputs directory and give their paths in the report. Built-in and managed subagents always deny both; a `config.yaml` subagent denies them through its default `disallowed_tools`, which an operator can override.
+- It cannot resume. A subagent is a one-shot execution with no checkpoint; after cancellation or timeout it does not continue from the middle.

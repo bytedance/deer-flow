@@ -3,7 +3,11 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
-from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
+from deerflow_extension_api import (
+    EXTENSION_PRINCIPAL_RESOLVER_KEY,
+    RUN_EVIDENCE_READER_RESOLVER_KEY,
+    ExtensionPrincipal,
+)
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -839,6 +843,19 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         )
 
     setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, _resolve_extension_principal)
+
+    def _resolve_extension_run_evidence_reader(request):
+        """Bind evidence access to the principal stamped by AuthMiddleware."""
+        principal = _resolve_extension_principal(request)
+        auth = getattr(request.state, "auth", None)
+        if principal is None or not principal.user_id or auth is None or not auth.has_permission("runs", "read"):
+            raise PermissionError("run evidence requires an authenticated user with runs:read")
+        factory = getattr(app.state, "run_evidence_reader_factory", None)
+        if factory is None:
+            return None
+        return factory.for_principal(principal)
+
+    setattr(app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, _resolve_extension_run_evidence_reader)
 
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)

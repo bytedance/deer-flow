@@ -49,6 +49,10 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    is_valid_thread_incarnation,
+)
 from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
@@ -206,7 +210,7 @@ async def _ensure_thread_metadata(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool = False,
-) -> None:
+) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
@@ -231,12 +235,12 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
-        await thread_store.create(
+        existing = await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
             metadata=metadata,
         )
-        return
+    return existing
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -447,7 +451,8 @@ def _normalize_input_messages(
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The ``messages`` channel is canonicalized to a list of ``BaseMessage``
+    The server-owned ``sandbox`` channel is rejected. The ``messages`` channel
+    is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
     forged metadata and delegation verdicts are removed. ``normalize_input``
@@ -458,6 +463,12 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
+    if "sandbox" in values:
+        raise HTTPException(
+            status_code=400,
+            detail="External sandbox state is not allowed",
+        )
+
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
         if channel == "messages" and value is not None:
@@ -487,6 +498,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
+    The ``sandbox`` channel is also server-owned. External callers cannot select
+    a provider resource by id; trusted internal run admission may carry the
+    server's own restored value.
+
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
     receipts, delegated receipt metadata/verdicts, and ``untrusted_input`` are
@@ -509,6 +524,11 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     """
     if raw_input is None:
         return {}
+    if not trusted_internal and "sandbox" in raw_input:
+        raise HTTPException(
+            status_code=400,
+            detail="External sandbox state is not allowed",
+        )
     result = raw_input
     messages = raw_input.get("messages")
     if messages is not None:
@@ -594,6 +614,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
             # Server-owned pinned project snapshot (spec §7.1): resolved once
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
@@ -1916,6 +1937,7 @@ async def start_run(
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
             metadata_failure: Exception | None = None
+            metadata_record: dict[str, Any] | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
@@ -1924,7 +1946,7 @@ async def start_run(
                 )
                 if metadata_task in done:
                     try:
-                        metadata_task.result()
+                        metadata_record = metadata_task.result()
                     except asyncio.CancelledError:
                         pass
                     except Exception as exc:
@@ -1946,8 +1968,20 @@ async def start_run(
                         metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
-                    if not metadata_failure_logged:
-                        _log_thread_metadata_task_result(metadata_task, thread_id=thread_id)
+                    if metadata_record is None and not metadata_failure_logged:
+                        try:
+                            metadata_record = metadata_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            metadata_failure_logged = True
+                            metadata_failure = exc
+                            logger.warning(
+                                "Failed to ensure thread_meta for %s%s",
+                                sanitize_log_param(thread_id),
+                                "" if require_existing_thread else " (non-fatal)",
+                                exc_info=True,
+                            )
                 else:
                     metadata_task.cancel()
                     metadata_task.add_done_callback(
@@ -1968,6 +2002,28 @@ async def start_run(
             # or strict verification failure:
             # its startup barrier is the single path that turns pending
             # cancellation into no-agent-construction plus publish_end.
+            incarnation_kwargs: dict[str, str | None] = {}
+            if metadata_record is None:
+                if not record.abort_event.is_set():
+                    logger.warning(
+                        "Thread metadata for %s is unavailable; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+            else:
+                if "incarnation" not in metadata_record:
+                    logger.warning(
+                        "Thread metadata for %s has no incarnation; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+                else:
+                    incarnation = metadata_record["incarnation"]
+                    if is_valid_thread_incarnation(incarnation):
+                        incarnation_kwargs["thread_incarnation"] = incarnation
+                    else:
+                        logger.warning(
+                            "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
+                            sanitize_log_param(thread_id),
+                        )
             await run_agent(
                 bridge,
                 run_mgr,
@@ -1981,6 +2037,7 @@ async def start_run(
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
                 knowledge_scope=admitted_knowledge_scope,
+                **incarnation_kwargs,
             )
 
         try:
