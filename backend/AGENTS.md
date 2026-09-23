@@ -378,36 +378,6 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
-### Reasoning Capability Contract
-
-`ModelConfig.reasoning` (issue #5073) is an optional declarative contract beside
-the legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
-`unsupported | optional | required`, `on_disable_request` (`keep_enabled` or
-`reject`, required-thinking only), the payload `dialect` (`auto` infers it from
-`when_thinking_enabled`), the reasoning `history` requirement, and an `effort`
-vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
-When the block is present the booleans are derived from it and contradictory
-profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
-+ an enable template, a `default` outside `values`, an explicit boolean that
-disagrees, a profile `reasoning_effort` the contract rejects).
-
-`deerflow.models.reasoning` owns the normalized view: `resolve_reasoning_contract`
-turns any profile (legacy or declared) into an immutable `ReasoningContract`,
-`resolve_reasoning_request` applies a caller's generic `thinking_enabled` /
-`reasoning_effort` to it, and `reasoning_capabilities_payload` projects it for
-`/api/models` and `DeerFlowClient` (`reasoning` object, `source: legacy|contract`).
-`create_chat_model` is the single enforcement point for every caller (lead agent,
-subagents, summarization, title, one-shot utilities): a required-thinking model
-never enters the disable branch, effort is mapped through aliases or the default
-and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no `reasoning:`) keep the historical path
-byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
-OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
-the same policy first so run metadata reports the effective values. Design note:
-[docs/plans/2026-09-23-reasoning-capability-contract.md](../docs/plans/2026-09-23-reasoning-capability-contract.md);
-tests: `tests/test_reasoning_contract.py`, the contract section of
-`tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
-
 ## Code Style
 
 - Uses `ruff` for linting and formatting
