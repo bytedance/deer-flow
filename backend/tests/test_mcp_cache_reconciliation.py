@@ -365,8 +365,8 @@ def test_added_server_is_rebuilt_not_retired(cache_globals, monkeypatch, tmp_pat
     assert pool.active_binding("C") is not None
 
 
-@pytest.mark.parametrize("removed", [None, {"enabled": False}])
-def test_removed_or_disabled_server_is_retired_others_survive(cache_globals, monkeypatch, tmp_path, owner_loop, removed):
+@pytest.mark.parametrize("removal_path", ["delete", "disable"], ids=["delete", "disable"])
+def test_removed_or_disabled_server_is_retired_others_survive(cache_globals, monkeypatch, tmp_path, owner_loop, removal_path):
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
     pool = get_session_pool()
@@ -374,9 +374,10 @@ def test_removed_or_disabled_server_is_retired_others_survive(cache_globals, mon
     session_b = _open_session(owner_loop, pool, "B")
     binding_b = pool.active_binding("B")
 
-    servers = {"B": _stdio("uvx")}
-    if removed is not None:
-        servers = {"A": {**_stdio("npx"), **removed}, **servers}
+    if removal_path == "delete":
+        servers = {"B": _stdio("uvx")}
+    else:
+        servers = {"A": {**_stdio("npx"), "enabled": False}, "B": _stdio("uvx")}
     _write_config(cfg, servers)
 
     transition = cache_module._classify_cache_transition()
@@ -392,6 +393,64 @@ def test_removed_or_disabled_server_is_retired_others_survive(cache_globals, mon
     assert pool.active_binding("B") == binding_b
     assert _entry(pool, "B", owner_loop)[0] is session_b
     assert session_b.closed is False
+
+
+@pytest.mark.parametrize("removal_path", ["delete", "disable"], ids=["delete", "disable"])
+def test_removed_or_disabled_server_readd_gets_fresh_tool_and_binding_while_B_survives(cache_globals, monkeypatch, tmp_path, owner_loop, removal_path):
+    cfg = tmp_path / "extensions_config.json"
+    first = _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    old_a_tool, old_b_tool = first
+    old_pool = get_session_pool()
+    old_a_session = _open_session(owner_loop, old_pool, "A")
+    old_b_session = _open_session(owner_loop, old_pool, "B")
+    old_a_binding = old_pool.active_binding("A")
+    old_b_binding = old_pool.active_binding("B")
+    old_a_entry = cache_module._server_tool_cache["A"]
+    old_b_entry = cache_module._server_tool_cache["B"]
+    assert old_a_binding is not None
+
+    if removal_path == "delete":
+        removed_servers = {"B": _stdio("uvx")}
+    else:
+        removed_servers = {"A": {**_stdio("npx"), "enabled": False}, "B": _stdio("uvx")}
+    _write_config(cfg, removed_servers)
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert old_a_session.closed is True
+    assert old_pool.active_binding("A") is not None
+    assert old_pool.active_binding("A").fingerprint is None
+    assert "A" not in cache_module._server_tool_cache
+    assert old_pool.active_binding("B") == old_b_binding
+    assert _entry(old_pool, "B", owner_loop)[0] is old_b_session
+    assert old_b_session.closed is False
+
+    _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    readded = asyncio.run(cache_module.initialize_mcp_tools())
+    new_a_tool, new_b_tool = readded
+    new_a_binding = get_session_pool().active_binding("A")
+    new_a_entry = cache_module._server_tool_cache["A"]
+    new_b_entry = cache_module._server_tool_cache["B"]
+
+    assert new_a_tool is not old_a_tool
+    assert new_a_binding is not None
+    assert new_a_binding is not old_a_binding
+    assert new_a_binding.epoch != old_a_binding.epoch
+    assert new_a_entry is not old_a_entry
+    assert new_a_entry.result.tools[0] is new_a_tool
+    assert new_b_tool is old_b_tool
+    assert new_b_entry is old_b_entry
+    assert get_session_pool() is old_pool
+    assert _entry(old_pool, "B", owner_loop)[0] is old_b_session
+    assert old_b_session.closed is False
+
+    cache_module.reset_mcp_tools_cache()
+    reset_pool = get_session_pool()
+    reset_tools = asyncio.run(cache_module.initialize_mcp_tools())
+    assert reset_pool is not old_pool
+    assert reset_tools[0] is not new_a_tool
+    assert reset_tools[1] is not old_b_tool
+    assert _entry(reset_pool, "A", owner_loop) is None
+    assert _entry(reset_pool, "B", owner_loop) is None
 
 
 def test_declaration_order_change_rebuilds_all_without_retiring(cache_globals, monkeypatch, tmp_path, owner_loop):
