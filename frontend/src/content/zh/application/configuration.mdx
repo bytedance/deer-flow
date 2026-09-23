@@ -264,15 +264,19 @@ BETTER_AUTH_SECRET=local-dev-secret-at-least-32-chars
 
 ## 运行时环境变量
 
-这些变量由 DeerFlow 进程自身读取（通过 `.env`、Docker 环境或 shell）。相对路径会基于 `DEER_FLOW_PROJECT_ROOT` 解析：
+这些变量由 DeerFlow 进程自身读取（通过 `.env`、Docker 环境或 shell）。
 
-| 变量                     | 默认值                 | 描述                                                  |
-| ------------------------ | ---------------------- | ----------------------------------------------------- |
-| `DEER_FLOW_PROJECT_ROOT` | 当前工作目录           | 解析相对运行时路径（`config.yaml`、`skills`）的根目录 |
-| `DEER_FLOW_HOME`         | `<项目根>/.deer-flow`  | 运行状态的可写目录（线程、上传文件）                  |
-| `DEER_FLOW_CONFIG_PATH`  | 在项目根目录下自动发现 | `config.yaml` 的绝对路径                              |
-| `DEER_FLOW_SKILLS_PATH`  | `<项目根>/skills`      | 技能定义所在目录                                      |
-| `AUTH_JWT_SECRET`        | 自动生成               | Gateway 的 JWT 签名密钥                               |
+这些路径变量中，只有 `DEER_FLOW_SKILLS_PATH` 会把相对值基于 `DEER_FLOW_PROJECT_ROOT` 解析；
+`DEER_FLOW_HOME` 和 `DEER_FLOW_CONFIG_PATH` 都按原值直接使用，相对值会基于进程工作目录解析。
+请为这两个变量设置绝对路径，确保可写状态与加载的配置文件落在预期的位置。
+
+| 变量                     | 默认值                 | 描述                                                   |
+| ------------------------ | ---------------------- | ------------------------------------------------------ |
+| `DEER_FLOW_PROJECT_ROOT` | 当前工作目录           | 解析项目相对默认值（含 `skills` 查找）的根目录         |
+| `DEER_FLOW_HOME`         | `<项目根>/.deer-flow`  | 运行状态的可写目录（线程、上传文件）；建议使用绝对路径 |
+| `DEER_FLOW_CONFIG_PATH`  | 在项目根目录下自动发现 | `config.yaml` 的绝对路径                               |
+| `DEER_FLOW_SKILLS_PATH`  | `<项目根>/skills`      | 技能定义所在目录（相对值基于项目根解析）               |
+| `AUTH_JWT_SECRET`        | 自动生成               | Gateway 的 JWT 签名密钥                                |
 
 日志级别不是环境变量——请在 `config.yaml` 中设置 `log_level`（`debug`、`info`、`warning` 或 `error`，默认 `info`）。模块参考见 [Harness 配置](/docs/harness/configuration)。
 
