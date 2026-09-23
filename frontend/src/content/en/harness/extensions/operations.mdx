@@ -1,0 +1,248 @@
+---
+title: Operating Extensions
+description: How operators install, upgrade, enable, disable, and remove extensions with the extension manager. Covers which config.yaml is used, the plugins record, accepted sources, local snapshots, transactional rollback and locking, deployment with Docker and Helm, and recovering a Gateway that a required extension keeps from starting.
+---
+
+import { Callout } from "nextra/components";
+
+# Operating Extensions
+
+This chapter is for operators. It describes what the extension manager does to a checkout, what each command prints, and how an installed extension reaches a production image. For writing an extension, start with [Quick Start](/docs/harness/extensions/quick-start).
+
+## Commands
+
+Run the `make` wrappers from the root of the DeerFlow checkout. Each one calls the same CLI from `backend/`:
+
+| `make` target                          | CLI (run from `backend/`)                                                      | Effect                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| `make extension-install SOURCE=<src>`  | `deerflow extensions install <src> [--yes] [--required]`                        | Install a package and add an enabled `plugins:` record                  |
+| `make extension-upgrade SOURCE=<src>`  | `deerflow extensions upgrade <src> [--yes]`                                     | Replace an installed package, keeping its record's settings             |
+| `make extension-list`                  | `deerflow extensions list`                                                      | Print configured extensions in load order                               |
+| `make extension-enable NAME=<name>`    | `deerflow extensions enable <name>`                                             | Set `enabled: true`                                                     |
+| `make extension-disable NAME=<name>`   | `deerflow extensions disable <name>`                                            | Set `enabled: false`; package and `config` stay                         |
+| `make extension-remove NAME=<name>`    | `deerflow extensions remove <name>`                                             | Remove the record, uninstall the package, delete its snapshot           |
+
+Invoke the CLI directly as `uv run --frozen --no-group extensions deerflow extensions <command>`, which is what the wrappers do. Running it without the `extensions` dependency group means a broken or missing extension package cannot stop you from listing, disabling, or removing it.
+
+`NAME` matches a record's `name`, its `package` (distribution name, compared after normalization), or its `use` value. Exactly one record must match, otherwise the command fails with `expected exactly one configured extension matching '<name>'`.
+
+**Every command takes effect only after a Gateway restart.** The Gateway reads `plugins:` once while it builds the application.
+
+### Output
+
+`install` and `upgrade` ask for confirmation unless `--yes` is given:
+
+```text
+Warning: a Python extension executes code with Gateway privileges.
+Install this trusted source? [y/N]
+```
+
+Answering anything other than `y` or `yes` prints `Extension installation cancelled.` (or `Extension upgrade cancelled.`) and exits with status 2. Pass `--yes` only in automation that has already reviewed the source: the package's build backend runs during installation, and its code runs inside the Gateway.
+
+On success:
+
+```text
+Installed and enabled hello (deerflow-extension-hello). Restart DeerFlow to load it.
+Upgraded hello (deerflow-extension-hello). Restart DeerFlow to load it.
+Enabled hello. Restart DeerFlow to apply the change.
+Disabled hello. Restart DeerFlow to apply the change.
+Removed hello. Restart DeerFlow to apply the change.
+```
+
+`list` prints a tab-separated table. A hand-written record without `name` or `package` shows its `use` value as the name and `-` as the package:
+
+```text
+NAME	STATE	PACKAGE	ENTRY POINT
+hello	enabled	deerflow-extension-hello	deerflow_extension_hello:install
+my_local_ext:install	enabled	-	my_local_ext:install
+```
+
+Any failure prints `extension command failed: <reason>` to stderr and exits with status 1. The reasons are listed in [Troubleshooting](/docs/harness/extensions/troubleshooting).
+
+## Which config.yaml is used
+
+The manager picks one file and edits only its `plugins:` block:
+
+1. `DEER_FLOW_CONFIG_PATH`, when set.
+2. Otherwise `config.yaml` at the checkout root, when it exists or when `backend/config.yaml` does not.
+3. Otherwise the legacy `backend/config.yaml`.
+
+The checkout root is `DEER_FLOW_PROJECT_ROOT` when set, otherwise the nearest ancestor of the current directory that contains `backend/pyproject.toml`.
+
+The Gateway resolves its config with the same `DEER_FLOW_CONFIG_PATH` override first. If you run the Gateway with a non-default config path, set the same variable when you run the manager, or it will edit a file the Gateway never reads.
+
+The manager validates the file before running any `uv` command. It refuses to continue when the file is missing (`DeerFlow config not found: <path>`), is not valid YAML, has a non-mapping root, has a `plugins` value that is not a list, or contains `plugins:` twice at the top level.
+
+## The plugins record
+
+```yaml
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config:
+      slow_ms: 200
+    # table_prefix: hello_
+```
+
+| Field          | Default  | Written by the manager | Meaning                                                                                             |
+| -------------- | -------- | ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `use`          | required | yes                    | Entry point as `module.path:install`                                                                |
+| `name`         | none     | yes                    | Operator-facing name: the entry-point name from the package metadata                                |
+| `package`      | none     | yes                    | Distribution name. Required for `remove`                                                            |
+| `enabled`      | `true`   | yes                    | `false` skips the entry without importing it                                                        |
+| `required`     | `false`  | yes (`false` unless `--required`) | `true` aborts Gateway startup when the entry fails to load                               |
+| `config`       | `{}`     | yes (`{}`)             | Private configuration handed to `install()`. Never overwritten by the manager                        |
+| `table_prefix` | none     | no                     | Table-name prefix the extension owns in the DeerFlow database. See [Database tables](#database-tables) |
+
+Unknown keys are rejected when the Gateway loads its config, so a typo in a field name stops the Gateway from starting rather than being ignored.
+
+The manager rewrites the whole `plugins:` block through a YAML serializer, so comments and formatting **inside** the block are not preserved. Everything outside it, including comment lines directly below a block at the end of the file, is left untouched. The write is atomic: a temporary file is renamed over the config with the original file mode.
+
+### Hand-written records
+
+You can add records by hand, for example for a module that is already importable in the environment. Such a record needs only `use`. `enable`, `disable`, and `list` work on it; `remove` refuses with `configured extension '<name>' has no managed package metadata`, because there is no package to uninstall. Delete the record yourself instead.
+
+When `install` finds an existing record with the same `use`, it adopts that record: it fills in `name` and `package`, sets `enabled: true`, keeps your `required` value and your `config`.
+
+### Database tables
+
+An extension that persists data in the DeerFlow database under its own SQLAlchemy metadata and migration chain should declare the prefix of its table names in `table_prefix`. DeerFlow then excludes those tables from `alembic revision --autogenerate`, which would otherwise propose to drop them. The prefix is registered even when the record is disabled, because the tables may already exist.
+
+A prefix that would hide one of DeerFlow's own tables always aborts startup, whatever `required` says:
+
+```text
+extension table_prefix 'runs' would hide host-owned table(s) ['runs'] from alembic autogenerate; choose a prefix that is not a prefix of any host table name
+```
+
+An empty `table_prefix: ""` is rejected; omit the key to declare no prefix.
+
+## Required and optional extensions
+
+With `required: false`, which is the default and what the manager writes, any load failure is logged and the Gateway starts without that extension. With `required: true`, the same failure raises `ExtensionLoadError` while the Gateway builds its application, and the Gateway does not start.
+
+Set `required: true` only when the deployment is incorrect without the extension, for example an audit trail you are obliged to keep. Keep in mind that a later broken build, a missing native library, or a deleted snapshot then becomes an outage that needs shell access to fix. `install --required` is the only way the manager writes `true`; `upgrade` and adopting an existing record keep whatever value is already there.
+
+## Accepted sources
+
+| Source                                                        | Example                                                                 | Accepted |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------- | -------- |
+| Package requirement from an index                             | `deerflow-extension-acme==1.2.3`                                         | Yes      |
+| Public Git over HTTPS, pinned to a commit                     | `git+https://github.com/acme/deerflow-extension-acme.git@<commit>`       | Yes      |
+| HTTPS direct reference                                        | `https://example.com/deerflow_extension_acme-1.2.3-py3-none-any.whl`     | Yes      |
+| Local directory (absolute path)                               | `$HOME/src/deerflow-extension-hello`                                     | Yes, as a snapshot |
+| HTTP to `localhost`, `127.0.0.1`, or `::1`                    | `http://127.0.0.1:8080/pkg.whl`                                          | Yes, with a warning if it ends up in `uv.lock` |
+| Git SSH shorthand                                             | `git@github.com:acme/x.git`                                              | No       |
+| SSH URL                                                       | `git+ssh://git@github.com/acme/x.git`                                    | No       |
+| Plain HTTP to any other host                                  | `http://example.com/x.whl`                                               | No       |
+| URL with embedded credentials                                 | `https://user:pw@example.com/x.whl`                                      | No       |
+| URL with a credential-like query or fragment key              | `...?token=abc`, `...#api_key=...`                                       | No       |
+| `file:` URL, relative path, local wheel or other local file    | `file:///tmp/x`, `./pkg.whl`                                             | No       |
+
+The rules exist because the production image is built from the checkout alone. The stock Docker builder does not forward SSH credentials, cannot reach files outside `backend/`, and must not have secrets baked into the recorded source URL. Authenticate private indexes through uv's own index and credential settings, which the manager leaves in place.
+
+### Local snapshots
+
+A local directory is not linked. It is copied to `backend/extensions/sources/<normalized distribution name>/`, which the Docker build context includes. The copy skips `.git`, `.venv`, `venv`, `__pycache__`, and `*.pyc`. The manager refuses a directory that:
+
+- has no `pyproject.toml`, or does not declare `project.name` and **exactly one** entry point in the `deerflow.extensions` group;
+- contains a symbolic link or junction, or anything other than regular files and directories;
+- contains a likely secret: `.env`, `.env.*`, `.npmrc`, `.pypirc`, `credentials.json`, or a file ending in `.key`, `.pem`, `.p12`, or `.pfx`;
+- is already installed. Use `upgrade` to replace it.
+
+These checks catch packaging accidents. They are not a malware scan.
+
+Because the snapshot is a copy, edits to your working directory reach DeerFlow only through `make extension-upgrade SOURCE=<same path>` followed by a restart.
+
+## Upgrading
+
+`upgrade` replaces the source of an extension that is already installed and keeps its record: `config`, `required`, and `enabled` stay as they are.
+
+- A local directory must already have a snapshot. The old snapshot is kept aside and restored if the upgrade fails.
+- A package requirement must name a distribution already in the `extensions` group, for example `deerflow-extension-acme==1.3.0`.
+- A Git URL must point to a repository already pinned in the group; pass the new commit.
+
+Anything else fails with `... is not installed; use install`. The new version must keep the same entry-point target (`use`). If the target changed, remove the extension and install it again.
+
+## What an install changes
+
+1. Validates the source and the config file.
+2. Checks that `uv --version` is 0.8.0 or newer.
+3. For a local directory, copies the snapshot.
+4. Runs `uv add --project backend --group extensions --no-workspace --no-sync -- <source>`, which updates the `extensions` list under `[dependency-groups]` in `backend/pyproject.toml` and `backend/uv.lock`.
+5. Audits the new lock (see below).
+6. Runs `uv sync --project backend --all-packages --locked`, plus the same optional extras the normal startup would detect from the config.
+7. Discovers the package's single `deerflow.extensions` entry point in the synced environment and checks that it loads and is callable.
+8. Writes the `plugins:` record. This is the last step, so a failure before it never touches the config.
+
+`remove` works in the other order: it deactivates the record first, then runs `uv remove --group extensions`, audits the lock, moves the snapshot aside, and syncs. If another record uses the same `package`, `remove` only deletes the matching record and leaves the package installed.
+
+Every `uv` call pins the backend project and drops environment variables that could redirect it, including `UV_PROJECT`, `UV_PYTHON`, `UV_FROZEN`, `UV_NO_SYNC`, `UV_PROJECT_ENVIRONMENT`, and `UV_INSECURE_HOST`. Index, proxy, cache, and credential-provider settings remain available.
+
+### Rollback
+
+A failed install, upgrade, or remove restores `backend/pyproject.toml`, `backend/uv.lock`, the snapshot directory, and, for `remove`, the config, then re-syncs the environment to match the restored files. If that recovery sync fails as well, the error reports both failures (`extension operation failed and the restored environment could not be synchronized; original failure: ...`). If the operation is interrupted (Ctrl+C), the files are restored but the recovery sync is skipped; the next locked sync at startup reconciles the environment.
+
+Recovery never overwrites someone else's edit. If a dependency file or the config changed while the operation was running, the manager leaves the concurrent edit in place and fails with `... recovery preserved a concurrent dependency-file edit` (or `concurrent config edit`). A `remove` interrupted this way leaves the extension deactivated.
+
+### Locking
+
+All mutating commands for one checkout hold an exclusive lock on `.deer-flow/extension-manager.lock` at the checkout root, so two operators or two CI jobs cannot interleave installs. A second command waits until the first finishes. `list` does not take the lock.
+
+### Lock audit
+
+A source that passes validation can still resolve to something the image build cannot reproduce, for example when `UV_FIND_LINKS` points uv at a local wheelhouse. After every `uv add` and `uv remove`, the manager scans `uv.lock`. Any absolute path, `file:` URL, or relative path outside the backend project, its workspace members, and `extensions/sources/` fails the whole operation with `uv.lock contains a local dependency source outside the backend Docker build context` and rolls it back. A loopback URL only produces a warning, `uv.lock records a loopback dependency source the backend Docker build cannot reach`, because it is a source you typed deliberately. It still will not resolve inside the image builder.
+
+## Deploying
+
+### Local development
+
+`make dev`, `make install`, and `cd backend && make dev` all use `uv sync --locked` or `uv run --locked`, so they install exactly what `backend/uv.lock` records, including the `extensions` group, which is a default group. They may download locked artifacts that are missing locally. They never re-resolve dependencies.
+
+### Docker
+
+The backend image is built from the checkout's `backend/` directory, including `pyproject.toml`, `uv.lock`, and `extensions/sources/`, with `uv sync --locked`. The containers start the Gateway with `uv run --no-sync`, so **a production container never installs an extension at startup**. After any change to the installed set, rebuild:
+
+```bash
+make up
+```
+
+Commit `backend/pyproject.toml`, `backend/uv.lock`, and `backend/extensions/sources/` to the branch you build images from, and keep the matching `plugins:` records in the `config.yaml` the deployment mounts.
+
+The development container (`make docker-start`) runs `uv sync --locked --all-packages` at startup. If that fails, it recreates `.venv` and retries once, still `--locked`. A second failure stops the container with:
+
+```text
+[startup] uv sync --locked failed again after recreating .venv.
+[startup] backend/uv.lock does not match backend/pyproject.toml, or a locked artifact is unreachable.
+```
+
+### Helm
+
+The chart does not install extensions. Build the Gateway image from a checkout where the extension is installed, as above, and add the `plugins:` records to the `config` value that the chart renders into `config.yaml`. The chart's `extensionsConfig` value renders `extensions_config.json`, which holds MCP servers and skills; `plugins:` placed there is ignored.
+
+### uv version
+
+The manager needs uv 0.8.0 or newer (`extension installation requires uv 0.8.0 or newer`). Production pins one exact version: the `UV_IMAGE` build argument in `backend/Dockerfile` (currently `ghcr.io/astral-sh/uv:0.11.1`). The compose files and CI use the same version, and `backend/tests/test_ci_uv_version_pin.py` keeps them in step. Use the same uv locally when you install or upgrade extensions: a newer uv can write a `uv.lock` that the pinned uv in the image cannot read.
+
+## Recovering from a required extension that blocks startup
+
+<Callout type="warning">
+  A `required: true` extension that fails to load stops the Gateway with
+  `ExtensionLoadError: required extension <use> failed to load` (or
+  `... failed to install`, `... declares incompatible api ...`). The web UI is
+  unavailable until you fix it from a shell.
+</Callout>
+
+1. Read the error line logged just before it: `Extension <use>: <reason>`. It names the cause.
+2. Let the Gateway start without the extension. Either disable it:
+
+   ```bash
+   make extension-disable NAME=<name>
+   ```
+
+   or edit the record in `config.yaml` and set `required: false`, which keeps it loading when it works and skipping it when it does not. The management wrappers run without the `extensions` dependency group, so they work even when the extension's package itself is broken.
+3. Restart the Gateway, fix the cause (for example `make extension-upgrade SOURCE=...`), re-enable, and restart again.
+
+A `table_prefix` collision aborts startup regardless of `required`; change or remove the prefix.

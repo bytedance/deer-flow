@@ -1,0 +1,248 @@
+---
+title: 运维扩展
+description: 运维人员如何用扩展管理器安装、升级、启用、禁用和移除扩展。涵盖使用哪个 config.yaml、plugins 记录、可接受的来源、本地快照、事务回滚与加锁、用 Docker 和 Helm 部署，以及当必需扩展阻止 Gateway 启动时如何恢复。
+---
+
+import { Callout } from "nextra/components";
+
+# 运维扩展
+
+本章面向运维人员，说明扩展管理器会对 checkout 做什么、每条命令输出什么，以及已安装的扩展如何进入生产镜像。编写扩展请从[快速上手](/docs/harness/extensions/quick-start)开始。
+
+## 命令
+
+在 DeerFlow checkout 根目录运行 `make` 包装命令，它们都会在 `backend/` 下调用同一个 CLI：
+
+| `make` 目标                            | CLI（在 `backend/` 下运行）                                                     | 作用                                                    |
+| -------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| `make extension-install SOURCE=<src>`  | `deerflow extensions install <src> [--yes] [--required]`                        | 安装一个包并添加一条已启用的 `plugins:` 记录             |
+| `make extension-upgrade SOURCE=<src>`  | `deerflow extensions upgrade <src> [--yes]`                                     | 替换已安装的包，保留记录中的设置                         |
+| `make extension-list`                  | `deerflow extensions list`                                                      | 按加载顺序列出已配置的扩展                               |
+| `make extension-enable NAME=<name>`    | `deerflow extensions enable <name>`                                             | 设置 `enabled: true`                                    |
+| `make extension-disable NAME=<name>`   | `deerflow extensions disable <name>`                                            | 设置 `enabled: false`；包和 `config` 保留                |
+| `make extension-remove NAME=<name>`    | `deerflow extensions remove <name>`                                             | 删除记录、卸载包、删除其快照                             |
+
+直接调用 CLI 的写法是 `uv run --frozen --no-group extensions deerflow extensions <command>`，包装命令就是这么做的。不带 `extensions` 依赖组运行，意味着一个坏掉或缺失的扩展包不会妨碍你列出、禁用或移除它。
+
+`NAME` 可以匹配记录的 `name`、`package`（发行包名，规范化后比较）或 `use`。必须恰好匹配一条记录，否则命令会以 `expected exactly one configured extension matching '<name>'` 失败。
+
+**每条命令都要在 Gateway 重启后才生效。** Gateway 只在构建应用时读取一次 `plugins:`。
+
+### 输出
+
+除非传了 `--yes`，`install` 和 `upgrade` 会要求确认：
+
+```text
+Warning: a Python extension executes code with Gateway privileges.
+Install this trusted source? [y/N]
+```
+
+回答 `y` 或 `yes` 以外的任何内容都会打印 `Extension installation cancelled.`（或 `Extension upgrade cancelled.`）并以状态码 2 退出。只在已经审查过来源的自动化流程里传 `--yes`：安装时会运行包的构建后端，它的代码会在 Gateway 内运行。
+
+成功时：
+
+```text
+Installed and enabled hello (deerflow-extension-hello). Restart DeerFlow to load it.
+Upgraded hello (deerflow-extension-hello). Restart DeerFlow to load it.
+Enabled hello. Restart DeerFlow to apply the change.
+Disabled hello. Restart DeerFlow to apply the change.
+Removed hello. Restart DeerFlow to apply the change.
+```
+
+`list` 打印一张以制表符分隔的表。没有 `name` 或 `package` 的手写记录，名称显示为 `use` 的值，包显示为 `-`：
+
+```text
+NAME	STATE	PACKAGE	ENTRY POINT
+hello	enabled	deerflow-extension-hello	deerflow_extension_hello:install
+my_local_ext:install	enabled	-	my_local_ext:install
+```
+
+任何失败都会向 stderr 打印 `extension command failed: <原因>` 并以状态码 1 退出。各种原因见[故障排查](/docs/harness/extensions/troubleshooting)。
+
+## 使用哪个 config.yaml
+
+管理器选定一个文件，只编辑其中的 `plugins:` 段：
+
+1. 设置了 `DEER_FLOW_CONFIG_PATH` 时用它。
+2. 否则用 checkout 根目录的 `config.yaml`，前提是它存在，或者 `backend/config.yaml` 不存在。
+3. 否则用旧位置 `backend/config.yaml`。
+
+checkout 根目录在设置了 `DEER_FLOW_PROJECT_ROOT` 时就是它，否则是当前目录向上最近一个包含 `backend/pyproject.toml` 的目录。
+
+Gateway 解析配置时同样先看 `DEER_FLOW_CONFIG_PATH`。如果你用非默认的配置路径运行 Gateway，运行管理器时也要设置同一个变量，否则它会编辑一个 Gateway 根本不读的文件。
+
+管理器在运行任何 `uv` 命令之前先校验这个文件。文件不存在（`DeerFlow config not found: <path>`）、不是合法的 YAML、根节点不是映射、`plugins` 不是列表，或者顶层出现两次 `plugins:` 时，它都会拒绝继续。
+
+## plugins 记录
+
+```yaml
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config:
+      slow_ms: 200
+    # table_prefix: hello_
+```
+
+| 字段           | 默认值   | 管理器是否写入         | 含义                                                                                  |
+| -------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------- |
+| `use`          | 必填     | 是                     | 入口点，写作 `module.path:install`                                                     |
+| `name`         | 无       | 是                     | 面向运维的名称：包元数据中的入口点名称                                                 |
+| `package`      | 无       | 是                     | 发行包名。`remove` 需要它                                                              |
+| `enabled`      | `true`   | 是                     | `false` 时跳过该条目，不导入                                                           |
+| `required`     | `false`  | 是（除非 `--required`，否则为 `false`） | `true` 时该条目加载失败会中止 Gateway 启动                             |
+| `config`       | `{}`     | 是（`{}`）             | 交给 `install()` 的私有配置。管理器从不覆盖它                                           |
+| `table_prefix` | 无       | 否                     | 扩展在 DeerFlow 数据库中拥有的表名前缀。见[数据库表](#数据库表)                          |
+
+Gateway 加载配置时会拒绝未知的键，所以字段名拼错会让 Gateway 无法启动，而不是被悄悄忽略。
+
+管理器通过 YAML 序列化器重写整个 `plugins:` 段，所以段**内**的注释和格式不会保留。段外的一切都不动，包括位于文件末尾的段下方紧跟的注释行。写入是原子的：先写临时文件，再保留原文件权限重命名覆盖配置。
+
+### 手写记录
+
+你可以手工添加记录，例如对于环境里已经可以导入的模块。这样的记录只需要 `use`。`enable`、`disable`、`list` 都能处理它；`remove` 会以 `configured extension '<name>' has no managed package metadata` 拒绝，因为没有可卸载的包。请自己删除这条记录。
+
+`install` 如果发现已有一条 `use` 相同的记录，会接管它：补上 `name` 和 `package`，设置 `enabled: true`，保留你的 `required` 值和 `config`。
+
+### 数据库表
+
+如果扩展用自己的 SQLAlchemy metadata 和迁移链在 DeerFlow 数据库中持久化数据，应当在 `table_prefix` 中声明其表名前缀。DeerFlow 会把这些表排除在 `alembic revision --autogenerate` 之外，否则 autogenerate 会提议删除它们。即使记录被禁用，前缀也会注册，因为这些表可能已经存在。
+
+会遮住 DeerFlow 自己某张表的前缀总会中止启动，无论 `required` 是什么：
+
+```text
+extension table_prefix 'runs' would hide host-owned table(s) ['runs'] from alembic autogenerate; choose a prefix that is not a prefix of any host table name
+```
+
+空的 `table_prefix: ""` 会被拒绝；不声明前缀就直接省略这个键。
+
+## 必需与可选扩展
+
+`required: false` 是默认值，也是管理器写入的值，此时任何加载失败都只记日志，Gateway 不带该扩展照常启动。`required: true` 时，同样的失败会在 Gateway 构建应用时抛出 `ExtensionLoadError`，Gateway 无法启动。
+
+只在缺了这个扩展部署就是错的情况下设置 `required: true`，例如你有义务保留的审计轨迹。要清楚，之后一次构建出错、一个缺失的原生库或一个被删除的快照，都会变成需要 shell 权限才能修复的故障。`install --required` 是管理器写入 `true` 的唯一方式；`upgrade` 和接管已有记录都会保留原来的值。
+
+## 可接受的来源
+
+| 来源                                                      | 示例                                                                    | 是否接受 |
+| --------------------------------------------------------- | ----------------------------------------------------------------------- | -------- |
+| 来自索引的包依赖声明                                      | `deerflow-extension-acme==1.2.3`                                         | 是       |
+| 通过 HTTPS 访问的公开 Git，固定到某个提交                  | `git+https://github.com/acme/deerflow-extension-acme.git@<commit>`       | 是       |
+| HTTPS 直接引用                                            | `https://example.com/deerflow_extension_acme-1.2.3-py3-none-any.whl`     | 是       |
+| 本地目录（绝对路径）                                      | `$HOME/src/deerflow-extension-hello`                                     | 是，作为快照 |
+| 指向 `localhost`、`127.0.0.1` 或 `::1` 的 HTTP             | `http://127.0.0.1:8080/pkg.whl`                                          | 是；如果写进 `uv.lock` 会有警告 |
+| Git SSH 简写                                              | `git@github.com:acme/x.git`                                              | 否       |
+| SSH URL                                                   | `git+ssh://git@github.com/acme/x.git`                                    | 否       |
+| 指向其他主机的普通 HTTP                                   | `http://example.com/x.whl`                                               | 否       |
+| 内嵌凭据的 URL                                            | `https://user:pw@example.com/x.whl`                                      | 否       |
+| 查询串或片段中含类似凭据键的 URL                          | `...?token=abc`、`...#api_key=...`                                       | 否       |
+| `file:` URL、相对路径、本地 wheel 或其他本地文件           | `file:///tmp/x`、`./pkg.whl`                                             | 否       |
+
+这些规则的原因是生产镜像只从 checkout 构建。标准 Docker 构建器不转发 SSH 凭据，访问不到 `backend/` 之外的文件，也不能把机密固化在记录下来的来源 URL 里。私有索引请通过 uv 自己的索引和凭据设置认证，管理器会保留这些设置。
+
+### 本地快照
+
+本地目录不会被链接，而是被复制到 `backend/extensions/sources/<规范化的发行包名>/`，Docker 构建上下文会包含这个目录。复制时跳过 `.git`、`.venv`、`venv`、`__pycache__` 和 `*.pyc`。以下情况管理器会拒绝该目录：
+
+- 没有 `pyproject.toml`，或者没有声明 `project.name` 以及 `deerflow.extensions` 组中**恰好一个**入口点；
+- 包含符号链接或 junction，或者包含普通文件和目录之外的东西；
+- 包含疑似机密：`.env`、`.env.*`、`.npmrc`、`.pypirc`、`credentials.json`，或以 `.key`、`.pem`、`.p12`、`.pfx` 结尾的文件；
+- 已经安装过。请用 `upgrade` 替换。
+
+这些检查拦的是打包失误，不是恶意软件扫描。
+
+因为快照是一份拷贝，对工作目录的修改只能通过 `make extension-upgrade SOURCE=<同一路径>` 再重启才能到达 DeerFlow。
+
+## 升级
+
+`upgrade` 替换一个已安装扩展的来源，并保留它的记录：`config`、`required`、`enabled` 都保持不变。
+
+- 本地目录必须已有快照。旧快照会先挪到一边，升级失败时恢复。
+- 包依赖声明必须指向 `extensions` 组里已有的发行包，例如 `deerflow-extension-acme==1.3.0`。
+- Git URL 必须指向组里已经固定的仓库；传入新的提交。
+
+其他情况会以 `... is not installed; use install` 失败。新版本必须保持相同的入口点目标（`use`）。如果目标变了，请先移除扩展再重新安装。
+
+## 一次安装会改动什么
+
+1. 校验来源和配置文件。
+2. 检查 `uv --version` 不低于 0.8.0。
+3. 如果是本地目录，复制快照。
+4. 运行 `uv add --project backend --group extensions --no-workspace --no-sync -- <source>`，更新 `backend/pyproject.toml` 中 `[dependency-groups]` 下的 `extensions` 列表和 `backend/uv.lock`。
+5. 审计新的锁文件（见下文）。
+6. 运行 `uv sync --project backend --all-packages --locked`，并带上常规启动会从配置中检测出的同样的可选 extras。
+7. 在同步后的环境中找到包唯一的 `deerflow.extensions` 入口点，检查它能加载且可调用。
+8. 写入 `plugins:` 记录。这是最后一步，所以此前的任何失败都不会动配置。
+
+`remove` 顺序相反：先停用记录，然后运行 `uv remove --group extensions`，审计锁文件，把快照挪到一边，再同步。如果还有别的记录使用同一个 `package`，`remove` 只删除匹配的那条记录，包保持安装。
+
+每次调用 `uv` 都会固定 backend 项目，并去掉可能改变其行为的环境变量，包括 `UV_PROJECT`、`UV_PYTHON`、`UV_FROZEN`、`UV_NO_SYNC`、`UV_PROJECT_ENVIRONMENT` 和 `UV_INSECURE_HOST`。索引、代理、缓存和凭据提供方设置保持可用。
+
+### 回滚
+
+安装、升级或移除失败时，会恢复 `backend/pyproject.toml`、`backend/uv.lock`、快照目录，对 `remove` 还会恢复配置，然后重新同步环境以匹配恢复后的文件。如果这次恢复同步也失败，错误会同时报告两个失败（`extension operation failed and the restored environment could not be synchronized; original failure: ...`）。如果操作被中断（Ctrl+C），文件会恢复，但跳过恢复同步；下次启动时的锁定同步会让环境重新一致。
+
+恢复绝不覆盖别人的修改。如果某个依赖文件或配置在操作期间被改动，管理器会保留这个并发修改，并以 `... recovery preserved a concurrent dependency-file edit`（或 `concurrent config edit`）失败。以这种方式中断的 `remove` 会让扩展保持停用状态。
+
+### 加锁
+
+同一个 checkout 的所有写操作命令都会持有 checkout 根目录下 `.deer-flow/extension-manager.lock` 的排他锁，所以两个运维人员或两个 CI 任务的安装不会交错。第二条命令会等到第一条结束。`list` 不加锁。
+
+### 锁文件审计
+
+一个通过了校验的来源，仍可能解析成镜像构建无法复现的东西，例如 `UV_FIND_LINKS` 让 uv 指向本地的 wheel 目录。每次 `uv add` 和 `uv remove` 之后，管理器都会扫描 `uv.lock`。任何绝对路径、`file:` URL，或位于 backend 项目、其 workspace 成员和 `extensions/sources/` 之外的相对路径，都会让整个操作以 `uv.lock contains a local dependency source outside the backend Docker build context` 失败并回滚。回环 URL 只产生一条警告 `uv.lock records a loopback dependency source the backend Docker build cannot reach`，因为那是你有意输入的来源。它在镜像构建器里仍然无法解析。
+
+## 部署
+
+### 本地开发
+
+`make dev`、`make install` 和 `cd backend && make dev` 都使用 `uv sync --locked` 或 `uv run --locked`，因此安装的正是 `backend/uv.lock` 记录的内容，包括作为默认组的 `extensions` 组。它们可能下载本地缺失的已锁定制品，但从不重新解析依赖。
+
+### Docker
+
+后端镜像从 checkout 的 `backend/` 目录构建，包括 `pyproject.toml`、`uv.lock` 和 `extensions/sources/`，使用 `uv sync --locked`。容器以 `uv run --no-sync` 启动 Gateway，所以**生产容器在启动时从不安装扩展**。改动已安装集合之后要重新构建：
+
+```bash
+make up
+```
+
+把 `backend/pyproject.toml`、`backend/uv.lock` 和 `backend/extensions/sources/` 提交到你构建镜像所用的分支，并在部署挂载的 `config.yaml` 里保留对应的 `plugins:` 记录。
+
+开发容器（`make docker-start`）在启动时运行 `uv sync --locked --all-packages`。失败时它会重建 `.venv` 并重试一次，仍然带 `--locked`。第二次失败会让容器停止并输出：
+
+```text
+[startup] uv sync --locked failed again after recreating .venv.
+[startup] backend/uv.lock does not match backend/pyproject.toml, or a locked artifact is unreachable.
+```
+
+### Helm
+
+chart 不负责安装扩展。按上面的方式，从已安装该扩展的 checkout 构建 Gateway 镜像，并把 `plugins:` 记录加到 chart 渲染成 `config.yaml` 的 `config` 值里。chart 的 `extensionsConfig` 值渲染的是 `extensions_config.json`，其中存放 MCP 服务器和技能；放在那里的 `plugins:` 会被忽略。
+
+### uv 版本
+
+管理器需要 uv 0.8.0 或更新版本（`extension installation requires uv 0.8.0 or newer`）。生产环境固定一个确切版本：`backend/Dockerfile` 中的 `UV_IMAGE` 构建参数（当前为 `ghcr.io/astral-sh/uv:0.11.1`）。compose 文件和 CI 使用同一版本，`backend/tests/test_ci_uv_version_pin.py` 让它们保持一致。本地安装或升级扩展时请使用同一个 uv：更新的 uv 可能写出镜像中固定版本的 uv 读不了的 `uv.lock`。
+
+## 必需扩展阻止启动时如何恢复
+
+<Callout type="warning">
+  加载失败的 `required: true` 扩展会以
+  `ExtensionLoadError: required extension <use> failed to load`（或
+  `... failed to install`、`... declares incompatible api ...`）让 Gateway 停止。
+  在你从 shell 修复之前，Web 界面不可用。
+</Callout>
+
+1. 查看紧挨在它之前记录的错误行：`Extension <use>: <原因>`，它写明了原因。
+2. 让 Gateway 不带这个扩展启动。可以禁用它：
+
+   ```bash
+   make extension-disable NAME=<name>
+   ```
+
+   也可以编辑 `config.yaml` 中的记录，设置 `required: false`，这样它能用时照常加载，出错时被跳过。管理包装命令在不带 `extensions` 依赖组的情况下运行，所以即使扩展包本身坏了也能用。
+3. 重启 Gateway，修复原因（例如 `make extension-upgrade SOURCE=...`），重新启用，再重启。
+
+`table_prefix` 冲突无论 `required` 为何都会中止启动；请修改或删除该前缀。

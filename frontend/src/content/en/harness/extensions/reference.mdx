@@ -1,0 +1,413 @@
+---
+title: Reference
+description: Every public name in deerflow-extension-api 0.2.1, grouped by topic, with signatures, fields, and defaults. Also covers the compatibility rules and the contract's version history.
+---
+
+# Reference
+
+This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.1**. Import them from the package root:
+
+```python
+from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
+```
+
+The package has no dependencies and never imports DeerFlow. Types written as `Any` below, such as a middleware or a router, are validated by the host at runtime rather than by the contract.
+
+## Entry point and registry
+
+### `ExtensionInstall`
+
+```python
+ExtensionInstall = Callable[[ExtensionRegistry, Mapping[str, Any]], None]
+```
+
+The signature of the function named by a `plugins:` record's `use`. The second argument is a shallow copy of the record's `config`.
+
+### `extension(*, api, name=None)`
+
+Decorator that stamps an install function with the contract version it was written against (`__deerflow_api__`) and an optional name (`__deerflow_name__`). Optional; see [Compatibility rules](#compatibility-rules).
+
+```python
+@extension(api="0.2.0", name="hello")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
+```
+
+### `ExtensionRegistry`
+
+A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Every method has a default implementation that registers nothing. A host whose registry predates a method inherits that default, so the call succeeds but the contribution is not registered. The version marker and package metadata are how you prevent that.
+
+| Method                                                     | Returns | Registers                                                                                |
+| ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `middlewares(contributor: MiddlewareContributor)`          | `None`  | A middleware contributor                                                                 |
+| `task_lifecycle(contributor: TaskLifecycleContributor)`    | `None`  | Start and stop hooks for lead runs and subagents                                        |
+| `system_model_observer(observer: SystemModelCallObserver)` | `None`  | An observer of DeerFlow-owned model calls                                                |
+| `agent_assembly_observer(observer: AgentAssemblyObserver)` | `None`  | An observer of assembled agents                                                          |
+| `context_compaction_observer(observer: ContextCompactionObserver)` | `None` | An observer of summarization                                                       |
+| `service(service: ExtensionService)`                       | `None`  | A Gateway-lifetime service                                                               |
+| `routers(routers: Sequence[Any])`                          | `None`  | FastAPI routers, built during `install()`                                                |
+
+## Middleware
+
+### `MiddlewareContributor`
+
+```python
+class MiddlewareContributor(Protocol):
+    def contribute_middlewares(
+        self, app_store: ExtensionData, ctx: AgentBuildContext
+    ) -> Sequence[MiddlewarePlacement]: ...
+```
+
+Called on every agent assembly. Default returns `()`.
+
+### `MiddlewarePlacement`
+
+Frozen dataclass.
+
+| Field        | Type         | Default           |
+| ------------ | ------------ | ----------------- |
+| `middleware` | `Any` (must be a LangChain `AgentMiddleware`) | required |
+| `placement`  | `Placement`  | required          |
+| `scope`      | `AgentScope` | `AgentScope.BOTH` |
+| `order`      | `int`        | `0`               |
+
+### `Placement`
+
+`StrEnum`: `MODEL_LOGICAL = "model_logical"`, `MODEL_PHYSICAL = "model_physical"`, `TOOL_VISIBLE = "tool_visible"`, `TOOL_RAW = "tool_raw"`, `STANDARD = "standard"`. The guarantee each one makes is in [Middleware Contributions](/docs/harness/extensions/middleware).
+
+### `AgentScope`
+
+`Flag`: `LEAD`, `SUBAGENT`, `BOTH = LEAD | SUBAGENT`.
+
+### `AgentBuildContext`
+
+Frozen dataclass passed to `contribute_middlewares()`.
+
+| Field        | Type                 | Default                |
+| ------------ | -------------------- | ---------------------- |
+| `scope`      | `AgentScope`         | required               |
+| `agent_name` | `str \| None`        | `None`                 |
+| `model_name` | `str \| None`        | `None`                 |
+| `policy`     | `HostPolicySnapshot` | `HostPolicySnapshot()` |
+
+### `HostPolicySnapshot`
+
+Frozen dataclass: the limits the host enforces, projected so extensions do not depend on DeerFlow's config types. Every field has a default.
+
+| Field                   | Type            | Default |
+| ----------------------- | --------------- | ------- |
+| `token_budget_enabled`  | `bool`          | `False` |
+| `max_input_tokens`      | `int \| None`   | `None`  |
+| `max_output_tokens`     | `int \| None`   | `None`  |
+| `max_total_tokens`      | `int \| None`   | `None`  |
+| `budget_warn_fraction`  | `float \| None` | `None`  |
+| `budget_hard_fraction`  | `float \| None` | `None`  |
+| `max_subagents_per_run` | `int \| None`   | `None`  |
+
+## State
+
+### `ExtensionData`
+
+Typed, thread-safe store attached to one host scope (the app, or one task). Keyed by Python type, so two extensions cannot collide.
+
+| Member                                         | Description                                                                        |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `ExtensionData(scope_id: str)`                 | Constructor. The host creates stores; construct one yourself only in tests         |
+| `scope_id: str`                                | Host identity of the scope                                                         |
+| `get(typ: type[T]) -> T \| None`               | The stored instance of `typ`, or `None`                                            |
+| `get_or_init(typ: type[T], init: Callable[[], T]) -> T` | The stored instance, created by `init()` when absent. `init` runs under the store's lock |
+| `set(value: T) -> None`                        | Store `value` under `type(value)`, replacing any previous one                      |
+| `remove(typ: type[T]) -> T \| None`            | Remove and return the stored instance                                              |
+
+### `task_store_from_runtime(runtime: object) -> ExtensionData | None`
+
+Return the task-scoped store from a LangGraph runtime (`request.runtime` in a wrap hook, the `runtime` argument of a lifecycle hook), or `None` when there is no live task.
+
+### `EXTENSION_TASK_STORE_KEY`
+
+`"__deerflow_extension_task_store"`. The host-owned runtime-context key behind `task_store_from_runtime()`. Read it only through that helper and never write it.
+
+## Task lifecycle
+
+### `TaskLifecycleContributor`
+
+```python
+class TaskLifecycleContributor(Protocol):
+    async def on_task_start(self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo) -> None: ...
+    async def on_task_stop(
+        self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo, outcome: TaskOutcome
+    ) -> None: ...
+```
+
+### `TaskInfo`
+
+Frozen dataclass.
+
+| Field            | Type                          | Default |
+| ---------------- | ----------------------------- | ------- |
+| `task_id`        | `str`                         | required |
+| `run_id`         | `str`                         | required |
+| `thread_id`      | `str`                         | required |
+| `kind`           | `Literal["lead", "subagent"]` | required |
+| `parent_task_id` | `str \| None`                 | `None`  |
+| `agent_name`     | `str \| None`                 | `None`  |
+| `resumed`        | `bool`                        | `False` |
+
+### `TaskOutcome`
+
+`StrEnum`: `COMPLETED = "completed"`, `ABORTED = "aborted"`, `FAILED = "failed"`.
+
+## System model calls
+
+### `SystemModelCallObserver`
+
+```python
+class SystemModelCallObserver(Protocol):
+    async def on_system_model_call(
+        self,
+        app_store: ExtensionData,
+        task_store: ExtensionData,
+        kind: SystemOperationKind,
+        request: SystemModelRequest,
+        result: SystemModelResult,
+    ) -> None: ...
+```
+
+### `SystemOperationKind`
+
+`StrEnum`: `GOAL = "goal"`, `MEMORY = "memory"`, `TITLE = "title"`, `SUMMARIZATION = "summarization"`.
+
+### `SystemModelRequest`
+
+Frozen dataclass, a read-only snapshot taken before the call.
+
+| Field           | Type                          | Default |
+| --------------- | ----------------------------- | ------- |
+| `messages`      | `Sequence[Any]`               | `()`    |
+| `model_name`    | `str \| None`                 | `None`  |
+| `invoke_config` | `Mapping[str, Any] \| None`   | `None`  |
+
+`messages` is normalized to a tuple on construction. A single prompt string becomes a one-element tuple rather than a sequence of characters.
+
+### `SystemModelResult`
+
+Frozen dataclass: `response: Any | None = None`, `error: BaseException | None = None`, `duration_ms: float | None = None`.
+
+## Agent assembly
+
+### `AgentAssemblyObserver`
+
+```python
+class AgentAssemblyObserver(Protocol):
+    def on_agent_assembled(self, app_store: ExtensionData, descriptor: AgentAssemblyDescriptor) -> None: ...
+```
+
+Synchronous, called at the end of agent construction. Must be cheap and must not raise.
+
+### `AgentAssemblyDescriptor`
+
+Frozen dataclass.
+
+| Field                 | Type                              | Default |
+| --------------------- | --------------------------------- | ------- |
+| `namespace`           | `str`                             | required |
+| `agent_name`          | `str`                             | required |
+| `requested_model`     | `str \| None`                     | required |
+| `effective_model`     | `str`                             | required |
+| `model_parameters`    | `dict[str, Any]`                  | required |
+| `thinking_enabled`    | `bool`                            | required |
+| `reasoning_effort`    | `Any`                             | required |
+| `base_prompt_hash`    | `str`                             | required |
+| `tools`               | `tuple[ToolDescriptor, ...]`      | required |
+| `middlewares`         | `tuple[MiddlewareDescriptor, ...]` | required |
+| `deferred_tool_names` | `tuple[str, ...]`                 | required |
+| `enabled_skills`      | `tuple[str, ...]`                 | required |
+| `effective_policies`  | `dict[str, Any]`                  | required |
+| `build`               | `dict[str, Any]`                  | `{}`    |
+
+`fingerprint: str` (cached property) is a `canonical_hash` of everything that changes behavior. Tools, deferred tool names, and skills are sorted; middleware order is preserved because it decides what wraps what. `build` and `requested_model` are excluded, so a redeploy of the same assembly keeps the same fingerprint.
+
+### `ToolDescriptor`
+
+Frozen dataclass: `name: str`, `description_hash: str`, `schema_hash: str`, `source: str`, `mcp_server: str | None = None`, `mcp_transport: str | None = None`.
+
+### `MiddlewareDescriptor`
+
+Frozen dataclass: `name: str`, `module: str`, `policy_parameters: dict[str, Any] = {}`, `extension: str | None = None`. `extension` names the contributing extension; it is `None` for host middleware.
+
+## Context compaction
+
+### `ContextCompactionObserver`
+
+```python
+class ContextCompactionObserver(Protocol):
+    async def on_context_compacted(
+        self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent
+    ) -> None: ...
+```
+
+### `CompactionEvent`
+
+Frozen dataclass, captured while both sides of the transform still exist.
+
+| Field                     | Type              |
+| ------------------------- | ----------------- |
+| `transform_kind`          | `str`             |
+| `transform_version`       | `str`             |
+| `source_content_hashes`   | `tuple[str, ...]` |
+| `output_content_hash`     | `str`             |
+| `compacted_message_count` | `int`             |
+| `kept_message_count`      | `int`             |
+
+Hashes are `canonical_hash(message.content)` of the content passed directly, never a stringified copy. To match a message to an event, hash its `content` the same way.
+
+## Services
+
+### `ExtensionService`
+
+```python
+class ExtensionService(Protocol):
+    async def start(self, deps: ExtensionRuntimeDeps) -> None: ...
+    async def stop(self) -> None: ...
+```
+
+### `ExtensionRuntimeDeps`
+
+Frozen dataclass passed to `start()`.
+
+| Field                 | Type                        | Default                |
+| --------------------- | --------------------------- | ---------------------- |
+| `app_store`           | `ExtensionData \| None`     | `None`                 |
+| `policy`              | `HostPolicySnapshot`        | `HostPolicySnapshot()` |
+| `session_factory`     | `Any \| None`               | `None`                 |
+| `run_evidence_reader` | `RunEvidenceReader \| None` | `None`                 |
+
+`run_evidence_reader` is `None` on a host that does not provide one.
+
+## Run evidence
+
+### `RunEvidenceReader`
+
+A read-only Protocol. Its default methods raise `NotImplementedError`.
+
+| Method                                                                                           | Returns                   |
+| ------------------------------------------------------------------------------------------------ | ------------------------- |
+| `async list_changed_runs(*, cursor: str \| None, limit: int)`                                     | `RunPage`                 |
+| `async list_run_events(*, thread_id: str, run_id: str, after_seq: int \| None, limit: int)`       | `RunEventPage`            |
+| `async get_run_status(*, thread_id: str, run_id: str)`                                            | `RunStatusView \| None`   |
+
+The Gateway's implementation accepts `limit` from 1 to 2000 and a non-negative `after_seq`, raising `ValueError` otherwise. Deletions produce no tombstone: `get_run_status()` returning `None` means the run is absent or not visible. See [Run Evidence](/docs/harness/extensions/run-evidence).
+
+### `RunStatusView`
+
+Frozen dataclass: `thread_id`, `run_id`, `status`, `created_at`, `updated_at` (all `str = ""`), `error: str | None = None`, `stop_reason: str | None = None`.
+
+### `RunEventView`
+
+Frozen dataclass: `thread_id: str = ""`, `run_id: str = ""`, `seq: int = 0` (monotonic within a thread), `event_type: str = ""`, `category: str = ""`, `content: Any = None`, `metadata: dict[str, Any] = {}`, `created_at: str = ""`. Content and metadata are detached copies. Content is returned unchanged; metadata has only the legacy `auth_token` key removed, with no other redaction.
+
+### `RunPage` / `RunEventPage`
+
+Frozen dataclasses. `RunPage`: `items: tuple[RunStatusView, ...] = ()`, `next_cursor: str | None = None`, `has_more: bool = False`. `RunEventPage`: `items: tuple[RunEventView, ...] = ()`, `next_after_seq: int | None = None`, `has_more: bool = False`.
+
+### `InvalidRunEvidenceCursor`
+
+Subclass of `ValueError`, raised for a malformed or unsupported cursor, or a cursor from another scope.
+
+## Identity
+
+### `ExtensionPrincipal`
+
+Frozen dataclass: `user_id: str`, `is_admin: bool = False`, `is_internal: bool = False`, `roles: tuple[str, ...] = ()`.
+
+### `resolve_principal(request: object) -> ExtensionPrincipal | None`
+
+The authenticated caller of a contributed route, or `None` when it cannot be determined. `request` is duck-typed, so a Starlette `Request` works without the contract depending on Starlette.
+
+### `require_admin(request: object) -> ExtensionPrincipal`
+
+Return the principal if it is an administrator, otherwise raise `PermissionError("this endpoint requires an administrator account")`. It fails closed when identity cannot be determined.
+
+### `EXTENSION_PRINCIPAL_RESOLVER_KEY`
+
+`"deerflow_extension_principal_resolver"`. The `app.state` attribute the host installs its resolver under. Host-owned.
+
+## Message provenance
+
+Middleware that injects messages stamps them, so an observer can tell an injected message from the user's own without matching on wording.
+
+| Constant                         | Value                           |
+| -------------------------------- | ------------------------------- |
+| `MESSAGE_CONTENT_KIND_KEY`       | `"deerflow_content_kind"`       |
+| `MESSAGE_PRODUCER_KIND_KEY`      | `"deerflow_producer_kind"`      |
+| `MESSAGE_PRODUCER_ENTITY_ID_KEY` | `"deerflow_producer_entity_id"` |
+| `PROVENANCE_KEYS`                | `frozenset` of the three keys. The host treats them as server-owned and strips caller-supplied values from untrusted input |
+
+### `ContentKind`
+
+`StrEnum`: `MIDDLEWARE_INJECTION = "middleware_injection"`, `MEMORY = "memory"`, `DURABLE_CONTEXT = "durable_context"`, `SKILL_BODY = "skill_body"`, `IMAGE_PAYLOAD = "image_payload"`. Stamped values are plain strings, so a kind added by a newer host arrives as an unrecognized string rather than an error.
+
+### `MessageProvenance`
+
+Frozen dataclass: `content_kind: str`, `producer_kind: str`, `producer_entity_id: str | None = None`.
+
+### `provenance_kwargs(content_kind, producer_kind, *, producer_entity_id=None) -> dict[str, str]`
+
+The `additional_kwargs` fragment to merge into a message you produce. `producer_entity_id` is omitted when `None`.
+
+### `read_provenance(message: object) -> MessageProvenance | None`
+
+Read a stamp from `message.additional_kwargs`. Returns `None` when either required key is missing or not a string.
+
+## Release policies and hashing
+
+### `ReleasePolicyProvider`
+
+```python
+@runtime_checkable
+class ReleasePolicyProvider(Protocol):
+    def release_policy_parameters(self) -> dict[str, object]: ...
+```
+
+Implement it on a middleware to declare its behavior-affecting parameters. They appear in `MiddlewareDescriptor.policy_parameters` and in the assembly fingerprint. Values must be JSON-serializable; hash long text instead of embedding it.
+
+### `collect_release_policies(middlewares: Sequence[object]) -> dict[str, dict[str, object]]`
+
+Gather declarations from a stack, keyed by class name (`Name`, `Name#2`, ... for repeats), unwrapping isolation wrappers. A declaration that raises is recorded as `{"error": "<ExceptionType>"}`, and one that returns a non-mapping as `{"error": "NonMappingDeclaration"}`.
+
+### `canonical_json(value: object) -> str`
+
+Deterministic JSON: sorted keys, `(",", ":")` separators, `ensure_ascii=False`. Raises `TypeError` for values that are not JSON-serializable.
+
+### `canonical_hash(value: object) -> str`
+
+SHA-256 hex digest of `canonical_json(value)` encoded as UTF-8.
+
+## Version constant
+
+### `API_VERSION`
+
+The host's contract version as a dotted string, `"0.2.1"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
+
+## Compatibility rules
+
+- **Additive growth.** Every Protocol method has a default implementation and every optional dataclass field has a default. A contract release that adds a method or field does not break extensions built against an earlier one.
+- **Before 1.0**, a minor release may break extensions and a patch release is additive. **From 1.0 on**, breaking changes bump the major.
+- **The `@extension(api=...)` check.** When an install function carries a marker, the host refuses it unless:
+  - before 1.0: the same major and minor, and the host's version is at least the declared one (a `0.2.1` host accepts `0.2.0` and `0.2.1`, and rejects `0.2.2`, `0.1.x`, and `0.3.x`);
+  - from 1.0: the same major, and the host's version is at least the declared one.
+
+  A marker that is not a dotted numeric string is refused. An install function without a marker is not checked.
+- **Package metadata** is the primary mechanism: declare `deerflow-extension-api>=0.2,<0.3` so the resolver rejects a mismatched host before anything loads. The marker covers installs that bypass resolution.
+- **Declare frameworks yourself.** The contract depends on nothing. An extension that imports LangChain, LangGraph, or FastAPI declares them.
+
+## Version history
+
+| Version | PR | Added |
+| ------- | -- | ----- |
+| 0.1.0 | [#4636](https://github.com/bytedance/deer-flow/pull/4636) | The foundation: `install()` and `@extension`, `ExtensionRegistry.middlewares`, `MiddlewareContributor`, `MiddlewarePlacement`, `Placement`, `AgentScope`, `AgentBuildContext`, `HostPolicySnapshot`, `ExtensionData`, `task_store_from_runtime`, `EXTENSION_TASK_STORE_KEY`, `API_VERSION` |
+| 0.1.1 | [#4684](https://github.com/bytedance/deer-flow/pull/4684) | `task_lifecycle` and `system_model_observer` registrations with `TaskLifecycleContributor`, `TaskInfo`, `TaskOutcome`, `SystemModelCallObserver`, `SystemModelRequest`, `SystemModelResult`, `SystemOperationKind` |
+| 0.1.2 | [#4780](https://github.com/bytedance/deer-flow/pull/4780) | `service` and `routers` registrations with `ExtensionService` and `ExtensionRuntimeDeps`; the packaged-extension manager |
+| 0.2.0 | [#4863](https://github.com/bytedance/deer-flow/pull/4863) | `agent_assembly_observer` and `context_compaction_observer` with `AgentAssemblyDescriptor`, `ToolDescriptor`, `MiddlewareDescriptor`, `CompactionEvent`; message provenance; release policies and canonical hashing; `ExtensionPrincipal`, `resolve_principal`, `require_admin` |
+| 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader` with `RunEvidenceReader`, `RunPage`, `RunEventPage`, `RunStatusView`, `RunEventView`, `InvalidRunEvidenceCursor` |
+
+No release has removed a public name.

@@ -1,0 +1,123 @@
+---
+title: 扩展包
+description: 扩展包是独立发布的 Python 包，通过一个 install() 函数接入 DeerFlow Gateway。本章介绍扩展能贡献什么、什么时候该用扩展而不是工具、MCP 或技能、扩展如何加载，以及如何阅读本手册。
+asIndexPage: true
+---
+
+import { Callout } from "nextra/components";
+
+# 扩展包
+
+<Callout type="info" emoji="🧩">
+  扩展包是 DeerFlow 在 Gateway 启动时导入的普通 Python 包。它只依赖公开的
+  `deerflow-extension-api` 契约，因此构建、测试和发布都不需要导入 DeerFlow 本身。
+</Callout>
+
+工具、MCP 服务器和技能给模型增加可调用的能力；扩展包给**宿主**增加行为：观察每一次模型调用和工具调用，在运行开始和结束时做出响应，在 Gateway 旁运行后台服务，并提供自己的 HTTP 路由。审计日志、成本核算、治理看板这类集成，扩展包是不 fork DeerFlow 就能交付的受支持方式。
+
+## 如何阅读本手册
+
+| 读者               | 从这里开始                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| 扩展作者           | 本页、[快速上手](/docs/harness/extensions/quick-start)、[运行时模型](/docs/harness/extensions/runtime)，然后按下文每种贡献类型阅读对应章节 |
+| 运维人员           | [运维扩展](/docs/harness/extensions/operations)、[故障排查](/docs/harness/extensions/troubleshooting)、[信任模型](#信任模型)                |
+| 查某个名称         | [参考](/docs/harness/extensions/reference)                                                                              |
+| DeerFlow 贡献者    | `backend/packages/harness/deerflow/extensions/AGENTS.md`，其中记录了宿主侧的设计决策                  |
+
+## 该不该做成扩展包？
+
+选能完成任务的最轻机制。下表每一行都会执行运维方信任的代码，但越往下，接入运行时越深。
+
+| 你想要                                                   | 使用                                                                              |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 给模型一个新的可调用能力                                 | [自定义工具](/docs/harness/tools)（`config.yaml` 的 `tools:`）或 [MCP 服务器](/docs/harness/mcp) |
+| 教模型一套工作流程或领域方法                             | [技能](/docs/harness/skills)                                                      |
+| 在配置里直接给所有 Agent 加一个 `AgentMiddleware` 类       | `config.yaml` 的 `extensions.middlewares`，见[自定义与扩展](/docs/harness/customization) |
+| 交付一个带版本的包，用来观察运行、保存状态、运行服务或提供路由 | **扩展包**（本手册）                                                          |
+
+两条中间件路径容易混淆。`extensions.middlewares` 把一个类插到固定位置，不附带任何契约；扩展包的中间件声明语义化的[放置位置](/docs/harness/extensions/middleware#放置位置)，运行在隔离故障的包装器里，并且可以和下面其他贡献类型一起发布。
+
+## 扩展能贡献什么
+
+`install(registry, config)` 收到一个只写的注册表，每个方法注册一种贡献：
+
+| 注册方法                                    | 贡献                                                                                         |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `registry.middlewares(contributor)`         | 按语义位置插入 Lead Agent 和子 Agent 链的 `AgentMiddleware`。见[中间件贡献](/docs/harness/extensions/middleware) |
+| `registry.task_lifecycle(contributor)`      | 每次 Lead 运行和每个被委派的子 Agent 的 `on_task_start` / `on_task_stop`。见[生命周期与观察者](/docs/harness/extensions/observers) |
+| `registry.system_model_observer(obs)`       | DeerFlow 自己发起的模型调用快照：目标评估、记忆抽取、标题生成、摘要压缩。见[生命周期与观察者](/docs/harness/extensions/observers) |
+| `registry.agent_assembly_observer(obs)`     | 每个组装完成的 Agent 的描述：模型、提示词哈希、工具、中间件栈、技能和指纹。见[生命周期与观察者](/docs/harness/extensions/observers) |
+| `registry.context_compaction_observer(obs)` | 每次摘要压缩从上下文中移除消息时的 `CompactionEvent`。见[生命周期与观察者](/docs/harness/extensions/observers) |
+| `registry.service(service)`                 | 在 Gateway 持久化层就绪后启动、关闭时停止的对象，可通过[运行证据](/docs/harness/extensions/run-evidence)读取器读取运行。见[服务与路由](/docs/harness/extensions/services-and-routes) |
+| `registry.routers(routers)`                 | 在所有宿主路由之后挂载、受 Gateway 认证保护的 FastAPI 路由。见[服务与路由](/docs/harness/extensions/services-and-routes) |
+
+一个扩展可以注册任意组合。[内置示例](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example)注册了一个中间件、一个任务生命周期贡献者、一个系统模型观察者、一个服务和一个路由。
+
+## 安装与加载
+
+运维人员用扩展管理器安装扩展。它把包加入后端的 `extensions` 依赖组，更新 `uv.lock`，并在 `config.yaml` 顶层的 `plugins:` 列表里写入一条记录：
+
+```yaml
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config: {}
+```
+
+| 字段       | 含义                                                                                         |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| `use`      | 入口点，写作 `module.path:install`                                                            |
+| `enabled`  | `false` 时跳过该扩展，不导入                                                                  |
+| `required` | `false`（默认）：加载失败只记日志，Gateway 不带该扩展照常启动。`true`：Gateway 拒绝启动         |
+| `config`   | 私有配置，作为第二个参数原样（浅拷贝）传给 `install()`                                         |
+
+加载只发生一次，就在 Gateway 构建应用的时候。Gateway 按列表顺序解析每个启用的条目，检查 API 版本，然后调用 `install()`。如果 `install()` 抛出异常，它已注册的内容会被回滚，下一个扩展照常加载。加载结束时 Gateway 会打印 `Extensions loaded: N/M (...)`。
+
+因为只在启动时加载，**任何改动都需要重启 Gateway**：安装、升级、启用、禁用、移除，或手工编辑 `plugins:`。`plugins:` 只能写在 `config.yaml` 里，不能写在 `extensions_config.json` 里，因为后者可以通过 Gateway API 修改，而导入一个包就等于执行代码。
+
+## 故障模型
+
+扩展是观察性的，所以一个坏掉的扩展只会退化成一条日志，而不会搞坏一次运行：
+
+- 抛出异常的贡献会被跳过，Gateway 记录一条归属到其入口点的错误（`Extension <use>: ...`）。
+- 贡献的中间件运行在隔离包装器里，包装器绝不会重复一次模型调用或工具副作用。见[故障隔离](/docs/harness/extensions/middleware#故障隔离)。
+- 任务生命周期通知共享一个有上限的时间预算；观察者逐个通知，一个观察者失败不会跳过后面的观察者。
+
+唯一的例外是 `required: true`，它把任何加载失败都变成启动中止。只在缺了这个扩展部署就是错的情况下使用它，因为从这种失败中恢复需要有 shell 权限去改配置文件。
+
+## 信任模型
+
+<Callout type="warning">
+  扩展包没有沙箱。它的构建钩子在安装时运行，它的代码在 Gateway 进程内以 Gateway
+  的权限运行，包括通过交给服务的 session factory 访问数据库。只安装你审查过并信任的来源。
+</Callout>
+
+扩展管理器在安装前会要求确认，拒绝内嵌凭据的来源 URL，只接受包依赖声明、HTTPS 来源（包括通过 HTTPS 访问的公开 Git）和本地目录，本地目录会被复制成快照。SSH Git URL 和本地 wheel 会被拒绝。这些检查防的是打包失误，不是恶意代码。
+
+## 版本
+
+契约包独立于 DeerFlow 进行版本管理，宿主通过 `deerflow_extension_api.API_VERSION` 暴露其版本。本手册覆盖 `deerflow-extension-api` **0.2.1**。
+
+- 1.0 之前，minor 版本可以有不兼容变更，patch 版本只做增量。1.0 之后，不兼容变更会升 major。
+- 每个 Protocol 方法都有默认实现，每个可选的 dataclass 字段都有默认值，所以增量发布不会破坏已经发布的扩展。
+- 用 `@extension(api="0.2.0")` 装饰 `install`，声明你编写时所用的版本。除非宿主是相同的 `0.minor` 且不低于声明的 patch，否则 Gateway 会拒绝该扩展，并给出可操作的提示。请声明你用到的功能所需的最低版本。
+
+同时在包元数据里声明对应的范围，例如 `deerflow-extension-api>=0.2,<0.3`。
+
+## 术语
+
+- **宿主**：加载扩展的 DeerFlow Gateway 进程。
+- **贡献**：通过注册表注册的一个对象：贡献者、观察者、服务或路由。
+- **贡献者**：宿主回调以获取贡献的对象，例如 `MiddlewareContributor`，每构建一个 Agent 就返回一次中间件。
+- **作用域**：一份状态所属的生命周期。**应用作用域**与 Gateway 同寿；**任务作用域**只存活一次 Lead 运行或一次子 Agent 执行。
+- **`ExtensionData`**：挂在某个作用域上的类型化存储，以 Python 类型为键，两个扩展不会冲突。
+- **诊断**：归属到某个扩展的加载期或运行期问题，写入 Gateway 日志。
+
+<Cards num={3}>
+  <Cards.Card title="快速上手" href="/docs/harness/extensions/quick-start" />
+  <Cards.Card title="运行时模型" href="/docs/harness/extensions/runtime" />
+  <Cards.Card title="运维扩展" href="/docs/harness/extensions/operations" />
+</Cards>

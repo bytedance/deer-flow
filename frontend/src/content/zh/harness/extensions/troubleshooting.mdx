@@ -1,0 +1,181 @@
+---
+title: 故障排查
+description: 按症状索引的扩展问题指南。每一条都引用确切的日志行或错误信息，说明原因并给出修复方法，涵盖安装与启动、中间件、生命周期钩子、服务和路由。
+---
+
+import { Callout } from "nextra/components";
+
+# 故障排查
+
+Gateway 日志中的每条扩展诊断都以 `Extension <use>:` 开头，其中 `<use>` 是记录的入口点，例如 `Extension deerflow_extension_hello:install:`。先在日志里搜索这个前缀。`make dev` 下 Gateway 写入 `logs/gateway.log`；Docker 下使用 `make docker-logs` 或 `docker compose logs gateway`。
+
+管理器命令的失败会以 `extension command failed: <原因>` 输出到 stderr，退出状态码为 1。
+
+## 扩展似乎没有加载
+
+### 完全没有 `Extensions loaded` 这一行
+
+只要 `plugins:` 里至少有一个条目，Gateway 就会在 INFO 级别记录 `Extensions loaded: N/M (...)`。没有这一行说明 Gateway 没读到任何 `plugins:` 列表：
+
+- **Gateway 没有重启。** 扩展只在启动时加载。
+- **Gateway 读的是另一个 `config.yaml`。** 管理器和 Gateway 都遵循 `DEER_FLOW_CONFIG_PATH`；如果一个进程设置了而另一个没有，它们用的就是不同的文件。见[运维扩展](/docs/harness/extensions/operations)。
+- **记录被写进了 `extensions_config.json`。** `plugins:` 只从 `config.yaml` 读取。
+
+### `Extensions loaded: 0/1 (none)`
+
+条目被读到了，但没有加载成功。紧挨在上面的错误行说明了原因，下面的条目逐一介绍。除非记录设置了 `required: true`，Gateway 会不带该扩展继续运行。
+
+### `could not resolve extension entry point: Could not import module <module>. Missing dependency '<module>'...`
+
+Gateway 的环境里没有安装这个模块。请通过管理器安装，而不是 `pip install`，这样它才会进入 `backend/uv.lock` 以及基于它构建的镜像。如果已经安装了还看到这条，检查 `use` 写的是导入路径而不是发行包名：`deerflow_extension_hello:install`，而不是 `deerflow-extension-hello:install`。
+
+### `could not resolve extension entry point: Module <module> does not define a <name> attribute/class`
+
+模块可以导入，但冒号后面的函数不存在。修正 `use`。
+
+### `could not resolve extension entry point: <value> doesn't look like a variable path`
+
+`use` 里没有 `:`。它必须写作 `module.path:install`。
+
+### `extension entry point is not callable: <type>`
+
+`use` 指向的不是函数，例如一个模块级常量。
+
+### `extension requires extension-api <declared>, host provides <version>`
+
+`@extension(api=...)` 标记超出了这个宿主接受的范围。1.0 之前，宿主接受相同的 `0.minor`，且 patch 不高于宿主自身。
+
+- 声明的版本**高于**宿主（例如在 `0.2.1` 宿主上声明 `0.3.0`）：升级 DeerFlow，或安装为这个宿主构建的扩展版本。
+- 声明的 patch 版本**高于**宿主（例如在 `0.2.1` 宿主上声明 `0.2.2`）：升级 DeerFlow，或安装声明 `0.2.1` 及以下版本的扩展。
+- 声明的版本属于**更旧**的 minor（例如在 `0.2.1` 宿主上声明 `0.1.0`）：把扩展升级到针对宿主 minor 编写的版本。
+
+这条消息会建议 `pip install 'deerflow-extension-api>=<declared>,<...'`。宿主的契约版本由它自己的 `uv.lock` 固定，所以对于旧扩展这个建议并不适用：要修的是扩展，不是宿主。
+
+### `extension declares invalid extension-api version marker of type <type>; expected a dotted numeric string such as '0.1'`
+
+`__deerflow_api__` 被设成了 `"0.2.0"` 这类字符串以外的值。请使用 `@extension(api="0.2.0")` 装饰器。
+
+### `install() failed: <error>`
+
+你的 `install()` 抛出了异常。它在抛出前注册的内容都会被回滚，Gateway 继续加载下一个扩展。这一行后面跟着 traceback。让 `install()` 只做注册：打开连接和启动后台任务请放到 [ExtensionService](/docs/harness/extensions/services-and-routes) 中。
+
+### 我的代码修改没有生效
+
+本地目录是以快照形式安装在 `backend/extensions/sources/` 中的，不是 editable 链接。运行 `make extension-upgrade SOURCE=<同一个绝对路径>` 并重启。Docker 下还要重新构建镜像。
+
+## Gateway 无法启动
+
+### `ExtensionLoadError: required extension <use> failed to load`
+
+一条 `required: true` 的记录失败了。根据失败的步骤，这条消息也可能以 `is not callable`、`could not inspect api marker`、`declares invalid api marker`、`declares incompatible api <version>` 或 `failed to install` 结尾。紧挨在它之前记录的那一行写明了原因。用 `make extension-disable NAME=<name>` 或把 `required` 改为 `false` 来恢复，然后重启。见[运维扩展](/docs/harness/extensions/operations)。
+
+### `extension table_prefix '<prefix>' would hide host-owned table(s) [...] from alembic autogenerate`
+
+记录的 `table_prefix` 是某张 DeerFlow 表名的前缀。这总会中止启动，即使记录被禁用或是可选的。请选一个更具体的前缀，例如 `acme_audit_`。
+
+### 加载 `config.yaml` 时出现针对 `plugins` 的校验错误
+
+例如 `Extra inputs are not permitted`，或 `table_prefix` 下的 `String should have at least 1 character`。记录会拒绝未知的键和空的 `table_prefix`。修正记录即可；这是配置错误，所以无论 `required` 为何都会让 Gateway 停止。
+
+## 安装和管理命令失败
+
+| `extension command failed:` 之后的消息                                                                    | 原因与修复                                                                                                       |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `extension installation requires uv 0.8.0 or newer`                                                        | 升级 uv，最好升到 `backend/Dockerfile` 中固定的版本                                                              |
+| `extension has no pyproject.toml: <path>`                                                                  | 该目录不是包的根目录                                                                                             |
+| `extension pyproject.toml must declare project.name`                                                       | 添加 `[project] name = ...`                                                                                     |
+| `extension must declare exactly one 'deerflow.extensions' entry point`                                     | 在 `[project.entry-points."deerflow.extensions"]` 下声明一个条目                                                 |
+| `invalid 'deerflow.extensions' entry point target`                                                         | 入口点的值必须是 `module.path:function`                                                                          |
+| `distribution '<name>' must expose exactly one 'deerflow.extensions' entry point`                          | 来自索引或 Git 的包在该组中没有声明入口点，或声明了多个                                                          |
+| `distribution '<name>' extension entry point could not be loaded`                                          | 在同步后的环境中导入入口点时抛出异常，或它不可调用。先在本地测试 `import`                                        |
+| `local extension snapshot contains a likely sensitive file: <name>`                                        | 从目录中删除 `.env`、密钥或凭据文件，或者从一份干净的副本构建                                                    |
+| `local extension snapshots cannot contain symbolic links or junctions`                                     | 把链接替换成真实文件                                                                                             |
+| `local extension sources must be directories so they can be snapshotted for deployment`                    | 你传入的是本地文件（例如 wheel）。请传入包目录                                                                   |
+| `extension source is already installed: <path>`                                                            | 使用 `make extension-upgrade`                                                                                    |
+| `extension source is not installed: <path>; use install` / `extension '<name>' is not installed; use install` | `upgrade` 只能替换已有的安装                                                                                  |
+| `Git SSH shorthand is not deployable; ...` / `remote Git sources must use public HTTPS; ...`               | 使用 `git+https://host/org/repo.git@<commit>`                                                                    |
+| `remote extension sources must use HTTPS`                                                                  | 普通 HTTP 只接受回环主机                                                                                         |
+| `extension source URLs cannot contain embedded credentials` / `... credential-like query parameters`        | 在 uv 中配置索引凭据，不要写进 URL                                                                              |
+| `file URLs are not deployable; ...` / `local path references are not deployable; ...`                      | 改为传入本地目录                                                                                                 |
+| `uv.lock contains a local dependency source outside the backend Docker build context`                      | 解析时引入了本地文件，常见原因是 `UV_FIND_LINKS` 或本地索引。操作已回滚；去掉该设置                               |
+| `expected exactly one configured extension matching '<name>'`                                              | 没有记录或有多条记录匹配 `NAME`。用 `make extension-list` 检查                                                   |
+| `configured extension '<name>' has no managed package metadata`                                            | 没有 `package` 的手写记录；请自己从 `config.yaml` 中删除                                                          |
+| `multiple configured plugins conflict with extension '<name>'`                                             | 另一条记录已使用这个 `name` 或 `package`，但 `use` 不同。删除过时的记录。在 `upgrade` 期间出现，也意味着新版本改了入口点目标：请移除后重新安装 |
+| `config.yaml contains duplicate top-level plugins keys`                                                    | 合并两个 `plugins:` 段                                                                                           |
+| `DeerFlow config not found: <path>`                                                                         | 运行 `make config`，或让 `DEER_FLOW_CONFIG_PATH` 指向正确的文件                                                   |
+| `extension installation recovery preserved a concurrent dependency-file edit`（或 `removal`、`config edit`） | 操作期间有人修改了这些文件。检查 `git diff` 后重试                                                               |
+| `extension operation failed and the restored environment could not be synchronized; original failure: ...` | 回滚恢复了文件，但 `uv sync` 失败。运行 `cd backend && uv sync --locked --all-packages`                          |
+
+管理器命令看起来卡住时，通常是在等待另一条持有 `.deer-flow/extension-manager.lock` 的命令。
+
+## 中间件问题
+
+### `placement <NAME> fell back to a secondary anchor (primary anchor middleware is absent from this stack); ...`
+
+这是一条警告。该放置位置通常锚定的中间件不在这条链里，所以宿主使用了下一条规则。作用域包含子 Agent 的 `TOOL_RAW` 在每次构建子 Agent 时都会出现这条警告，而回退位置仍然满足其保证。对其他放置位置，请检查你是否仍然观察到了预期的内容。见[中间件贡献](/docs/harness/extensions/middleware)。
+
+### `<Class>.<hook> failed and was skipped: <error>`
+
+你的钩子抛出了异常。宿主已恢复，且没有重复模型或工具调用。常见变体：
+
+- `... did not call the downstream handler`：你的包装钩子没有调用 `handler` 就返回了。宿主替你调用了它。
+- `... called the downstream handler more than once`：你的包装钩子做了重试。只有第一次调用算数。
+
+### `contribute_middlewares() failed: <error>`
+
+你的贡献者抛出了异常，所以这个 Agent 构建时没有你的中间件。每次组装 Agent 都会调用它；检查是否有按调用而变的假设，例如缺少 `agent_name`。
+
+### `contribution <n> must be a MiddlewarePlacement, got <type>`（或 `has invalid scope`、`invalid placement`、`invalid order`、`middleware must be an AgentMiddleware`）
+
+贡献者返回的某一项类型不对。`order` 必须是 `int`（不能是 `bool`），`middleware` 必须是 LangChain 的 `AgentMiddleware` 实例。
+
+### `Middleware ordering constraint violated: ... Contributed by: <use>.`
+
+硬失败：Agent 无法构建。最终的栈违反了宿主的某个排序不变量。请附上完整消息报告；扩展贡献只会落在放置锚点上，所以使用公开契约时不应该出现这种情况。
+
+### 我的中间件修改了请求或结果，但什么都没变
+
+这是预期行为。本版本中扩展的包装钩子只能观察：宿主始终转发原始请求并返回真实结果。
+
+### 常规运行中我的中间件什么也看不到
+
+它很可能只实现了同步的 `wrap_tool_call` 或 `wrap_model_call`。Gateway 运行走异步路径；请同时实现 `awrap_tool_call` 或 `awrap_model_call`。
+
+## 生命周期钩子与观察者
+
+### `Extension <use>: on_task_start timed out for task <id>; the 3.0s notification budget was spent`
+
+所有任务生命周期贡献者在每次通知中共享 3 秒预算（`on_task_start` 和 `on_task_stop` 各自一份）。一个慢的贡献者会把它耗尽，之后的贡献者会被记录为 `... skipped for task <id>; the 3.0s notification budget was spent`。把慢操作移出钩子，例如放进由服务消费的队列。
+
+### `Extension <use>: on_task_stop failed for task <id>`
+
+钩子抛出了异常。运行结果不受影响，下一个贡献者照常运行。
+
+### 在 Gateway 之外生命周期钩子从不触发
+
+在 LangGraph Server、`langgraph dev` 或没有 `run_id` 的直接 harness 调用下，任务生命周期通知会被跳过。
+
+### `No running loop registered for extension observations; ... dropped`
+
+系统模型或压缩观察到达时没有运行中的 Gateway 通知循环，例如在嵌入式 harness 中或关闭期间。该观察会被丢弃。
+
+### `Extension <use>: on_agent_assembled failed for AgentAssemblyDescriptor`
+
+你的组装观察者抛出了异常。它在 Agent 构建期间同步运行；保持轻量并且不要抛异常。
+
+## 服务与路由
+
+| `Extension <use>:` 之后的日志行                                                              | 原因与修复                                                                                                      |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `service start() failed; continuing without it: <error>`                                      | `start()` 抛出了异常。服务没有运行；依赖它的路由应当报告这一点（内置示例返回 503）                                |
+| `service stop() timed out after 30.0s; continuing shutdown`                                   | `stop()` 超出了 30 秒预算                                                                                        |
+| `service stop() failed; continuing shutdown: <error>`                                         | `stop()` 抛出了异常；关闭继续进行                                                                                |
+| `router path <path> is already served by host; this router was not mounted`                   | 某个宿主路由已经处理该路径和方法。整个路由器被跳过。请使用自己的前缀，例如 `/api/<extension>/...`                 |
+| `router path <path> is already served by <other use>; this router was not mounted`            | 另一个更早加载的扩展占用了该路径                                                                                 |
+| `router could not be mounted; continuing without it: contributed WebSocket routes are not supported ...` | 目前还不接受 WebSocket 路由                                                                            |
+| `router could not be mounted; continuing without it: contributed router lifecycle hooks are not supported; register an ExtensionService instead` | 从路由器中去掉 `on_startup`/`on_shutdown` 或 `lifespan`                     |
+| `router could not be mounted; continuing without it: contributed router contains a Starlette Mount ...` | 不支持 Mount；请直接声明路由                                                                            |
+| `router could not be mounted; continuing without it: contributed route <path> can enter a host public namespace`（或 `a host-reserved exact path`） | 该路径可能进入宿主免认证或免 CSRF 的路径。请换一个路径 |
+| `router could not be mounted; continuing without it: contributed router exposes no routes: ...` | 路由器是空的                                                                                                    |
+
+成功挂载的路由会在 INFO 级别记录为 `Extension routers mounted: <use> -> <path>, ...`。贡献的路由始终位于 Gateway 认证之后；它们返回 401 说明请求未认证，而不是路由不存在。

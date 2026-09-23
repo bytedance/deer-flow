@@ -1,0 +1,170 @@
+---
+title: Middleware Contributions
+description: How an extension contributes AgentMiddleware to the Lead Agent and subagent chains. Covers the five semantic placements and where each lands, scope and ordering, what a contributed middleware can and cannot change, failure isolation, and reading task state.
+---
+
+import { Callout } from "nextra/components";
+
+# Middleware Contributions
+
+A middleware contribution inserts your `AgentMiddleware` into the chain that wraps every model call and tool call of an agent. It is the right contribution when you need to see **each call**: latency and cost accounting, audit trails, policy telemetry, or tracing. For an introduction to the chain itself, see [Middlewares](/docs/harness/middlewares).
+
+## The contract
+
+Register a contributor in `install()`. The host calls it back each time it assembles an agent:
+
+```python
+from collections.abc import Sequence
+
+from deerflow_extension_api import (
+    AgentBuildContext,
+    AgentScope,
+    ExtensionData,
+    MiddlewarePlacement,
+    Placement,
+)
+
+
+class AuditContributor:
+    def contribute_middlewares(
+        self,
+        app_store: ExtensionData,
+        ctx: AgentBuildContext,
+    ) -> Sequence[MiddlewarePlacement]:
+        return (
+            MiddlewarePlacement(
+                AuditMiddleware(),
+                Placement.MODEL_LOGICAL,
+                scope=AgentScope.BOTH,
+                order=0,
+            ),
+        )
+
+
+def install(registry, config):
+    registry.middlewares(AuditContributor())
+```
+
+| Field          | Type             | Default           | Meaning                                                         |
+| -------------- | ---------------- | ----------------- | --------------------------------------------------------------- |
+| `middleware`   | `AgentMiddleware` | required         | The instance to insert. Any other type is rejected              |
+| `placement`    | `Placement`      | required          | The semantic guarantee you need. See [Placements](#placements)  |
+| `scope`        | `AgentScope`     | `AgentScope.BOTH` | Which chains receive it. See [Scope](#scope)                    |
+| `order`        | `int`            | `0`               | Tie-breaker among contributions at the same point. See [Ordering](#ordering) |
+
+`contribute_middlewares()` receives the app-scoped store and an `AgentBuildContext`:
+
+| Field        | Meaning                                                                             |
+| ------------ | ----------------------------------------------------------------------------------- |
+| `scope`      | `AgentScope.LEAD` or `AgentScope.SUBAGENT`: the chain being built right now         |
+| `agent_name` | The custom agent or subagent name, when there is one                                 |
+| `model_name` | The resolved model name                                                              |
+| `policy`     | A `HostPolicySnapshot`: token-budget limits and, for the Lead Agent, `max_subagents_per_run` |
+
+The contributor may return different middleware, or none, depending on the context. It runs on every agent assembly, which normally means once per run and once per delegated subagent, so keep it cheap.
+
+## Placements
+
+A middleware occupies one position in a list, but that position only means something on the hook chains the middleware implements. "Outermost" on the model axis is a different place from "outermost" on the tool axis. So you do not pick an index. You declare an axis, an end, and the guarantee you need, and the host resolves it against its current stack.
+
+| Placement        | Axis and end      | Guarantee                                                                                          | Typical use                                   |
+| ---------------- | ----------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `MODEL_LOGICAL`  | Model, outer end  | Outer of retry and error handling. Fires **once per logical model decision**, however many times the host retries underneath | Auditing decisions, counting turns             |
+| `MODEL_PHYSICAL` | Model, inner end  | Inner of every request-transforming middleware. Fires **once per provider call**; retries re-enter it | Provider latency, cost, the exact final request |
+| `TOOL_VISIBLE`   | Tool, outer end   | Outer of truncation, sanitization, and error wrapping. Observes **what the model finally sees**     | End-to-end tool latency, what the model was told |
+| `TOOL_RAW`       | Tool, inner end   | Adjacent to the real tool callable. Observes the **raw return** before any processing               | Capturing untruncated tool output             |
+| `STANDARD`       | None              | No position requirement. Relative order against other `STANDARD` contributions is not guaranteed    | `before_model` / `after_model` state hooks     |
+
+### Where each placement lands today
+
+The guarantees above are the contract. The concrete anchors below are how the current host meets them. They can move when the built-in stack changes, and an extension that depends on them is depending on an implementation detail.
+
+| Placement        | Lead Agent chain                                                        | Subagent chain                                          |
+| ---------------- | ----------------------------------------------------------------------- | ------------------------------------------------------- |
+| `TOOL_VISIBLE`   | Outermost, before `InputSanitizationMiddleware`                          | Same                                                    |
+| `MODEL_LOGICAL`  | Immediately outer of `LLMErrorHandlingMiddleware`                        | Same                                                    |
+| `STANDARD`       | Currently the same anchor as `MODEL_LOGICAL`                             | Same                                                    |
+| `MODEL_PHYSICAL` | Inner of `SafetyFinishReasonMiddleware`, outer of `ClarificationMiddleware` | Inner of `SystemMessageCoalescingMiddleware`, the last middleware |
+| `TOOL_RAW`       | Outer of `ClarificationMiddleware`                                        | Innermost                                               |
+
+`ClarificationMiddleware` stays last in the lead chain because it ends the tool loop for `ask_clarification`. It never transforms the result of a tool that actually runs, so `MODEL_PHYSICAL` and `TOOL_RAW` keep their guarantees even though they sit outer of it.
+
+When the primary anchor of a placement is missing from a stack, the host falls back to the next rule and logs a warning, because a silently degraded placement would change what the extension observes:
+
+```text
+Extension <use>: placement TOOL_RAW fell back to a secondary anchor (primary anchor middleware is absent from this stack); ...
+```
+
+<Callout type="info">
+  The subagent chain has no `ClarificationMiddleware`, so a `TOOL_RAW`
+  contribution with `SUBAGENT` scope always takes the fallback, which is the
+  innermost end. That fallback still meets the `TOOL_RAW` guarantee, but the
+  warning is logged on every subagent build.
+</Callout>
+
+## Scope
+
+`AgentScope` is a flag: `LEAD`, `SUBAGENT`, or `BOTH` (the default). The host builds each chain separately and includes a contribution only when its scope overlaps the chain being built. To differ by chain, either return two placements with different scopes or branch on `ctx.scope`.
+
+Middleware configured through `create_deerflow_agent(extra_middleware=...)` or `DeerFlowClient(middlewares=...)` does not reach subagents. Extension middleware with `SUBAGENT` scope does.
+
+## Ordering
+
+Contributions are sorted by `order`, then by registration order: extensions load in `plugins:` list order, and contributions keep the order their contributor returned them in. When several contributions resolve to the same point, **the lower `order` ends up outer**. Use `order` only to order your own contributions against each other. Relying on it against another extension couples the two packages.
+
+After inserting contributions, the host validates its ordering invariants on the final stack. A violation is the one hard failure in this system: agent construction fails with an error that names the extension responsible.
+
+## What a contributed middleware can change
+
+Every contribution in this release is **observational**. The host enforces this in the wrapper around your middleware.
+
+- **`wrap_model_call` / `wrap_tool_call` and their async forms.** You may inspect the request and the result. You must call `handler` exactly once. The host always passes the **original** request downstream, even if you call `handler` with a modified one, and always returns the **real** downstream result, whatever your hook returns. You cannot rewrite prompts, veto tool calls, or replace tool output from an extension.
+- **`before_agent` / `before_model` / `after_model` / `after_agent` and their async forms.** These run as in any `AgentMiddleware`, and a returned dict is applied as a state update. If the middleware declares a `state_schema`, the wrapper forwards it.
+
+Because LangChain wires both the sync and the async path when either side of a wrap pair exists, the wrapper supplies a pass-through for the side you did not write. Implement both `wrap_tool_call` and `awrap_tool_call` (or both model forms) if you must observe both paths. Normal Gateway runs are async.
+
+## Failure isolation
+
+The host wraps every contribution in an `IsolatedMiddleware`. The wrapper tracks the downstream handler so that recovering from your failure never adds another model request or tool side effect:
+
+| What goes wrong                                  | What the host does                                                              |
+| ------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Your wrap hook raises before calling `handler`   | Logs a diagnostic, then calls `handler` once with the original request          |
+| Your wrap hook never calls `handler`             | Logs a diagnostic, then calls `handler` itself                                  |
+| Your wrap hook raises after `handler` returned   | Logs a diagnostic and returns the real result                                   |
+| Your wrap hook calls `handler` a second time      | The second call raises `RuntimeError` in your hook; the host returns the first result |
+| `handler` itself raises                          | The error propagates unchanged; the host's own error policy handles it          |
+| A lifecycle hook raises                          | Logs a diagnostic and applies no state update                                   |
+| `contribute_middlewares()` raises                | Logs a diagnostic; this contributor adds nothing to this agent                   |
+| A returned item is not a valid `MiddlewarePlacement` | Logs a diagnostic and skips that item                                       |
+
+LangGraph interrupts (`GraphBubbleUp`) always propagate. Diagnostics are written to the Gateway log as `Extension <use>: <Class>.<hook> failed and was skipped: <error>`.
+
+## Reading task state
+
+Middleware instances may be shared by concurrent runs, so do not keep per-run state on `self`. Keep it in the task-scoped `ExtensionData` store, which the host creates for each lead run and each subagent execution and discards when it ends. Inside a hook, recover it from the runtime:
+
+```python
+from deerflow_extension_api import task_store_from_runtime
+
+
+class CountingMiddleware(AgentMiddleware):
+    async def awrap_tool_call(self, request, handler):
+        store = task_store_from_runtime(getattr(request, "runtime", None))
+        if store is not None:
+            store.get_or_init(ToolCallCount, ToolCallCount).value += 1
+        return await handler(request)
+```
+
+`task_store_from_runtime()` returns `None` when there is no live task, for example when the harness runs without a Gateway run around it. Pass through in that case. `ExtensionData` is keyed by type, so define your own class for each value you store: two extensions cannot collide on a key, and you never write to the runtime context directly.
+
+## Identity in traces
+
+LangChain requires unique middleware names and uses them as trace identities and graph node IDs. The host names each wrapper `extension_<entry point>_<class name>_<n>`, with unsafe characters replaced by underscores. For example, the Quick Start middleware appears as `extension_deerflow_extension_hello_install_ToolTimer_0`.
+
+## Common pitfalls
+
+- **Expecting to modify calls.** Wrap hooks are observe-only in this release. For request-shaping behavior, use `extensions.middlewares` (see [Customization](/docs/harness/customization)), which imposes no wrapper, and accept that it is trusted configuration rather than a contract.
+- **Implementing only `wrap_tool_call`.** Gateway runs take the async path, so a sync-only middleware sees nothing there.
+- **Heavy work in `contribute_middlewares()`.** It runs on every agent assembly. Build expensive clients once in `install()`, or lazily in the app store.
+- **Depending on the concrete anchor.** Choose the placement by the guarantee you need, not by the neighbor it happens to sit next to today.
