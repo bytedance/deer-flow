@@ -408,6 +408,44 @@ def test_interceptor_change_is_a_full_reset(cache_globals, monkeypatch, tmp_path
     assert cache_module._cache_initialized is False
 
 
+def test_whole_pool_reset_signals_owner_before_background_teardown(cache_globals, monkeypatch, tmp_path):
+    """A whole-pool reset must detach and signal owners before any worker runs."""
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx")}, interceptors=["pkg.a:build"])
+    pool = get_session_pool()
+
+    async def _run() -> None:
+        exited = asyncio.Event()
+
+        class _ObservedSessionCm(_FakeSessionCm):
+            async def __aexit__(self, *exc):
+                result = await super().__aexit__(*exc)
+                exited.set()
+                return result
+
+        monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", _ObservedSessionCm)
+
+        binding = pool.active_binding("A")
+        assert binding is not None
+        session = await pool.get_session("A", "thread-1", _connection("npx"), binding=binding)
+        assert _entry(pool, "A", asyncio.get_running_loop())[0] is session
+
+        _write_config(cfg, {"A": _stdio("npx")}, interceptors=["pkg.b:build"])
+
+        async def _never_run_teardown(work):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(cache_module.asyncio, "to_thread", _never_run_teardown)
+        assert cache_module.reconcile_mcp_servers(None) is True
+
+        assert pool._entries == {}
+        assert pool._inflight == {}
+        await asyncio.wait_for(exited.wait(), timeout=1)
+        assert session.closed is True
+
+    asyncio.run(_run())
+
+
 def test_skills_only_edit_is_not_a_transition(cache_globals, monkeypatch, tmp_path):
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx")}, skills={"skill-a": {"enabled": True}})
