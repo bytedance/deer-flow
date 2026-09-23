@@ -417,3 +417,17 @@ def test_parse_unquoted_colon_value_escapes_regex_in_hint(tmp_path, caplog):
     assert skill is None
     combined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert r'description: "match: \\d+ digits"' in combined
+
+
+def test_parse_skill_with_utf8_bom(tmp_path):
+    """SKILL.md saved as UTF-8 with BOM must parse (issue #5587)."""
+    skill_dir = tmp_path / "bom-skill"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_bytes("---\nname: bom-skill\ndescription: Has a BOM\n---\n# Body\n".encode("utf-8-sig"))
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.name == "bom-skill"
+    assert skill.description == "Has a BOM"
