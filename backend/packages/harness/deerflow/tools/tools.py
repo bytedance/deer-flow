@@ -233,7 +233,7 @@ def get_available_tools(
     if include_mcp:
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.mcp.cache import get_cached_mcp_tools, refresh_mcp_cache_if_active
 
             extensions_config = ExtensionsConfig.from_file()
             if extensions_config.get_enabled_mcp_servers():
@@ -248,6 +248,12 @@ def get_available_tools(
                     # policy-filtered list because their skills load at startup.
                     for t in mcp_tools:
                         tag_mcp_tool(t)
+            else:
+                # A change that disables the last MCP server must still retire
+                # the previously initialized cache and its pooled sessions.
+                # This never initializes tools, so deployments without MCP
+                # servers pay no config-hashing or discovery cost.
+                refresh_mcp_cache_if_active()
             if mcp_plugins is not None:
                 from deerflow.capabilities.runtime import filter_mcp_plugins
 
@@ -255,7 +261,9 @@ def get_available_tools(
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+            # Log only the exception type: ExtensionsConfig.from_file() resolves
+            # $VAR values before validation, so its message can embed secrets.
+            logger.error("Failed to get cached MCP tools (%s)", type(e).__name__)
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []
