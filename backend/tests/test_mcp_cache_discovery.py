@@ -125,6 +125,26 @@ def _stdio_result(config, name: str, tool: StructuredTool) -> ServerDiscoveryRes
     return ServerDiscoveryResult(tools=(tool,), pool=pool, binding=binding)
 
 
+def make_groups_from_test_tools(config, selected) -> dict[str, ServerDiscoveryResult]:
+    enabled = config.get_enabled_mcp_servers()
+    groups = {}
+    for name, server in enabled.items():
+        if name not in selected:
+            continue
+        connection = build_server_params(name, server)
+        if connection.get("transport") == "stdio":
+            pool = get_session_pool()
+            binding = pool.ensure_binding(name, normalized_connection_fingerprint(connection))
+            groups[name] = ServerDiscoveryResult(
+                tools=(test_tool(f"{name}_{server.command}"),),
+                pool=pool,
+                binding=binding,
+            )
+        else:
+            groups[name] = ServerDiscoveryResult(tools=(test_tool(f"{name}_{server.url}"),))
+    return groups
+
+
 def _force_reinitialize_preserving_server_entries() -> None:
     with c._init_condition:
         c._mcp_tools_cache = None
@@ -518,3 +538,207 @@ def test_present_empty_group_is_cached_and_reused(cache_globals, monkeypatch, tm
     assert calls == [frozenset({"A"})]
     assert c._server_tool_cache["A"] is entry
     assert second == []
+
+
+def test_rapid_supersession_discards_blocked_v2_and_preserves_B(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("v1"), "B": _stdio("b1")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[tuple[str, frozenset[str]]] = []
+    v2_started = threading.Event()
+    release_v2 = threading.Event()
+
+    async def fake_discover(config, *, server_names=None):
+        selected = set(config.get_enabled_mcp_servers()) if server_names is None else set(server_names)
+        a_command = config.get_enabled_mcp_servers()["A"].command
+        calls.append((a_command, frozenset(selected)))
+        groups = make_groups_from_test_tools(config, selected)
+        if selected == {"A"} and a_command == "v2":
+            v2_started.set()
+            assert await asyncio.to_thread(release_v2.wait, 5)
+        return groups
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    old_b = first[1]
+
+    _write_config(cfg, {"A": _stdio("v2"), "B": _stdio("b1")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    worker_results: list[list[StructuredTool]] = []
+    worker_errors: list[BaseException] = []
+
+    def initialize_v2() -> None:
+        try:
+            worker_results.append(asyncio.run(cache_module.initialize_mcp_tools()))
+        except BaseException as exc:  # pragma: no cover - only reports worker failures
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=initialize_v2)
+    worker.start()
+    try:
+        assert v2_started.wait(timeout=5)
+        _write_config(cfg, {"A": _stdio("v3"), "B": _stdio("b1")})
+        assert cache_module.reconcile_mcp_servers({"A"}) is True
+    finally:
+        release_v2.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert worker_errors == []
+    assert worker_results == [[]]
+
+    latest = asyncio.run(cache_module.initialize_mcp_tools())
+    assert [tool.name for tool in latest] == ["A_v3", "B_b1"]
+    assert all(tool.name != "A_v2" for tool in latest)
+    assert latest[1] is old_b
+    assert calls == [("v1", frozenset({"A", "B"})), ("v2", frozenset({"A"})), ("v3", frozenset({"A"}))]
+
+
+def test_empty_success_is_retained_while_failed_group_is_retried_only_after_relevant_update(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "EMPTY": _http("https://empty.example/mcp"),
+            "FAIL": _http("https://fail.example/mcp"),
+            "B": _http("https://b.example/mcp"),
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[frozenset[str]] = []
+
+    async def fake_discover(config, *, server_names=None):
+        enabled = config.get_enabled_mcp_servers()
+        selected = set(enabled) if server_names is None else set(server_names)
+        calls.append(frozenset(selected))
+        if selected == {"EMPTY", "FAIL", "B"}:
+            return {
+                "EMPTY": ServerDiscoveryResult(tools=()),
+                "B": ServerDiscoveryResult(tools=(test_tool("B-v1"),)),
+            }
+        assert "FAIL" in selected
+        assert "EMPTY" not in selected
+        assert "B" not in selected
+        return {"A": ServerDiscoveryResult(tools=(test_tool("A-v1"),))}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    empty_entry = c._server_tool_cache["EMPTY"]
+    old_b = first[0]
+    assert first == [old_b]
+    assert empty_entry.result.tools == ()
+    assert "FAIL" not in c._server_tool_cache
+
+    assert cache_module.get_cached_mcp_tools() == first
+    assert calls == [frozenset({"EMPTY", "FAIL", "B"})]
+
+    _write_config(
+        cfg,
+        {
+            "A": _http("https://a.example/mcp"),
+            "EMPTY": _http("https://empty.example/mcp"),
+            "FAIL": _http("https://fail.example/mcp"),
+            "B": _http("https://b.example/mcp"),
+        },
+    )
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    second = asyncio.run(cache_module.initialize_mcp_tools())
+
+    assert calls == [
+        frozenset({"EMPTY", "FAIL", "B"}),
+        frozenset({"A", "FAIL"}),
+    ]
+    assert [tool.name for tool in second] == ["A-v1", "B-v1"]
+    assert second[1] is old_b
+    assert c._server_tool_cache["EMPTY"] is empty_entry
+    assert c._server_tool_cache["EMPTY"].result.tools == ()
+    assert "FAIL" not in c._server_tool_cache
+
+    assert cache_module.get_cached_mcp_tools() == second
+    assert calls == [
+        frozenset({"EMPTY", "FAIL", "B"}),
+        frozenset({"A", "FAIL"}),
+    ]
+
+
+def test_failed_changed_server_does_not_publish_its_old_tools_and_retries_later(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _http("https://a-v1.example/mcp"), "B": _http("https://b.example/mcp")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[frozenset[str]] = []
+
+    async def fake_discover(config, *, server_names=None):
+        enabled = config.get_enabled_mcp_servers()
+        selected = set(enabled) if server_names is None else set(server_names)
+        calls.append(frozenset(selected))
+        if enabled["A"].url == "https://a-v1.example/mcp":
+            return {
+                "A": ServerDiscoveryResult(tools=(test_tool("A-v1"),)),
+                "B": ServerDiscoveryResult(tools=(test_tool("B-v1"),)),
+            }
+        if enabled["B"].url == "https://b.example/mcp" and selected == {"A"}:
+            return {}
+        return {
+            "A": ServerDiscoveryResult(tools=(test_tool("A-retried"),)),
+            "B": ServerDiscoveryResult(tools=(test_tool("B-v2"),)),
+        }
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    old_b = first[1]
+
+    _write_config(cfg, {"A": _http("https://a-v2.example/mcp"), "B": _http("https://b.example/mcp")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    failed = asyncio.run(cache_module.initialize_mcp_tools())
+    assert [tool.name for tool in failed] == ["B-v1"]
+    assert "A" not in c._server_tool_cache
+    assert all(tool.name != "A-v1" for tool in failed)
+    assert failed[0] is old_b
+
+    _write_config(cfg, {"A": _http("https://a-v2.example/mcp"), "B": _http("https://b-v2.example/mcp")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    retried = asyncio.run(cache_module.initialize_mcp_tools())
+    assert calls == [
+        frozenset({"A", "B"}),
+        frozenset({"A"}),
+        frozenset({"A", "B"}),
+    ]
+    assert [tool.name for tool in retried] == ["A-retried", "B-v2"]
+
+
+def test_cancelled_discovery_releases_generation_for_waiter(cache_globals, monkeypatch, tmp_path):
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _http("https://a.example/mcp")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    async def fake_discover(config, *, server_names=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            assert await asyncio.to_thread(release_first.wait, 5)
+        return {"A": ServerDiscoveryResult(tools=(test_tool(f"A-{calls}"),))}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+
+    async def run() -> None:
+        owner = asyncio.create_task(cache_module.initialize_mcp_tools())
+        assert await asyncio.to_thread(first_started.wait, 5)
+        waiter = asyncio.create_task(cache_module.initialize_mcp_tools())
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        release_first.set()
+        result = await asyncio.wait_for(waiter, timeout=5)
+        assert [tool.name for tool in result] == ["A-2"]
+        assert cache_module._initializing_generation is None
+
+    asyncio.run(run())

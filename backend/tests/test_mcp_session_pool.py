@@ -1531,12 +1531,20 @@ async def test_http_transport_tools_not_pooled():
     mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {
-        "myserver": MagicMock(type="http", url="http://localhost:8000/mcp", headers=None, command=None, args=[], env=None),
-        "playwright": MagicMock(type="stdio", command="npx", args=["-y", "@anthropic/mcp-server-playwright"], env=None, url=None, headers=None),
-    }
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "myserver": {"type": "http", "url": "http://localhost:8000/mcp"},
+                "playwright": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@anthropic/mcp-server-playwright"],
+                },
+            }
+        }
+    )
 
     servers_config = {
         "myserver": {"transport": "http", "url": "http://localhost:8000/mcp"},
@@ -1604,10 +1612,9 @@ async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
         url="https://example.com/mcp",
         tool_call_timeout=30.0,
     )
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
-    extensions_config.mcp_servers = {"remote": server_cfg}
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate({"mcpServers": {"remote": server_cfg.model_dump(by_alias=True)}})
 
     servers_config = {
         "remote": {"transport": "http", "url": "https://example.com/mcp"},
@@ -1675,10 +1682,9 @@ async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
         tool_call_timeout=60.0,
     )
 
-    extensions_config = MagicMock()
-    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
-    extensions_config.mcp_servers = {"biomcp": server_cfg}
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate({"mcpServers": {"biomcp": server_cfg.model_dump(by_alias=True)}})
 
     # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
     servers_config = {
@@ -2860,8 +2866,16 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
         response_format="content_and_artifact",
     )
 
-    extensions_config = MagicMock()
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "web": {"type": "stdio", "command": "npx", "args": ["web"]},
+                "web_scraper": {"type": "stdio", "command": "npx", "args": ["scraper"]},
+            }
+        }
+    )
 
     # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
     # `web_scraper_search` to `web`.
@@ -3007,14 +3021,15 @@ async def test_bound_stdio_tool_isolates_threads_without_stale_error(tmp_path):
 
 
 def _gated_mcp_config(server_name: str):
-    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
 
-    server_cfg = McpServerConfig(type="stdio", command="x", args=[])
-    extensions_config = MagicMock()
-    extensions_config.mcp_servers = {server_name: server_cfg}
-    extensions_config.get_enabled_mcp_servers.return_value = {server_name: server_cfg}
-    extensions_config.model_extra = {}
-    return extensions_config
+    return ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                server_name: {"type": "stdio", "command": "x", "args": []},
+            }
+        }
+    )
 
 
 @pytest.mark.asyncio

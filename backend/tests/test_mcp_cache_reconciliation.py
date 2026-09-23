@@ -112,6 +112,10 @@ def _stdio(command: str = "npx", **extra) -> dict:
     return {"enabled": True, "type": "stdio", "command": command, "args": [], **extra}
 
 
+def _http(url: str) -> dict:
+    return {"enabled": True, "type": "http", "url": url}
+
+
 @pytest.fixture()
 def cache_globals():
     """Snapshot/restore ``deerflow.mcp.cache`` globals and reset the pool."""
@@ -468,18 +472,33 @@ def test_whole_pool_reset_signals_owner_before_background_teardown(cache_globals
     asyncio.run(_run())
 
 
-def test_skills_only_edit_is_not_a_transition(cache_globals, monkeypatch, tmp_path):
+def test_skills_only_edit_preserves_flat_and_grouped_cache_identity(cache_globals, monkeypatch, tmp_path):
     cfg = tmp_path / "extensions_config.json"
-    _publish(monkeypatch, cfg, {"A": _stdio("npx")}, skills={"skill-a": {"enabled": True}})
+    first = _publish(
+        monkeypatch,
+        cfg,
+        {"A": _stdio("npx"), "B": _stdio("uvx")},
+        skills={"skill-a": {"enabled": True}},
+    )
+    entries = dict(cache_module._server_tool_cache)
+    flat = cache_module._mcp_tools_cache
     pool = get_session_pool()
 
-    _write_config(cfg, {"A": _stdio("npx")}, skills={"skill-a": {"enabled": False}})
+    _write_config(
+        cfg,
+        {"A": _stdio("npx"), "B": _stdio("uvx")},
+        skills={"skill-a": {"enabled": False}},
+    )
 
     assert cache_module._classify_cache_transition() is None
     assert cache_module._is_cache_stale() is False
     assert cache_module.refresh_mcp_cache_if_active() is False
     assert cache_module._cache_initialized is True
     assert get_session_pool() is pool
+    assert cache_module._mcp_tools_cache is flat
+    assert cache_module._mcp_tools_cache == first
+    assert all(cache_module._server_tool_cache[name] is entry for name, entry in entries.items())
+    assert cache_module.get_cached_mcp_tools() == first
 
 
 def test_unreadable_config_is_a_full_reset(cache_globals, monkeypatch, tmp_path):
@@ -515,6 +534,60 @@ def test_config_path_switch_is_a_full_reset(cache_globals, monkeypatch, tmp_path
 
     transition = cache_module._classify_cache_transition()
     assert transition is not None and transition.retire_servers is None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["interceptors", "path", "explicit_reset", "unreadable", "unstable"],
+)
+def test_global_invalidations_clear_all_groups_and_rediscover_all(cache_globals, monkeypatch, tmp_path, kind):
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _http("https://a.example/mcp"), "B": _http("https://b.example/mcp")}
+    _write_config(cfg, servers)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls: list[frozenset[str]] = []
+
+    async def fake_discover(config, *, server_names=None):
+        enabled = config.get_enabled_mcp_servers()
+        selected = set(enabled) if server_names is None else set(server_names)
+        calls.append(frozenset(selected))
+        return {name: ServerDiscoveryResult(tools=(test_tool(f"{name}-{len(calls)}"),)) for name in selected}
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", fake_discover)
+    asyncio.run(cache_module.initialize_mcp_tools())
+    assert calls == [frozenset({"A", "B"})]
+    assert set(cache_module._server_tool_cache) == {"A", "B"}
+
+    if kind == "interceptors":
+        _write_config(cfg, servers, interceptors=["pkg.changed:build"])
+        assert cache_module.refresh_mcp_cache_if_active() is True
+    elif kind == "path":
+        other = tmp_path / "other_extensions_config.json"
+        _write_config(other, servers)
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(other))
+        assert cache_module.refresh_mcp_cache_if_active() is True
+    elif kind == "explicit_reset":
+        cache_module.reset_mcp_tools_cache()
+    elif kind == "unreadable":
+        cfg.write_text("{not json", encoding="utf-8")
+        assert cache_module.refresh_mcp_cache_if_active() is True
+        cfg.write_text(json.dumps({"mcpServers": servers, "skills": {}}), encoding="utf-8")
+    else:
+        _write_config(cfg, {"A": _http("https://a-v2.example/mcp"), "B": servers["B"]})
+        counter = iter(range(1000))
+        real_signature = cache_module._get_config_signature
+        monkeypatch.setattr(cache_module, "_get_config_signature", lambda path: (next(counter), 0, "unstable"))
+        assert cache_module.refresh_mcp_cache_if_active() is True
+        monkeypatch.setattr(cache_module, "_get_config_signature", real_signature)
+        _write_config(cfg, servers)
+
+    assert cache_module._server_tool_cache == {}
+    assert cache_module._cache_initialized is False
+
+    rediscovered = asyncio.run(cache_module.initialize_mcp_tools())
+    assert calls[-1] == frozenset({"A", "B"})
+    assert [tool.name for tool in rediscovered] == ["A-2", "B-2"]
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +702,47 @@ def test_reconcile_during_first_initialization_fences_stale_publish(cache_global
 # ---------------------------------------------------------------------------
 # Apply paths
 # ---------------------------------------------------------------------------
+
+
+def test_removed_server_readd_gets_fresh_tool_and_binding_while_B_survives(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    first = _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    old_a_tool, old_b_tool = first
+    old_pool = get_session_pool()
+    old_a_session = _open_session(owner_loop, old_pool, "A")
+    old_b_session = _open_session(owner_loop, old_pool, "B")
+    old_a_binding = old_pool.active_binding("A")
+    old_b_binding = old_pool.active_binding("B")
+    assert old_a_binding is not None
+
+    _write_config(cfg, {"B": _stdio("uvx")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert old_a_session.closed is True
+    assert old_pool.active_binding("A") is not None
+    assert old_pool.active_binding("A").fingerprint is None
+    assert old_pool.active_binding("B") == old_b_binding
+    assert _entry(old_pool, "B", owner_loop)[0] is old_b_session
+
+    _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    readded = asyncio.run(cache_module.initialize_mcp_tools())
+    new_a_tool, new_b_tool = readded
+    new_a_binding = get_session_pool().active_binding("A")
+    assert new_a_tool is not old_a_tool
+    assert new_a_binding is not None
+    assert new_a_binding.epoch != old_a_binding.epoch
+    assert new_b_tool is old_b_tool
+    assert get_session_pool() is old_pool
+    assert _entry(old_pool, "B", owner_loop)[0] is old_b_session
+
+    cache_module.reset_mcp_tools_cache()
+    reset_pool = get_session_pool()
+    reset_tools = asyncio.run(cache_module.initialize_mcp_tools())
+    assert reset_pool is not old_pool
+    assert reset_tools[0] is not new_a_tool
+    assert reset_tools[1] is not old_b_tool
+    assert _entry(reset_pool, "A", owner_loop) is None
+    assert _entry(reset_pool, "B", owner_loop) is None
 
 
 def test_refresh_with_last_server_disabled_is_a_selective_removal(cache_globals, monkeypatch, tmp_path, owner_loop):
