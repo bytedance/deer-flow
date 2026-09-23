@@ -1339,6 +1339,12 @@ pii_redaction:
   # redact_credit_card: true
   # redact_phone: true
   # redact_national_id: true
+  # Deployment-scoped secret for keyed placeholder digests (recommended).
+  # When set, placeholders are HMAC-derived and only linkable within this
+  # deployment; when unset (None), tokens are publicly computable
+  # fingerprints — deterministic, linkable across deployments, and
+  # confirmable by guessing for known-format values.
+  # token_secret: change-me-to-a-long-random-string
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)

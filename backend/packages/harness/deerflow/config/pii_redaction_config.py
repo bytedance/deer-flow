@@ -8,7 +8,8 @@ class PiiRedactionConfig(BaseModel):
 
     Default-off. When enabled, personally identifiable information found in
     genuine user messages and remote-content tool results is rewritten to
-    irreversible placeholders (``[EMAIL_1]`` …) before it reaches the model.
+    irreversible value-derived placeholders (128-bit HMAC digests encoded
+    over base-26 letters) before it reaches the model.
     Each detector can be toggled independently for deployments that only need
     a subset (e.g. credentials but not phone numbers).
     """
