@@ -37,3 +37,14 @@ class PiiRedactionConfig(BaseModel):
         default=True,
         description="Redact national IDs (CN resident ID and CPF with checksum validation, formatted CUIT/RFC)",
     )
+    token_secret: str | None = Field(
+        default=None,
+        description=(
+            "Optional deployment-scoped secret for keyed placeholder digests. "
+            "When set, placeholders are HMAC-derived and only linkable within "
+            "this deployment, and cannot be re-derived offline without the "
+            "secret. When None, tokens are publicly computable fingerprints: "
+            "deterministic, linkable across deployments, and confirmable by "
+            "guessing for known-format values."
+        ),
+    )

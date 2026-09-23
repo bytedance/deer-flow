@@ -46,6 +46,7 @@ gates did not claim.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -203,19 +204,26 @@ def redact_text(text: str | None, config: PiiRedactionConfig | None) -> str | No
     """
     if config is None or not config.enabled or not isinstance(text, str) or not text:
         return text
-    return _Redactor(active_pii_detectors(config)).redact(text)
+    return _make_redactor(config).redact(text)
 
 
 def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> list[str]:
     """Redact related text fields, before truncation."""
-    redactor = _Redactor(active_pii_detectors(config))
+    redactor = _make_redactor(config)
     return [redactor.redact(text) for text in texts]
 
 
-def _placeholder_token(category: str, value: str) -> str:
-    """Value-derived, deterministic placeholder (128-bit digest, base-26 letters).
+def _make_redactor(config: PiiRedactionConfig | None) -> _Redactor:
+    """Build the scan redactor: active detectors + the configured token key."""
+    if config is None:
+        return _Redactor((), None)
+    return _Redactor(active_pii_detectors(config), config.token_secret)
 
-    Two properties the token format must uphold:
+
+def _placeholder_token(category: str, value: str, token_key: str | None) -> str:
+    """Value-derived, deterministic placeholder (128-bit HMAC digest, base-26 letters).
+
+    Three properties the token format must uphold:
 
     * **Value-derived** — sequential allocation is order-dependent: the same
       unchanged message re-redacted in a later batch can get a different
@@ -226,20 +234,25 @@ def _placeholder_token(category: str, value: str) -> str:
     * **Letters-only** — the digest is encoded over ``a-z`` instead of hex, so
       a minted token contains no digit runs and can never satisfy the
       digit-anchored detectors that run later in the pinned order (no nested
-      ``[EMAIL_…[PHONE_…]…`` corruption). The unkeyed hash is an
-      egress-hygiene trade, not an adversarial control: a known-format value
-      can be confirmed by guessing, which masking does not claim to prevent.
-      128 bits keep distinct identities collision-free at any realistic
-      volume.
+      ``[EMAIL_…[PHONE_…]…`` corruption);
+    * **Deployment-scoped linkability** — the digest is an HMAC over the
+      deployment-scoped ``token_secret``: tokens are linkable only within one
+      deployment and cannot be re-derived offline without the secret. With
+      ``token_secret=None`` the digest degrades to a publicly computable
+      fingerprint — linkable across deployments and confirmable by guessing
+      for known-format values — which is the documented trade for
+      deployments that opt out. 128 bits keep distinct identities
+      collision-free at any realistic volume.
     """
-    digest = hashlib.sha256(f"{category}\x00{value}".encode()).digest()
+    key_bytes = (token_key or "").encode("utf-8")
+    digest = hmac.new(key_bytes, f"{category}\x00{value}".encode(), hashlib.sha256).digest()
     alphabet = "abcdefghijklmnopqrstuvwxyz"
     number = int.from_bytes(digest[:16], "big")
     letters = []
     for _ in range(27):
         number, rem = divmod(number, 26)
         letters.append(alphabet[rem])
-    return f"[{category.upper()}_{''.join(letters)}]"
+    return f"[{category.upper()}_{''.join(letters)}]"  # noqa: FS003
 
 
 class _Redactor:
@@ -251,8 +264,9 @@ class _Redactor:
     seam that shares this module.
     """
 
-    def __init__(self, detectors: Sequence[_Detector]) -> None:
+    def __init__(self, detectors: Sequence[_Detector], token_key: str | None = None) -> None:
         self._detectors = detectors
+        self._token_key = token_key
 
     def redact(self, text: str) -> str:
         for detector in self._detectors:
@@ -264,7 +278,7 @@ class _Redactor:
             value = match.group(0)
             if detector.validator is not None and not detector.validator(value):
                 return value
-            return _placeholder_token(detector.name, value)
+            return _placeholder_token(detector.name, value, self._token_key)
 
         return replace
 
@@ -314,6 +328,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
 
     def __init__(self, config: PiiRedactionConfig) -> None:
         self._detectors = active_pii_detectors(config)
+        self._token_key = config.token_secret if config else None
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare the behaviour-affecting settings (middleware module guide)."""
@@ -404,7 +419,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
         spans the whole result, so placeholder numbering stays continuous
         across every ToolMessage the result carries.
         """
-        redactor = _Redactor(self._detectors)
+        redactor = _Redactor(self._detectors, self._token_key)
         if isinstance(result, ToolMessage):
             return self._redact_tool_message(result, redactor)
         update = getattr(result, "update", None)

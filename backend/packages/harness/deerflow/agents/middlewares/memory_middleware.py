@@ -10,7 +10,7 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory import get_memory_manager
-from deerflow.agents.middlewares.pii_redaction_middleware import _redact_content, _Redactor, active_pii_detectors
+from deerflow.agents.middlewares.pii_redaction_middleware import _make_redactor, _redact_content, _Redactor
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -33,7 +33,7 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     message object, including ``tool_calls`` and provider-format arguments in
     ``additional_kwargs``.
     """
-    redactor = _Redactor(active_pii_detectors(pii_redaction_config))
+    redactor = _make_redactor(pii_redaction_config)
 
     redacted = []
     for message in messages:

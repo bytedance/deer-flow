@@ -183,8 +183,24 @@ def test_factory_threads_pii_redaction_config(mock_create_agent):
     middleware = mock_create_agent.call_args[1]["middleware"]
     memory_mw = next(m for m in middleware if type(m).__name__ == "MemoryMiddleware")
     durable_mw = next(m for m in middleware if type(m).__name__ == "DurableContextMiddleware")
+    pii_mw = next(m for m in middleware if type(m).__name__ == "PiiRedactionMiddleware")
     assert memory_mw._pii_redaction_config is pii
     assert durable_mw._pii_redaction_config is pii
+
+    # Model-call regression: the assembled SDK chain actually redacts user
+    # content at the model boundary (round-10 review).
+    class _Req:
+        def __init__(self, messages):
+            self.messages = list(messages)
+
+        def override(self, **kwargs):
+            copy = object.__new__(type(self))
+            copy.messages = kwargs.get("messages", self.messages)
+            return copy
+
+    captured = {}
+    pii_mw.wrap_model_call(_Req([HumanMessage("reach alice@example.com")]), lambda req: captured.update(messages=req.messages) or "r")
+    assert "alice@example.com" not in str(captured["messages"][0].content)
 
 
 @patch("deerflow.agents.factory.create_agent")

@@ -278,6 +278,11 @@ def _assemble_from_features(
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
+    if pii_redaction_config is not None and pii_redaction_config.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        chain.append(PiiRedactionMiddleware(pii_redaction_config))
+
     chain.append(DurableContextMiddleware(pii_redaction_config=pii_redaction_config))
     # DurableContext adds its authority contract as a second SystemMessage; strict backends
     # (vLLM, SGLang, Qwen, Anthropic) reject that, so merge them into one leading message.

@@ -21,29 +21,30 @@ from pydantic import Field
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
     PiiRedactionMiddleware,
-    _placeholder_token,
     redact_text,
 )
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY
 
-EMAIL_ALICE = _placeholder_token("email", "alice@example.com")
-EMAIL_BOB_COM = _placeholder_token("email", "bob@example.com")
-EMAIL_BOB_ORG = _placeholder_token("email", "bob@example.org")
-EMAIL_CAROL = _placeholder_token("email", "carol@example.com")
-EMAIL_CHARLIE = _placeholder_token("email", "charlie@example.net")
-PHONE_INTL = _placeholder_token("phone", "+86 138 0013 8000")
-PHONE_CN = _placeholder_token("phone", "13800138000")
-PHONE_US = _placeholder_token("phone", "(212) 555-0123")
-PHONE_US2 = _placeholder_token("phone", "+1 415 555 2671")
-KEY_SK = _placeholder_token("api_key", "sk-proj4aaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-KEY_AWS = _placeholder_token("api_key", "AKIAIOSFODNN7EXAMPLE")
-CARD_VISA = _placeholder_token("credit_card", "4111 1111 1111 1111")
-ID_X = _placeholder_token("national_id", "11010519491231002X")
-ID_L150 = _placeholder_token("national_id", "110105194912310150")
-ID_W239 = _placeholder_token("national_id", "110105197506150239")
-ID_CUIT = _placeholder_token("national_id", "20-12345678-6")
-ID_CPF = _placeholder_token("national_id", "529.982.247-25")
+_PII_CFG = PiiRedactionConfig(enabled=True)
+
+EMAIL_ALICE = redact_text("alice@example.com", _PII_CFG)
+EMAIL_BOB_COM = redact_text("bob@example.com", _PII_CFG)
+EMAIL_BOB_ORG = redact_text("bob@example.org", _PII_CFG)
+EMAIL_CAROL = redact_text("carol@example.com", _PII_CFG)
+EMAIL_CHARLIE = redact_text("charlie@example.net", _PII_CFG)
+PHONE_INTL = redact_text("+86 138 0013 8000", _PII_CFG)
+PHONE_CN = redact_text("13800138000", _PII_CFG)
+PHONE_US = redact_text("(212) 555-0123", _PII_CFG)
+PHONE_US2 = redact_text("+1 415 555 2671", _PII_CFG)
+KEY_SK = redact_text("sk-proj4aaaaaaaaaaaaaaaaaaaaaaaaaaaa", _PII_CFG)
+KEY_AWS = redact_text("AKIAIOSFODNN7EXAMPLE", _PII_CFG)
+CARD_VISA = redact_text("4111 1111 1111 1111", _PII_CFG)
+ID_X = redact_text("11010519491231002X", _PII_CFG)
+ID_L150 = redact_text("110105194912310150", _PII_CFG)
+ID_W239 = redact_text("110105197506150239", _PII_CFG)
+ID_CUIT = redact_text("20-12345678-6", _PII_CFG)
+ID_CPF = redact_text("529.982.247-25", _PII_CFG)
 
 
 def _make_middleware(**config_overrides) -> PiiRedactionMiddleware:
@@ -694,5 +695,21 @@ def test_minted_tokens_survive_later_detectors():
     # letters contain no digits, so the token survives the full pinned order.
     result = redact_text("contact user280@example.com today", PiiRedactionConfig(enabled=True))
     assert result.startswith("contact [EMAIL_") and result.endswith("] today")
+    assert result.count("[") == 1 and result.count("]") == 1
+    assert "@" not in result and "user280" not in result
+
+
+def test_token_secret_scopes_linkability():
+    # Review round 10: unkeyed digests are publicly computable fingerprints,
+    # linkable across deployments. A deployment secret scopes the tokens.
+    cfg_a = PiiRedactionConfig(enabled=True, token_secret="deployment-a")
+    cfg_b = PiiRedactionConfig(enabled=True, token_secret="deployment-b")
+    assert redact_text("alice@example.com", cfg_a) != redact_text("alice@example.com", cfg_b)
+    assert redact_text("alice@example.com", cfg_a) == redact_text("alice@example.com", cfg_a)
+
+
+def test_hmac_tokens_still_letters_only():
+    cfg = PiiRedactionConfig(enabled=True, token_secret="s3cret")
+    result = redact_text("contact user280@example.com today", cfg)
     assert result.count("[") == 1 and result.count("]") == 1
     assert "@" not in result and "user280" not in result
