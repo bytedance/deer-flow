@@ -14,6 +14,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,7 @@ from app.gateway.routers.mcp import (
     update_mcp_server,
     update_mcp_server_state,
 )
+from deerflow.config.extensions_config import read_raw_extensions_config
 from deerflow.mcp.cache import _McpCacheTransition
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.session_pool import (
@@ -96,6 +98,11 @@ def _write_config(
 
 def _stdio(command: str = "npx", **extra) -> dict:
     return {"enabled": True, "type": "stdio", "command": command, "args": [], **extra}
+
+
+def _lifecycle(path: Path) -> dict:
+    """The persisted ``mcpLifecycle`` block after a writer committed *path*."""
+    return read_raw_extensions_config(path)["mcpLifecycle"]
 
 
 @pytest.fixture()
@@ -930,6 +937,36 @@ def test_put_server_endpoint_transport_alias_only_is_a_noop(cache_globals, monke
     assert cache_module._cache_initialized is True
 
 
+def test_put_server_metadata_only_edit_advances_only_config_revision(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """A description-only edit is not a lifecycle event for the server resource."""
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    binding_a = pool.active_binding("A")
+    binding_b = pool.active_binding("B")
+    _allow_router_admin(monkeypatch)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    async def _run() -> None:
+        await update_mcp_server(
+            None,
+            McpServerConfigUpdateRequest(
+                server_name="A",
+                server=_server_model({**_stdio("npx"), "description": "now documented"}),
+            ),
+        )
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    assert pool.active_binding("A") == binding_a
+    assert pool.active_binding("B") == binding_b
+    lifecycle = _lifecycle(cfg)
+    assert lifecycle["configRevision"] == 1
+    assert lifecycle["globalGeneration"] == 0
+    assert lifecycle["serverGenerations"] == {"A": 0, "B": 0}
+
+
 def test_delete_endpoint_retires_only_the_deleted_server(cache_globals, monkeypatch, tmp_path, owner_loop):
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
@@ -1098,6 +1135,45 @@ def test_delete_then_identical_readd_advances_epoch_and_closes_old_session(cache
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
 
+    # Delete (A drops to a tombstone) then identical re-add must be visible as
+    # two lifecycle events for A only; the untouched B keeps its history.
+    lifecycle = _lifecycle(cfg)
+    assert lifecycle["configRevision"] == 2
+    assert lifecycle["globalGeneration"] == 0
+    assert lifecycle["serverGenerations"]["A"] == 2
+    assert lifecycle["serverGenerations"]["B"] == 0
+
+
+def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """A hand-edited block is never echoed back; the writer recomputes and overwrites it."""
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    raw = read_raw_extensions_config(cfg)
+    injected = {
+        "schemaVersion": 1,
+        "configRevision": 500,
+        "globalGeneration": 9,
+        "serverGenerations": {"ghost": 3},
+    }
+    raw["mcpLifecycle"] = injected
+    cfg.write_text(json.dumps(raw), encoding="utf-8")
+    _allow_router_admin(monkeypatch)
+
+    async def _run() -> None:
+        await delete_mcp_server(None, "A")
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    lifecycle = _lifecycle(cfg)
+    assert lifecycle != injected
+    assert lifecycle == {
+        "schemaVersion": 1,
+        "configRevision": 501,
+        "globalGeneration": 9,
+        "serverGenerations": {"A": 1, "B": 0, "ghost": 3},
+    }
+
 
 def test_disable_then_identical_enable_advances_epoch_and_closes_old_session(cache_globals, monkeypatch, tmp_path, owner_loop):
     cfg = tmp_path / "extensions_config.json"
@@ -1124,6 +1200,13 @@ def test_disable_then_identical_enable_advances_epoch_and_closes_old_session(cac
     assert pool.active_binding("B") == binding_b
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
+
+    # Disable then identical re-enable is exactly two per-server events.
+    lifecycle = _lifecycle(cfg)
+    assert lifecycle["configRevision"] == 2
+    assert lifecycle["globalGeneration"] == 0
+    assert lifecycle["serverGenerations"]["A"] == 2
+    assert lifecycle["serverGenerations"]["B"] == 0
 
 
 def test_delete_then_readd_cannot_interleave_before_tombstone_installation(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -1288,3 +1371,39 @@ def test_blocked_session_exit_does_not_block_next_config_write(cache_globals, mo
     assert pool.active_binding("B") == binding_b
     assert session_b.closed is False
     assert pool.active_binding("C") is not None
+
+
+def test_embedded_client_update_mcp_config_reconciles_pool(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """The embedded client commits lifecycle counters and fences the local pool inline."""
+    import deerflow.client as client_module
+    from deerflow.client import DeerFlowClient
+
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    binding_a_before = pool.active_binding("A")
+    binding_b = pool.active_binding("B")
+
+    app_config = MagicMock()
+    app_config.database.checkpoint_channel_mode = "full"
+    app_config.database.checkpoint_delta.snapshot_frequency = 10
+    monkeypatch.setattr(client_module, "get_app_config", lambda: app_config)
+    client = DeerFlowClient()
+
+    # First committed write removes A; the identical re-add must mint a fresh
+    # epoch instead of reviving the retired binding.
+    client.update_mcp_config({"B": _stdio("uvx")})
+    client.update_mcp_config({"A": _stdio("npx"), "B": _stdio("uvx")})
+
+    binding_a_after = pool.active_binding("A")
+    assert binding_a_after is not None
+    assert binding_a_after.epoch > binding_a_before.epoch
+    assert session_a.closed is True
+    assert pool.active_binding("B") == binding_b
+    assert session_b.closed is False
+    lifecycle = _lifecycle(cfg)
+    assert lifecycle["configRevision"] == 2
+    assert lifecycle["serverGenerations"]["A"] == 2
+    assert lifecycle["serverGenerations"]["B"] == 0

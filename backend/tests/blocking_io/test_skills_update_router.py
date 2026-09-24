@@ -116,7 +116,13 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
         "skills": {
             "existing-skill": {"enabled": True},
             "demo-skill": {"enabled": False},
-        }
+        },
+        "mcpLifecycle": {
+            "schemaVersion": 1,
+            "configRevision": 1,
+            "globalGeneration": 0,
+            "serverGenerations": {},
+        },
     }
 
 
@@ -292,3 +298,43 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
 
     # The non-cancelled writer still completed its cache reconciliation.
     assert mcp_reconciled.is_set()
+
+
+async def test_update_skill_advances_only_config_revision_and_preserves_raw_keys(tmp_path: Path, monkeypatch) -> None:
+    """A skills write moves ``configRevision`` only and keeps unknown/raw keys intact."""
+    monkeypatch.delenv("DEERFLOW_TEST_SKILL_TOKEN", raising=False)
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "A": {
+                        "enabled": True,
+                        "type": "stdio",
+                        "command": "npx",
+                        "env": {"TOKEN": "$DEERFLOW_TEST_SKILL_TOKEN"},
+                    },
+                },
+                "skills": {"demo-skill": {"enabled": True}},
+                "mcpInterceptors": ["pkg.before:Interceptor"],
+                "customTopLevel": {"keep": [1, 2, 3]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_config_infra(monkeypatch, config_path)
+
+    result = await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+
+    assert result.name == "demo-skill"
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["mcpLifecycle"] == {
+        "schemaVersion": 1,
+        "configRevision": 1,
+        "globalGeneration": 0,
+        "serverGenerations": {"A": 0},
+    }
+    assert written["skills"]["demo-skill"]["enabled"] is False
+    assert written["mcpServers"]["A"]["env"]["TOKEN"] == "$DEERFLOW_TEST_SKILL_TOKEN"
+    assert written["mcpInterceptors"] == ["pkg.before:Interceptor"]
+    assert written["customTopLevel"] == {"keep": [1, 2, 3]}

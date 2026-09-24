@@ -15,7 +15,6 @@ from deerflow.config.extensions_config import (
     McpRoutingConfig,
     McpTaskToolsetConfig,
     McpToolOverride,
-    atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
@@ -29,8 +28,16 @@ from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import (
     effective_server_config,
     finish_mcp_reconciliation,
+    force_local_mcp_invalidation,
     prepare_mcp_reconciliation,
     reset_mcp_tools_cache,
+)
+from deerflow.mcp.commit import (
+    MCPCommitOutcomeUnknownError,
+    MCPCommittedNotReconciledError,
+    MCPCommittedReloadFailedError,
+    commit_extensions_config,
+    validate_previous_config_lenient,
 )
 from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
 
@@ -1222,6 +1229,76 @@ def _raise_mcp_task_config_conflict(exc: McpTaskConfigurationError) -> NoReturn:
     ) from None
 
 
+def _lenient_previous_mcp_config(raw_data: dict) -> ExtensionsConfig | None:
+    """Validate the pre-mutation document, or ``None`` when it is unverifiable.
+
+    D7-R3: a stored server (or other stored value) that no longer validates must
+    not turn a repair into a dead end. Delegates to the shared lenient validator
+    so a *non-*``HTTPException`` escape cannot turn an R3 repair into a 500.
+    Only the *previous* snapshot is lenient: the incoming candidate is still
+    validated exactly as before.
+    """
+    return validate_previous_config_lenient(raw_data)
+
+
+def _stored_server_for_secret_merge(name: str, raw_server: Any) -> McpServerConfigResponse | None:
+    """Parse a stored server for masked-secret preservation, or ``None``.
+
+    D7-R3: a stored server that no longer validates must not block a *full*
+    ``PUT`` from repairing the document, so an unparseable stored entry simply
+    has no secrets we can carry over and the incoming server is used as-is. The
+    incoming and candidate payloads are still validated exactly as before.
+    """
+    try:
+        return _mcp_server_response_from_raw(name, raw_server)
+    except HTTPException:
+        logger.warning(
+            "Stored MCP server %s could not be parsed while merging a full config replacement; using the incoming server as-is.",
+            name,
+            exc_info=True,
+        )
+        return None
+
+
+def _fence_mcp_reconciliation(changed: set[str] | None) -> Any:
+    """Install the local ownership fence; never claim an uncommitted no-op.
+
+    The config commit has already landed when this runs, so a failing fence is a
+    *committed but not reconciled* state. This function must NOT invalidate local
+    state itself: it runs while the caller holds the config write locks and the
+    conservative invalidation waits for the retired pool's teardown. The writer
+    performs that invalidation after releasing the locks.
+    """
+    try:
+        return prepare_mcp_reconciliation(changed)
+    except McpTaskConfigurationError as exc:
+        # Pre-empted by ``_validate_mcp_task_config_candidate`` before the commit
+        # in every helper here; raised for the documented 409 contract.
+        _raise_mcp_task_config_conflict(exc)
+    except Exception as exc:
+        raise MCPCommittedNotReconciledError(
+            "MCP configuration was committed to disk but the local reconciliation fence failed; the caller must conservatively invalidate local MCP state",
+        ) from exc
+
+
+def _reload_mcp_config_after_fence() -> None:
+    """Reload the in-process config *after* the fence has been installed.
+
+    ``reload_extensions_config()`` no longer sits between the commit and the
+    fence, so a failure here must surface as "committed; in-process reload
+    failed" rather than pretending nothing changed. The caller still runs
+    ``finish_mcp_reconciliation`` from a post-lock ``finally``, so the owners the
+    fence prepared are reaped (not merely signalled) before this reaches the
+    caller.
+    """
+    try:
+        reload_extensions_config()
+    except Exception as exc:
+        raise MCPCommittedReloadFailedError(
+            "MCP configuration was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
+        ) from exc
+
+
 def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[str] | None]:
     """Worker-thread body for :func:`update_mcp_configuration`.
 
@@ -1240,59 +1317,73 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[st
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     pending_reconciliation = None
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        # Load raw (un-resolved) JSON from disk to use as the merge source.
-        # This preserves $VAR placeholders in env values and top-level keys
-        # like mcpInterceptors that would otherwise be lost.
-        raw_data = _load_raw_extensions_config(config_path, create=True)
-        raw_servers = _raw_mcp_servers(raw_data)
-        raw_other_keys: dict = {}
-        raw_skills: dict[str, dict] | None = None
-        if isinstance(raw_data.get("skills"), dict):
-            raw_skills = raw_data["skills"]
-        # Preserve any top-level keys beyond mcpServers/skills
-        for key, value in raw_data.items():
-            if key not in ("mcpServers", "skills"):
-                raw_other_keys[key] = value
+    try:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
+            # Load raw (un-resolved) JSON from disk to use as the merge source.
+            # This preserves $VAR placeholders in env values and top-level keys
+            # like mcpInterceptors that would otherwise be lost.
+            raw_data = _load_raw_extensions_config(config_path, create=True)
+            raw_servers = _raw_mcp_servers(raw_data)
+            # Capture the real pre-mutation effective config *before* any edit. The
+            # lifecycle counters are derived from this and the validated candidate,
+            # never from the router-supplied ``changed`` hint. Derivation is lenient
+            # (D7-R3) so an unverifiable stored document can still be repaired here.
+            previous_config = _lenient_previous_mcp_config(raw_data)
+            raw_other_keys: dict = {}
+            raw_skills: dict[str, dict] | None = None
+            if isinstance(raw_data.get("skills"), dict):
+                raw_skills = raw_data["skills"]
+            # Preserve any top-level keys beyond mcpServers/skills
+            for key, value in raw_data.items():
+                if key not in ("mcpServers", "skills"):
+                    raw_other_keys[key] = value
 
-        # Merge incoming server configs with raw on-disk secrets
-        merged_servers: dict[str, McpServerConfigResponse] = {}
-        for name, incoming in body.mcp_servers.items():
-            raw_server = raw_servers.get(name)
-            if raw_server is not None:
-                merged = _merge_preserving_secrets(
-                    incoming,
-                    _mcp_server_response_from_raw(name, raw_server),
-                )
-            else:
-                merged = incoming
-            _ensure_no_masked_secrets(merged)
-            merged_servers[name] = merged
+            # Merge incoming server configs with raw on-disk secrets
+            merged_servers: dict[str, McpServerConfigResponse] = {}
+            for name, incoming in body.mcp_servers.items():
+                raw_server = raw_servers.get(name)
+                stored_server = _stored_server_for_secret_merge(name, raw_server) if raw_server is not None else None
+                if stored_server is not None:
+                    merged = _merge_preserving_secrets(incoming, stored_server)
+                else:
+                    merged = incoming
+                _ensure_no_masked_secrets(merged)
+                merged_servers[name] = merged
 
-        # Build config data preserving all top-level keys from the original file
-        config_data = dict(raw_other_keys)
-        config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
-        if raw_skills is None:
-            current_config = get_extensions_config()
-            raw_skills = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
-        config_data["skills"] = raw_skills
+            # Build config data preserving all top-level keys from the original file
+            config_data = dict(raw_other_keys)
+            config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
+            if raw_skills is None:
+                current_config = get_extensions_config()
+                raw_skills = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
+            config_data["skills"] = raw_skills
 
-        candidate_config = _validate_extensions_config_candidate(config_data)
-        _validate_mcp_task_config_candidate(candidate_config)
-        atomic_write_extensions_config(config_path, config_data)
+            candidate_config = _validate_extensions_config_candidate(config_data)
+            _validate_mcp_task_config_candidate(candidate_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=config_data,
+                previous_config=previous_config,
+                new_config=candidate_config,
+            )
 
-        logger.info(f"MCP configuration updated and saved to: {config_path}")
+            logger.info(f"MCP configuration updated and saved to: {config_path}")
 
-        # Reload the Gateway configuration and update the global cache. The
-        # agent runtime lives in Gateway, so this keeps API reads and tool
-        # execution aligned after extensions_config.json changes.
-        reload_extensions_config()
-        try:
-            pending_reconciliation = prepare_mcp_reconciliation(None)
-        except McpTaskConfigurationError as exc:
-            _raise_mcp_task_config_conflict(exc)
-        payload = _mcp_server_responses_from_raw(config_data)
-    finish_mcp_reconciliation(pending_reconciliation)
+            # Fence first, reload second: the local ownership transfer must not
+            # depend on ``reload_extensions_config()`` succeeding.
+            pending_reconciliation = _fence_mcp_reconciliation(None)
+            # Reload the Gateway configuration and update the global cache. The
+            # agent runtime lives in Gateway, so this keeps API reads and tool
+            # execution aligned after extensions_config.json changes.
+            _reload_mcp_config_after_fence()
+            payload = _mcp_server_responses_from_raw(config_data)
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # Locks are already released here: the conservative invalidation waits
+        # for the retired pool's teardown and must never run under the write lock.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
     return payload, None
 
 
@@ -1306,45 +1397,55 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> tuple[d
         )
 
     pending_reconciliation = None
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        if not config_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"MCP server '{body.server_name}' not found",
-            )
-
-        raw_data = _load_raw_extensions_config(config_path, create=False)
-        raw_servers = _raw_mcp_servers(raw_data)
-        if body.server_name not in raw_servers:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"MCP server '{body.server_name}' not found",
-            )
-        raw_server = raw_servers[body.server_name]
-        target_server = _mcp_server_response_from_raw(body.server_name, raw_server)
-
-        if body.enabled:
-            _validate_mcp_update_request(
-                McpConfigUpdateRequest(
-                    mcp_servers={body.server_name: target_server},
+    try:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
+            if not config_path.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"MCP server '{body.server_name}' not found",
                 )
+
+            raw_data = _load_raw_extensions_config(config_path, create=False)
+            raw_servers = _raw_mcp_servers(raw_data)
+            previous_config = _lenient_previous_mcp_config(raw_data)
+            if body.server_name not in raw_servers:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"MCP server '{body.server_name}' not found",
+                )
+            raw_server = raw_servers[body.server_name]
+            target_server = _mcp_server_response_from_raw(body.server_name, raw_server)
+
+            if body.enabled:
+                _validate_mcp_update_request(
+                    McpConfigUpdateRequest(
+                        mcp_servers={body.server_name: target_server},
+                    )
+                )
+
+            enabled_changed = target_server.enabled != body.enabled
+            raw_server["enabled"] = body.enabled
+            candidate_config = _validate_extensions_config_candidate(raw_data)
+            _validate_mcp_task_config_candidate(candidate_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=raw_data,
+                previous_config=previous_config,
+                new_config=candidate_config,
             )
 
-        enabled_changed = target_server.enabled != body.enabled
-        raw_server["enabled"] = body.enabled
-        candidate_config = _validate_extensions_config_candidate(raw_data)
-        _validate_mcp_task_config_candidate(candidate_config)
-        atomic_write_extensions_config(config_path, raw_data)
-
-        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
-        reload_extensions_config()
-        changed = {body.server_name} if enabled_changed else set()
-        try:
-            pending_reconciliation = prepare_mcp_reconciliation(changed)
-        except McpTaskConfigurationError as exc:
-            _raise_mcp_task_config_conflict(exc)
-        payload = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending_reconciliation)
+            logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
+            changed = {body.server_name} if enabled_changed else set()
+            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            _reload_mcp_config_after_fence()
+            payload = _mcp_server_responses_from_raw(raw_data)
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # Locks are already released here: the conservative invalidation waits
+        # for the retired pool's teardown and must never run under the write lock.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed
 
 
@@ -1411,35 +1512,45 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> tuple[dict, set[s
     """Atomically add servers without replacing entries already on disk."""
     config_path = _mcp_config_path(create=True)
     pending_reconciliation = None
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        raw_data = _load_raw_extensions_config(config_path, create=True)
-        raw_servers = _raw_mcp_servers(raw_data)
-        duplicate = next((name for name in body.mcp_servers if name in raw_servers), None)
-        if duplicate is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"MCP server '{duplicate}' already exists",
+    try:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
+            raw_data = _load_raw_extensions_config(config_path, create=True)
+            raw_servers = _raw_mcp_servers(raw_data)
+            previous_config = _lenient_previous_mcp_config(raw_data)
+            duplicate = next((name for name in body.mcp_servers if name in raw_servers), None)
+            if duplicate is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"MCP server '{duplicate}' already exists",
+                )
+
+            existing_names = set(raw_servers)
+            for name, incoming in body.mcp_servers.items():
+                _ensure_no_masked_secrets(incoming)
+                raw_servers[name] = incoming.model_dump()
+            added_names = set(raw_servers) - existing_names
+            raw_data["mcpServers"] = raw_servers
+            _ensure_skills_key(raw_data)
+            candidate_config = _validate_extensions_config_candidate(raw_data)
+            _validate_mcp_task_config_candidate(candidate_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=raw_data,
+                previous_config=previous_config,
+                new_config=candidate_config,
             )
 
-        existing_names = set(raw_servers)
-        for name, incoming in body.mcp_servers.items():
-            _ensure_no_masked_secrets(incoming)
-            raw_servers[name] = incoming.model_dump()
-        added_names = set(raw_servers) - existing_names
-        raw_data["mcpServers"] = raw_servers
-        _ensure_skills_key(raw_data)
-        candidate_config = _validate_extensions_config_candidate(raw_data)
-        _validate_mcp_task_config_candidate(candidate_config)
-        atomic_write_extensions_config(config_path, raw_data)
-
-        logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
-        reload_extensions_config()
-        try:
-            pending_reconciliation = prepare_mcp_reconciliation(added_names)
-        except McpTaskConfigurationError as exc:
-            _raise_mcp_task_config_conflict(exc)
-        payload = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending_reconciliation)
+            logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
+            pending_reconciliation = _fence_mcp_reconciliation(added_names)
+            _reload_mcp_config_after_fence()
+            payload = _mcp_server_responses_from_raw(raw_data)
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # Locks are already released here: the conservative invalidation waits
+        # for the retired pool's teardown and must never run under the write lock.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
     return payload, added_names
 
 
@@ -1447,38 +1558,48 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> tuple
     """Atomically replace one server while preserving concurrent sibling edits."""
     config_path = _mcp_config_path(create=False)
     pending_reconciliation = None
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        raw_data = _load_raw_extensions_config(config_path, create=False)
-        raw_servers = _raw_mcp_servers(raw_data)
-        if body.server_name not in raw_servers:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"MCP server '{body.server_name}' not found",
+    try:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
+            raw_data = _load_raw_extensions_config(config_path, create=False)
+            raw_servers = _raw_mcp_servers(raw_data)
+            previous_config = _lenient_previous_mcp_config(raw_data)
+            if body.server_name not in raw_servers:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"MCP server '{body.server_name}' not found",
+                )
+            existing_server = _mcp_server_response_from_raw(body.server_name, raw_servers[body.server_name])
+
+            merged = _merge_preserving_secrets(
+                body.server,
+                existing_server,
+                preserve_omitted_fields=False,
             )
-        existing_server = _mcp_server_response_from_raw(body.server_name, raw_servers[body.server_name])
+            _ensure_no_masked_secrets(merged)
+            config_changed = effective_server_config(existing_server) != effective_server_config(merged)
+            raw_servers[body.server_name] = merged.model_dump()
+            raw_data["mcpServers"] = raw_servers
+            candidate_config = _validate_extensions_config_candidate(raw_data)
+            _validate_mcp_task_config_candidate(candidate_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=raw_data,
+                previous_config=previous_config,
+                new_config=candidate_config,
+            )
 
-        merged = _merge_preserving_secrets(
-            body.server,
-            existing_server,
-            preserve_omitted_fields=False,
-        )
-        _ensure_no_masked_secrets(merged)
-        config_changed = effective_server_config(existing_server) != effective_server_config(merged)
-        raw_servers[body.server_name] = merged.model_dump()
-        raw_data["mcpServers"] = raw_servers
-        candidate_config = _validate_extensions_config_candidate(raw_data)
-        _validate_mcp_task_config_candidate(candidate_config)
-        atomic_write_extensions_config(config_path, raw_data)
-
-        logger.info("Updated MCP server: %s", body.server_name)
-        reload_extensions_config()
-        changed = {body.server_name} if config_changed else set()
-        try:
-            pending_reconciliation = prepare_mcp_reconciliation(changed)
-        except McpTaskConfigurationError as exc:
-            _raise_mcp_task_config_conflict(exc)
-        payload = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending_reconciliation)
+            logger.info("Updated MCP server: %s", body.server_name)
+            changed = {body.server_name} if config_changed else set()
+            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            _reload_mcp_config_after_fence()
+            payload = _mcp_server_responses_from_raw(raw_data)
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # Locks are already released here: the conservative invalidation waits
+        # for the retired pool's teardown and must never run under the write lock.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed
 
 
@@ -1486,32 +1607,42 @@ def _apply_mcp_server_delete(server_name: str) -> tuple[dict, set[str]]:
     """Atomically remove one server while preserving every sibling entry."""
     config_path = _mcp_config_path(create=False)
     pending_reconciliation = None
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        raw_data = _load_raw_extensions_config(config_path, create=False)
-        raw_servers = _raw_mcp_servers(raw_data)
-        if server_name not in raw_servers:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"MCP server '{server_name}' not found",
+    try:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
+            raw_data = _load_raw_extensions_config(config_path, create=False)
+            raw_servers = _raw_mcp_servers(raw_data)
+            previous_config = _lenient_previous_mcp_config(raw_data)
+            if server_name not in raw_servers:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"MCP server '{server_name}' not found",
+                )
+
+            del raw_servers[server_name]
+            raw_data["mcpServers"] = raw_servers
+            # Removal cannot introduce an ID collision; permit incremental recovery
+            # even when another legacy collision pair remains. Keep schema validation.
+            candidate_config = _validate_extensions_config_candidate(raw_data, check_installation_ids=False)
+            _validate_mcp_task_config_candidate(candidate_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=raw_data,
+                previous_config=previous_config,
+                new_config=candidate_config,
             )
 
-        del raw_servers[server_name]
-        raw_data["mcpServers"] = raw_servers
-        # Removal cannot introduce an ID collision; permit incremental recovery
-        # even when another legacy collision pair remains. Keep schema validation.
-        candidate_config = _validate_extensions_config_candidate(raw_data, check_installation_ids=False)
-        _validate_mcp_task_config_candidate(candidate_config)
-        atomic_write_extensions_config(config_path, raw_data)
-
-        logger.info("Deleted MCP server: %s", server_name)
-        reload_extensions_config()
-        changed = {server_name}
-        try:
-            pending_reconciliation = prepare_mcp_reconciliation(changed)
-        except McpTaskConfigurationError as exc:
-            _raise_mcp_task_config_conflict(exc)
-        payload = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending_reconciliation)
+            logger.info("Deleted MCP server: %s", server_name)
+            changed = {server_name}
+            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            _reload_mcp_config_after_fence()
+            payload = _mcp_server_responses_from_raw(raw_data)
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # Locks are already released here: the conservative invalidation waits
+        # for the retired pool's teardown and must never run under the write lock.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed
 
 
