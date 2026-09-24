@@ -1,5 +1,11 @@
 ### Data Flow
 
+Artifact state, upload metadata, and workspace changes carry raw filesystem
+paths. `urlOfArtifact` and `resolveArtifactURL` encode those paths without
+decoding literal percent sequences. Only Markdown destinations are URL inputs:
+`resolveMarkdownArtifactURL` decodes once at that boundary, and relative image
+resolution matches the decoded name against raw artifact paths before encoding.
+
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
    File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
