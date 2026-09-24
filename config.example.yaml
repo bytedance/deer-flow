@@ -736,6 +736,26 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # GitHub repository research tools.
+  - name: github_repository
+    group: web
+    use: deerflow.community.github_research.tools:github_repository_tool
+
+  - name: github_readme
+    group: web
+    use: deerflow.community.github_research.tools:github_readme_tool
+
+  - name: github_recent_commits
+    group: web
+    use: deerflow.community.github_research.tools:github_recent_commits_tool
+
+  - name: github_latest_release
+    group: web
+    use: deerflow.community.github_research.tools:github_latest_release_tool
+
+  - name: compare_repositories
+    group: web
+    use: deerflow.community.github_research.tools:compare_repositories_tool
   # Read explicitly referenced conversations (Gateway API only, opt-in).
   # Each run must submit conversation_references; see backend/docs/API.md.
   # - name: read_conversation
