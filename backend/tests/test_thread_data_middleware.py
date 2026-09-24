@@ -80,6 +80,33 @@ class TestThreadDataMiddleware:
         assert result is not None
         assert runtime.context is None
 
+    def test_before_agent_preserves_response_metadata_on_trailing_human_message(self, tmp_path):
+        # Regression: before_agent rebuilt the trailing HumanMessage from only content/id/name/
+        # additional_kwargs, silently resetting any existing response_metadata to {}.
+        from langchain_core.messages import HumanMessage
+
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        message = HumanMessage(
+            content="hello",
+            id="message-1",
+            response_metadata={"source": "gateway"},
+            additional_kwargs={"existing": "kept"},
+        )
+
+        result = middleware.before_agent(
+            state={"messages": [message]},
+            runtime=Runtime(context={"thread_id": "thread-1", "run_id": "run-1"}),
+        )
+
+        updated = result["messages"][-1]
+        assert updated.response_metadata == {"source": "gateway"}
+        assert updated.content == "hello"
+        assert updated.id == "message-1"
+        assert updated.name == "user-input"
+        assert updated.additional_kwargs["existing"] == "kept"
+        assert updated.additional_kwargs["run_id"] == "run-1"
+        assert "timestamp" in updated.additional_kwargs
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(
