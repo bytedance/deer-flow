@@ -19,7 +19,12 @@ from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
+from deerflow.runtime.runs.worker import (
+    _JOURNAL_UNSETTLED_ERROR,
+    RunContext,
+    _delivery_content_with_outputs,
+    run_agent,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 
 
@@ -1039,3 +1044,56 @@ async def test_cancelled_run_stays_interrupted_when_the_journal_also_fails():
     assert record.error is None
     assert await _delivery_events(event_store, "thread-1", record.run_id) == []
     assert (await run_store.get(record.run_id))["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_store_self_cancellation_is_a_journal_failure_not_host_cancellation(caplog):
+    """D2c at the bounded flush: a store cancelling its own write is a journal failure.
+
+    The store raising ``CancelledError`` from ``put_batch`` is not the caller's
+    request, so the barrier's bounded ``flush()`` must report it as a durable
+    journal failure rather than letting it escape as host cancellation. Before
+    the fix the ``CancelledError`` reached the worker's
+    ``except asyncio.CancelledError`` arm, was deferred as a host interrupt, and
+    was re-raised by ``run_agent`` without ever taking the ordered-completion
+    refusal that marks the run ``error``.
+    """
+
+    class SelfCancellingBatchStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise asyncio.CancelledError("store cancelled its own write")
+
+        async def put_if_absent(self, **kwargs):
+            # The receipt path stays healthy: only the journal write is broken.
+            return await super().put_if_absent(**kwargs)
+
+    event_store = SelfCancellingBatchStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            yield {"messages": []}
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.worker"):
+        try:
+            await run_agent(
+                _make_bridge(),
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=None, event_store=event_store),
+                agent_factory=lambda *, config: JournalingAgent(),
+                graph_input={},
+                config={},
+            )
+        except asyncio.CancelledError:
+            pytest.fail("a store cancelling its own write escaped run_agent as host cancellation")
+
+    assert record.status == RunStatus.error
+    assert record.error == _JOURNAL_UNSETTLED_ERROR
+    assert (await run_store.get(record.run_id))["status"] == "error"
+    assert await _delivery_events(event_store, "thread-1", record.run_id) == []
+    assert "journal did not settle before its terminal receipt" in caplog.text

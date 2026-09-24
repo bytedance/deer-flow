@@ -35,7 +35,10 @@ Write-ownership invariants (keep these when changing buffering or progress):
   waiting without abandoning the drain. The received cancellation is re-raised
   only after the drain's outcome is applied; a definite write failure is reported
   first, and a store cancelling its own write is reported as that failure instead
-  of masquerading as caller cancellation.
+  of masquerading as caller cancellation. That conversion happens where the write
+  outcome is applied, so it covers both the bounded ``flush()`` and the settled
+  drain: only a cancellation the caller itself requested is re-raised as
+  ``CancelledError``.
 - Precedence while joining: ``_await_owned_task()`` treats only a
   ``CancelledError`` actually delivered to its own wait as its caller's request,
   and defers to a definite child failure. The joining caller then suppresses
@@ -997,7 +1000,15 @@ class RunJournal(BaseCallbackHandler):
         task.add_done_callback(lambda completed: self._on_flush_done(completed, detached=detached))
 
     async def _put_batch_cancellation_safe(self, batch: list[dict], *, register_active: bool = False) -> bool:
-        """Write one batch without guessing the outcome of an interrupted write."""
+        """Write one batch without guessing the outcome of an interrupted write.
+
+        A ``CancelledError`` is ambiguous only while the caller's own request may
+        still be pending. Once the caller is known not to be cancelling, the only
+        cancellation that can arrive is the store cancelling its own write, and
+        that is a definite failure: it is converted into a ``RuntimeError`` with
+        the batch retained for retry, so a bounded ``flush()`` never reports it as
+        caller cancellation.
+        """
         store = self._store
         if store is None:
             return True
@@ -1053,10 +1064,15 @@ class RunJournal(BaseCallbackHandler):
 
         try:
             write_task.result()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            # ``caller_cancelling`` is already false here, so this cancellation
+            # is the store cancelling its own write -- not a host request. A
+            # bounded ``flush()`` must report that as a definite failure, not
+            # re-raise it as caller cancellation that the worker barrier would
+            # classify as a host interrupt (D2c).
             self._requeue_batch(batch, context="Journal write was cancelled")
             self._active_write_tasks.pop(write_task, None)
-            raise
+            raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
         except Exception as error:
             self._requeue_batch(
                 batch,

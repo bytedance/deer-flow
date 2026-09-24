@@ -1535,7 +1535,11 @@ async def run_agent(
                     # The bounded flush reports whether its drain deadline was
                     # met, not whether the write that missed it can still land,
                     # so ``False`` is a "not yet": settle it before the receipt
-                    # and before the durable terminal row.
+                    # and before the durable terminal row. D1 operational cost:
+                    # this settle is deliberately unbounded and precedes
+                    # ``bridge.publish_end``, so a hung store holds the durable
+                    # run ``running`` and stream consumers wait for the end frame
+                    # until lease expiry or a worker restart.
                     settled = await journal.flush()
                     if not settled:
                         settled = await journal.flush_until_settled()
