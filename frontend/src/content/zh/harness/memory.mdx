@@ -53,8 +53,9 @@ memory:
   # 绝对路径按原样使用，相对路径相对于 base_dir 解析。
   storage_path: memory.json
 
-  # 存储类（默认：基于文件的 JSON 存储）
-  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+  # 存储类（留空 = FileMemoryStorage，即默认的基于文件的 JSON 存储，不走 importlib；
+  # 自定义实现填 `module.Class` 点号路径）
+  storage_class: ""
 
   # 处理排队记忆更新前等待的秒数（防抖）
   debounce_seconds: 30
@@ -98,14 +99,23 @@ DeerFlow 支持两级记忆：
 
 ## 自定义存储后端
 
-`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage` 并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
+`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage`（位于 `deerflow.agents.memory.backends.deermem.deermem.core.storage`）并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
 
 ```yaml
 memory:
-  storage_class: mypackage.storage.RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
 
-如果配置的类无法加载，系统回退到默认的 `FileMemoryStorage` 并记录错误。
+该值是 `module.Class` 点号路径，且存储类会按 `cls(config)` 构造——完整接口见「自定义」页面的「自定义记忆存储」。
+
+如果配置的类无法导入、不是 `MemoryStorage` 的子类，或无法构造，系统**不会**回退到 `FileMemoryStorage`，而是在构建记忆管理器时直接抛出：
+
+```
+ValueError: backend_config.storage_class='mypackage.storage.NotThere' failed to load: No module named 'mypackage'. Refusing to silently fall back because memory is persistent state.
+```
+
+由于 storage 在 `model_post_init()` 中装配，这个错误会以 pydantic 的 `ValidationError` 形式从 `DeerMem` 构造函数冒出来。
 
 ## 禁用记忆
 
