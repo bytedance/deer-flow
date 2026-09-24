@@ -47,7 +47,8 @@ from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
-from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
+from deerflow.authz.sandbox_authz import safe_app_config, safe_app_config_async
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
@@ -485,6 +486,161 @@ def authorize_sandbox_for_request(
         logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
         if config.fail_closed:
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
+
+
+# --- Plugin resource authorization -------------------------------------------
+#
+# The plugin request paths deliberately do NOT reuse the route provider cache
+# above: that cache is synchronous, constructs inline on the calling thread and
+# keys on config identity alone, so a hit cannot prove the instance belongs to
+# the caller's event loop. A plugin provider may be loop-affine (its
+# ``__init__`` may create an asyncio client), so this cache keys on
+# ``(config signature, loop key)`` and never hands a loop-built instance to a
+# sync caller or to a different loop.
+
+_PLUGIN_PROVIDER_SYNC_SLOT = object()
+#: loop_key → (config signature, provider, owning loop or None for the sync slot).
+_plugin_provider_cache: dict[object, tuple[str, AuthorizationProvider, asyncio.AbstractEventLoop | None]] = {}
+
+
+class _PluginAuthorizationUnavailable(Exception):
+    """Raised when the plugin provider cannot be resolved for a request.
+
+    Carries ``fail_closed`` so callers choose between deny and legacy allow
+    without re-reading config (mirrors ``_AuthorizationUnavailable``).
+    """
+
+    def __init__(self, *, fail_closed: bool) -> None:
+        self.fail_closed = fail_closed
+
+
+def _plugin_config_signature(config: AuthorizationConfig) -> str:
+    return repr(sorted(config.model_dump().items()))
+
+
+def _store_plugin_provider(loop_key: object, loop: asyncio.AbstractEventLoop | None, signature: str, provider: AuthorizationProvider) -> None:
+    """Publish one entry, dropping entries whose loop has closed (bounded growth)."""
+    for key, entry in list(_plugin_provider_cache.items()):
+        owner = entry[2]
+        if owner is not None and owner.is_closed():
+            _plugin_provider_cache.pop(key, None)
+    _plugin_provider_cache[loop_key] = (signature, provider, loop)
+
+
+def _get_cached_plugin_provider_sync(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider for sync callers (and FastAPI ``def`` thread-pool workers)."""
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(_PLUGIN_PROVIDER_SYNC_SLOT)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    provider = resolve_authorization_provider(config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(_PLUGIN_PROVIDER_SYNC_SLOT, None, signature, provider)
+    return provider
+
+
+async def _aget_cached_plugin_provider(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider belonging to *this* loop; a miss discovers off-loop."""
+    loop = asyncio.get_running_loop()
+    loop_key = id(loop)
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(loop_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    if getattr(config, "provider", None) is None:
+        # Nothing to import; preserve the resolver's own "enabled but unconfigured" error.
+        provider = resolve_authorization_provider(config)
+    else:
+        spec = await asyncio.to_thread(resolve_authorization_provider_spec, config)
+        # Construction stays on the calling loop: async providers may create
+        # loop-affine clients in ``__init__``.
+        provider = construct_authorization_provider(spec, config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(loop_key, loop, signature, provider)
+    return provider
+
+
+def _plugin_request_principal(request: Request, authz_config: AuthorizationConfig) -> Principal | None:
+    """Build the request-scoped Principal, or ``None`` when the caller is anonymous."""
+    user = getattr(getattr(request, "state", None), "user", None)
+    if user is None:
+        return None
+    return build_principal_from_context(
+        _route_authz_context(user, is_internal=_is_internal_caller(request, user)),
+        default_role=authz_config.default_role,
+    )
+
+
+def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for plugin resources, for synchronous callers.
+
+    ``(None, None)`` means authorization is disabled or no config is readable —
+    the caller keeps today's behavior. Raises ``_PluginAuthorizationUnavailable``
+    (carrying ``fail_closed``) when the provider cannot be resolved.
+    """
+    app_config = safe_app_config()
+    if app_config is None:
+        return None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None
+    try:
+        provider = _get_cached_plugin_provider_sync(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config)
+
+
+async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Async ``(provider, principal)`` for plugin resources.
+
+    Never returns the sync slot, and never performs synchronous config loading,
+    provider discovery or provider calls on the event loop.
+    """
+    app_config = await safe_app_config_async()
+    if app_config is None:
+        return None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None
+    try:
+        provider = await _aget_cached_plugin_provider(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config)
+
+
+async def authorize_plugin_action_for_request(request: Request, *, namespace: str, action_name: str) -> None:
+    """Authorize a registered plugin action before its handler runs (O2).
+
+    Returns normally when the action is permitted (or authorization is
+    disabled); raises ``HTTPException(403)`` on deny, and on a provider
+    resolution failure under ``fail_closed``.
+    """
+    from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_action
+
+    try:
+        provider, principal = await aresolve_plugin_authorization(request)
+    except _PluginAuthorizationUnavailable as unavailable:
+        if unavailable.fail_closed:
+            raise _plugin_action_denied() from None
+        return
+    if provider is None:
+        # Authorization is disabled (or no config is readable): today's behavior.
+        return
+    try:
+        await aenforce_plugin_action(principal=principal, namespace=namespace, action_name=action_name, provider=provider)
+    except PluginAuthorizationError as error:
+        raise _plugin_action_denied() from error
+
+
+def _plugin_action_denied() -> HTTPException:
+    return HTTPException(status_code=403, detail="Plugin action not permitted for your role.")
 
 
 @dataclass(slots=True)

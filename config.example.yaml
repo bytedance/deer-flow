@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 47
+config_version: 48
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -2909,6 +2909,16 @@ run_ownership:
 #       # (which models/skills the caller sees on GET /api/models and the
 #       # GET /api/skills[.../custom, /{name}] skill routes); skill
 #       # management endpoints (install/edit/export) stay admin-gated.
+#       #
+#       # Plugin resources: `plugin_actions` gates invoking a registered
+#       # backend action (POST /api/plugins/{ns}/actions/{name}), and
+#       # `plugin_management` gates an enterprise-contributed management route
+#       # that calls require_plugin_management. Targets are
+#       # "<namespace>/<action-name>" and "<namespace>/permissions.read"
+#       # / "<namespace>/permissions.write". **Omitting a key leaves that
+#       # resource unrestricted for the role**, so list it explicitly to
+#       # constrain it. Declared plugin pages are not gated yet: their
+#       # `plugin_pages` row ships with the page-authorization slice.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
@@ -2916,12 +2926,16 @@ run_ownership:
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}
+#           plugin_management: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}                 # invoke any installed action
+#           plugin_management: {allow: []}               # no management route access
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2932,6 +2946,8 @@ run_ownership:
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
 #           skills: {allow: []}      # no skills visible in the listing
+#           plugin_actions: {allow: ["acme.reports/export"]}
+#           plugin_management: {allow: ["acme.reports/permissions.read"]}
 authorization:
   enabled: false
 

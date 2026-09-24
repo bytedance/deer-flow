@@ -483,6 +483,71 @@ Phase 1 最低验证要求：
   各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
   迁移（沿袭前阶段延期项）。
 
+### 2026-09-24 — Phase 5 / PR1 — 插件资源授权管道（targets、决策层、action 检查、management 守卫）
+
+- **背景：** 设计文档 `2026-09-23-extension-tool-authorization-coverage-gaps.md` 与实施规格
+  `2026-09-24-extension-tool-authorization-spec.md`（rev 5）把「插件工具/页面授权覆盖缺口」
+  切成三个 PR：PR1 = 插件管道（target 编码、provenance 展示、`plugin_authz`、action 检查、
+  management 守卫、provider 生命周期、公开 helper + 一次契约版本提升），PR2 = 工具链路
+  （middleware 声明工具、identity-bound exemption），PR3 = 页面切片。本条记录 PR1。
+- **决策（target 编码）：** 新增 `deerflow/authz/plugin_targets.py`，复合 target 一律
+  `"{namespace}/{part}"`，由唯一 `_join` 校验器编码：namespace 字符集与
+  `config/plugin_settings.py` 一致，action / surface id / management part 分别镜像 registry、
+  浏览器 surface 规则和两个模块常量。三个构造器各带 kind 检查，调用点禁止字符串拼接；
+  非法输入抛 `PluginTargetError`（`ValueError` 子类），绝不返回 best-effort 字符串。
+- **决策（RBAC 别名）：** `_RESOURCE_POLICY_KEYS` 新增 `"plugin_action" → "plugin_actions"`
+  与 `"plugin_management" → "plugin_management"`（自映射，合法，同 `sandbox`）。左值仍是请求
+  `resource`，右值是 `config.yaml` 键；把 `plugin_action` 当作 config 键会在构造期被拒
+  （reserved request alias）。`plugin_page → plugin_pages` 随 PR3 落地——该 PR 才产生
+  `plugin_page` 资源，缺 key = 不受限仍是不变的语义。
+- **决策（决策层）：** 新增 `deerflow/authz/plugin_authz.py`：六个决策函数 +
+  `PluginAuthorizationError`（携带 resource / target / reason_code / fail_closed）。disabled →
+  no-op；显式 deny 抛错；provider 异常、解析失败、malformed decision、无 principal 一律按
+  `fail_closed` 抛错或 warning 放行（镜像 sandbox gate 的语义，而不是工具过滤器的静默集合
+  语义）。异步批量决策用 `asyncio.to_thread(filter_resources)`，因此
+  `AuthorizationProvider.filter_resources` 的 docstring 增加一句线程安全要求（仅文档，
+  三个方法和签名不变）。
+- **决策（provider 生命周期）：** 插件请求路径**不**复用既有 route provider cache（同步、
+  在事件循环上构造、仅按 config identity 命中，且无 blocking-IO anchor）。新增按
+  `(config signature, loop_key)` 键的缓存：同步调用者用私有 `_SYNC_SLOT`，异步按
+  `id(asyncio.get_running_loop())`；两者互不串用，也不跨 loop 复用；config 读取与
+  `resolve_authorization_provider_spec` 在线程中执行，`construct_authorization_provider`
+  保持在调用方 loop 上；无 single-flight 锁（允许并发冷启动重复构造，已文档化）；
+  写入时清理已关闭 loop 的条目。
+- **决策（公开 helper + 契约版本）：** `deerflow_extension_api.auth` 新增
+  `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` 与
+  `require_plugin_management` / `arequire_plugin_management`（只读 `request.app.state`，保持
+  契约包不依赖 `deerflow`）。两者 fail closed：解析器缺失/失败/返回 `None`、未知 namespace、
+  非 `True` 答案都抛 `PermissionError`；`authorization.enabled: false` 时宿主回答 `True`
+  （no-op），因此不会开始拒绝企业路由，需要无条件底线的企业仍叠加 `require_admin`。同步形式
+  供 FastAPI `def` 端点（线程池）使用，异步端点使用 `a` 版本。契约版本 `0.2.3 → 0.2.4`
+  （`API_VERSION`、包 version、harness 精确 pin、lockfile、契约测试四处同步）。
+- **决策（action 检查）：** `POST /api/plugins/{ns}/actions/{name}` 在 action 解析之后
+  （未知 action 仍是 404，不改变存在性预言）、读取请求体之前插入一次 `plugin_action` 决策；
+  deny → `403 "Plugin action not permitted for your role."`，handler 不被调用，被拒调用者
+  无法占用 256 KiB 输入预算。
+- **证据：** 新增 `tests/test_plugin_targets.py`（字符集、跨 kind 同形 target、
+  management part、非法输入）、`tests/test_tool_provenance.py`（plugin tag 往返、错配 tag 被丢弃、
+  MCP 优先级、`deerflow_tool_source` 与模块回退标签保持）、
+  `tests/test_plugin_action_authorization.py`（allow/deny/未授权先于 body、
+  fail_closed/fail_open、disabled no-op、未知 action 404、internal 身份）、
+  `tests/test_plugin_management_guard.py`（helper 的 fail-closed 矩阵、宿主解析器安装与
+  未知 namespace、disabled 放行、loop 生命周期与只读投影前置）、
+  `tests/blocking_io/test_plugin_authorization.py`（config/discovery 不在事件循环上，
+  含 red→green teeth）；扩展 `test_rbac_authorization_provider.py`、`test_plugin_tools.py`、
+  `test_extension_api_contracts.py`。
+- **兼容性：** `authorization.enabled: false` 时 action 路由与 management helper 均为 no-op；
+  既有工具 resource 名与 `AuthorizationProvider` Protocol 未变；`config_version` 47 → 48
+  （`config.example.yaml` + Helm values + Helm README 三处同步）；`config.example.yaml`
+  roles 新增 `plugin_actions` / `plugin_management` 两行并注明「省略 key = 该资源不受限」。
+- **否决方案：** 不为节省一次构造而复用 route cache（会把一个 loop 上的 loop-affine provider
+  交给另一个 loop）；不在请求边界拼接 target（必须走 `plugin_targets`）；不在 PR1 引入
+  `plugin_page` 别名（没有生产者，属 PR3）；不把插件检查做成第二个常开 gate。
+- **延期：** PR2（工具链路：middleware 声明工具、`LayerOneOutcome` 种子、build-local view、
+  identity-bound infrastructure exemption、`GuardrailRequest.tool_provenance`/`tool_identity`）、
+  PR3（`pages`/`shared_operation` 声明门、`extensions/catalog.py`、`/api/plugins` 只读投影、
+  前端页面 gate、企业示例与剩余文档）。
+
 ### 新记录模板
 
 ```markdown
