@@ -1147,8 +1147,9 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
 
 
 @pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
 @pytest.mark.anyio
-async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_modes):
+async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_modes, close_fails, caplog):
     run_manager = RunManager()
     record = await run_manager.create("thread-stream-close-cancellation")
     bridge = SimpleNamespace(
@@ -1179,6 +1180,8 @@ async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_mod
             except asyncio.CancelledError:
                 self.close_cancelled = True
                 raise
+            if close_fails:
+                raise RuntimeError("stream close failed")
             self.closed = True
 
     stream = BlockingStream()
@@ -1214,12 +1217,19 @@ async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_mod
     assert not stream.closed
     bridge.publish_end.assert_not_awaited()
 
-    allow_close.set()
-    await run_task
+    with caplog.at_level(logging.DEBUG, logger="deerflow.runtime.runs.worker"):
+        allow_close.set()
+        await run_task
 
-    assert stream.closed
     assert not stream.close_cancelled
     assert record.status == RunStatus.interrupted
+    if close_fails:
+        assert not stream.closed
+        assert "Could not close agent stream" in caplog.text
+        assert "stream close failed" in caplog.text
+    else:
+        assert stream.closed
+        assert "Could not close agent stream" not in caplog.text
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

@@ -350,6 +350,7 @@ async def test_stream_originated_cancellation_is_reported_as_close_failure() -> 
 
     assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
     assert exc_info.value.__cause__.args == ("stream cancelled itself",)
+    assert exc_info.value.__suppress_context__ is True
     task = asyncio.current_task()
     assert task is not None
     assert task.cancelling() == 0
@@ -366,6 +367,7 @@ async def test_synchronous_stream_close_cancellation_is_reported_as_failure() ->
 
     assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
     assert exc_info.value.__cause__.args == ("sync stream close cancellation",)
+    assert exc_info.value.__suppress_context__ is True
 
 
 @pytest.mark.asyncio

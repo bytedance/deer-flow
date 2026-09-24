@@ -62,6 +62,8 @@ async def close_agent_stream(stream: Any) -> None:
         cancellation_count = caller.cancelling()
         return True
 
+    # Deliver cancellation that was already pending before close_task exists.
+    # A zero count delta here is therefore host-side, not close-task cancellation.
     try:
         await asyncio.sleep(0)
     except asyncio.CancelledError as exc:
