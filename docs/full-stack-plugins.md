@@ -51,12 +51,6 @@ list of texts through a deployment-configured Jev or chat-model backend, and the
 plugin keeps the whole call inside those bounds with its own batch and deadline
 limits. It requires deployment opt-in and a separate backend API key.
 
-The [fetched-content screening example](../examples/deerflow-extension-jev-screening/README.md)
-contributes only opt-in middleware at `TOOL_VISIBLE`. It can mark suspicious remote
-text while preserving the original tool result. It does not establish that a model
-will ignore marked instructions; RFC #5737 holds the detection evidence and
-proposes a separate evaluation of downstream agent behavior.
-
 Durable `batch_task` workers pin the Gateway app's extension snapshot at startup
 and use it for both plugin tools and subagent execution. Recovered items use the
 new worker's snapshot after restart; no Python snapshot is stored in the durable

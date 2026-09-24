@@ -78,7 +78,8 @@ expand when escaped; preserving raw UTF-8 limits alone does not cover it.
 
 ## Advisory fetched-content screening example
 
-`test_jev_result_screening_extension.py` exercises the public extension placement
-and a local HTTP transport. Keep attacker-controlled content in request state only;
-check source selection, bounded excerpts, fixed result markers, fail-open errors,
-and cancellation without calling a paid API. Detection is not behavioral defense.
+`test_jev_result_screening_extension.py` checks bounded requests and copying/failure
+semantics for the configured middleware. `test_jev_screening_pipeline.py` runs real
+lead/subagent graphs to a recording model; cover error metadata/receipts, budget,
+PII ordering and one-time annotation. Use offline transports. Detection is not
+behavioral defense; do not infer the final model input from an isolated hook test.

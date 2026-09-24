@@ -149,10 +149,6 @@ order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBL
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
 the shared base builder because the lead builder appends more middleware afterward.
-The optional fetched-content screening example uses `TOOL_VISIBLE` after host
-sanitization and budgeting, sends only bounded text excerpts to an operator-configured
-classifier, and preserves the original result on errors. Its fixed marker is
-advisory; extension code remains trusted operator code.
 `extensions/ordering.py` owns host ordering invariants and validates the final composed
 stack. Nothing under `extensions/` may import `agents.middlewares` at module scope: the
 middleware layer calls into this one, so a module-scope reference points the dependency
