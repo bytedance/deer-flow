@@ -965,6 +965,13 @@ This release closes that milestone with **765 merged pull requests**.
   the API had reported as paused. The read now takes the writer first, as every
   other mutating path in that repository does. PostgreSQL was unaffected.
   ([#5777])
+- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
+  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
+  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
+  `get_event_loop()` failing, but it also caught discovery errors and
+  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
+  up; inside a running loop it also logged a misleading "asyncio.run() cannot
+  be called from a running event loop" traceback instead of the real cause.
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
