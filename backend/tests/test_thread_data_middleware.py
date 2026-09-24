@@ -35,6 +35,28 @@ class TestThreadDataMiddleware:
         assert result is not None
         assert "/users/runtime-user/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
 
+    def test_before_agent_preserves_human_message_metadata(self, tmp_path):
+        from langchain_core.messages import HumanMessage
+
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        message = HumanMessage(
+            content="hello",
+            id="message-1",
+            response_metadata={"source": "gateway"},
+            additional_kwargs={"client": "web"},
+        )
+
+        result = middleware.before_agent(
+            state={"messages": [message]},
+            runtime=Runtime(context={"thread_id": "thread-1", "run_id": "run-1"}),
+        )
+
+        updated = result["messages"][-1]
+        assert updated.response_metadata == {"source": "gateway"}
+        assert updated.additional_kwargs["client"] == "web"
+        assert updated.additional_kwargs["run_id"] == "run-1"
+        assert updated.name == "user-input"
+
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context=None)
