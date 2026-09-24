@@ -98,6 +98,8 @@ to respond.
 
 **Shared warm-pool lifecycle:** community sandbox providers that keep released sandboxes alive for fast reuse share `deerflow.community.warm_pool_lifecycle.WarmPoolLifecycleMixin`. The mixin owns the common `DEFAULT_IDLE_TIMEOUT=600`, `IDLE_CHECK_INTERVAL=60`, `DEFAULT_REPLICAS=3`, idle-checker loop, warm-pool expiry, oldest-warm eviction, replica counting, and soft-cap logging. Providers remain responsible for their own active registries, creation/discovery, health checks, and destroy hook (`_destroy_warm_entry`): AIO destroys `SandboxInfo` through its backend; Boxlite closes loop-affine `BoxliteBox` handles; Tenki closes the microVM session (`TenkiSandbox.close`, which terminates the remote sandbox). AIO keeps active-idle cleanup outside the mixin and delegates only warm-pool expiry to the shared helper.
 
+**AIO health polling:** The lease thread schedules at most one separate health worker, so slow active/warm container probes never delay lease renewal.
+
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
 - Physical: `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/...`; raw skills stay under `deer-flow/skills/` and managed integration storage. Unrestricted sandboxes read `backend/.deer-flow/skills_view/public/` and `backend/.deer-flow/users/{user_id}/skills_view/{custom,legacy,integrations}/`; explicit lead Agent policies read `backend/.deer-flow/users/{user_id}/threads/{thread_id}/skills_view/{public,custom,legacy,integrations}/`.

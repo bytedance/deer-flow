@@ -211,6 +211,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
         self._renewal_thread: threading.Thread | None = None
+        self._health_check_thread: threading.Thread | None = None
         # Per-instance id used for cross-instance sandbox ownership leases (#4206).
         self._owner_id = generate_owner_id()
 
@@ -1305,6 +1306,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         thread = self._renewal_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
+        health_thread = getattr(self, "_health_check_thread", None)
+        if health_thread is not None and health_thread.is_alive() and health_thread is not threading.current_thread():
+            health_thread.join(timeout=5)
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1314,9 +1318,29 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             except Exception:
                 logger.exception("Error in sandbox ownership renewal loop")
             try:
-                self._health_check_owned_sandboxes()
+                self._schedule_health_check()
             except Exception:
-                logger.exception("Error in sandbox health check loop")
+                logger.exception("Error scheduling sandbox health check")
+
+    def _schedule_health_check(self) -> None:
+        """Start at most one health scan without delaying lease renewal."""
+        if not self._config.get("auto_restart", True) or self._renewal_stop.is_set():
+            return
+        thread = getattr(self, "_health_check_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        self._health_check_thread = threading.Thread(
+            target=self._run_health_check,
+            name="sandbox-health-check",
+            daemon=True,
+        )
+        self._health_check_thread.start()
+
+    def _run_health_check(self) -> None:
+        try:
+            self._health_check_owned_sandboxes()
+        except Exception:
+            logger.exception("Error in sandbox health check loop")
 
     def _health_check_owned_sandboxes(self) -> None:
         """Evict cached sandboxes whose containers died since last use.
@@ -1324,10 +1348,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         ``get()``/``get_scoped()`` are intentionally pure in-memory lookups
         (async tool paths call them directly on the event loop), so a
         mid-run container crash is otherwise only caught the next time
-        ``acquire``/``reclaim`` runs. Riding the existing renewal thread lets a
-        crash between two tool calls be detected and evicted — via the same
-        ownership-fenced teardown as every other reap path — within one
-        renewal interval instead of persisting for the rest of the run.
+        ``acquire``/``reclaim`` runs. A worker scheduled by the renewal loop
+        detects a crash between tool calls without delaying the next lease
+        refresh, then uses the usual ownership-fenced teardown.
         """
         if not self._config.get("auto_restart", True):
             return
@@ -1336,7 +1359,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             tracked = list(self._sandbox_infos.items()) + [(sandbox_id, info) for sandbox_id, (info, _) in self._warm_pool.items()]
 
         for sandbox_id, info in tracked:
+            if getattr(self, "_shutdown_called", False):
+                return
             if self._check_tracked_sandbox_alive(sandbox_id, info) is False:
+                if getattr(self, "_shutdown_called", False):
+                    return
                 self._drop_unhealthy_sandbox(
                     sandbox_id,
                     "periodic health check",

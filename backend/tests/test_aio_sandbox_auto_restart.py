@@ -58,7 +58,7 @@ def test_health_check_evicts_sandbox_that_crashed_between_tool_calls(tmp_path):
 
     ``get()``/``get_scoped()`` stay pure in-memory lookups (see
     ``test_get_remains_in_memory_lookup`` / ``test_get_uses_in_memory_registry_only``),
-    so the renewal-thread health check is what catches a mid-run crash: it must
+    so the scheduled health worker is what catches a mid-run crash: it must
     evict the cached sandbox so the *next* cache lookup misses and the caller
     falls through to ``acquire()`` for a fresh container.
     """
@@ -95,3 +95,44 @@ def test_health_check_respects_auto_restart_disabled(tmp_path):
     provider._backend.is_alive.assert_not_called()
     provider._backend.destroy.assert_not_called()
     assert provider.get("sandbox-crashed-disabled") is sandbox
+
+
+def test_slow_health_check_does_not_delay_lease_renewal():
+    """A blocked remote probe must not hold up the next ownership renewal."""
+    module = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = module.AioSandboxProvider.__new__(module.AioSandboxProvider)
+    provider._config = {"auto_restart": True}
+    provider._ownership_config = SimpleNamespace(renewal_interval_seconds=0.01, ttl_multiplier=4)
+    provider._renewal_stop = threading.Event()
+    provider._renewal_thread = None
+    provider._health_check_thread = None
+
+    health_started = threading.Event()
+    allow_health = threading.Event()
+    second_renewal = threading.Event()
+    renewals: list[int] = []
+    health_checks: list[int] = []
+
+    def renew() -> None:
+        renewals.append(1)
+        if len(renewals) >= 2:
+            second_renewal.set()
+
+    def check_health() -> None:
+        health_checks.append(1)
+        health_started.set()
+        allow_health.wait(timeout=2)
+
+    provider._renew_owned_leases = renew
+    provider._health_check_owned_sandboxes = check_health
+
+    provider._start_lease_renewal()
+    try:
+        assert health_started.wait(timeout=1)
+        assert second_renewal.wait(timeout=0.5), "a slow health probe delayed lease renewal"
+        assert len(health_checks) == 1, "health checks must not spawn unbounded workers"
+    finally:
+        allow_health.set()
+        provider._stop_lease_renewal()
+    assert provider._health_check_thread is not None
+    assert not provider._health_check_thread.is_alive()
