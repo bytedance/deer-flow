@@ -2095,6 +2095,11 @@
 
 ### 安全
 
+- **认证：** `POST /api/v1/auth/initialize` 不再让两个并发的首次初始化请求都创建 admin。
+  此前处理器在一个会话中统计 admin 数量、在另一个会话中创建账号，因此两个使用不同邮箱的请求
+  会同时看到空系统；现在失败方会返回文档所述的 `409 system_already_initialized`。统计与插入现在
+  在同一事务内完成，并先对写入串行化（SQLite 用 `BEGIN IMMEDIATE`，PostgreSQL 用
+  advisory lock）。([#5776])
 - **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
   客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
   宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
@@ -3549,3 +3554,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776
