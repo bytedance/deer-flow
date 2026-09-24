@@ -938,6 +938,85 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
 
 
 @pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_keeps_file_lock_until_worker_finishes(tmp_path, monkeypatch):
+    """Caller cancellation must not release the cross-process lock over an admitted worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    discover_started = threading.Event()
+    allow_discover = threading.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    def blocking_discover(_sandbox_id: str):
+        discover_started.set()
+        assert allow_discover.wait(timeout=2)
+        return None
+
+    create_calls: list[tuple[str | None, str, str | None]] = []
+
+    async def fake_create(thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        create_calls.append((thread_id, sandbox_id, user_id))
+        return sandbox_id
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(discover=blocking_discover)
+    monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire())
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-flock",
+            "sandbox-cancel-flock",
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        assert await asyncio.to_thread(discover_started.wait, 2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set(), "cross-process lock released while discover worker was still running"
+
+        allow_discover.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+        assert create_calls == []
+    finally:
+        allow_discover.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
 async def test_acquire_async_lock_wait_uses_dedicated_executor(tmp_path, monkeypatch):
     """Per-thread lock waits should not consume the default asyncio.to_thread pool."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
