@@ -415,8 +415,10 @@ def refresh_mcp_cache_if_active() -> bool:
     performs only the staleness check:
 
     * it returns immediately when no MCP state was ever initialized and no
-      initialization is in flight, so deployments without MCP servers pay no
-      config-hashing cost;
+      initialization is in flight, so a process that never initialized MCP
+      tools pays no config-hashing cost. A process that did publish a cache
+      (including an empty one) still pays one stat+sha256 of the config file
+      per call to check that cache for staleness;
     * it invalidates an in-flight initialization (bumping the cache generation)
       so tools discovered under the superseded config cannot publish;
     * it retires the pool outside the lock, matching ``get_cached_mcp_tools``.

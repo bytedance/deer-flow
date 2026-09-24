@@ -258,8 +258,9 @@ def get_available_tools(
                 else:
                     # A change that disables the last MCP server must still retire
                     # the previously initialized cache and its pooled sessions.
-                    # This never initializes tools, so deployments without MCP
-                    # servers pay no config-hashing or discovery cost.
+                    # This never initializes tools: a process that never initialized
+                    # MCP pays no config-hashing or discovery cost, while one that
+                    # did still checks the existing cache for staleness.
                     refresh_mcp_cache_if_active()
                 if mcp_plugins is not None:
                     from deerflow.capabilities.runtime import filter_mcp_plugins
