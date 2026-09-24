@@ -15,6 +15,10 @@ request_admission:
   max_queue_size: 256
 ```
 
+Like every other field, these accept `$VAR` environment references; an integer
+field such as `requests_per_minute: $RPM` validates when the variable holds a
+decimal integer.
+
 Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
 at least one second apart, even after idle periods. The first call can proceed
 immediately. Async waiting is cancellable; a cancelled or expired waiter spends

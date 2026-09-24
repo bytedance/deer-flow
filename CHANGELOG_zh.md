@@ -727,6 +727,11 @@
 
 ### 修复
 
+- **配置：** `request_admission.requests_per_minute` 与 `max_queue_size` 现在与其他字段一样
+  接受 `$VAR` 环境变量引用。这两个字段是严格整数，布尔值与浮点数仍会被拒绝；但 `$VAR`
+  替换得到的永远是字符串，因此即使 `RPM=60`，`requests_per_minute: $RPM` 也会让整个配置
+  加载失败并报 "Input should be a valid integer"。现在以字符串形式到达的十进制整数字面量会在
+  严格校验之前被转换；其他字符串仍会被拒绝。
 - **调度器：** 在 SQLite 上，调度分发进行中暂停计划任务时不再丢失暂停状态。
   `release_dispatch_lease` 依据租约持有者做校验（暂停会清除该字段），但读取任务行时没有先获取
   SQLite 的写锁，因此过期的读取会通过校验，并把任务状态写回 `enabled` 且不改动 `next_run_at`，
