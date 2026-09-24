@@ -16,6 +16,7 @@ This chapter is organized by **what you see**. Each entry gives the cause, the f
 | `409` from a state/history/thread read | a full-mode process reading a delta thread | [HTTP 409 on a delta thread](#http-409-on-a-delta-thread) |
 | `503` with a restart-required message | config edited without restarting | [HTTP 503 after editing config.yaml](#http-503-after-editing-configyaml) |
 | A config edit seems ignored | mode and cadence are frozen at agent-build time | [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect) |
+| A history-cache edit seems ignored | the cache is built with the checkpointer at startup | [A history-cache change appears to have no effect](#a-history-cache-change-appears-to-have-no-effect) |
 | Regenerate or state endpoints return `500` | the run-runs router does not map the mode errors | [The regenerate or state endpoints return 500 instead of 409](#the-regenerate-or-state-endpoints-return-500-instead-of-409) |
 | Delta did not shrink storage | still in full mode, or the writes table was not counted | [Delta did not shrink storage](#delta-did-not-shrink-storage) |
 | Materialization got slower | snapshot cadence raised too far | [Materialization got slower after raising the cadence](#materialization-got-slower-after-raising-the-cadence) |
@@ -66,7 +67,17 @@ checkpoint_delta.snapshot_frequency is restart-required and cannot change in a r
 
 **Cause**: the mode is frozen process-globally the first time an agent is built, from the startup snapshot; the cadence is frozen alongside it. On the first freeze a client-supplied `configurable.__deerflow_checkpoint_channel_mode` is ignored, and once frozen any differing value fails closed. The embedded `DeerFlowClient` freezes mode and cadence the same way. Also note `checkpoint_delta.*` is ignored in full mode.
 
-**Fix**: restart every process that shares the checkpoint database; all of them must use the same value. Confirm the switch by reading a thread's marker (see [Observability](/docs/harness/checkpoints/observability)). Two keys are *not* frozen and need no restart: `database.checkpoint_graph_cache.accessor_graph_max` (re-read on each eviction check) and `database.checkpoint_cache.*` (performance-only).
+**Fix**: restart every process that shares the checkpoint database; all of them must use the same value. Confirm the switch by reading a thread's marker (see [Observability](/docs/harness/checkpoints/observability)). Only one related key is re-read at runtime: `database.checkpoint_graph_cache.accessor_graph_max` (on each eviction check). `database.checkpoint_cache.*` is *not frozen* — it cannot corrupt a thread and may differ across workers — but it is also not hot-reloadable; see [the next entry](#a-history-cache-change-appears-to-have-no-effect).
+
+### A history-cache change appears to have no effect
+
+**Symptom**: you changed `database.checkpoint_cache.max_entries`, switched `type` to `redis`, or edited `redis_url`, `ttl_seconds`, or `key_prefix`, and the running Gateway keeps its old behaviour — the old capacity, no redis traffic, the previous keys.
+
+**Cause**: the history cache is not hot-reloadable. `langgraph_runtime()` builds the checkpointer once from the startup `AppConfig` snapshot, and the delta saver is wrapped around whatever `make_checkpoint_cache()` returned at that moment (`backend/app/gateway/deps.py`, `backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py`), so backend, capacity, connection, TTL, and prefix are captured for the process's lifetime. The whole `database` section is registered startup-only for exactly this reason (`backend/packages/harness/deerflow/config/reload_boundary.py`).
+
+This is not the frozen-for-correctness case: nothing about the cache can corrupt a thread, results are identical with it disabled, and workers sharing one checkpoint database may safely run different cache settings. It is simply captured once.
+
+**Fix**: restart the Gateway after editing the section — and on the embedded or TUI path, restart that process, whose checkpointer singleton is also created once and reused. Only `database.checkpoint_graph_cache.accessor_graph_max` applies without a restart, because it is re-read on every eviction check.
 
 ### The regenerate or state endpoints return 500 instead of 409
 
@@ -177,7 +188,7 @@ database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer
 - A `max_entries: 1` LRU thrashes on every read — correct, but no hits.
 - The redis backend reports only `hits` and `misses`; its `evictions` and `entries` stay `0`.
 
-**Fix**: confirm delta mode and `max_entries > 0`, then read `compose_hits` and `full_walks` to see whether composition (not the top-level cache) is doing the work. Interpret `hits`/`misses` together with those two counters rather than alone. See [Cache counters](/docs/harness/checkpoints/observability).
+**Fix**: confirm delta mode and `max_entries > 0` — and restart before drawing conclusions from a settings change, because the cache is read only when it is built at startup. Then read `compose_hits` and `full_walks` to see whether composition (not the top-level cache) is doing the work. Interpret `hits`/`misses` together with those two counters rather than alone. See [Cache counters](/docs/harness/checkpoints/observability).
 
 ## Integration
 

@@ -86,13 +86,19 @@ import { Callout } from "nextra/components";
 
 ## 配置
 
-| 配置键 | 类型 | 默认值 | 范围 | 是否重启 | 说明 |
+缓存是**随 checkpointer 一起、每个进程构造一次**的。`langgraph_runtime()` 用启动时的 `AppConfig` 快照构造 checkpointer（`deps:463`），当时 `make_checkpoint_cache()` 返回什么，delta saver 就被 `CachedHistorySaver` 包住什么（`asyncprov:250-254`）。运行期不会再读本节，因此下表每个字段在整个进程生命周期内都保持启动时的取值。
+
+| 配置键 | 类型 | 默认值 | 范围 | 是否需重启才生效 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | 否 | `memory` 是进程内 LRU；`redis` 供多 worker 共享，仅异步/Gateway 路径 |
-| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | 否 | 内存后端 LRU 容量；`0` 表示禁用缓存 |
-| `database.checkpoint_cache.redis_url` | `str` 或 null | `null` | 任意 redis URL | 否 | 依次回退到 `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`、`REDIS_URL`、`redis://localhost:6379/0` |
-| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | 否 | redis 条目 TTL，是防泄漏网而非正确性机制；`0` 表示显式关闭过期 |
-| `database.checkpoint_cache.key_prefix` | `str` | `""` | 任意字符串 | 否 | 为空表示使用数据库身份派生的哈希 |
+| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | 是 | `memory` 是进程内 LRU；`redis` 供多 worker 共享，仅异步/Gateway 路径 |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | 是 | 内存后端 LRU 容量；`0` 表示禁用缓存 |
+| `database.checkpoint_cache.redis_url` | `str` 或 null | `null` | 任意 redis URL | 是 | 依次回退到 `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`、`REDIS_URL`、`redis://localhost:6379/0` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | 是 | redis 条目 TTL，是防泄漏网而非正确性机制；`0` 表示显式关闭过期 |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | 任意字符串 | 是 | 为空表示使用数据库身份派生的哈希 |
+
+<Callout type="warning">
+  「不冻结」不等于「热重载」。这些设置**在正确性意义上不冻结**：它们不会损坏线程，禁用缓存时结果完全相同，共享同一检查点数据库的多个进程也可以安全地使用不同取值。但运行中的进程不会读到改动——后端、容量、redis 连接、前缀与 TTL 都停留在启动时的取值——因此改动其中任何一项都需要重启 Gateway。内嵌与 TUI 路径同理：它们的 checkpointer 单例只在进程内创建一次并一直复用。只有 [`database.checkpoint_graph_cache.accessor_graph_max`](#编译后的-accessor-图缓存) 会在运行期重新读取。
+</Callout>
 
 ```yaml
 database:

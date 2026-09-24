@@ -87,13 +87,30 @@ The sync path mirrors this recursion and shares the same cache and depth budget.
 
 ## Configuration
 
-| Key | Type | Default | Range | Restart | Notes |
+The cache is built **with the checkpointer, once per process**. `langgraph_runtime()` constructs the
+checkpointer from the startup `AppConfig` snapshot (`deps:463`), and the delta saver is wrapped in
+`CachedHistorySaver` around whatever `make_checkpoint_cache()` returned at that moment
+(`asyncprov:250-254`). Nothing re-reads this section at runtime, so every field below keeps its
+startup value for the process's lifetime.
+
+| Key | Type | Default | Range | Restart to change | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | No | `memory` is a process-local LRU; `redis` is a shared cache for multi-worker deployments, async/Gateway path only |
-| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | No | LRU capacity of the memory backend; `0` disables the cache |
-| `database.checkpoint_cache.redis_url` | `str` or null | `null` | Any redis URL | No | Falls back to `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` |
-| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | No | Redis entry TTL, a leak safety net rather than a correctness mechanism; `0` disables expiry |
-| `database.checkpoint_cache.key_prefix` | `str` | `""` | Any string | No | Empty means the derived hash of the database identity |
+| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | Yes | `memory` is a process-local LRU; `redis` is a shared cache for multi-worker deployments, async/Gateway path only |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | Yes | LRU capacity of the memory backend; `0` disables the cache |
+| `database.checkpoint_cache.redis_url` | `str` or null | `null` | Any redis URL | Yes | Falls back to `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | Yes | Redis entry TTL, a leak safety net rather than a correctness mechanism; `0` disables expiry |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | Any string | Yes | Empty means the derived hash of the database identity |
+
+<Callout type="warning">
+  "Not frozen" is not "hot-reloadable". These settings are **not frozen** for correctness: they
+  cannot corrupt a thread, results are identical with the cache disabled, and processes sharing one
+  checkpoint database may safely run different values. But a running process never picks up an edit —
+  backend, capacity, Redis connection, prefix, and TTL all stay at their startup values — so changing
+  any of them needs a Gateway restart. The embedded and TUI paths behave the same way: their
+  checkpointer singleton is created once and reused for the life of the process. Only
+  [`database.checkpoint_graph_cache.accessor_graph_max`](#compiled-accessor-graph-cache) is re-read
+  at runtime.
+</Callout>
 
 ```yaml
 database:

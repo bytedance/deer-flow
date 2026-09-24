@@ -25,6 +25,7 @@ import { Callout } from "nextra/components";
 | `goalsrc` | `backend/packages/harness/deerflow/runtime/goal.py` |
 | `checkpoint_patches` | `backend/packages/harness/deerflow/checkpoint_patches.py` |
 | `syncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/provider.py` |
+| `asyncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py` |
 | `cacheprov` | `backend/packages/harness/deerflow/runtime/checkpoint_cache/provider.py` |
 | `threads` | `backend/app/gateway/routers/threads.py` |
 | `thread_runs` | `backend/app/gateway/routers/thread_runs.py` |
@@ -38,7 +39,7 @@ import { Callout } from "nextra/components";
 
 ## 配置键
 
-下表列出与检查点相关的全部 `database.*` 键，以及加载器实际强制执行的约束。「重启」表示该值被冻结进进程状态或已编译的通道表，运行中无法更改。
+下表列出与检查点相关的全部 `database.*` 键，以及加载器实际强制执行的约束。「重启」表示运行中的进程在启动时就捕获了该值——冻结进进程状态、编译进通道表，或在构造 checkpointer 及其历史缓存这类单例时绑定——因此改动要到该进程重启后才生效。
 
 | 键 | 类型 | 默认值 | 范围 | 重启 | 证据 |
 | --- | --- | --- | --- | --- | --- |
@@ -46,11 +47,11 @@ import { Callout } from "nextra/components";
 | `database.checkpoint_channel_mode` | `CheckpointChannelMode` = `Literal["full", "delta"]` | `"full"` | `full` \| `delta` | 是——首次使用时冻结；之后更改为不同值会抛 `CheckpointModeReconfigurationError` | `dbcfg:59`、`dbcfg:147-155`、`cmode:39-45` |
 | `database.checkpoint_delta.snapshot_frequency` | `int` | `10`（`DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY`） | `ge=1`（无上界） | 是——与模式一同冻结 | `dbcfg:61`、`dbcfg:74-84`、`cmode:53-69` |
 | `database.checkpoint_graph_cache.accessor_graph_max` | `int` | `64` | `ge=1` | 否——热重载，每次淘汰检查时重读 | `dbcfg:96-99`、`services:1133-1138` |
-| `database.checkpoint_cache.type` | `Literal["memory", "redis"]` | `"memory"` | `memory` \| `redis`；`redis` 仅限异步/Gateway | 否 | `dbcfg:113-116`、`syncprov:181-182` |
-| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0`；`0` 完全禁用缓存 | 否 | `dbcfg:117-121`、`cacheprov:76-84` |
-| `database.checkpoint_cache.redis_url` | `str \| None` | `None` | 任意 redis URL；省略时依次取 `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`、`REDIS_URL`、`redis://localhost:6379/0` | 否 | `dbcfg:122-125`、`cacheprov:19-23` |
-| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0`；`0` 显式关闭过期 | 否 | `dbcfg:126-135` |
-| `database.checkpoint_cache.key_prefix` | `str` | `""` | 任意字符串；空值则由数据库标识派生哈希 | 否 | `dbcfg:136-139`、`cacheprov:60-64` |
+| `database.checkpoint_cache.type` | `Literal["memory", "redis"]` | `"memory"` | `memory` \| `redis`；`redis` 仅限异步/Gateway | 是——构造 checkpointer 时捕获 | `dbcfg:113-116`、`syncprov:181-182`、`asyncprov:250-254` |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0`；`0` 完全禁用缓存 | 是——构造 checkpointer 时捕获 | `dbcfg:117-121`、`cacheprov:76-84`、`deps:463` |
+| `database.checkpoint_cache.redis_url` | `str \| None` | `None` | 任意 redis URL；省略时依次取 `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`、`REDIS_URL`、`redis://localhost:6379/0` | 是——构造 checkpointer 时捕获 | `dbcfg:122-125`、`cacheprov:19-23` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0`；`0` 显式关闭过期 | 是——构造 checkpointer 时捕获 | `dbcfg:126-135` |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | 任意字符串；空值则由数据库标识派生哈希 | 是——构造 checkpointer 时捕获 | `dbcfg:136-139`、`cacheprov:60-64` |
 | `database.checkpoint_delta_snapshot_frequency`（已废弃的扁平键） | `int` | 无——会迁移到嵌套键 | 迁移后为 `ge=1` | 不适用 | `dbcfg:218-254` |
 
 ### 各键影响什么
@@ -58,7 +59,7 @@ import { Callout } from "nextra/components";
 - `database.checkpoint_channel_mode` 决定 `messages` 通道的存储形态：整份取值（`full`）还是 LangGraph `DeltaChannel` 哨兵加逐步写入（`delta`）。它影响一个线程的每一次读写。
 - `database.checkpoint_delta.snapshot_frequency` 是 delta 模式下每 N 次逐步写入落一份完整 messages 快照的节奏。值越大检查点越小、物化越慢。`full` 模式下被忽略。
 - `database.checkpoint_graph_cache.accessor_graph_max` 限制进程缓存的已编译线程状态访问器图数量，键按 assistant、通道模式与快照节奏组合。与模式和节奏不同，它不需要重启：容量不同只会改变缓存何时淘汰，不会改变图的语义。
-- `database.checkpoint_cache.*` 只配置 delta 模式下的物化历史缓存。它纯属性能优化，永不冻结，允许多 worker 之间取值不同；memory 后端受 `max_entries` 约束，redis 后端受 `ttl_seconds` 与服务器自身 maxmemory 策略约束。
+- `database.checkpoint_cache.*` 只配置 delta 模式下的物化历史缓存。它纯属性能优化、永不冻结——没有任何正确性不变量要求跨进程一致，禁用缓存时结果也完全相同——但它**不是热重载**：缓存对象在启动时随 checkpointer 一起构造（`deps:463`、`asyncprov:250-254`），而 `reload` 把整个 `database` 段登记为 startup-only（`reload:47`），所以改动其中任何一项都需要重启。memory 后端受 `max_entries` 约束，redis 后端受 `ttl_seconds` 与服务器自身 maxmemory 策略约束。
 - `database.backend` 决定由哪种 saver 承载线程（`InMemorySaver`、SQLite 或 Postgres）。模式语义位于已编译的通道表而不是 saver，所以三种后端都支持两种模式。
 
 两个冻结键的 `Field(description=...)` 原文值得读一遍，因为它写明了跨进程规则：

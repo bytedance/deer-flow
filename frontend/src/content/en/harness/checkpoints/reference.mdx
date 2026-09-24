@@ -25,6 +25,7 @@ Evidence column values are repo-relative `path:line` references using the aliase
 | `goalsrc` | `backend/packages/harness/deerflow/runtime/goal.py` |
 | `checkpoint_patches` | `backend/packages/harness/deerflow/checkpoint_patches.py` |
 | `syncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/provider.py` |
+| `asyncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py` |
 | `cacheprov` | `backend/packages/harness/deerflow/runtime/checkpoint_cache/provider.py` |
 | `threads` | `backend/app/gateway/routers/threads.py` |
 | `thread_runs` | `backend/app/gateway/routers/thread_runs.py` |
@@ -38,7 +39,7 @@ The pinned dependency set referenced by the defect table is `langgraph 1.2.9`, `
 
 ## Configuration keys
 
-Every `database.*` key related to checkpoints, with the constraint the loader actually enforces. "Restart" means the value is frozen into process state or into a compiled channel table and cannot change in a running process.
+Every `database.*` key related to checkpoints, with the constraint the loader actually enforces. "Restart" means the running process captured the value at startup — frozen into process state, compiled into a channel table, or bound when a singleton such as the checkpointer and its history cache was constructed — so an edit does not take effect until that process restarts.
 
 | Key | Type | Default | Range | Restart | Evidence |
 | --- | --- | --- | --- | --- | --- |
@@ -46,11 +47,11 @@ Every `database.*` key related to checkpoints, with the constraint the loader ac
 | `database.checkpoint_channel_mode` | `CheckpointChannelMode` = `Literal["full", "delta"]` | `"full"` | `full` \| `delta` | Yes — frozen on first use; a later different value raises `CheckpointModeReconfigurationError` | `dbcfg:59`, `dbcfg:147-155`, `cmode:39-45` |
 | `database.checkpoint_delta.snapshot_frequency` | `int` | `10` (`DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY`) | `ge=1` (no upper bound) | Yes — frozen alongside the mode | `dbcfg:61`, `dbcfg:74-84`, `cmode:53-69` |
 | `database.checkpoint_graph_cache.accessor_graph_max` | `int` | `64` | `ge=1` | No — hot-reloadable, re-read on every eviction check | `dbcfg:96-99`, `services:1133-1138` |
-| `database.checkpoint_cache.type` | `Literal["memory", "redis"]` | `"memory"` | `memory` \| `redis`; `redis` is async/Gateway only | No | `dbcfg:113-116`, `syncprov:181-182` |
-| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0`; `0` disables the cache entirely | No | `dbcfg:117-121`, `cacheprov:76-84` |
-| `database.checkpoint_cache.redis_url` | `str \| None` | `None` | any redis URL; when omitted, `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` | No | `dbcfg:122-125`, `cacheprov:19-23` |
-| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0`; `0` explicitly disables expiry | No | `dbcfg:126-135` |
-| `database.checkpoint_cache.key_prefix` | `str` | `""` | any string; empty derives a hash of the database identity | No | `dbcfg:136-139`, `cacheprov:60-64` |
+| `database.checkpoint_cache.type` | `Literal["memory", "redis"]` | `"memory"` | `memory` \| `redis`; `redis` is async/Gateway only | Yes — captured when the checkpointer is built | `dbcfg:113-116`, `syncprov:181-182`, `asyncprov:250-254` |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0`; `0` disables the cache entirely | Yes — captured when the checkpointer is built | `dbcfg:117-121`, `cacheprov:76-84`, `deps:463` |
+| `database.checkpoint_cache.redis_url` | `str \| None` | `None` | any redis URL; when omitted, `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` | Yes — captured when the checkpointer is built | `dbcfg:122-125`, `cacheprov:19-23` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0`; `0` explicitly disables expiry | Yes — captured when the checkpointer is built | `dbcfg:126-135` |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | any string; empty derives a hash of the database identity | Yes — captured when the checkpointer is built | `dbcfg:136-139`, `cacheprov:60-64` |
 | `database.checkpoint_delta_snapshot_frequency` (deprecated, flat) | `int` | none — carried onto the nested key | `ge=1` after migration | n/a | `dbcfg:218-254` |
 
 ### What each key affects
@@ -58,7 +59,7 @@ Every `database.*` key related to checkpoints, with the constraint the loader ac
 - `database.checkpoint_channel_mode` selects how the `messages` channel is stored: whole-value checkpoints (`full`) or a LangGraph `DeltaChannel` sentinel plus per-step writes (`delta`). It affects every read and write of a thread.
 - `database.checkpoint_delta.snapshot_frequency` is the cadence at which delta mode writes a full messages snapshot every N per-step writes. Higher means smaller checkpoints and slower materialization. It is ignored in `full` mode.
 - `database.checkpoint_graph_cache.accessor_graph_max` caps the compiled thread-state accessor graphs a process caches, keyed per assistant, channel mode, and snapshot cadence. Unlike the mode and cadence it is not restart-required, because a different cap only changes when the cache evicts, never graph semantics.
-- `database.checkpoint_cache.*` configures the delta-mode materialized-history cache only. It is performance-only, never frozen, and safe to differ across workers; the memory backend is bounded by `max_entries`, the redis backend by `ttl_seconds` and the server's own maxmemory policy.
+- `database.checkpoint_cache.*` configures the delta-mode materialized-history cache only. It is performance-only and never frozen — no correctness invariant requires cross-process agreement, and results are identical with it disabled — but it is **not hot-reloadable**: the cache object is constructed with the checkpointer at startup (`deps:463`, `asyncprov:250-254`), inside a `database` section that `reload` registers as startup-only (`reload:47`), so changing any of these fields needs a restart. The memory backend is bounded by `max_entries`, the redis backend by `ttl_seconds` and the server's own maxmemory policy.
 - `database.backend` selects which saver serves the threads (`InMemorySaver`, SQLite, or Postgres). Mode semantics live in the compiled channel table rather than in the saver, so both modes work on all three backends.
 
 The verbatim `Field(description=...)` text for the two frozen keys is worth reading once, because it states the cross-process rule:

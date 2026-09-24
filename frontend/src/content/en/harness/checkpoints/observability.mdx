@@ -92,7 +92,7 @@ The delta history cache wraps the saver only in delta mode on the Gateway (async
 | `compose_hits` | ancestor levels resolved by composing from a warm ancestor (cached entry or snapshot-bearing parent) | wrapper |
 | `full_walks` | fallbacks to the raw inner saver's own walk (cold chain at the depth budget, disabled cache, or no target found) | wrapper |
 
-The redis backend reports only `hits` and `misses`; its `evictions` and `entries` stay at `0`. `max_entries: 0` disables the cache uniformly, and a disabled cache passes straight through to the raw saver without composing at all.
+The redis backend reports only `hits` and `misses`; its `evictions` and `entries` stay at `0`. `max_entries: 0` disables the cache uniformly, and a disabled cache passes straight through to the raw saver without composing at all. Changing any `database.checkpoint_cache.*` field takes a restart before a running Gateway reports different counters, because the cache is built with the checkpointer at startup; see [History Cache](/docs/harness/checkpoints/history-cache).
 
 ## Determining the mode
 

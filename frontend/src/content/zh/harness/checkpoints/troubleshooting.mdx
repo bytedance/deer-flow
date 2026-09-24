@@ -16,6 +16,7 @@ import { Callout } from "nextra/components";
 | 状态/历史/线程读接口返回 `409` | full 模式进程读取了 delta 线程 | [delta 线程上的 HTTP 409](#delta-线程上的-http-409) |
 | `503` 且带重启要求信息 | 改了配置但未重启 | [改完 config.yaml 后返回 HTTP 503](#改完-configyaml-后返回-http-503) |
 | 配置改动似乎被忽略 | 模式与节奏在构建 agent 时已冻结 | [配置改动似乎没有生效](#配置改动似乎没有生效) |
+| 历史缓存改动似乎被忽略 | 缓存在启动时随 checkpointer 一起构造 | [历史缓存的改动没有生效](#历史缓存的改动没有生效) |
 | 重新生成或状态接口返回 `500` | run-runs 路由没有映射模式错误 | [重新生成或状态接口返回 500 而不是 409](#重新生成或状态接口返回-500-而不是-409) |
 | delta 没有缩小存储 | 仍在 full 模式，或没统计 writes 表 | [delta 没有缩小存储](#delta-没有缩小存储) |
 | 物化变慢 | 快照节奏调得过高 | [提高节奏后物化变慢](#提高节奏后物化变慢) |
@@ -66,7 +67,17 @@ checkpoint_delta.snapshot_frequency is restart-required and cannot change in a r
 
 **原因**：模式在进程首次构建 agent 时按启动快照全局冻结；节奏随之一起冻结。首次冻结时，客户端传入的 `configurable.__deerflow_checkpoint_channel_mode` 会被忽略；一旦冻结，任何不同的值都会 fail-closed。内嵌 `DeerFlowClient` 也以同样方式冻结模式与节奏。另注意 `checkpoint_delta.*` 在 full 模式下被忽略。
 
-**处理**：重启共享该检查点数据库的每个进程；它们必须使用相同的值。通过读取线程标记确认切换（见[可观测性](/docs/harness/checkpoints/observability)）。有两个键**不**冻结、无需重启：`database.checkpoint_graph_cache.accessor_graph_max`（每次淘汰检查时重读）与 `database.checkpoint_cache.*`（纯性能策略）。
+**处理**：重启共享该检查点数据库的每个进程；它们必须使用相同的值。通过读取线程标记确认切换（见[可观测性](/docs/harness/checkpoints/observability)）。只有一个相关键会在运行期重新读取：`database.checkpoint_graph_cache.accessor_graph_max`（每次淘汰检查时）。`database.checkpoint_cache.*` **不冻结**——它不会损坏线程，也允许多 worker 取值不同——但它同样不是热重载，见[下一条](#历史缓存的改动没有生效)。
+
+### 历史缓存的改动没有生效
+
+**症状**：你改了 `database.checkpoint_cache.max_entries`、把 `type` 换成 `redis`，或改了 `redis_url`、`ttl_seconds`、`key_prefix`，但运行中的 Gateway 行为照旧——容量没变、没有 redis 流量、仍是原来的键前缀。
+
+**原因**：历史缓存不是热重载。`langgraph_runtime()` 用启动时的 `AppConfig` 快照只构造一次 checkpointer，delta saver 就被包在当时 `make_checkpoint_cache()` 返回的对象上（`backend/app/gateway/deps.py`、`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py`），因此后端、容量、连接、TTL 与前缀都被捕获到进程生命周期结束。整个 `database` 段被登记为 startup-only 正是这个原因（`backend/packages/harness/deerflow/config/reload_boundary.py`）。
+
+这不属于「为正确性而冻结」：缓存不会损坏线程，禁用后结果完全相同，共享同一检查点数据库的多个 worker 也可以安全地使用不同设置。区别只在于它只在启动时被读取一次。
+
+**处理**：改完该段后重启 Gateway；内嵌或 TUI 路径则重启那个进程，因为它的 checkpointer 单例同样只创建一次并一直复用。只有 `database.checkpoint_graph_cache.accessor_graph_max` 无需重启，因为它在每次淘汰检查时都会重读。
 
 ### 重新生成或状态接口返回 500 而不是 409
 
@@ -177,7 +188,7 @@ database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer
 - `max_entries: 1` 的 LRU 每次读都会抖动 —— 结果正确，但没有命中。
 - redis 后端只报告 `hits` 与 `misses`；它的 `evictions` 与 `entries` 恒为 `0`。
 
-**处理**：确认处于 delta 模式且 `max_entries > 0`，然后读 `compose_hits` 与 `full_walks`，判断是否由组合（而非顶层缓存）在承担工作。解释 `hits`/`misses` 时要与这两个计数器一起看，而不是单独看。见[缓存计数器](/docs/harness/checkpoints/observability)。
+**处理**：确认处于 delta 模式且 `max_entries > 0`——并且在根据设置改动下结论前先重启，因为缓存只在启动构造时被读取一次。然后读 `compose_hits` 与 `full_walks`，判断是否由组合（而非顶层缓存）在承担工作。解释 `hits`/`misses` 时要与这两个计数器一起看，而不是单独看。见[缓存计数器](/docs/harness/checkpoints/observability)。
 
 ## 集成
 

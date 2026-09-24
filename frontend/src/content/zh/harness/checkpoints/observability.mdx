@@ -91,7 +91,7 @@ delta 历史缓存只在 Gateway（异步）路径的 delta 模式下包裹 save
 | `compose_hits` | 由「热祖先」（已缓存条目或带快照的父级）组合出的祖先层级数 | wrapper |
 | `full_walks` | 回退到原始内层 saver 自行回走的次数（冷链到达深度预算、缓存被禁用、未找到目标） | wrapper |
 
-redis 后端只报告 `hits` 与 `misses`；它的 `evictions` 与 `entries` 恒为 `0`。`max_entries: 0` 统一禁用缓存，被禁用的缓存会直接透传给原始 saver，完全不做组合。
+redis 后端只报告 `hits` 与 `misses`；它的 `evictions` 与 `entries` 恒为 `0`。`max_entries: 0` 统一禁用缓存，被禁用的缓存会直接透传给原始 saver，完全不做组合。改动 `database.checkpoint_cache.*` 的任何字段后，运行中的 Gateway 需要重启才会报告不同的计数，因为缓存是随 checkpointer 在启动时构造的；见[历史缓存](/docs/harness/checkpoints/history-cache)。
 
 ## 判断模式
 
