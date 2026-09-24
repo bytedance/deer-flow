@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -87,6 +87,10 @@ class DuplicateMcpRemoteTaskError(RuntimeError):
     """The current user already tracks this server's remote task handle."""
 
 
+class McpTaskThreadMismatchError(RuntimeError):
+    """The submitting run no longer owns the current thread incarnation."""
+
+
 def _is_remote_task_unique_conflict(exc: IntegrityError) -> bool:
     original = exc.orig
     diagnostic = getattr(original, "diag", None)
@@ -96,6 +100,64 @@ def _is_remote_task_unique_conflict(exc: IntegrityError) -> bool:
     return "uq_mcp_tasks_user_server_remote" in message or "mcp_tasks.user_id, mcp_tasks.server_name, mcp_tasks.remote_task_id" in message
 
 
+def _matches_current_thread_incarnation(
+    *,
+    user_id: str,
+    thread_id: str,
+    thread_incarnation: str | None,
+):
+    """Atomically match task, current thread, and caller-captured incarnation."""
+    return (
+        select(ThreadMetaRow.thread_id)
+        .where(
+            McpTaskRow.thread_id == thread_id,
+            McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+            ThreadMetaRow.thread_id == thread_id,
+            ThreadMetaRow.incarnation.is_not_distinct_from(thread_incarnation),
+            or_(ThreadMetaRow.user_id == user_id, ThreadMetaRow.user_id.is_(None)),
+        )
+        .exists()
+    )
+
+
+async def _lock_current_thread_incarnation(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    thread_id: str,
+    thread_incarnation: str | None,
+) -> bool:
+    """Lock the expected thread incarnation until the transaction ends."""
+    conditions = (
+        ThreadMetaRow.thread_id == thread_id,
+        ThreadMetaRow.incarnation.is_not_distinct_from(thread_incarnation),
+        or_(ThreadMetaRow.user_id == user_id, ThreadMetaRow.user_id.is_(None)),
+    )
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite has no row-level SELECT lock. A no-op UPDATE acquires its
+        # database writer lock before we inspect or mutate an MCP task row.
+        # Raw SQL avoids firing ThreadMetaRow.updated_at's ORM onupdate hook.
+        result = await session.execute(
+            text(
+                """
+                UPDATE threads_meta
+                SET incarnation = incarnation
+                WHERE thread_id = :thread_id
+                  AND incarnation IS :thread_incarnation
+                  AND (user_id = :user_id OR user_id IS NULL)
+                """
+            ),
+            {
+                "thread_id": thread_id,
+                "thread_incarnation": thread_incarnation,
+                "user_id": user_id,
+            },
+        )
+        return result.rowcount == 1
+    result = await session.execute(select(ThreadMetaRow.thread_id).where(*conditions).with_for_update(read=True))
+    return result.one_or_none() is not None
+
+
 class McpTaskRepository:
     """Durable source of truth for long-running MCP task lifecycle state."""
 
@@ -103,9 +165,11 @@ class McpTaskRepository:
         self._sf = session_factory
 
     @staticmethod
-    def _row_to_dict(row: McpTaskRow) -> dict[str, Any]:
+    def _row_to_dict(row: McpTaskRow, *, include_internal: bool = False) -> dict[str, Any]:
         data = row.to_dict()
-        data.pop("thread_incarnation", None)
+        thread_incarnation = data.pop("thread_incarnation", None)
+        if include_internal:
+            data["_thread_incarnation"] = thread_incarnation
         for key in _TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -117,6 +181,7 @@ class McpTaskRepository:
         task_id: str,
         user_id: str,
         thread_id: str,
+        expected_thread_incarnation: str | None,
         run_id: str | None,
         tool_call_id: str | None,
         server_name: str,
@@ -160,19 +225,14 @@ class McpTaskRepository:
         )
         _record_event_if_changed(row, tracking_degraded=False, now=now)
         async with self._sf() as session:
-            matching_thread = select(ThreadMetaRow.incarnation).where(
-                ThreadMetaRow.thread_id == thread_id,
-                or_(ThreadMetaRow.user_id == user_id, ThreadMetaRow.user_id.is_(None)),
-            )
-            if session.get_bind().dialect.name == "sqlite":
-                # Keep lookup and write in one SQLite statement. A preliminary
-                # read would leave a delete/recreate window before the INSERT.
-                row.thread_incarnation = matching_thread.scalar_subquery()
-            else:
-                # FOR SHARE also conflicts with the FOR NO KEY UPDATE lock taken
-                # by an older writer's plain owner UPDATE. KEY SHARE would not,
-                # leaving a mixed-version ownership race before this INSERT.
-                row.thread_incarnation = (await session.execute(matching_thread.with_for_update(read=True))).scalar_one_or_none()
+            if not await _lock_current_thread_incarnation(
+                session,
+                user_id=user_id,
+                thread_id=thread_id,
+                thread_incarnation=expected_thread_incarnation,
+            ):
+                raise McpTaskThreadMismatchError("MCP task submission crossed a thread lifecycle boundary")
+            row.thread_incarnation = expected_thread_incarnation
             session.add(row)
             try:
                 await session.commit()
@@ -184,24 +244,47 @@ class McpTaskRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def get(self, task_id: str, *, user_id: str) -> dict[str, Any] | None:
+    async def get(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        thread_incarnation: str | None,
+    ) -> dict[str, Any] | None:
         async with self._sf() as session:
-            row = await session.get(McpTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return None
-            return self._row_to_dict(row)
+            stmt = select(McpTaskRow).where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.user_id == user_id,
+                McpTaskRow.thread_id == thread_id,
+                McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+                _matches_current_thread_incarnation(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    thread_incarnation=thread_incarnation,
+                ),
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return self._row_to_dict(row) if row is not None else None
 
     async def list_by_thread(
         self,
         thread_id: str,
         *,
         user_id: str,
+        thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
             McpTaskRow.thread_id == thread_id,
             McpTaskRow.user_id == user_id,
+            McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+            _matches_current_thread_incarnation(
+                user_id=user_id,
+                thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
+            ),
         )
         if active_only:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
@@ -245,7 +328,7 @@ class McpTaskRepository:
                 row.poll_attempt_count += 1
                 row.updated_at = now
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_dict(row, include_internal=True) for row in rows]
 
     async def apply_snapshot(
         self,
@@ -387,16 +470,31 @@ class McpTaskRepository:
         *,
         user_id: str,
         thread_id: str,
+        thread_incarnation: str | None,
         requested_at: datetime,
     ) -> dict[str, Any] | None:
         """Persist a user-scoped cancellation request without exposing the remote id."""
         async with self._sf() as session:
+            if not await _lock_current_thread_incarnation(
+                session,
+                user_id=user_id,
+                thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
+            ):
+                await session.rollback()
+                return None
             stmt = (
                 select(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
                     McpTaskRow.user_id == user_id,
                     McpTaskRow.thread_id == thread_id,
+                    McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+                    _matches_current_thread_incarnation(
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        thread_incarnation=thread_incarnation,
+                    ),
                 )
                 .with_for_update()
             )
@@ -447,7 +545,7 @@ class McpTaskRepository:
                 row.cancel_attempt_count = int(row.cancel_attempt_count or 0) + 1
                 row.updated_at = now
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_dict(row, include_internal=True) for row in rows]
 
     async def apply_cancel_snapshot(
         self,

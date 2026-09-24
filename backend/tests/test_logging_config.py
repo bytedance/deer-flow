@@ -711,8 +711,11 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
     assert spacey_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
     assert "QuerySecret" not in spacey_t1.getMessage()
 
-    # An absolute Location with an interior space stays whole for the
-    # generic absolute-URL pass (which stops its rest at whitespace).
+    # An absolute Location with an interior space must NOT be handed to the
+    # generic absolute-URL pass: that pass stops its ``rest`` at whitespace,
+    # so the signed tail after the first space used to survive (round 16).
+    # The slot collapses whole instead, like any other non-whole-coverable
+    # slot shape.
     spacey_absolute = logging.LogRecord(
         "urllib3.connectionpool",
         logging.DEBUG,
@@ -723,8 +726,25 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
         None,
     )
     assert filt.filter(spacey_absolute) is True
-    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted> page?sig=OtherSecret"
+    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> /<redacted>"
     assert "BearerSecret" not in spacey_absolute.getMessage()
+    assert "OtherSecret" not in spacey_absolute.getMessage()
+    assert "QuerySecret" not in spacey_absolute.getMessage()
+
+    # Same in the first slot, where the recursive urlopen frame carries the
+    # previous raw Location.
+    spacey_absolute_t1 = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("https://mirror.example/other page?sig=OtherSecret", "/private/x"),
+        None,
+    )
+    assert filt.filter(spacey_absolute_t1) is True
+    assert spacey_absolute_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
+    assert "OtherSecret" not in spacey_absolute_t1.getMessage()
 
     # The sandbox arrow false positive stays excluded: the prefix anchor,
     # not a strict tail, is what keeps non-Redirecting messages untouched.
@@ -739,10 +759,13 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
     relative-part) also admits slash-less relative references —
     ``download?sign=…`` and ``?sign=…`` kept their signed queries verbatim,
     and neither the slot rule nor the generic absolute-URL pass (which
-    needs a scheme) could see them. A slot is now kept ONLY when it starts
-    with an absolute hierarchical URL (scheme at position 0), so every
-    relative-reference form collapses and non-hierarchical schemes
-    (``data:…``) collapse too; network-path references collapse with any
+    needs a scheme) could see them. A slot is now kept ONLY when the generic
+    pass itself consumes it whole, so every relative-reference form collapses,
+    non-hierarchical schemes (``data:…``) collapse, a space-carrying
+    absolute slot collapses instead of leaking its signed tail (round 16),
+    and so does a slot the pass stops early on — a quote that reads as a
+    closing mark, or an empty host the ``host`` group never matches;
+    network-path references collapse with any
     userinfo credentials they carry."""
     from deerflow.logging_config import UrlRedactionFilter
 
@@ -758,6 +781,25 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
         ("/private/x", "//user:tok@cdn.example/private/x?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # network-path + userinfo
         # Absolute URLs are still kept whole for the generic absolute-URL pass.
         ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other?sig=OtherSecret", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
+        # ... but only when the generic pass consumes the slot WHOLE. Its
+        # ``host``/``rest`` groups stop at whitespace, so a space-carrying
+        # absolute slot leaks its signed tail if it is handed over (round 16).
+        ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other page?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),
+        ("https://mirror.example/other page?sig=OtherSecret", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", "https://mirror.example/a\tb?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # any whitespace, not just a space
+        ("/private/x", "https://mirror.example/a%20b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),  # percent-encoded space stays absolute
+        # The pass also stops early INSIDE a whitespace-free absolute slot, so
+        # the "is it absolute" test alone was still not sufficient (review of
+        # #5687): a quote that reads as a closing mark ends ``rest`` there,
+        # and an empty host before the first ``/?#`` matches nowhere at all.
+        ("/private/x", "https://mirror.example/a')b?sig=LeakedSigQuote", "Redirecting /<redacted> -> /<redacted>"),
+        ("https://mirror.example/a')b?sig=LeakedSigQuote", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", "https:///path?sig=LeakedSigEmptyHost", "Redirecting /<redacted> -> /<redacted>"),
+        ("https:///path?sig=LeakedSigEmptyHost", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", 'https://mirror.example/a")b?sig=LeakedSigDQuote', "Redirecting /<redacted> -> /<redacted>"),
+        # A quote embedded mid-path is NOT a closing mark, so that slot is
+        # still consumed whole and keeps its host for debuggability.
+        ("/private/x", "https://mirror.example/a'b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
     ]
     for t1, t2, expected in cases:
         record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, "Redirecting %s -> %s", (t1, t2), None)

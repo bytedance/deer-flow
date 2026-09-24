@@ -11,7 +11,7 @@ import inspect
 import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from deerflow_extension_api import (
@@ -24,7 +24,7 @@ from deerflow_extension_api import (
     TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
-from deerflow_extension_api.plugins import PluginContribution
+from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
 
 _Entry = tuple[str, Any]
 
@@ -117,8 +117,15 @@ class ExtensionRegistry(ExtensionRegistryContract):
             if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
                 raise ValueError("Backend actions require unique names and async handlers")
             names.add(action.name)
-        if contribution.frontend and (not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024):
-            raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        if isinstance(contribution.frontend, BrowserAssets):
+            from deerflow.extensions.browser_assets import load_browser_assets
+
+            contribution = replace(contribution, frontend=load_browser_assets(contribution.frontend))
+        elif isinstance(contribution.frontend, BrowserModule):
+            if not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024:
+                raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        elif contribution.frontend is not None:
+            raise ValueError("Unsupported browser transport")
         # Validate everything before writing the plugin bucket; loader rollback also
         # covers a later failure elsewhere in this package's install function.
         from deerflow.config.plugin_settings import validate_contribution

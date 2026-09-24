@@ -1,0 +1,104 @@
+---
+title: Developers and Integration
+description: What to know when using create_deerflow_agent or SubagentRuntime directly, the structured contracts, where extensions can observe and intervene, the security boundaries, and the background execution registry rules.
+---
+
+import { Callout } from "nextra/components";
+
+# Developers and Integration
+
+This chapter is for developers embedding the DeerFlow harness in their own programs, writing extensions, or consuming the frontend contracts.
+
+## Integrating create_deerflow_agent directly
+
+`create_deerflow_agent` builds a graph without the Gateway. Subagent-relevant points:
+
+- Enabling the `subagent` feature through `RuntimeFeatures` installs `SubagentLimitMiddleware` (concurrency and per-run total) and registers the `task` tool. You may pass a `SubagentRuntime`; it requires the `subagent` feature and cannot be combined with full middleware takeover.
+- `DurableContextMiddleware` is now **always** on the factory chain. It writes the delegation ledger, which the per-run total and the "already delegated" guidance depend on, and it re-injects `summary_text` after summarization. Older factory graphs lacked it, so those features silently did nothing.
+- `RuntimeFeatures(token_budget=True)` builds an enabled `TokenBudgetConfig`.
+- When the supplied `SubagentRuntime` owns a durable batch service, `batch_task`, `batch_status`, and `cancel_batch` bind to it; when a runtime is supplied without one, the batch tools are not registered. Only when no `SubagentRuntime` is passed at all do they fall back to the process-global submitter. An owned batch worker that has not been started raises at build time.
+
+### Runs without a run_id
+
+Under LangGraph Server, `langgraph dev`, or direct factory calls, the runtime context may have no `run_id`. The runtime handles this as follows:
+
+- Token budget and loop detection no longer lose their signals when `run_id` is empty: invocations without a non-empty string `run_id` are keyed by `Runtime.control`, and the stop reason is still stored under the context `run_id` as given (including `None`) so the executor can read it.
+- The per-run delegation total counts the whole thread's ledger without a `run_id` and logs a warning.
+- Extension task-lifecycle notifications are skipped entirely when `run_id` is empty, with a debug log.
+
+The LangGraph Server entrypoint must be a concrete module-level function; the harness provides `make_lead_agent`.
+
+### SubagentRuntime
+
+`SubagentRuntime` bundles the process-wide capacity with an optional durable batch service:
+
+- `SubagentRuntime.from_app_config(app_config, batch_repository=...)` builds it from configuration; a `SubagentRuntimeConfig` can also be passed directly.
+- `max_total_per_run` is range-checked at construction (1 to 50).
+- `start()` starts the owned batch worker; `stop()` drains running work without a bound under the lifecycle lock and propagates the caller's cancellation. It runs the batch service stop in a shielded, separately owned task, so it completes even when the caller cancels repeatedly.
+- `async with` is supported.
+
+Public exports: `deerflow.agents` provides `create_deerflow_agent`, `RuntimeFeatures`, `make_lead_agent`, `ThreadState`, and more; `deerflow.subagents` provides `SubagentConfig`, `SubagentExecutor`, `SubagentResult`, `SubagentRuntime`, `get_available_subagent_names`, `get_subagent_config`, and `list_subagents`. Both are lazy exports.
+
+## Structured contracts
+
+### Status contract
+
+`contracts/subagent_status_contract.json` is the fixture shared by backend and frontend (version 2):
+
+- Valid `subagent_status`: `completed`, `failed`, `cancelled`, `timed_out`, `polling_timed_out`.
+- Valid `subagent_stop_reason`: `token_capped`, `turn_capped`, `loop_capped`.
+- The tool result text is display content, not part of the contract.
+
+The backend writes metadata with `make_subagent_additional_kwargs` and reads it with `read_subagent_result_metadata`. The writer raises `ValueError` on an invalid status; the reader returns `None` for an unknown one and maps the legacy `max_turns_reached` to `turn_capped`. The frontend's `parseSubtaskResult` reads structured fields first and falls back to text prefixes only when no structured metadata exists at all. Additive fields (model name, token usage, receipts, acceptance) do not require a contract version bump.
+
+### Event contract
+
+`contracts/run_event_stream_contract.json` defines the schemas for `subagent.start` / `subagent.step` / `subagent.end` and the `subagent` category, and notes that durable batch workers emit no parent-run journal events.
+
+### The two ids of a background execution
+
+Every delegation has two ids, kept apart on purpose:
+
+- **`tool_call_id`**: the provider-generated tool call id, used for the `ToolMessage`, SSE events, persistence, and frontend correlation. It may repeat across runs.
+- **Execution id**: a server-generated UUID that is the sole key for the background registry, polling, cancellation, timeouts, and cleanup.
+
+The `ExtensionData.scope_id` extensions see is the `tool_call_id` (the execution id only when it is missing).
+
+## Extensions
+
+### Middleware contributions
+
+Extensions can contribute middlewares to both the Lead Agent and subagent chains at semantic placements: `MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, and `STANDARD`. The subagent chain uses `AgentScope.SUBAGENT` with the same anchor table as the Lead Agent, with one difference: `MODEL_PHYSICAL` prefers the inside of the system-message coalescing middleware. Ordering among `STANDARD` contributors is not guaranteed.
+
+### Task lifecycle
+
+Extensions implementing `TaskLifecycleContributor` receive `on_task_start(app_store, task_store, info)` and `on_task_stop(app_store, task_store, info, outcome)`. `TaskInfo` carries `task_id`, `run_id`, `thread_id`, `kind` (`lead` or `subagent`), `parent_task_id`, `agent_name`, and `resumed`. For a subagent, `parent_task_id` is the parent run id. Notifications are bounded by a timeout, and an extension exception never affects the subagent.
+
+### Assembly observation
+
+When an assembly observer is registered, the executor emits an assembly descriptor after building the graph (`prompt_template_id` is `deerflow-subagent-v1`). Its `effective_policies.subagents` is filtered by the caller's `allowed_subagents`, so the full catalog is never leaked to observers. Without an observer the whole step is skipped.
+
+## Security boundaries
+
+Several kinds of untrusted text reach the model prompt around subagents, and the runtime escapes or isolates each one:
+
+- A custom subagent's `description` is reduced to its first line and HTML-escaped before it is rendered into the `subagent_system` block, so it cannot close the block or forge framework tags.
+- Skill names, descriptions, tool lists, and locations are HTML-escaped in the skill index; on slash activation, attributes are escaped and the body is embedded XML-escaped.
+- The input sanitization middleware keeps a deny list of tag names shared by the subagent chain and the Lead Agent, including framework tags such as `system-reminder`, `subagent_system`, `skill_system`, `durable_context_data`, `report_contract`, `acceptance_criteria`, `tool_restrictions`, and `current_date`, plus generic words such as `system`, `instruction`, `override`, and `ignore`.
+- The remote-content sanitization middleware neutralizes the same tags in results from `web_fetch`, `web_search`, `image_search`, `web_capture`, and every MCP tool; local tool output (bash, file reads) is left untouched.
+- Acceptance criteria text enters only the task message; the system prompt carries a value-free note.
+- Tool receipts are written under a runtime-owned key that is always overwritten, so a tool cannot forge evidence; the `is_subagent` and `agent_id` of loop-detection events are decided by the server-installed recorder, and caller-supplied keys of the same name are stripped at both the Gateway and embedded-worker boundaries.
+
+## The background execution registry
+
+`SubagentExecutor` keeps a process-wide `_background_tasks` registry keyed by execution id, with a companion `Future` table. Its rules:
+
+- The context copy happens **before** registration, so a copy failure cannot strand a PENDING entry; a failed submission pops the entry.
+- `cleanup_background_task` removes terminal entries only; `force_cleanup_background_task` removes unconditionally and is a last resort.
+- `Future.cancel()` must be called outside the registry lock, because the completion callback re-acquires it.
+- After a cancellation or safety timeout the runtime schedules a deferred cleanup task that polls until the terminal state and then cleans up; the task is strongly referenced so garbage collection cannot swallow it. An unexpected exit of the polling coroutine, including a failed `task_started` emit, also requests cancellation and schedules cleanup.
+- Capacity slot release runs in its own task and is shielded from repeated cancellation, so the `_running` counter cannot leak permanently.
+
+## Where the tests live
+
+Backend tests for subagents are under `backend/tests/`, in files starting with `test_subagent_`, `test_task_tool_`, `test_worker_subagent_`, `test_acceptance_`, and similar; the frontend card and status-parsing tests are under `frontend/tests/unit/core/tasks/`. When changing a contract, update the JSON under `contracts/` and the tests on both sides together.

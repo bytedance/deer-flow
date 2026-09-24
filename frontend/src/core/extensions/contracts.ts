@@ -34,6 +34,8 @@ export type FrontendContribution = {
   namespace: string;
   module: string | null;
   entry: string | null;
+  /** Known transports: inline-v1 and assets-v1; unknown values fail per plugin. */
+  transport?: string | null;
   title: string;
   description: string;
   settings: ExtensionSettings;

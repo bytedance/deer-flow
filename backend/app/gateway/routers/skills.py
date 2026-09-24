@@ -505,12 +505,22 @@ async def get_custom_skill(skill_name: str, request: Request, config: AppConfig 
 async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        skills = storage.load_skills(enabled_only=False)
-        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+
+        def _load_response_parts() -> tuple[Skill | None, str | None]:
+            # Worker thread: load_skills walks every skill directory and
+            # read_custom_skill opens SKILL.md — blocking filesystem IO that
+            # scales with the number of installed skills (#5747).
+            storage = _get_user_skill_storage(config)
+            skills = storage.load_skills(enabled_only=False)
+            skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+            if skill is None:
+                return None, None
+            return skill, storage.read_custom_skill(skill_name)
+
+        skill, content = await asyncio.to_thread(_load_response_parts)
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=storage.read_custom_skill(skill_name))
+        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=content)
     except HTTPException:
         raise
     except Exception as e:
@@ -618,21 +628,36 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
 async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
-        storage = _get_user_skill_storage(config)
-        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+
+        def _read_rollback_history() -> tuple[SkillStorage, list[dict] | None]:
+            # Worker thread: storage construction, the existence probes, and the
+            # history-file read are blocking filesystem IO that must stay off the
+            # event loop — the same rule get_custom_skill_history applies above.
+            storage = _get_user_skill_storage(config)
+            if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+                return storage, None
+            return storage, storage.read_history(skill_name)
+
+        storage, history = await asyncio.to_thread(_read_rollback_history)
+        if history is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        history = storage.read_history(skill_name)
         if not history:
             raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
         record = history[body.history_index]
         target_content = record.get("prev_content")
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
-        storage.validate_skill_markdown_content(skill_name, target_content)
+        await asyncio.to_thread(storage.validate_skill_markdown_content, skill_name, target_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
-        skill_file = storage.get_custom_skill_file(skill_name)
-        current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+
+        def _read_current_content() -> str | None:
+            # Worker thread: the post-scan read of the file being replaced is
+            # blocking filesystem IO (#5747), same rule as the history read.
+            skill_file = storage.get_custom_skill_file(skill_name)
+            return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+
+        current_content = await asyncio.to_thread(_read_current_content)
         history_entry = {
             "action": "rollback",
             "author": "human",

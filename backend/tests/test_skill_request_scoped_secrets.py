@@ -597,12 +597,25 @@ class TestRequiredSecretsParsing:
 
         skill_file = self._write_skill(
             tmp_path,
-            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - name: REQUIRED_ONE",
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - name: EXPLICIT_REQUIRED\n    optional: false\n  - name: REQUIRED_ONE",
         )
         skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
         by_name = {s.name: s for s in skill.required_secrets}
         assert by_name["ERP_TOKEN"].optional is True
+        assert by_name["EXPLICIT_REQUIRED"].optional is False
         assert by_name["REQUIRED_ONE"].optional is False
+
+    @pytest.mark.parametrize("value", ["false", "true", "no", 1, [], {}, None])
+    def test_malformed_optional_fails_closed(self, value, caplog):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets(
+            [{"name": "ERP_TOKEN", "optional": value}],
+            Path("SKILL.md"),
+        )
+        assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=False),)
+        assert f"non-boolean optional value of type {type(value).__name__}" in caplog.text
+        assert "required-secrets entry 'ERP_TOKEN' as required" in caplog.text
 
     def test_invalid_env_name_entry_is_dropped(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file

@@ -301,3 +301,99 @@ def test_resolve_checkpointer_config_failure_fails_closed(monkeypatch):
     )
 
     assert resolve_checkpointer_config(object()) is None
+
+
+class _BlockingProbeConnection:
+    def __init__(self) -> None:
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.close_finished = asyncio.Event()
+
+    async def execute(self, *_args, **_kwargs):
+        return None
+
+    async def close(self) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.close_finished.set()
+
+
+async def _assert_probe_close_is_drained(probe_coro, connection: _BlockingProbeConnection, label: str) -> None:
+    probe = asyncio.create_task(probe_coro)
+    try:
+        await asyncio.wait_for(connection.close_started.wait(), 1)
+
+        probe.cancel("first cancellation")
+        await asyncio.sleep(0)
+        probe.cancel("second cancellation")
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert not probe.done(), f"readiness probe returned before its {label} connection closed"
+
+        connection.allow_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+        assert connection.close_finished.is_set()
+    finally:
+        connection.allow_close.set()
+        await asyncio.gather(probe, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_sqlite_probe_drains_connection_close_across_repeated_cancellation(monkeypatch):
+    import aiosqlite
+
+    connection = _BlockingProbeConnection()
+
+    async def fake_connect(*_args, **_kwargs):
+        return connection
+
+    monkeypatch.setattr(aiosqlite, "connect", fake_connect)
+
+    await _assert_probe_close_is_drained(
+        health_module._probe_sqlite_backend("/tmp/deerflow-health-probe.db"),
+        connection,
+        "SQLite",
+    )
+
+
+class _FakeProbeCursor:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def execute(self, *_args, **_kwargs):
+        return None
+
+
+class _BlockingPostgresProbeConnection(_BlockingProbeConnection):
+    def cursor(self):
+        return _FakeProbeCursor()
+
+
+@pytest.mark.anyio
+async def test_postgres_probe_drains_connection_close_across_repeated_cancellation(monkeypatch):
+    import types
+
+    connection = _BlockingPostgresProbeConnection()
+
+    class FakeAsyncConnection:
+        @classmethod
+        async def connect(cls, *_args, **_kwargs):
+            return connection
+
+    fake_psycopg = types.ModuleType("psycopg")
+    fake_psycopg.AsyncConnection = FakeAsyncConnection
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+
+    await _assert_probe_close_is_drained(
+        health_module._probe_postgres_backend(
+            "postgresql://user:pass@localhost:5432/deerflow",
+            "",
+        ),
+        connection,
+        "PostgreSQL",
+    )

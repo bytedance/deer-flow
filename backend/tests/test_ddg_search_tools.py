@@ -1,6 +1,7 @@
 """Unit tests for the DDGS community web search tool."""
 
 import json
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,60 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.community.ddg_search import tools
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "env_value", "call_args", "expected_count", "warns"),
+    [
+        pytest.param("$DDG_TEST_MAX_RESULTS", "3", {"max_results": 2}, 3, False, id="environment-variable"),
+        pytest.param("3", "3", {"max_results": 2}, 3, False, id="numeric-string"),
+        pytest.param(3, "3", {"max_results": 2}, 3, False, id="integer-config"),
+        pytest.param(None, "3", {"max_results": 2}, 2, False, id="call-argument"),
+        pytest.param(None, "3", {}, 5, False, id="default"),
+        pytest.param("$DDG_TEST_MAX_RESULTS", "abc", {"max_results": 2}, 5, True, id="invalid-env"),
+        pytest.param("$DDG_TEST_MAX_RESULTS", "", {"max_results": 2}, 5, True, id="empty-env"),
+        pytest.param("$DDG_TEST_MAX_RESULTS", "3.5", {"max_results": 2}, 5, True, id="fractional-env"),
+        pytest.param("$DDG_TEST_MAX_RESULTS", "0", {"max_results": 2}, 5, True, id="zero-env"),
+        pytest.param("$DDG_TEST_MAX_RESULTS", "-2", {"max_results": 2}, 5, True, id="negative-env"),
+        pytest.param(0, "3", {}, 5, True, id="zero-config"),
+        pytest.param(-2, "3", {}, 5, True, id="negative-config"),
+        pytest.param([], "3", {}, 5, True, id="invalid-config-type"),
+        pytest.param(None, "3", {"max_results": 0}, 5, True, id="zero-call-argument"),
+        pytest.param(None, "3", {"max_results": -2}, 5, True, id="negative-call-argument"),
+    ],
+)
+def test_web_search_tool_max_results_with_real_ddgs(monkeypatch, caplog, configured_limit, env_value, call_args, expected_count, warns) -> None:
+    """Exercise SDK count arithmetic and slicing without contacting search engines."""
+    from ddgs.ddgs import DDGS
+    from ddgs.results import TextResult
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.tool_config import ToolConfig
+
+    monkeypatch.setenv("DDG_TEST_MAX_RESULTS", env_value)
+    caplog.set_level(logging.WARNING, logger=tools.__name__)
+    raw_config = {"name": "web_search", "group": "web", "use": "deerflow.community.ddg_search.tools:web_search_tool"}
+    if configured_limit is not None:
+        raw_config["max_results"] = configured_limit
+    tool_config = ToolConfig.model_validate(AppConfig.resolve_env_variables(raw_config))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: tool_config))
+
+    rows = [TextResult(title=f"Result {i}", href=f"https://example.com/{i}", body=f"Snippet {i}") for i in range(10)]
+    engine = SimpleNamespace(provider="offline", name="offline", search=MagicMock(return_value=rows))
+    monkeypatch.setattr(DDGS, "_get_network_client", lambda self: None)
+    monkeypatch.setattr(DDGS, "_get_engines", lambda self, category, backend: [engine])
+
+    parsed = json.loads(tools.web_search_tool.invoke({"query": "Result", **call_args}))
+
+    assert "error" not in parsed
+    assert parsed["total_results"] == len(parsed["results"]) == expected_count
+    assert all(result["url"].startswith("https://example.com/") for result in parsed["results"])
+    engine.search.assert_called_once()
+    warnings = [record for record in caplog.records if record.name == tools.__name__ and record.levelno == logging.WARNING]
+    assert len(warnings) == int(warns)
+    if warns:
+        assert "max_results" in warnings[0].getMessage()
+        assert "using default 5" in warnings[0].getMessage()
 
 
 def test_resolve_ddgs_region_maps_worldwide_chinese_query_for_wikipedia() -> None:

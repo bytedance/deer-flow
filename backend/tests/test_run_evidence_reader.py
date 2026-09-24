@@ -4,9 +4,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from deerflow_extension_api import InvalidRunEvidenceCursor
+from deerflow_extension_api import ExtensionPrincipal, InvalidRunEvidenceCursor, require_run_evidence_reader, resolve_run_evidence_reader
 
-from deerflow.extensions.run_evidence import StoreRunEvidenceReader
+from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -188,6 +188,32 @@ async def test_reader_hides_runs_outside_scope_and_rejects_cursor_from_another_s
         await other.list_changed_runs(cursor=first.next_cursor, limit=1)
     assert await other.get_run_status(thread_id="thread-a", run_id="run-a") is None
     assert (await other.list_run_events(thread_id="thread-a", run_id="run-a", after_seq=None, limit=10)).items == ()
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [None, SimpleNamespace(user_id="user-1"), *[ExtensionPrincipal(user_id=value) for value in (None, 1, "", " \t", " user-1", "user-1 ", "\tuser-1\n")]],
+)
+def test_reader_factory_rejects_invalid_principals(principal):
+    factory = StoreRunEvidenceReaderFactory(MemoryRunStore(), MemoryRunEventStore())
+    with pytest.raises(ValueError, match="principal"):
+        factory.for_principal(principal)
+
+
+def test_request_resolver_binds_reader_to_principal_and_fails_when_unavailable():
+    runs = MemoryRunStore()
+    events = MemoryRunEventStore()
+    factory = StoreRunEvidenceReaderFactory(runs, events)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(deerflow_extension_run_evidence_reader_resolver=lambda _request: factory.for_principal(ExtensionPrincipal(user_id="user-1")))))
+
+    reader = resolve_run_evidence_reader(request)
+    assert isinstance(reader, StoreRunEvidenceReader)
+    assert reader._user_id == "user-1"
+
+    unsupported = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    assert resolve_run_evidence_reader(unsupported) is None
+    with pytest.raises(NotImplementedError, match="unavailable"):
+        require_run_evidence_reader(unsupported)
 
 
 @pytest.mark.asyncio
