@@ -38,14 +38,34 @@ class ModelInvocationScope:
     def __init__(self, source: str, grant: ModelInvocationGrant):
         self.source = source
         self.grant = grant.model_copy(deep=True)
-        self.semaphore: asyncio.Semaphore | None = None
+        self.budget: ModelInvocationBudget | None = None
 
     def bind(self, app_config: Any):
         from deerflow.extensions.model_invocation import HostModelInvoker
 
-        if self.semaphore is None:
-            self.semaphore = asyncio.Semaphore(self.grant.max_concurrency)
-        return HostModelInvoker(self.source, self.grant, self.semaphore, app_config)
+        if self.budget is None:
+            self.budget = ModelInvocationBudget(self.grant.max_concurrency)
+        return HostModelInvoker(self.source, self.grant, self.budget, app_config)
+
+
+class ModelInvocationBudget:
+    """Loop-owned admission shared by every service in one installation."""
+
+    def __init__(self, concurrency: int):
+        self.semaphore = asyncio.Semaphore(concurrency)
+        self.capacity = 2 * concurrency
+        self.admitted = 0
+        # Strong references keep abandoned, shielded provider work alive.
+        self.workers: set[asyncio.Task] = set()
+
+    def retain(self, task):
+        self.workers.add(task)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task):
+        self.workers.discard(task)
+        if not task.cancelled():
+            task.exception()  # Consume abandoned failures without exposing provider text.
 
 
 class ModelInvocationService:

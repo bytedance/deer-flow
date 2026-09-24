@@ -1386,7 +1386,9 @@ the global service reader.
 Extension services can optionally receive a [host model invoker](backend/docs/extension-model-invocation.md)
 (extension API 0.2.4+). Operators explicitly map allowed logical roles under
 `plugins[].host_access.model_invocation`; the host handles credentials, concurrency,
-timeouts, and schema-validated output. Without a grant the capability is `None`.
+  timeouts, and schema-validated output. Admission is bounded; timed-out provider work
+keeps its concurrency slot until completion, and schema validation runs in terminable
+child processes. Without a grant the capability is `None`.
 
 Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
 `required: true` makes load failure abort startup; otherwise failures are reported and

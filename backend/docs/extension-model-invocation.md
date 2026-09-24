@@ -37,7 +37,8 @@ the same Python entry point does not inherit its grant. Grants and model
 configuration are bound at service startup. As with all `plugins:` changes,
 changing the grant, source, or extension model configuration requires a Gateway
 restart. Startup failure revokes that service's handle. Shutdown revokes retained
-handles and cancels outstanding calls before invoking its `stop()` method.
+handles and cancels callers before invoking its `stop()` method. Already-running
+provider work retains its budget until it actually finishes; its result is discarded.
 
 This capability follows the trusted extension model: installed Python code already
 runs with Gateway privileges. It is not a sandbox or a per-user authorization API.
@@ -85,15 +86,26 @@ Invoke from the service's event loop. Messages support `system`, `user`, and
 `assistant` text, with 1–256 messages per call. `purpose` is an optional 1–128
 character tracing label, not a prompt or an authorization selector. Do not put
 secrets in it. The caller can shorten `timeout_seconds`, but cannot extend the
-host timeout. Waiting for concurrency capacity and provider construction count
-toward the same deadline. Cancellation propagates as `asyncio.CancelledError`
-and releases the concurrency slot.
+host timeout. Queueing, provider construction, schema-worker startup, and validation
+count toward the same deadline. Cancellation propagates as `asyncio.CancelledError`.
+Timeout and cancellation stop waiting promptly, but cannot terminate synchronous
+provider threads. Both synchronous and asynchronous provider calls therefore keep
+their concurrency and admission slots until the actual operation finishes. No
+additional provider request starts if construction finishes after its caller left.
+Configure provider-side timeouts as well: a stuck provider keeps its slot occupied.
+Stopping a service does not wait for those provider operations to finish.
 
 `response_schema` accepts inline JSON Schema Draft 2020-12 object schemas.
 References (`$ref`, `$dynamicRef`, `$recursiveRef`) and other schema dialects are
 rejected before dispatch; schema validation never fetches network resources.
 The host adds a JSON-only instruction and validates the returned text locally,
 so the contract does not depend on a provider's native structured-output feature.
+Schema checking and response validation each run in a short-lived isolated Python
+process using the host interpreter. This adds process startup overhead to structured
+calls. Expensive regexes or schema combinations cannot block the Gateway event loop
+or its GIL. On timeout/cancellation the host kills and reaps the child before
+releasing admission (pipe cancellation is polled every 50 ms). No schema-worker
+process is used for plain text calls.
 Malformed JSON, non-finite numbers, and schema violations are explicit failures;
 no partially populated success is returned. Batching, row-ID reconciliation,
 file handling, and workflow-specific checks belong to the extension.
@@ -115,11 +127,18 @@ source, logical role, and purpose.
 | `ModelOutputValidationError` | Malformed JSON or schema mismatch; a subclass of `ModelInvocationFailed` |
 
 All these derive from `ModelInvocationError`. Provider failures use a normalized
-message without the original exception chain. Normal caller cancellation remains
+message without the original exception chain. Host deadline expiry reports
+`Model invocation timed out`; a provider's own `TimeoutError` reports
+`Model provider timed out`. Normal caller cancellation remains
 `asyncio.CancelledError`, rather than being converted to an ordinary failure.
 
 Concurrency defaults to 2 (range 1–64), timeout to 60 seconds (maximum 600), and
-input/output character limits to 262144/65536 (maximum 1048576 each). Input
+input/output character limits to 262144/65536 (maximum 1048576 each). At most
+`2 * max_concurrency` calls are admitted per installation, including running,
+queued, and abandoned-but-still-running provider calls. Excess calls fail immediately
+with `ModelInvocationFailed("Model invocation capacity exceeded")`, before payload
+conversion or validation. Schema workers share the execution slots, so at most
+`max_concurrency` children can run per installation. Input
 counting includes the schema instruction. Output bounds apply to returned text
 after generation; configure the underlying model's token limits to bound provider
 generation costs. This is a per-installation, per-Gateway-process budget, not a

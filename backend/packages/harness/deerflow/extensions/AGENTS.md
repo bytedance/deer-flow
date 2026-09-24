@@ -283,10 +283,19 @@ app store, projected host policy, session factory, and optional read-only
 to each service via the host-only `ModelInvocationService` adapter. The loader captures
 one `ModelInvocationScope` per installation, not per `use` string, so duplicate sources
 cannot inherit one another's roles. Its semaphore is shared by that installation's
-services; failed-install positional rollback also removes its adapters. The adapter
+services; its admission ceiling is twice the concurrency limit, checked before
+payload processing. Provider work is shielded from caller cancellation and retains
+both budgets until actual completion, including synchronous LangChain executor calls
+and offloaded construction. Abandoned construction cannot dispatch a model request.
+Failed-install positional rollback also removes its adapters. The adapter
 receives startup config through `start_with_host`, while extensions receive only the
 neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.
-Failed start and stop revoke the service's handle and cancel queued/in-flight calls.
+Failed start and stop revoke the service's handle and cancel queued/in-flight
+callers; they do not release slots owned by still-running provider work. Structured
+schema checks and output validation run in terminable isolated Python children,
+with pipe I/O on admission-bounded dedicated threads (Windows selector-loop compatible,
+independent of a potentially saturated provider executor). Cancellation kills and
+reaps those children before releasing admission.
 Grants and model profiles are startup snapshots; changing them requires restarting the
 Gateway. Calls use the normal model factory and attributed tracing, return plain text,
 usage counts and optionally locally validated JSON objects, and never return raw model

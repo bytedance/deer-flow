@@ -153,10 +153,11 @@ async def test_concurrency_shared_across_services_and_queue_timeout(host):
 @pytest.mark.asyncio
 async def test_stop_revokes_retained_capability_and_cancels_inflight(host):
     started = asyncio.Event()
+    release = asyncio.Event()
 
     async def invoke(*args, **kwargs):
         started.set()
-        await asyncio.Event().wait()
+        await release.wait()
 
     host.model.ainvoke.side_effect = invoke
     loaded, services, _ = await host.start([GRANT])
@@ -168,6 +169,8 @@ async def test_stop_revokes_retained_capability_and_cancels_inflight(host):
         await task
     with pytest.raises(ModelInvocationUnavailable):
         await invoker.invoke(request())
+    release.set()
+    await asyncio.gather(*invoker._budget.workers)
 
 
 @pytest.mark.asyncio
@@ -259,12 +262,13 @@ async def test_invalid_timeout_rejected_before_provider(host, timeout):
 
 
 @pytest.mark.asyncio
-async def test_host_timeout_caps_request_and_cancels_provider(host):
+async def test_host_timeout_caps_request_and_preserves_running_provider(host):
     cancelled = asyncio.Event()
+    release = asyncio.Event()
 
     async def invoke(*args, **kwargs):
         try:
-            await asyncio.Event().wait()
+            await release.wait()
         finally:
             cancelled.set()
 
@@ -272,7 +276,9 @@ async def test_host_timeout_caps_request_and_cancels_provider(host):
     loaded, services, _ = await host.start([{**GRANT, "timeout_seconds": 0.05}])
     with pytest.raises(ModelInvocationFailed, match="timed out"):
         await services[0].deps.model_invoker.invoke(request(timeout_seconds=500))
-    assert cancelled.is_set()
+    assert not cancelled.is_set()
+    release.set()
+    await asyncio.wait_for(cancelled.wait(), 1)
     await stop_services(loaded)
 
 
@@ -337,3 +343,175 @@ async def test_failed_duplicate_install_does_not_grant_prior_service(monkeypatch
 def test_invalid_grants_rejected(grant):
     with pytest.raises(ValueError):
         ExtensionSpec(use="example:install", host_access={"model_invocation": grant})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_kind", ["timeout", "cancel", "stop"])
+async def test_sync_provider_retains_slot_until_thread_finishes(host, exit_kind):
+    import threading
+
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    calls = []
+
+    class SyncModel(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "blocked-sync-test"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            calls.append(1)
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(10)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    host.factory.return_value = SyncModel()
+    loaded, services, _ = await host.start([{**GRANT, "max_concurrency": 1}], services_per_install=2)
+    invoker = services[0].deps.model_invoker
+    first = asyncio.create_task(invoker.invoke(request(timeout_seconds=0.1 if exit_kind == "timeout" else 5)))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        if exit_kind == "cancel":
+            first.cancel()
+        elif exit_kind == "stop":
+            invoker.close()
+        with pytest.raises(ModelInvocationFailed if exit_kind == "timeout" else asyncio.CancelledError):
+            await first
+        with pytest.raises(ModelInvocationFailed, match="timed out"):
+            await services[1].deps.model_invoker.invoke(request(timeout_seconds=0.05))
+        assert len(calls) == 1, "timed-out synchronous requests still consume their concurrency slot"
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+    assert (await services[1].deps.model_invoker.invoke(request())).content == "ok"
+    await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+async def test_admission_limit_shared_and_rejects_before_payload_processing(host):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def invoke(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return AIMessage(content="ok")
+
+    host.model.ainvoke.side_effect = invoke
+    loaded, services, _ = await host.start([{**GRANT, "max_concurrency": 1}], services_per_install=2)
+    first = asyncio.create_task(services[0].deps.model_invoker.invoke(request()))
+    await started.wait()
+    queued = asyncio.create_task(services[1].deps.model_invoker.invoke(request()))
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(ModelInvocationFailed, match="capacity"):
+            await services[0].deps.model_invoker.invoke(request(timeout_seconds=0.05))
+        assert host.factory.call_count == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, queued)
+        await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_is_not_reported_as_host_deadline(host):
+    host.model.ainvoke.side_effect = TimeoutError("secret provider URL")
+    loaded, services, _ = await host.start([GRANT])
+    with pytest.raises(ModelInvocationFailed, match="provider timed out") as error:
+        await services[0].deps.model_invoker.invoke(request())
+    assert error.value.__context__ is None
+    assert "secret" not in str(error.value)
+    await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_kind", ["timeout", "cancel", "stop"])
+async def test_validation_deadline_does_not_block_event_loop(host, monkeypatch, exit_kind):
+    import time
+
+    from deerflow.extensions import model_invocation
+
+    processes = []
+    popen = model_invocation.subprocess.Popen
+
+    def track_process(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(model_invocation.subprocess, "Popen", track_process)
+    schema = {"type": "object", "properties": {"value": {"type": "string", "pattern": "^(a+)+$"}}}
+    host.model.ainvoke.return_value = AIMessage(content='{"value":"' + "a" * 30 + '!"}')
+    loaded, services, _ = await host.start([GRANT])
+    ticks = []
+    running = True
+
+    async def heartbeat():
+        while running:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    ticker = asyncio.create_task(heartbeat())
+    invoker = services[0].deps.model_invoker
+    task = asyncio.create_task(invoker.invoke(request(response_schema=schema, timeout_seconds=3)))
+    try:
+        if exit_kind != "timeout":
+            async with asyncio.timeout(3):
+                while len(processes) < 2:
+                    await asyncio.sleep(0.01)
+            if exit_kind == "cancel":
+                task.cancel()
+                # Repeated cancellation must not abandon the child cleanup.
+                asyncio.get_running_loop().call_later(0.01, task.cancel)
+            else:
+                invoker.close()
+        with pytest.raises(ModelInvocationFailed if exit_kind == "timeout" else asyncio.CancelledError):
+            await task
+        assert host.model.ainvoke.call_count == 1, "deadline must fire during response validation"
+        ticks.append(time.monotonic())
+        assert max(b - a for a, b in zip(ticks, ticks[1:])) < 0.3
+        assert len(processes) == 2
+        assert all(process.poll() is not None for process in processes)
+        assert invoker._budget.admitted == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        running = False
+        await ticker
+        await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_constructor_retains_slot_and_never_dispatches(host):
+    import threading
+
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def factory(*args, **kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(10)
+        return host.model
+
+    host.factory.side_effect = factory
+    loaded, services, _ = await host.start([{**GRANT, "max_concurrency": 1}])
+    invoker = services[0].deps.model_invoker
+    first = asyncio.create_task(invoker.invoke(request()))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        with pytest.raises(ModelInvocationFailed, match="timed out"):
+            await invoker.invoke(request(timeout_seconds=0.05))
+        assert host.factory.call_count == 1
+    finally:
+        release.set()
+        await asyncio.gather(*invoker._budget.workers, return_exceptions=True)
+        await stop_services(loaded)
+    host.model.ainvoke.assert_not_called()
