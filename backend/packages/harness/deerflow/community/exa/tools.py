@@ -16,12 +16,17 @@ def _coerce_positive_int(value: object, default: int, option: str) -> int:
     """Normalize a config value before handing it to the Exa SDK.
 
     ``$VAR`` references in config.yaml resolve to strings, and exa-py rejects a
-    string ``num_results`` outright, so every search would fail. Invalid values
-    (blank, non-numeric, zero or negative) warn and keep the default instead.
+    string ``num_results`` outright, so every search would fail. Only an integer
+    or an integer-form string is accepted: ``int()`` would silently truncate a
+    float such as an unquoted ``3.5`` and turn ``true`` into 1. Anything else
+    (blank, non-numeric, fractional, boolean, zero or negative) warns and keeps
+    the default instead.
     """
-    try:
-        count = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    elif isinstance(value, str) and value.strip().isdecimal():
+        count = int(value.strip())
+    else:
         count = 0
     if count <= 0:
         logger.warning("Invalid Exa %s=%r; using default %s", option, value, default)

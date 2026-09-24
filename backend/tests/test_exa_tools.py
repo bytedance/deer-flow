@@ -158,7 +158,7 @@ class TestWebSearchTool:
         assert sent["numResults"] == 10
         assert sent["contents"] == {"highlights": {"maxCharacters": 2000}}
 
-    @pytest.mark.parametrize("raw", [None, "", "many", "3.5", 0, -2])
+    @pytest.mark.parametrize("raw", [None, "", "many", "3.5", 3.5, 10.0, True, False, 0, -2, "-2"])
     def test_search_invalid_limits_fall_back_to_defaults(self, mock_exa_client, raw):
         """An unusable value warns and keeps the default instead of failing the search."""
         with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
