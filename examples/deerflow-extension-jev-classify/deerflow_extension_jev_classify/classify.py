@@ -25,9 +25,8 @@ logger = logging.getLogger(__name__)
 ENV_NAME = r"^[A-Za-z_][A-Za-z0-9_]*$"
 MAX_ITEMS = 300
 MAX_CATEGORIES = 32
-# Ids and category names are bounded in UTF-8 bytes, not characters: the host
-# measures tool output in bytes, and 300 results with 64-byte ids and labels
-# stay under its 64 KiB limit.
+# Bound ids and category names in both raw UTF-8 and JSON-encoded output bytes:
+# 300 results with 64-byte ids and labels stay under the host's 64 KiB limit.
 MAX_KEY_BYTES = 64
 MAX_REQUEST_BYTES = 256 * 1024
 MIN_BATCH_SECONDS = 0.5
@@ -48,7 +47,7 @@ INPUT_SCHEMA = {
             "type": "array",
             "minItems": 1,
             "maxItems": MAX_ITEMS,
-            "description": "Texts to classify, each with a stable id you choose (for CSV rows, the row number). Ids are at most 64 bytes.",
+            "description": "Texts to classify, each with a stable id you choose (for CSV rows, the row number). Ids are at most 64 bytes in UTF-8 and JSON output.",
             "items": {
                 "type": "object",
                 "properties": {"id": {"type": "string", "minLength": 1, "maxLength": MAX_KEY_BYTES}, "text": {"type": "string", "maxLength": 20000}},
@@ -60,7 +59,7 @@ INPUT_SCHEMA = {
             "type": "array",
             "minItems": 2,
             "maxItems": MAX_CATEGORIES,
-            "description": "Allowed labels, each with a one-line description. Names are at most 64 bytes.",
+            "description": "Allowed labels, each with a one-line description. Names are at most 64 bytes in UTF-8 and JSON output.",
             "items": {
                 "type": "object",
                 "properties": {"name": {"type": "string", "minLength": 1, "maxLength": MAX_KEY_BYTES}, "description": {"type": "string", "maxLength": 600}},
@@ -257,11 +256,16 @@ def _error(code: str, message: str) -> dict[str, Any]:
     return {"error": {"code": code, "message": message}}
 
 
+def _output_key_bytes(value: str) -> int:
+    """Bytes occupied by a string value in the host's JSON result, excluding quotes."""
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) - 2
+
+
 def _categories(raw: Any) -> dict[str, str] | None:
     categories: dict[str, str] = {}
     for entry in raw:
         name = entry["name"]
-        if not name.strip() or len(name.encode()) > MAX_KEY_BYTES or name in categories:
+        if not name.strip() or len(name.encode()) > MAX_KEY_BYTES or _output_key_bytes(name) > MAX_KEY_BYTES or name in categories:
             return None
         categories[name] = entry.get("description") or name
     return categories
@@ -288,11 +292,11 @@ async def classify_texts(payload: Mapping[str, Any], options: Options) -> dict[s
     """Label every item; failures are explicit per call or per item, never raised."""
     categories = _categories(payload["categories"])
     if categories is None:
-        return _error("invalid_categories", f"Category names must be unique, non-blank and at most {MAX_KEY_BYTES} bytes.")
+        return _error("invalid_categories", f"Category names must be unique, non-blank and at most {MAX_KEY_BYTES} bytes in UTF-8 and JSON output.")
     items = [dict(item) for item in payload["items"]]
     identifiers = [item["id"] for item in items]
-    if len(set(identifiers)) != len(identifiers) or any(not identifier.strip() or len(identifier.encode()) > MAX_KEY_BYTES for identifier in identifiers):
-        return _error("invalid_items", f"Item ids must be unique, non-blank and at most {MAX_KEY_BYTES} bytes.")
+    if len(set(identifiers)) != len(identifiers) or any(not identifier.strip() or len(identifier.encode()) > MAX_KEY_BYTES or _output_key_bytes(identifier) > MAX_KEY_BYTES for identifier in identifiers):
+        return _error("invalid_items", f"Item ids must be unique, non-blank and at most {MAX_KEY_BYTES} bytes in UTF-8 and JSON output.")
     if len(items) > options.max_items:
         return _error("too_many_items", f"At most {options.max_items} items per call; split the list and call again.")
     key = os.environ.get(options.jev_api_key_env if options.backend == "jev" else options.llm_api_key_env)

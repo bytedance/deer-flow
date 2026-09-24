@@ -103,9 +103,10 @@ carries a code such as `http_401`, `timeout`, `network`, `invalid_response`,
   surrounding whitespace is mapped to the name when that mapping is unambiguous.
 - At most `max_items` per call (default 200, hard limit 300), 2 to 32 categories,
   texts up to `max_text_chars` (default 2000). Ids and category names are at
-  most 64 bytes of UTF-8, so 300 results always fit the host's 64 KiB output
-  bound. Blank and over-long texts are reported, not sent. The host measures the
-  call input as JSON with non-ASCII escaped and rejects more than 256 KiB before
+  most 64 bytes in both UTF-8 and JSON-encoded output, so 300 results fit the
+  host's 64 KiB output bound. Blank and over-long texts are reported, not sent.
+  The host measures the call input as JSON with non-ASCII escaped and rejects
+  more than 256 KiB before
   the plugin runs, which is roughly 200,000 ASCII or 40,000 CJK characters per
   call; the tool description tells the agent to split longer lists.
 - The whole call is bounded by `deadline_seconds` (default 25, under the host's

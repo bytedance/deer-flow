@@ -73,3 +73,5 @@ compatibility; distinguish protocol assertions from observed live behavior.
 Pin the Jev example's outbound byte budget against captured HTTP request bodies.
 Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
 inputs that fit the host's separate input limit. Use offline transports.
+Check the host's JSON output bound with the maximum item count and keys that
+expand when escaped; preserving raw UTF-8 limits alone does not cover it.

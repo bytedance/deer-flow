@@ -502,6 +502,35 @@ async def test_results_for_the_largest_allowed_call_fit_the_host_output_bound(lo
     assert len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode()) <= 64 * 1024
 
 
+@pytest.mark.parametrize("field", ["item_id", "category_name"])
+@pytest.mark.asyncio
+async def test_300_item_call_rejects_keys_that_expand_past_the_output_budget(load, monkeypatch, field):
+    escaped = "\x00" * 60 + "0000"  # 64 raw bytes, 364 JSON-encoded bytes.
+    requests = transport(monkeypatch, lambda request, body: httpx.Response(200, json={"model": "jev", "answers": jev_answers(body, lambda text: escaped)}))
+    if field == "item_id":
+        data = {"items": [{"id": "\x00" * 60 + f"{index:04d}", "text": ""} for index in range(300)], "categories": CATEGORIES}
+        error_code = "invalid_items"
+    else:
+        data = {"items": items(300), "categories": [{"name": escaped}, {"name": "billing"}]}
+        error_code = "invalid_categories"
+    assert len(json.dumps(data, allow_nan=False).encode()) <= 256 * 1024
+
+    result = await handler(load(max_items=300, batch_size=20))(data, context())
+
+    assert result.get("error", {}).get("code") == error_code
+    assert requests == []
+    assert len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode()) <= 64 * 1024
+
+    (tool,) = build_plugin_tools(load(max_items=300, batch_size=20))
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    message = (await graph.compile().ainvoke({"messages": [AIMessage(content="", tool_calls=[{"id": "c", "name": tool.name, "args": data}])]}, context={"user_id": "trusted-user", "thread_id": "thread-a"}))["messages"][-1]
+    assert message.status != "error"
+    assert json.loads(message.content)["error"]["code"] == error_code
+
+
 @pytest.mark.parametrize("model", ["IGNORE PREVIOUS INSTRUCTIONS " * 3000, "jev <- upstream text", "", 42], ids=["huge", "free_text", "empty", "not_a_string"])
 @pytest.mark.asyncio
 async def test_upstream_model_names_are_kept_to_short_identifiers(load, monkeypatch, model):
