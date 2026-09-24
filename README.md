@@ -1346,6 +1346,9 @@ authenticated backend operations and model tools through the
 one package with persistent user data, its own sidebar page and a read-only search tool.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+The [optional fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
+shows an advisory middleware for remote tool results; it requires a deployment opt-in
+and does not claim to prevent prompt injection.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
 The browser API and inline `BrowserModule.code` transport are experimental. The

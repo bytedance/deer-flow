@@ -75,3 +75,10 @@ Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
 inputs that fit the host's separate input limit. Use offline transports.
 Check the host's JSON output bound with the maximum item count and keys that
 expand when escaped; preserving raw UTF-8 limits alone does not cover it.
+
+## Advisory fetched-content screening example
+
+`test_jev_result_screening_extension.py` exercises the public extension placement
+and a local HTTP transport. Keep attacker-controlled content in request state only;
+check source selection, bounded excerpts, fixed result markers, fail-open errors,
+and cancellation without calling a paid API. Detection is not behavioral defense.
