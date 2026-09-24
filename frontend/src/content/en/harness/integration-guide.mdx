@@ -36,6 +36,8 @@ The client is thread-safe and designed to be instantiated once and reused across
 The recommended integration pattern is streaming. `stream()` is a sync generator, so no asyncio is required — it gives you real-time access to each token and event as the agent produces it:
 
 ```python
+import json
+
 def run_agent(thread_id: str, user_message: str):
     for event in client.stream(
         message=user_message,
@@ -43,8 +45,11 @@ def run_agent(thread_id: str, user_message: str):
         model_name="gpt-4o",
         subagent_enabled=True,
     ):
-        # Process each streaming event
-        yield event
+        # `stream()` yields `StreamEvent` dataclasses, not strings. Serialise each
+        # one before it goes over the wire: Starlette calls `.encode()` on any
+        # chunk that is not already `str` / `bytes`, so yielding the dataclass
+        # raises `AttributeError` on the very first event.
+        yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
 
 # In a FastAPI handler:
 # from fastapi.responses import StreamingResponse
@@ -115,6 +120,8 @@ app.mount("/deerflow", gateway_app)
 Or use `DeerFlowClient` directly in your own FastAPI routes with streaming:
 
 ```python
+import json
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from deerflow.client import DeerFlowClient
@@ -126,7 +133,9 @@ client = DeerFlowClient()
 async def chat(thread_id: str, body: dict):
     def generate():
         for event in client.stream(message=body["message"], thread_id=thread_id):
-            yield f"data: {event}\n\n"
+            # Serialise the `StreamEvent` dataclass; a raw f-string of the object
+            # would ship its `repr()`, which no SSE client can parse.
+            yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 

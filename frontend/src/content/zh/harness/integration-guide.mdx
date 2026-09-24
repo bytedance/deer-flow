@@ -35,6 +35,8 @@ client = DeerFlowClient()
 推荐的集成模式是流式传输。`stream()` 是同步生成器，无需 asyncio，即可在 Agent 生成响应时实时访问每个 token 和事件：
 
 ```python
+import json
+
 def run_agent(thread_id: str, user_message: str):
     for event in client.stream(
         message=user_message,
@@ -42,8 +44,10 @@ def run_agent(thread_id: str, user_message: str):
         model_name="gpt-4o",
         subagent_enabled=True,
     ):
-        # 处理每个流式事件
-        yield event
+        # `stream()` 产出的是 `StreamEvent` 数据类实例，而不是字符串。发送前必须
+        # 先序列化：Starlette 会对非 `str` / `bytes` 的分块调用 `.encode()`，
+        # 直接产出数据类会在第一个事件上抛出 `AttributeError`。
+        yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
 
 # 在 FastAPI 处理器中：
 # from fastapi.responses import StreamingResponse
@@ -114,6 +118,8 @@ app.mount("/deerflow", gateway_app)
 或者在你自己的 FastAPI 路由中直接使用 `DeerFlowClient` 进行流式传输：
 
 ```python
+import json
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from deerflow.client import DeerFlowClient
@@ -125,7 +131,9 @@ client = DeerFlowClient()
 async def chat(thread_id: str, body: dict):
     def generate():
         for event in client.stream(message=body["message"], thread_id=thread_id):
-            yield f"data: {event}\n\n"
+            # Serialise the `StreamEvent` dataclass; a raw f-string of the object
+            # would ship its `repr()`, which no SSE client can parse.
+            yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
