@@ -382,6 +382,11 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
     ``close`` must cancel/retain the progress snapshot and detach runtime
     dependencies before re-raising, while still observing the detached write's
     eventual outcome.
+
+    It also pins the A->B ordering case: an event buffered *after* the detached
+    write must still be persisted, in order, by the same close drain. The close
+    drain owns the whole settle-and-buffer sequence, so B must never be lost
+    just because the caller's cancellation arrived while A was still in flight.
     """
     import deerflow.runtime.journal as journal_module
 
@@ -391,8 +396,10 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         def __init__(self) -> None:
             self.started = asyncio.Event()
             self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
 
         async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
             self.started.set()
             await self.release.wait()
             return list(batch)
@@ -435,6 +442,11 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         progress_task = journal._pending_progress_task
         assert progress_task is not None
 
+        # A second event is buffered after the bounded flush detached the first.
+        # The close drain owns both batches and must persist them in order.
+        journal._put(event_type="after.detach", category="trace", content="second")
+        assert [event["event_type"] for event in journal._buffer] == ["after.detach"]
+
         close_task = asyncio.create_task(journal.close())
         # Let ``close`` reach the detached-write drain, then interrupt it there.
         await asyncio.sleep(0.02)
@@ -449,6 +461,11 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         with pytest.raises(asyncio.CancelledError):
             await close_task
 
+        # Both batches persisted exactly once, in order; B was not dropped.
+        assert store.attempts == [["before.detach"], ["after.detach"]]
+        assert journal._buffer == []
+        assert journal.feed_generation == feed_before + 2
+
         # Detach ran even though the caller cancellation was re-raised.
         assert journal._closed is True
         assert journal._store is None
@@ -461,7 +478,6 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
 
         # The ambiguous durable write was supervised to its outcome before detach.
         assert journal._detached_write_tasks == {}
-        assert journal.feed_generation == feed_before + 1
     finally:
         store.release.set()
         if flush_task_added:
@@ -474,6 +490,187 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         detached = tuple(getattr(journal, "_detached_write_tasks", ()))
         if detached:
             await asyncio.gather(*detached, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_close_flush_reports_definite_failure_under_cancellation():
+    """A definite write failure survives caller cancellation instead of detaching.
+
+    The store blocks its first ``put_batch`` and then fails. Cancelling the close
+    caller while it is blocked must not turn the failed write into a successful
+    cancellation detach: the failure is reported, store and buffer stay attached
+    for a later retry, and the suppressed cancellation is balanced (``uncancel``
+    applies only to the cancellation actually received while joining).
+    """
+
+    class FailingOnceStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.fail_next = True
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            if self.fail_next:
+                self.fail_next = False
+                self.started.set()
+                await self.release.wait()
+                raise RuntimeError("durable write failed")
+            return list(batch)
+
+    store = FailingOnceStore()
+    journal = RunJournal("r-close-failure", "t-close-failure", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    observed: list[BaseException] = []
+    cancelling_after: list[int] = []
+
+    async def close_caller() -> None:
+        try:
+            await journal.close()
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(asyncio.current_task().cancelling())
+
+    close_task = asyncio.create_task(close_caller())
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+    close_task.cancel()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+    store.release.set()
+    await asyncio.wait_for(close_task, timeout=0.2)
+
+    # The definite failure is what the caller observes, not the cancellation.
+    assert len(observed) == 1
+    assert isinstance(observed[0], RuntimeError)
+    assert str(observed[0]) == "durable write failed"
+    # The received cancellation was suppressed, so its count was uncancelled.
+    assert cancelling_after == [0]
+
+    # Store, buffer and the failed batch stay attached for a retry.
+    assert journal._closed is False
+    assert journal._store is store
+    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert getattr(journal, "_close_owner_task", None) is None
+
+    # A later explicit close succeeds once the store recovers.
+    await asyncio.wait_for(journal.close(), timeout=0.2)
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    assert store.attempts == [["A"], ["A"]]
+
+
+@pytest.mark.anyio
+async def test_close_flush_double_cancellation_and_concurrent_join(monkeypatch):
+    """Two cancels plus a concurrent close share one drain owner and keep order.
+
+    Caller 1 is cancelled twice while the drain waits for A; caller 2 joins the
+    same close without being cancelled. Exactly one close owner must run, A and
+    B must persist once each in order, caller 1 must observe ``CancelledError``
+    and caller 2 must return normally.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    class HangingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.release.wait()
+            return list(batch)
+
+    store = HangingStore()
+    journal = RunJournal("r-close-shared", "t-close-shared", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    drain_starts = 0
+    original_owned_drain = journal._flush_until_settled_owned
+
+    async def counting_owned_drain():
+        nonlocal drain_starts
+        drain_starts += 1
+        return await original_owned_drain()
+
+    journal._flush_until_settled_owned = counting_owned_drain
+
+    joins: list[asyncio.Task] = []
+    both_joined = asyncio.Event()
+    original_await_owned = journal_module._await_owned_task
+
+    async def tracked_await_owned(task):
+        joins.append(task)
+        if len(joins) >= 2:
+            both_joined.set()
+        return await original_await_owned(task)
+
+    monkeypatch.setattr(journal_module, "_await_owned_task", tracked_await_owned)
+
+    caller1 = asyncio.create_task(journal.close())
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+    caller1.cancel()
+    caller1.cancel()
+    await asyncio.sleep(0)
+    assert not caller1.done()
+    assert caller1.cancelling() == 2
+
+    caller2 = asyncio.create_task(journal.close())
+    await asyncio.wait_for(both_joined.wait(), timeout=0.2)
+
+    # Both callers must share exactly one close drain owner.
+    assert drain_starts == 1
+    owner_task = journal._close_owner_task
+    assert owner_task is not None
+    assert joins == [owner_task, owner_task]
+
+    # B arrives while both callers are joined to the same owner.
+    journal._put(event_type="B", category="trace", content="second")
+    store.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller1
+    # R1: the plain re-raise path leaves the received cancellation count alone.
+    assert caller1.cancelling() == 2
+    await asyncio.wait_for(caller2, timeout=0.2)
+
+    assert store.attempts == [["A"], ["B"]]
+    assert drain_starts == 1
+    assert journal._buffer == []
+    assert journal._closed is True
+    assert journal._store is None
+
+
+@pytest.mark.anyio
+async def test_close_flush_store_self_cancellation_is_a_definite_failure():
+    """A store cancelling its own write is a definite failure, not caller cancellation."""
+
+    class SelfCancellingStore:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def put_batch(self, batch):
+            self.attempts += 1
+            raise asyncio.CancelledError("store cancelled its own write")
+
+    store = SelfCancellingStore()
+    journal = RunJournal("r-store-cancel", "t-store-cancel", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await journal.close()
+
+    assert "cancelled its own write" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, asyncio.CancelledError)
+    # The failed batch is recoverable: nothing was detached.
+    assert journal._closed is False
+    assert journal._store is store
+    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert store.attempts == 1
 
 
 @pytest.fixture

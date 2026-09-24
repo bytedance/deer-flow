@@ -31,9 +31,12 @@ Write-ownership invariants (keep these when changing buffering or progress):
   first, and a store cancelling its own write is reported as that failure instead
   of masquerading as caller cancellation.
 - Teardown: ``close(flush=False)`` keeps supervising an already-started write;
-  ``close(flush=True)`` detaches on success and on caller cancellation
-  (cancelling and retaining any progress snapshot first) before re-raising,
-  while only an ordinary write failure stays attached for a later retry.
+  ``close(flush=True)`` runs the whole settled drain *and* the dependency detach
+  in one owned task that every caller joins without abandoning it. Only a
+  successful drain detaches; a definite write failure is reported first and
+  leaves the store, the buffer and the progress callback attached for a later
+  retry. A caller cancellation is re-raised after the owned close's outcome is
+  applied, so it never turns a failed write into a successful detach.
 """
 
 from __future__ import annotations
@@ -340,6 +343,7 @@ class RunJournal(BaseCallbackHandler):
         self._active_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
         self._detached_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
         self._flush_lock = asyncio.Lock()
+        self._close_owner_task: asyncio.Task[None] | None = None
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1499,31 +1503,48 @@ class RunJournal(BaseCallbackHandler):
         self._first_human_msg = None
         self._llm_error_fallback_message = None
 
+    async def _close_owned(self) -> None:
+        """Own one complete close: the settled drain and the dependency detach.
+
+        Both halves run in this task with no intervening await, so a cancelled
+        ``close`` caller stops waiting without abandoning either. Only a
+        *successful* drain reaches the detach: a definite write failure
+        propagates with the store, the buffer and the progress callback still
+        attached, so a later ``close`` retries instead of discarding the tail of
+        the run event stream.
+        """
+        await self._flush_until_settled_owned()
+        self._detach_runtime_dependencies()
+
     async def close(self, *, flush: bool = True) -> None:
         """Release run-scoped references, optionally flushing buffered events."""
         if self._closed:
             return
         if flush:
-            # A failed terminal write returns its batch to ``_buffer``. Keep the
-            # store and all buffered state attached so a later close/flush can retry
-            # instead of silently discarding the tail of the run event stream.
-            #
-            # A caller cancellation is different: ``flush_until_settled`` re-raises
-            # it only after the write's outcome is handled, and that must still
-            # detach runtime dependencies. Cancel and globally retain any
-            # best-effort progress snapshot first (it must never block teardown),
-            # then detach and re-raise. An ordinary write failure is an
-            # ``Exception`` and deliberately falls through with the store and
-            # buffer attached for a later retry.
+            # Every concurrent ``close(flush=True)`` joins the same owned close,
+            # so the settled drain and the detach happen exactly once. The
+            # joining caller may be cancelled: it stops waiting without
+            # abandoning the owned close, and its cancellation is re-raised only
+            # after that close's outcome has been applied. A definite write
+            # failure is reported first (``_await_owned_task`` suppresses the
+            # received cancellation in its favour) and leaves the store and all
+            # buffered state attached for a later retry.
+            owner = self._close_owner_task
+            if owner is None or owner.done():
+                # Join an owner only while it is in flight: a completed owner
+                # never detaches again, so a later ``close()`` starts a fresh
+                # one that retries whatever a failed owner retained.
+                owner = asyncio.create_task(self._close_owned())
+                self._close_owner_task = owner
             try:
-                await self.flush_until_settled()
-            except asyncio.CancelledError:
-                progress_task = self._pending_progress_task
-                if progress_task is not None and not progress_task.done():
-                    self._cancel_and_retain_progress_task(progress_task)
-                self._detach_runtime_dependencies()
-                raise
-            self._detach_runtime_dependencies()
+                await _await_owned_task(owner)
+            finally:
+                if owner.done() and self._close_owner_task is owner:
+                    # A failed or cancelled close never detached. Drop it rather
+                    # than retain a failed task (and its traceback) as the
+                    # journal's close owner.
+                    if owner.cancelled() or owner.exception() is not None:
+                        self._close_owner_task = None
             return
 
         # A worker that lost its lease must detach without starting another
