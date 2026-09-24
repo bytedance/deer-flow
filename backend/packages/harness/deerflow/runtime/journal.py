@@ -20,28 +20,42 @@ Write-ownership invariants (keep these when changing buffering or progress):
   progress snapshot stays owned until it settles.
 - Deadline: ordinary ``flush()`` is bounded and returns ``False`` while a
   predecessor is still in flight; ``flush_until_settled()`` and
-  ``close(flush=True)`` wait without a deadline and raise instead of returning.
+  ``close(flush=True)`` drain without a deadline -- they settle buffer, detached
+  writes and threshold wrappers for as long as that takes, and raise instead of
+  returning ``False``.
 - Outcomes: success advances ``feed_generation``; only an explicitly failed or
   cancelled write prepends its batch once for retry; an unresolved write is never
   requeued, and caller cancellation re-raises after the outcome is handled.
+- Closed-state gate: every requeue site funnels through one ``_requeue_batch()``
+  helper, which discards the batch with a warning once ``_closed`` is set. A late
+  outcome -- a cancelled wrapper, a failed write, a detached write settling after
+  the lease was lost -- therefore cannot repopulate a journal whose store is gone.
 - Ownership of the settled drain: ``flush_until_settled()`` runs the drain in its
   own task and joins it without ever cancelling it, so a cancelled caller stops
   waiting without abandoning the drain. The received cancellation is re-raised
   only after the drain's outcome is applied; a definite write failure is reported
   first, and a store cancelling its own write is reported as that failure instead
   of masquerading as caller cancellation.
-- Teardown: ``close(flush=False)`` fences the store first, then cancels and
-  globally retains the pending progress snapshot before its first await, so a
-  caller cancelled again while a threshold wrapper stops cannot skip either
-  cleanup. An already-started write stays supervised; a wrapper that suppresses
-  its cancellation stays retained until its own outcome settles, and no new
-  durable write starts after the lease is lost. ``close(flush=True)`` runs the
-  whole settled drain *and* the dependency detach in one owned task that every
-  caller joins without abandoning it. Only a successful drain detaches; a
-  definite write failure is reported first and leaves the store, the buffer and
-  the progress callback attached for a later retry. A caller cancellation is
-  re-raised after the owned close's outcome is applied, so it never turns a
-  failed write into a successful detach.
+- Precedence while joining: ``_await_owned_task()`` treats only a
+  ``CancelledError`` actually delivered to its own wait as its caller's request,
+  and defers to a definite child failure. The joining caller then suppresses
+  exactly the requests it received (``uncancel()`` balanced against the count on
+  entry) and reports the failure, so a failed write never turns into a successful
+  detach and an already-handled stale request is never re-reported as new.
+- Teardown: ``close(flush=True)`` creates at most one ``_close_owned()`` owner --
+  the settled drain *and* the dependency detach, with no await between them -- and
+  every concurrent caller joins that same owner without abandoning it. A failed
+  or cancelled owner is dropped so a later ``close()`` retries what it retained,
+  while a successful one makes close idempotent. Only a successful drain
+  detaches; a definite write failure is reported first and leaves the store, the
+  buffer and the progress callback attached for a later retry, and a caller
+  cancellation is re-raised after the owned close's outcome is applied, so it
+  never turns a failed write into a successful detach. ``close(flush=False)``
+  fences the store first, then cancels and globally retains the pending progress
+  snapshot before its first await, so a caller cancelled again while a threshold
+  wrapper stops cannot skip either cleanup. An already-started write stays
+  supervised; a wrapper that suppresses its cancellation stays retained until its
+  own outcome settles, and no new durable write starts after the lease is lost.
 """
 
 from __future__ import annotations
