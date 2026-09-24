@@ -147,6 +147,10 @@ def test_denied_tool_does_not_touch_live_sandbox(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_denied_async_tool_and_restored_view_do_not_read(tmp_path, monkeypatch):
     runtime, _, image_file = _setup(tmp_path, monkeypatch, sandbox_allowed=False)
+    stale_context = ViewImageMiddleware._create_image_context_message([{"type": "image_url", "image_url": {"url": "data:image/gif;base64,stale"}}])
+    user_message = HumanMessage(id="view-image-context:user-authored", content="Keep this message")
+    original_request = _model_request(runtime, _image_metadata(image_file))
+    original_request = original_request.override(messages=[*original_request.messages, stale_context, user_message])
     with patch("builtins.open", side_effect=AssertionError("denied image read")):
         with pytest.raises(SandboxAuthorizationError):
             await view_image_tool.coroutine(runtime=runtime, image_path=IMAGE_PATH, tool_call_id="image-call")
@@ -154,8 +158,10 @@ async def test_denied_async_tool_and_restored_view_do_not_read(tmp_path, monkeyp
         async def handler(request):
             return request
 
-        request = await ViewImageMiddleware().awrap_model_call(_model_request(runtime, _image_metadata(image_file)), handler)
+        request = await ViewImageMiddleware().awrap_model_call(original_request, handler)
     assert _image_payloads(request) == []
+    assert stale_context not in request.messages
+    assert user_message in request.messages
 
 
 @pytest.mark.asyncio
