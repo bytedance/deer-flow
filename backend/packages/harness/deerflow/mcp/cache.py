@@ -867,12 +867,53 @@ def refresh_mcp_cache_if_active() -> bool:
     return retired
 
 
+def prepare_mcp_reconciliation(changed: Collection[str] | None) -> _PendingTeardown | None:
+    """Classify and apply an MCP reconciliation without running teardown.
+
+    This is the synchronous lifecycle-ownership transfer used by the Gateway
+    config writers. It must run inside the same worker-thread critical section
+    as the config write so a second writer cannot land before the new epoch or
+    removal tombstone is installed.
+
+    The caller MUST release every config-write lock and MUST NOT hold
+    ``_init_condition`` before calling :func:`finish_mcp_reconciliation` on the
+    returned pending teardown. This function never waits for detached owners.
+
+    Args:
+        changed: The server names whose effective configuration the caller just
+            changed. ``None`` reads and classifies the whole on-disk effective
+            MCP config against the applied baseline instead.
+
+    Returns:
+        The detached-owner teardown to finish, or ``None`` for a no-op.
+    """
+    with _init_condition:
+        if changed is None:
+            plan = _plan_cache_transition(fence_in_flight_initialization=True)
+        else:
+            plan = _plan_explicit_reconciliation(frozenset(str(name) for name in changed))
+        if plan is None:
+            return None
+        return _apply_reconciliation_locked(plan)
+
+
+def finish_mcp_reconciliation(pending: _PendingTeardown | None) -> None:
+    """Run detached-owner teardown outside every cache/pool lock.
+
+    In the Gateway config-write worker thread this runs inline. That is
+    intentional: the worker thread is not cancellable with the HTTP coroutine,
+    so the fence installed by :func:`prepare_mcp_reconciliation` is completed
+    even when the awaiting request is cancelled.
+    """
+    _run_pending_teardown(pending)
+
+
 def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
     """Reconcile pooled MCP sessions and the tool cache with the on-disk config.
 
-    This is the shared entry point for the Gateway's configuration-mutation
-    endpoints and for cross-process lazy detection, so both paths make the same
-    session-ownership decisions (I8).
+    This is the shared entry point for cross-process lazy detection and for
+    callers that need the synchronous prepare-and-finish behavior in one call,
+    so both paths make the same session-ownership decisions (I8).
 
     Args:
         changed: The server names whose effective configuration the caller just
@@ -883,16 +924,10 @@ def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
         True when MCP state was reconciled (tools cleared and/or servers
         retired), False for a no-op.
     """
-    pending_teardown = None
-    with _init_condition:
-        if changed is None:
-            plan = _plan_cache_transition(fence_in_flight_initialization=True)
-        else:
-            plan = _plan_explicit_reconciliation(frozenset(str(name) for name in changed))
-        if plan is None:
-            return False
-        pending_teardown = _apply_reconciliation_locked(plan)
-    _run_pending_teardown(pending_teardown)
+    pending = prepare_mcp_reconciliation(changed)
+    if pending is None:
+        return False
+    finish_mcp_reconciliation(pending)
     return True
 
 

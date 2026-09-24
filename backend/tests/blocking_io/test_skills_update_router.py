@@ -205,7 +205,7 @@ async def test_skill_and_mcp_config_writes_are_serialized(tmp_path: Path, monkey
 
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
-    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", lambda _changed: True)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", lambda _changed: None)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _tracking_reload)
 
     await asyncio.gather(
@@ -261,12 +261,12 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
 
     def _mcp_reconcile(_changed):
         mcp_reconciled.set()
-        return True
+        return None
 
     _patch_config_infra(monkeypatch, config_path, reload_hook=_skills_reload)
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
-    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", _mcp_reconcile)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", _mcp_reconcile)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _mcp_reload)
 
     skills_task = asyncio.create_task(update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()))
