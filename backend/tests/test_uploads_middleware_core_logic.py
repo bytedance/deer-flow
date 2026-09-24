@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -163,6 +164,30 @@ class TestFilesFromKwargs:
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
         assert mw._files_from_kwargs(msg) is None
+
+    def test_preserves_explicit_converted_markdown_filename(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+        (uploads_dir / "report_1.md").write_text("converted")
+        msg = _human("read", files=[{"filename": "report.pdf", "markdown_file": "report_1.md"}])
+
+        result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result[0]["markdown_file"] == "report_1.md"
+
+    @pytest.mark.parametrize("companion", [None, "", 42, [], {}, "../report.md", "sub/report.md", "sub\\report.md", "/report.md", "C:report.md", "report.pdf", "missing.md"])
+    def test_ignores_invalid_converted_markdown_metadata(self, tmp_path, companion):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+        (uploads_dir / "report.md").write_text("notes")
+        msg = _human("read", files=[{"filename": "report.pdf", "markdown_file": companion}])
+
+        result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result[0]["filename"] == "report.pdf"
+        assert "markdown_file" not in result[0]
 
 
 # ---------------------------------------------------------------------------

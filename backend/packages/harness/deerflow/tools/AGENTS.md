@@ -1,5 +1,12 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`list_uploaded_files` does not infer conversion ownership from matching filename
+stems. A user's `report.md` must remain discoverable beside `report.pdf`, including
+when the PDF belongs to the current run. Exclude current-run originals and their
+explicit `markdown_file` companions from normalized upload metadata. Historical
+companions (and companions from clients omitting metadata) can still appear;
+never guess ownership. Staging files, symlinks, filters, and limits retain their rules.
+
 `conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
 assembly opts in only with a host reader; default, bootstrap, embedded and
 subagent assembly withhold it. The tool requires the worker-owned

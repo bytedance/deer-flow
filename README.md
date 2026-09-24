@@ -1767,6 +1767,12 @@ can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
 acquire and sync. Leave the field unset for automatic detection; setting it
 incorrectly can make uploaded files unavailable inside the sandbox.
 
+Historical upload discovery keeps Markdown files visible beside same-stem
+documents: `report.md` is still listed when `report.pdf` exists. Converted
+Markdown files may also appear; the `list_uploaded_files` tool supports filename
+and extension filters to narrow the results. Current-run uploads and conversion
+companions explicitly identified by their upload metadata are excluded.
+
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
 ```

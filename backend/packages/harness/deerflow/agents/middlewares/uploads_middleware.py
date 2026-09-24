@@ -6,7 +6,7 @@ on demand via the ``list_uploaded_files`` tool.
 
 import logging
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -165,7 +165,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         The frontend sends uploaded file metadata in additional_kwargs.files
         after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
+        path (virtual path), status, and an optional markdown_file from conversion.
 
         Args:
             message: The human message to inspect.
@@ -188,14 +188,24 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
-            files.append(
-                {
-                    "filename": filename,
-                    "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                }
-            )
+            file_info = {
+                "filename": filename,
+                "size": int(f.get("size") or 0),
+                "path": f"/mnt/user-data/uploads/{filename}",
+                "extension": Path(filename).suffix,
+            }
+            # Preserve the exact companion returned by ingestion, never a guessed
+            # same-stem name: conversion may have chosen a collision suffix.
+            markdown_file = f.get("markdown_file")
+            if (
+                isinstance(markdown_file, str)
+                and Path(markdown_file).name == markdown_file
+                and PureWindowsPath(markdown_file).name == markdown_file
+                and Path(markdown_file).suffix.lower() == ".md"
+                and (uploads_dir is None or ((uploads_dir / markdown_file).is_file() and not (uploads_dir / markdown_file).is_symlink()))
+            ):
+                file_info["markdown_file"] = markdown_file
+            files.append(file_info)
         return files if files else None
 
     @override

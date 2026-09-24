@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import HumanMessage, ToolMessage
 
+from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
 from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
 
@@ -138,6 +139,55 @@ class TestListUploadedFiles:
         assert "new.txt" not in filenames
         assert result["total_count"] == 1
 
+    @pytest.mark.parametrize("sibling_name", ["report.pdf", "report.docx", "report.txt"])
+    def test_keeps_user_markdown_with_same_stem_sibling(self, tmp_path, sibling_name):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / sibling_name).write_bytes(b"document")
+        (uploads_dir / "report.md").write_text("# My own notes\n", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(runtime=_runtime(), _paths=_paths(tmp_path))
+
+        files_by_name = {file["filename"]: file for file in result["files"]}
+        assert set(files_by_name) == {sibling_name, "report.md"}
+        assert files_by_name["report.md"]["path"] == "/mnt/user-data/uploads/report.md"
+        assert result["total_count"] == 2
+
+    def test_finds_same_stem_markdown_before_result_limit(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.md").write_text("# My own notes\n", encoding="utf-8")
+        os.utime(uploads_dir / "report.md", (100, 100))
+        (uploads_dir / "report.pdf").write_bytes(b"document")
+        os.utime(uploads_dir / "report.pdf", (200, 200))
+        (uploads_dir / "other.md").write_text("# Other notes\n", encoding="utf-8")
+        os.utime(uploads_dir / "other.md", (300, 300))
+
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            query="report",
+            extensions=["md"],
+            include_outline=["report.md"],
+            max_results=1,
+            _paths=_paths(tmp_path),
+        )
+
+        assert [file["filename"] for file in result["files"]] == ["report.md"]
+        assert result["files"][0]["outline"][0]["title"] == "My own notes"
+        assert result["total_count"] == 1
+        assert "truncated" not in result
+
+    def test_current_run_sibling_does_not_hide_historical_markdown(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"document")
+        (uploads_dir / "report.md").write_text("# Previous notes\n", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(state_uploaded=[{"filename": "report.pdf"}]),
+            _paths=_paths(tmp_path),
+        )
+
+        assert [file["filename"] for file in result["files"]] == ["report.md"]
+        assert result["total_count"] == 1
+
     def test_excludes_staging_files(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "good.txt").write_bytes(b"good")
@@ -148,6 +198,30 @@ class TestListUploadedFiles:
         filenames = {f["filename"] for f in result["files"]}
         assert "good.txt" in filenames
         assert ".upload-active.part" not in filenames
+
+    @pytest.mark.parametrize("companion, historical", [("report.md", "older.md"), ("report_1.md", "report.md")])
+    def test_current_conversion_metadata_survives_middleware_and_expires_next_turn(self, tmp_path, companion, historical):
+        uploads_dir = _uploads_dir(tmp_path)
+        for filename in ["report.pdf", companion, historical]:
+            (uploads_dir / filename).write_text("document", encoding="utf-8")
+        os.utime(uploads_dir / historical, (100, 100))
+        middleware = UploadsMiddleware(base_dir=str(tmp_path))
+        runtime = _runtime()
+        message = HumanMessage(
+            content="Read this PDF",
+            additional_kwargs={"files": [{"filename": "report.pdf", "size": 8, "markdown_file": companion}]},
+        )
+        runtime.state = middleware.before_agent({"messages": [message]}, runtime)
+
+        result = _list_uploaded_files_impl(runtime=runtime, max_results=1, _paths=_paths(tmp_path))
+
+        assert [file["filename"] for file in result["files"]] == [historical]
+        assert result["total_count"] == 1
+        assert "truncated" not in result
+
+        runtime.state = middleware.before_agent({"messages": [HumanMessage(content="List earlier uploads")]}, runtime)
+        result = _list_uploaded_files_impl(runtime=runtime, _paths=_paths(tmp_path))
+        assert {file["filename"] for file in result["files"]} == {"report.pdf", companion, historical}
 
     def test_max_results_truncation(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
@@ -182,10 +256,11 @@ class TestListUploadedFiles:
 
         result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
 
-        assert len(result["files"]) == 1
-        assert "outline" in result["files"][0]
-        assert result["files"][0]["outline"][0]["title"] == "Heading 1"
-        assert result["files"][0]["outline"][1]["title"] == "Heading 2"
+        files_by_name = {file["filename"]: file for file in result["files"]}
+        assert set(files_by_name) == {"doc.pdf", "doc.md"}
+        for file in files_by_name.values():
+            assert file["outline"][0]["title"] == "Heading 1"
+            assert file["outline"][1]["title"] == "Heading 2"
 
     def test_include_outline_list(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
@@ -688,13 +763,13 @@ class TestListUploadedFilesNeutralization:
         # Structural integrity
         assert isinstance(result, dict)
         assert isinstance(result["files"], list)
-        assert len(result["files"]) == 1
-        assert result["total_count"] == 1
+        assert {file["filename"] for file in result["files"]} == {"evil.pdf", "evil.md"}
+        assert result["total_count"] == 2
         assert "truncated" not in result  # only present when truncated
 
-        f = result["files"][0]
-        assert f["size"] > 0  # numeric, unchanged
-        assert isinstance(f["outline"][0]["line"], int)  # line number, unchanged
+        for file in result["files"]:
+            assert file["size"] > 0  # numeric, unchanged
+            assert isinstance(file["outline"][0]["line"], int)  # line number, unchanged
 
         # Blocked tags in outline are still neutralized
         assert "&lt;system-reminder&gt;H&lt;/system-reminder&gt;" in self._result_text(result)
@@ -704,7 +779,7 @@ class TestListUploadedFilesNeutralization:
 
         text = json.dumps(result, ensure_ascii=False)
         parsed = json.loads(text)
-        assert parsed["total_count"] == 1
+        assert parsed["total_count"] == 2
 
     # -- 20.2.7: boundary markers neutralized --
 
@@ -758,7 +833,7 @@ def test_list_uploaded_files_toolmessage_neutralization(tmp_path):
     # Valid JSON round-trip
     parsed = json.loads(tool_message_content)
     assert "files" in parsed
-    assert len(parsed["files"]) == 1
+    assert {file["filename"] for file in parsed["files"]} == {"evil.pdf", "evil.md"}
 
     # Outline titles are neutralized
     assert "&lt;system-reminder&gt;INJECTED&lt;/system-reminder&gt;" in tool_message_content
@@ -838,8 +913,8 @@ def test_all_string_fields_in_result_are_neutralized(tmp_path):
     walk(result)
 
     # Sanity: the result is non-empty and well-formed
-    assert len(result["files"]) == 1
-    assert result["total_count"] == 1
+    assert len(result["files"]) == 2
+    assert result["total_count"] == 2
 
 
 # ---------------------------------------------------------------------------
