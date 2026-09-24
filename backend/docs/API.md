@@ -825,31 +825,31 @@ GET /api/skills/{skill_name}
 }
 ```
 
-#### Enable Skill
+#### Enable or Disable Skill
 
 ```http
-POST /api/skills/{skill_name}/enable
+PUT /api/skills/{skill_name}
+Content-Type: application/json
 ```
 
-**Response:**
+Requires an authenticated admin session.
+
+**Request Body:**
 ```json
 {
-  "success": true,
-  "message": "Skill 'pdf-processing' enabled"
+  "enabled": false
 }
 ```
 
-#### Disable Skill
-
-```http
-POST /api/skills/{skill_name}/disable
-```
-
-**Response:**
+**Response:** the updated skill. An unknown `skill_name` returns `404`.
 ```json
 {
-  "success": true,
-  "message": "Skill 'pdf-processing' disabled"
+  "name": "pdf-processing",
+  "description": "Handle PDF documents efficiently",
+  "license": "MIT",
+  "category": "public",
+  "enabled": false,
+  "editable": false
 }
 ```
 
@@ -1476,7 +1476,9 @@ curl -X POST http://localhost:2026/api/threads/abc123/uploads \
   -F "files=@document.pdf"
 
 # Enable skill
-curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
+curl -X PUT http://localhost:2026/api/skills/pdf-processing \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 
 # Stateless stream — no thread pre-creation
 curl -s -D - -N -X POST http://localhost:2026/api/langgraph/runs/stream \

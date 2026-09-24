@@ -233,7 +233,7 @@ conversation:
 MCP servers can be managed in several ways:
 
 - **Through the DeerFlow App UI**: the extensions panel shows connected MCP servers and lets you enable/disable them.
-- **Through the Gateway API**: `POST /api/extensions/mcp/{name}/enable` and `/disable`.
+- **Through the Gateway API**: `PATCH /api/mcp/config` with body `{"server_name": "<name>", "enabled": true}` (or `false`; admin only).
 - **By editing `extensions_config.json` directly**: useful for scripted or programmatic configuration.
 
 Changes are picked up automatically due to the file mtime-based cache invalidation.

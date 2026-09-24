@@ -141,6 +141,23 @@ To work with these files:
 `extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
+历史上传支持有界续页：`max_results` 默认 20、每页最多 100。
+返回 `next_cursor` 时，将其作为下一次调用的 `cursor`，并保留相同的
+`query` / `extensions`；末页没有 `next_cursor`。可在续页时调整每页数量和
+`include_outline`，大纲只针对当前页提取。结果按修改时间倒序、同时间按原始文件名
+排序；`total_count` 是完整过滤结果数，`omitted_summary` 只统计当前页之后剩余的文件。
+
+例如 250 个匹配附件可按 100 → 100 → 50 枚举。每页都排除本轮上传、staging、
+符号链接以及现有规则识别的转换 companion。规范化后的过滤条件、用户、线程、
+本轮上传排除集合或目录中的普通文件清单元数据改变时，旧游标返回
+`error: stale_cursor`；畸形或过长游标返回 `error: invalid_cursor`。
+两种情况都有 `restart_required: true`，应丢弃此前收集的页，省略 `cursor`
+重新开始，避免把两次不同枚举混合起来。
+
+游标仅用于一致性校验，不是授权凭据；工具仍从可信 runtime 解析当前用户和线程。
+每页重新扫描目录，校验文件名、大小及纳秒级修改/变更时间，不保存持久快照，
+不保证文件字节不变或扫描期间的原子快照，也不限制任意大目录的扫描开销。
+
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
