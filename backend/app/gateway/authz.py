@@ -513,24 +513,69 @@ class _PluginAuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
-def _plugin_app_config() -> AppConfig:
-    """Read the request-scoped config snapshot for a plugin decision.
+def _plugin_loaded_config() -> AppConfig | None:
+    """The configuration this host is running on, or ``None`` if it has none.
 
-    Every failure to read the configuration — a missing file, a file being
-    rewritten, an invalid document — is *unavailable*, never *disabled*: a live
-    Gateway cannot have started without a readable ``config.yaml`` (``lifespan``
-    loads it through this same accessor and fails hard otherwise), so absence
-    during a request means the configuration this process was running on became
-    unavailable. The error therefore propagates and the caller applies the
-    failure policy, instead of resolving to "no gate" and letting a protected
-    plugin action or management route through.
+    ``get_app_config()`` re-reads the file on every request (hot reload), so a
+    failed read needs the last successfully loaded value to tell a host that has
+    no configuration at all from one whose running policy just became
+    unreadable.
+    """
+    from deerflow.config.app_config import peek_loaded_app_config
+
+    return peek_loaded_app_config()
+
+
+def _plugin_config_failure_fail_closed() -> bool:
+    """Failure flag for a plugin decision whose configuration cannot be read.
+
+    * No loaded config: the host never ran on a configuration, and the
+      ``config.yaml``-less case returned no gate before reaching this call, so
+      this is a file that exists but cannot be read or validated right now. The
+      flag that would permit an allow is unreadable, so it fails closed
+      (review P1, round 1).
+    * A loaded config with authorization disabled: there is no gate to apply.
+    * A loaded config with authorization enabled: follow that policy's own
+      ``fail_closed`` (``True`` by default), so a host that lost the config it
+      is running on answers like any other authorization failure instead of
+      reading the loss as "disabled" (review P1, round 2).
+    """
+    loaded = _plugin_loaded_config()
+    if loaded is None:
+        return True
+    authz_config = getattr(loaded, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return False
+    return getattr(authz_config, "fail_closed", False) is True
+
+
+def _plugin_app_config() -> AppConfig | None:
+    """Read the config snapshot for a plugin decision.
+
+    ``None`` means this host has no configuration file *and* has never loaded
+    one, so there is no policy to apply — the same rule the route-scoped gates
+    use for environments without a ``config.yaml`` (CI runners, direct-call
+    tests, a host that mounts only the plugins router): authorization can only
+    be enabled through config.
+
+    A host running on a configuration never reads a failed load as "disabled".
+    Both the lost file (a hot reload, an atomic replace, a ConfigMap remount)
+    and a file that exists but cannot be read or validated right now propagate,
+    so the caller applies the failure policy of the policy it is running on
+    (:func:`_plugin_config_failure_fail_closed`).
     """
     from deerflow.config.app_config import get_app_config
 
-    return get_app_config()
+    try:
+        return get_app_config()
+    except FileNotFoundError:
+        if _plugin_loaded_config() is None:
+            logger.debug("No `config.yaml` and no loaded config; the plugin authorization gate is a no-op", exc_info=True)
+            return None
+        raise
 
 
-async def _plugin_app_config_async() -> AppConfig:
+async def _plugin_app_config_async() -> AppConfig | None:
     """Off-loop :func:`_plugin_app_config` for async request paths."""
     return await asyncio.to_thread(_plugin_app_config)
 
@@ -595,20 +640,24 @@ def _plugin_request_principal(request: Request, authz_config: AuthorizationConfi
     )
 
 
-def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig]:
+def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
     """Return ``(provider, principal, app_config)`` for plugin resources, for sync callers.
 
-    ``provider is None`` means authorization is disabled — the caller keeps
-    today's behavior. The same ``app_config`` snapshot that produced the provider
-    is returned so the enforcement layer never re-reads the configuration. Raises
-    ``_PluginAuthorizationUnavailable`` (carrying ``fail_closed``) when the config
-    is unreadable or the provider cannot be resolved.
+    ``provider is None`` means authorization is disabled for this host — the
+    caller keeps today's behavior; ``app_config is None`` means there is no
+    configuration at all. The same ``app_config`` snapshot that produced the
+    provider is returned so the enforcement layer never re-reads the
+    configuration. Raises ``_PluginAuthorizationUnavailable`` (carrying
+    ``fail_closed``) when the configuration this host is running on became
+    unreadable, or when the provider cannot be resolved.
     """
     try:
         app_config = _plugin_app_config()
     except Exception:
         logger.warning("App config unavailable for plugin authorization", exc_info=True)
-        raise _PluginAuthorizationUnavailable(fail_closed=True) from None
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
     authz_config = getattr(app_config, "authorization", None)
     if getattr(authz_config, "enabled", None) is not True:
         return None, None, app_config
@@ -620,7 +669,7 @@ def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvide
     return provider, _plugin_request_principal(request, authz_config), app_config
 
 
-async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig]:
+async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
     """Async ``(provider, principal, app_config)`` for plugin resources.
 
     Never returns the sync slot, and never performs synchronous config loading,
@@ -632,7 +681,9 @@ async def aresolve_plugin_authorization(request: Request) -> tuple[Authorization
         app_config = await _plugin_app_config_async()
     except Exception:
         logger.warning("App config unavailable for plugin authorization", exc_info=True)
-        raise _PluginAuthorizationUnavailable(fail_closed=True) from None
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
     authz_config = getattr(app_config, "authorization", None)
     if getattr(authz_config, "enabled", None) is not True:
         return None, None, app_config

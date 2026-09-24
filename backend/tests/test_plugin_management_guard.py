@@ -618,13 +618,13 @@ def test_installed_resolver_denies_when_the_config_cannot_be_read(host_app, monk
     assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
 
 
-def test_installed_resolver_denies_when_no_config_exists(host_app, monkeypatch):
-    """Review P1: an absent config.yaml at request time is unavailable, not disabled.
+def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
+    """A host that never had a config has no policy to apply: no gate.
 
-    A Gateway cannot start without a readable config (``lifespan`` loads it
-    through this same accessor and fails hard otherwise), so absence *during a
-    request* is the hot-reload / atomic-replace window: the policy that would
-    permit an allow is unreadable, and the resolver must not answer 'allowed'.
+    Same rule the route-scoped gates use (``_get_route_authorization_config``,
+    ``deerflow.authz.sandbox_authz.safe_app_config``): authorization can only be
+    enabled through config, so a ``config.yaml``-less host (CI runner, direct
+    call, a host that mounts only the plugins router) keeps today's behavior.
     """
 
     def absent_config():
@@ -635,12 +635,34 @@ def test_installed_resolver_denies_when_no_config_exists(host_app, monkeypatch):
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
+
+
+@pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])
+def test_installed_resolver_applies_the_running_policy_when_the_config_disappears(host_app, monkeypatch, fail_closed: bool, expected: bool):
+    """Review P1: a host that lost the config it is running on must not answer 'allowed'.
+
+    The configuration this process loaded decides the failure: an enabled policy
+    follows its own ``fail_closed`` (``True`` by default) instead of the read
+    failure being read as "authorization was never configured".
+    """
+    set_app_config(_app_config(fail_closed=fail_closed, roles={"user": {"plugin_management": {"allow": "*"}}}))
+
+    def absent_config():
+        raise FileNotFoundError("`config.yaml` file not found")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", absent_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
+
+    resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
+
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is expected
 
 
 @pytest.mark.asyncio
-async def test_installed_async_resolver_denies_when_no_config_exists(host_app, monkeypatch):
-    """The async resolver applies the same rule (``aresolve_plugin_authorization``)."""
+async def test_installed_async_resolver_denies_when_the_config_disappears(host_app, monkeypatch):
+    """The async resolver reaches the same answer through ``aresolve_plugin_authorization``."""
+    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
 
     def absent_config():
         raise FileNotFoundError("`config.yaml` file not found")
@@ -650,6 +672,21 @@ async def test_installed_async_resolver_denies_when_no_config_exists(host_app, m
 
     with pytest.raises(PermissionError):
         await arequire_plugin_management(_plain_request(app=host_app), NAMESPACE, scope="read")
+
+
+def test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_off(host_app, monkeypatch):
+    """The running policy decides: a loaded config with authorization off has no gate to apply."""
+    set_app_config(_app_config(enabled=False))
+
+    def absent_config():
+        raise FileNotFoundError("`config.yaml` file not found")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", absent_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
+
+    resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
+
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
 
 
 @pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])

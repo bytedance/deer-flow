@@ -274,9 +274,10 @@ async def write_permissions(namespace: str, request: Request):
   config file mid-write or briefly absent while an editor, a deploy or a
   ConfigMap mount replaces it, or a document that does not validate. The
   decision uses the config snapshot captured when the request's provider was
-  resolved, and an unavailable snapshot is a denial, never an implicit allow.
-  A Gateway only serves requests after it loaded a config, so request-time
-  absence is never "authorization was never configured".
+  resolved, and a host that is running on a configuration never reads such a
+  failure as "authorization is disabled": it follows the configured failure
+  policy, which denies under the default `fail_closed: true`. A host with no
+  configuration at all has no policy to apply, so the helper stays a no-op.
 - Use `arequire_plugin_management` from an async endpoint. `require_plugin_management`
   is the synchronous form for a FastAPI `def` endpoint, which FastAPI runs in
   its thread pool; calling it from an async endpoint would do the host's

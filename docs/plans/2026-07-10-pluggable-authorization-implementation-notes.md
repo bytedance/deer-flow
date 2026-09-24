@@ -590,32 +590,58 @@ Phase 1 最低验证要求：
   P2 —— `_deny_reason_code` 在 provider 校验的 `try` 之外遍历 `decision.reasons`，
   自定义 provider 返回 `AuthzDecision(allow=False, reasons=None)`（或任何不可迭代对象）时抛
   `TypeError`，把一次拒绝变成未捕获错误，而不是配置好的授权失败（403）。
-- **决策（P1，采纳审查建议的第二种修法）：** Gateway 侧不再区分「缺失」与「读不了」：任何配置读取
-  失败都算**不可用**，异常上抛，两个解析函数以 `_PluginAuthorizationUnavailable(fail_closed=True)`
-  失败关闭（能放行的那个开关本身读不到）。`(None, None, None)` 这条放行路径删除，解析三元组的
-  第三个元素由 `AppConfig | None` 收紧为 `AppConfig`，三个调用点（action 分发、sync/async
-  management resolver）只按 `provider is None` 判定「授权已关闭」。
-  *被取代的规则：* round 1 记录的「不存在 `config.yaml` → 今日行为，无门禁」。该分支在已启动的
-  Gateway 中不可达，且与决策层的 `authz.config_unavailable` 规则、以及已写进
-  `docs/full-stack-plugins.md` / `reference.mdx` 的「宿主读不到配置即拒绝」相矛盾。
+- **决策（P1，采纳审查建议的第一种修法）：** 用「这个进程是否在跑一份配置」区分「不可用」与「未配置」，
+  而不是用异常类型或无条件失败关闭：
+  - 读取失败且进程**从未加载过配置**（`peek_loaded_app_config() is None`；`deerflow.config.app_config`
+    新增只读访问器，覆盖 `get_app_config()` 成功缓存与 `set_app_config()` 注入两种来源）：授权只能由
+    配置开启，故**无门禁**放行——与同一文件里的 `_get_route_authorization_config()`
+    （`(FileNotFoundError, RuntimeError)` → disabled）和 `sandbox_authz.safe_app_config()`
+    （“no readable config ⇒ the sandbox gate is a no-op … CI runners and direct-call tests”）同一条规则。
+    挂载 plugins router 的 e2e 宿主（`backend/extension_test_fixtures/bookmark_plugin_gateway.py`）
+    正属此类。
+  - 读取失败且进程**正在跑一份配置**：这是「可用但当前读不到」，异常上抛，
+    `resolve_/aresolve_plugin_authorization` 以 `_PluginAuthorizationUnavailable(fail_closed=…)`
+    失败处理，标志由**那份配置自己**给出（`enabled` 非 `True` → 无门禁；enabled → 取该策略的
+    `fail_closed`，默认 `true`）。于是启用授权且 fail-closed 的宿主在窗口内返回 403 / `False`，
+    不再像以前那样被当成「授权从未开启」放行。
+  - 文件存在但读不了/解析不了（非 `FileNotFoundError`）：无已加载配置时沿用 round 1 的 fail-closed
+    （能放行的那个开关读不到）；有已加载配置时同样取该策略的 `fail_closed`。
+  *被取代的规则：* round 1 记录的「不存在 `config.yaml` → 今日行为，无门禁」，以及本轮中间版本的
+  「任何读取失败都无条件失败关闭（`fail_closed=True`）」。
+- **修正记录：** 本轮先按审查字面实现「缺失即无条件失败关闭」，本地与 CI e2e 立刻变红
+  （`frontend/tests/e2e/bookmark-plugin.spec.ts` 的 save action 由 200 变 403——该宿主本来就
+  没有 `config.yaml`），且与 `_get_route_authorization_config()`、`safe_app_config()` 的既有规则
+  冲突。随后改为上面的「按进程已加载的配置」判定：没有配置的宿主行为不变，丢失配置的宿主不再被
+  当成未配置。
 - **决策（P2）：** 拒绝码提取改为全函数：`reasons` 不可迭代时直接退化为 `authz.denied`，
   元素校验额外要求 `reason.code` 是非空 `str`。刻意**不**并入 `_validated_decision` 的「畸形判决」
   判定：`allow` 已是真正的 `bool`，这条判决本身是合法拒绝；若按畸形判决走 `fail_closed`，
   在 `fail_closed: false` 下会把明确拒绝翻成放行。
-- **证据：** 新增回归测试并做了反证（修复前必须变红）——
-  `test_installed_resolver_denies_when_no_config_exists`（True vs False）、
-  `test_installed_async_resolver_denies_when_no_config_exists`（未抛 `PermissionError`）、
-  `test_no_config_at_all_denies_the_action`（200 vs 403）、
-  `test_malformed_reasons_keep_the_denial[...]` / `test_async_malformed_reasons_keep_the_denial[...]`
+- **证据：** 新增/改写回归测试并做了反证（修复前必须变红）——
+  `test_installed_resolver_allows_when_no_config_exists`（无配置宿主：True）、
+  `test_installed_resolver_applies_the_running_policy_when_the_config_disappears[True/False]`、
+  `test_installed_async_resolver_denies_when_the_config_disappears`、
+  `test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_off`、
+  `test_a_lost_config_follows_the_running_policy[403/200]`、`test_no_config_at_all_keeps_todays_behavior`、
+  `test_peek_loaded_app_config_survives_a_missing_file`（文件删除后 `peek_loaded_app_config()`
+  仍返回已加载配置），以及 round 1 的 `test_unreadable_config_denies_the_action` /
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（非 `FileNotFoundError` 仍然 fail-closed）；
+  P2 侧 `test_malformed_reasons_keep_the_denial[...]` / `test_async_malformed_reasons_keep_the_denial[...]`
   （`TypeError: 'NoneType' object is not iterable`，`plugin_authz.py:113`）。
-  `tests/test_plugin_contributions.py` 的 action 路由用例原先依赖「进程里没有配置」，
-  现改为显式安装一份 `authorization.enabled: false` 的可读配置（门禁按文档是 no-op）。
-  插件相关 12 个测试文件 301 项、blocking-IO 163 项、`ruff check` 与 `format --check` 全绿。
-- **否决方案：** 保留 startup 快照（「最后一次成功读取的配置」）作为缺失时的回退。它要在 Gateway
-  侧新增全局状态，且当最后已知配置是 `enabled: false` 时窗口内又变成 fail-open；决策层与公开文档
-  已经规定「不可用即拒绝」，不引入第二套语义。
-- **兼容性：** 配置可读且 `authorization.enabled: false` 时行为不变（no-op）；只有「运行中配置
-  消失/读不了」由放行改为拒绝，与公开文档一致。
+  e2e 层面复现了 spec 的后端一半：拉起 `extension_test_fixtures.bookmark_plugin_gateway` 后
+  POST `/api/plugins/community.bookmarks/actions/save`，中间版本 `403`（与 CI 的 3 个 bookmark 用例
+  失败一致），最终版本 `200`。验证：配置模块测试 41 项、插件/extension + blocking-IO 429 项、
+  `ruff check` 与 `format --check` 全绿。
+- **否决方案：** ①「缺失即无条件失败关闭」：与既有 `safe_app_config` / `_get_route_authorization_config`
+  规则冲突，并打断 e2e 宿主的插件 action（见上）。②「Gateway 侧发布 startup 快照」：状态要手动接线、
+  且只反映启动那一刻的策略（热重载后的新策略不会生效），改用配置模块自己缓存的「最后一次成功加载」
+  更准确且无需额外生命周期钩子。
+- **兼容性：** 没有配置的宿主（CI runner、直接调用、只挂 plugins router 的宿主）行为完全不变；
+  配置可读且 `authorization.enabled: false` 时不变（no-op）；只有「运行中配置消失/读不了」由
+  静默放行改为按该策略的 `fail_closed` 处理（默认拒绝）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻风险已记录但未改：同一文件里的
+  `_get_route_authorization_config()`（model / skill / sandbox 路由门）对读取失败仍一律回退到
+  disabled，存在同类窗口；如需同样收紧应另开一条（影响面覆盖全部路由门，超出本轮范围）。
 - **延期：** 不变（工具链路 PR2、页面切片 PR3）。
 
 ### 新记录模板

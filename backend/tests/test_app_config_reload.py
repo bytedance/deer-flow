@@ -11,7 +11,7 @@ from pydantic import ValidationError
 import deerflow.config.app_config as app_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
-from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, peek_loaded_app_config, reset_app_config
 from deerflow.config.checkpointer_config import get_checkpointer_config, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
@@ -457,6 +457,39 @@ def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
         reloaded = get_app_config()
         assert reloaded.models[0].supports_thinking is True
         assert reloaded is not initial
+    finally:
+        reset_app_config()
+
+
+def test_peek_loaded_app_config_survives_a_missing_file(tmp_path, monkeypatch):
+    """A host running on a config keeps that value after the file disappears.
+
+    This is the distinction ``app.gateway.authz`` needs for the plugin
+    authorization gate: a failed ``get_app_config()`` under a host that has a
+    configuration means "the policy I am running on is unreadable right now",
+    not "authorization was never configured".
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config(config_path, model_name="model-a", supports_thinking=False)
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        assert peek_loaded_app_config() is None
+
+        get_app_config()
+
+        config_path.unlink()
+        with pytest.raises(FileNotFoundError):
+            get_app_config()
+
+        loaded = peek_loaded_app_config()
+        assert loaded is not None
+        assert loaded.models[0].name == "model-a"
     finally:
         reset_app_config()
 

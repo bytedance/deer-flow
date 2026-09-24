@@ -304,28 +304,35 @@ def test_unreadable_config_denies_the_action(plugin_app, monkeypatch):
     assert calls == []
 
 
-def test_no_config_at_all_denies_the_action(plugin_app, monkeypatch):
-    """Review P1: request-time absence of ``config.yaml`` is not 'disabled'.
+def test_no_config_at_all_keeps_todays_behavior(plugin_app):
+    """A host with no configuration has no policy to apply, so the route is unchanged."""
+    http, calls, _ = plugin_app
 
-    A Gateway cannot have started without a readable config, so reaching this
-    branch means the configuration the process was running on became
-    unavailable (a hot reload replacing the file, an operator edit). The policy
-    that would permit an allow is unreadable, so the action is denied.
+    assert http.post(ACTION_URL, json={"text": "hello"}).status_code == 200
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fail_closed,expected", [(True, 403), (False, 200)])
+def test_a_lost_config_follows_the_running_policy(plugin_app, monkeypatch, fail_closed: bool, expected: int):
+    """Review P1: a Gateway that lost the config it started on must not look "disabled".
+
+    The Gateway publishes the configuration it started with; when a later read
+    fails, that policy decides — ``fail_closed`` (the default) denies instead of
+    treating an unreadable config as authorization never having been configured.
     """
 
     def absent_config():
         raise FileNotFoundError("`config.yaml` file not found")
 
+    _use_authorization(fail_closed=fail_closed, roles={"user": {"plugin_actions": {"allow": "*"}}})
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", absent_config)
     monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
 
     http, calls, _ = plugin_app
-
     response = http.post(ACTION_URL, json={"text": "hello"})
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Plugin action not permitted for your role."}
-    assert calls == []
+    assert response.status_code == expected
+    assert len(calls) == (1 if expected == 200 else 0)
 
 
 def test_malformed_allow_denies_under_fail_closed(plugin_app, monkeypatch):
