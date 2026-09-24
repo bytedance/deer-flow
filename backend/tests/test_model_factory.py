@@ -1873,6 +1873,23 @@ def test_ollama_wizard_native_reasoning_survives_config_load_and_model_build(mon
     assert captured["reasoning"] is True
 
 
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_native_provider_reasoning_level_string_is_forwarded(monkeypatch, level):
+    """langchain-ollama accepts ``reasoning: low|medium|high`` (e.g. gpt-oss). Before the
+    contract field existed the string passed straight through; it still must."""
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="gpt-oss:20b", reasoning=level)
+    assert model.reasoning == level
+    assert model.supports_thinking is False
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=True)
+
+    assert captured["reasoning"] == level
+
+
 def test_native_provider_reasoning_false_is_forwarded(monkeypatch):
     model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="ollama", reasoning=False)
     captured: dict = {}

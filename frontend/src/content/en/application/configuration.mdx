@@ -151,7 +151,7 @@ models:
 
 #### Reasoning capabilities
 
-`supports_thinking` and `supports_reasoning_effort` only say whether a knob exists. When a provider's contract differs from DeerFlow's generic assumptions — thinking that cannot be turned off, or an effort vocabulary other than `minimal/low/medium/high` — declare a mapping-valued `reasoning` block instead. The two booleans are then derived from it, the chat UI offers only the values the model accepts, and every model call (chat, summarization, title generation, subagents) follows the same policy. Existing Ollama `reasoning: true` / `false` values remain native ChatOllama settings and do not opt into this contract.
+`supports_thinking` and `supports_reasoning_effort` only say whether a knob exists. When a provider's contract differs from DeerFlow's generic assumptions — thinking that cannot be turned off, or an effort vocabulary other than `minimal/low/medium/high` — declare a mapping-valued `reasoning` block instead. The two booleans are then derived from it, the chat UI offers only the values the model accepts, and every model call (chat, summarization, title generation, subagents) follows the same policy. Existing Ollama `reasoning: true` / `false` values, and the `low` / `medium` / `high` level strings gpt-oss style models take, remain native ChatOllama settings and do not opt into this contract.
 
 ```yaml
 models:

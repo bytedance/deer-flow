@@ -25,8 +25,12 @@ the legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
 `reject`, required-thinking only), the payload `dialect` (`auto` infers it from
 `when_thinking_enabled`), the reasoning `history` requirement, and an `effort`
 vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
-Boolean `reasoning: true` / `false` remains a native ChatOllama provider setting;
-the factory forwards it on the legacy path. When the block is present the booleans are derived from it and contradictory
+A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for
+gpt-oss style models) remains a native ChatOllama provider setting; the factory
+forwards it on the legacy path, and the assembly descriptor keeps it — like a
+declared contract's `dialect` / `history` — inside `model_parameters` so
+request-affecting reasoning settings move the fingerprint. When the block is
+present the booleans are derived from it and contradictory
 profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
 + an enable template, a `default` outside `values`, an explicit boolean that
 disagrees, an effort value at `effort.path` in the profile or in the

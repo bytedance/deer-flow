@@ -131,13 +131,13 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
-    reasoning: ReasoningCapabilities | bool | None = Field(
+    reasoning: ReasoningCapabilities | bool | str | None = Field(
         default=None,
         description=(
             "Declarative reasoning capability contract (thinking availability, accepted effort values, "
-            "payload dialect, reasoning-history requirement). A boolean preserves the legacy native "
-            "provider setting (e.g. ChatOllama reasoning: true); only a contract derives "
-            "supports_thinking / supports_reasoning_effort."
+            "payload dialect, reasoning-history requirement). A boolean or a string preserves the legacy native "
+            "provider setting (e.g. ChatOllama reasoning: true, or reasoning: high for gpt-oss levels); "
+            "only a contract derives supports_thinking / supports_reasoning_effort."
         ),
     )
     when_thinking_enabled: dict | None = Field(

@@ -88,6 +88,20 @@ def test_contract_unsupported_thinking_projects_false():
     assert model.supports_reasoning_effort is True
 
 
+@pytest.mark.parametrize("native", [True, False, "low", "medium", "high"])
+def test_native_provider_reasoning_values_load_as_legacy_profiles(native):
+    """``reasoning`` was an unrestricted provider kwarg before the contract existed;
+    ChatOllama's boolean and level-string forms must keep loading and stay legacy."""
+    model = _model(use="langchain_ollama:ChatOllama", reasoning=native)
+
+    assert model.reasoning == native
+    assert model.supports_thinking is False
+    assert model.supports_reasoning_effort is False
+    contract = resolve_reasoning_contract(model)
+    assert contract.source == "legacy"
+    assert contract.thinking == "unsupported"
+
+
 def test_contract_is_excluded_from_provider_kwargs_by_the_factory_exclusion_list():
     """The factory excludes ``reasoning`` explicitly; pin the field name so a rename cannot leak it."""
     from deerflow.models import factory as factory_module

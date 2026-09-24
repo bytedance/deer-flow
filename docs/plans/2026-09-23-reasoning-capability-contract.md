@@ -201,8 +201,12 @@ default such as `max` can be persisted.
 
 - No existing `config.yaml` changes meaning. A model without a mapping-valued
   `reasoning:` contract is `source: legacy` and follows the pre-existing factory
-  path. In particular, boolean `reasoning: true` / `false` remains a native
-  ChatOllama constructor setting and is forwarded on that path.
+  path. In particular, a boolean or level-string `reasoning` (`true` /
+  `false`, or `low|medium|high` for gpt-oss style models) remains a native
+  ChatOllama constructor setting and is forwarded on that path. The assembly
+  descriptor keeps that native value — and a declared contract — in
+  `model_parameters`, so request-affecting reasoning settings move the
+  fingerprint.
 - `supports_thinking` / `supports_reasoning_effort` remain in the config
   schema, the API, and the frontend types. They are derived when a contract is
   present and are the deprecation-window projection.

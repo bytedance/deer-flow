@@ -504,9 +504,10 @@ This release closes that milestone with **765 merged pull requests**.
   effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
   `low/high/max` effort control. Custom effort paths reject leftover generic
   effort keys, and the chat UI drops remembered contract-only levels when
-  switching to legacy models. Existing Ollama boolean `reasoning: true` /
-  `false` settings remain native provider options. Profiles without a mapping
-  contract keep their existing provider behavior.
+  switching to legacy models. Existing Ollama `reasoning: true` / `false` and
+  `low|medium|high` settings remain native provider options and stay in the
+  assembly fingerprint. Profiles without a mapping contract keep their existing
+  provider behavior.
   ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
