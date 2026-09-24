@@ -1403,3 +1403,29 @@ def test_manual_wechat_setup_remains_available_with_multiple_workers(monkeypatch
     assert result.status_code == 200
     assert app.state.channels_config["wechat"]["bot_token"] == "manual-token"
     restart.assert_awaited_once()
+
+
+@pytest.mark.parametrize("worker_env", [{"GATEWAY_WORKERS": ""}, {"WEB_CONCURRENCY": ""}, {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": ""}])
+def test_wechat_qr_routes_allow_blank_worker_env(monkeypatch, worker_env):
+    """A blank GATEWAY_WORKERS/WEB_CONCURRENCY means unset (single worker), not multi-worker.
+
+    ``docker run -e GATEWAY_WORKERS=`` and ``environment: [WEB_CONCURRENCY=${VAR}]`` with
+    VAR unset both arrive as an empty string. Parsing it as ``0`` used to fail the
+    single-worker gate and block every WeChat QR route with a misleading
+    "requests could land on different workers" 503.
+    """
+    from app.channels.wechat_qr_login import WechatQRLogin
+
+    for name, value in worker_env.items():
+        monkeypatch.setenv(name, value)
+    app = _make_app(_enabled_connections_config(), None)
+    login = WechatQRLogin()
+    session = {"id": "session", "status": "pending", "qrcode_content": "scan-url", "expires_in": 180}
+    login.start = AsyncMock(return_value=session)
+    app.state.wechat_qr_login = login
+
+    with TestClient(app) as client:
+        result = client.post("/api/channels/wechat/qr-login")
+
+    assert result.status_code == 200
+    login.start.assert_awaited_once()
