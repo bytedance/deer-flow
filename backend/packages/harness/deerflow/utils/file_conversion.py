@@ -179,7 +179,14 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
         try:
             await await_drained(run_file_io(md_path.write_text, text, encoding="utf-8"))
         except asyncio.CancelledError:
-            await await_drained(run_file_io(md_path.unlink, missing_ok=True))
+            try:
+                await await_drained(run_file_io(md_path.unlink, missing_ok=True))
+            except Exception:
+                # Cleanup must not shadow the cancellation: an unlink failure
+                # escaping this handler used to be swallowed by the broad
+                # handler below as an ordinary conversion failure, leaving
+                # both the caller's cancellation and the staging file behind.
+                logger.exception("Failed to remove partial conversion output %s after cancellation", md_path)
             raise
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
