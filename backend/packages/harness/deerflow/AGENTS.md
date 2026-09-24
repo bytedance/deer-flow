@@ -90,10 +90,6 @@ Marked `live`, it is excluded from `make test` and skipped in default CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Parse every dict-returning client method's output through its Gateway Pydantic model so missing required fields raise `ValidationError` in CI. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
-### AIO Cached Sandbox Health
-
-`sandbox.auto_restart` defaults to true. AIO checks tracked active and warm containers during acquire, off the event loop for async callers. `get()` and `get_scoped()` remain memory-only because async tool paths call them on the event loop. A definitive dead result uses the ownership-fenced unhealthy-sandbox teardown; disabling the option skips cached-container health checks.
-
 ### AIO Sandbox Network Policy
 
 Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
