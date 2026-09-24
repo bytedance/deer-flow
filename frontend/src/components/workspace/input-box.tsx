@@ -1960,7 +1960,9 @@ export function InputBox({
     (event: KeyboardEvent<HTMLElement>) => {
       // Same rule as the inline-skill editor: the catalog's navigation keys must
       // win over Enter-to-submit, but not mid-composition, where Enter belongs
-      // to the IME candidate rather than the list.
+      // to the IME candidate rather than the list. Safari's confirming Enter
+      // carries neither composition flag; PromptInputTextarea drops it before
+      // this handler runs.
       if (!isIMEComposing(event)) {
         handleSkillSuggestionKeyDown(event);
         if (event.defaultPrevented) {

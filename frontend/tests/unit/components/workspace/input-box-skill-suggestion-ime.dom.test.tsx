@@ -9,6 +9,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
+import { COMPOSITION_CONFIRM_ENTER_MS } from "@/lib/ime";
 
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
@@ -112,6 +113,37 @@ describe("InputBox skill suggestion IME handling", () => {
       screen.queryByRole("button", { name: "Remove /research" }),
     ).toBeNull();
     expect(textarea.value).toBe("/res");
+  });
+
+  it("does not apply a suggestion for the Enter that follows compositionend", () => {
+    const { container } = renderComposer("thread-ime-composition-end");
+    const textarea = openSkillCatalog(container);
+
+    // Safari reports the confirming Enter after compositionend, with neither
+    // isComposing nor keyCode 229 set.
+    fireEvent.compositionEnd(textarea);
+    fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
+
+    expect(
+      screen.queryByRole("button", { name: "Remove /research" }),
+    ).toBeNull();
+    expect(textarea.value).toBe("/res");
+  });
+
+  it("still selects the highlighted skill once the confirm window has passed", () => {
+    const { container } = renderComposer("thread-ime-after-window");
+    const textarea = openSkillCatalog(container);
+    const endedAt = Date.now();
+    const now = rs.spyOn(Date, "now");
+    now.mockReturnValue(endedAt);
+    fireEvent.compositionEnd(textarea);
+    now.mockReturnValue(endedAt + COMPOSITION_CONFIRM_ENTER_MS);
+
+    fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
+
+    expect(
+      screen.getByRole("button", { name: "Remove /research" }),
+    ).toBeTruthy();
   });
 
   it("still selects the highlighted skill on a plain Enter", () => {
