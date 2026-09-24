@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
+from urllib.parse import urlsplit
 
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -87,6 +88,16 @@ class HonchoConfig:
     storage_path: str = ""
 
     def __post_init__(self) -> None:
+        # A scheme-less or non-http value is not a relative address: httpx turns
+        # "localhost:8000" into the bogus scheme "localhost:", so every later
+        # request fails while Gateway startup stays green. An authority without a
+        # host ("http://", "http://:8000") is the same accepted-now, dead-later
+        # shape, so the guard reads hostname rather than netloc. The mem0 and
+        # OpenViking backends already reject this shape; README.md and
+        # HonchoMemoryManager.from_config both promise a bad URL fails fast.
+        parsed_base_url = urlsplit(self.base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.hostname:
+            raise ValueError("Honcho backend: base_url must be an absolute http:// or https:// URL")
         if not isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("Honcho backend: timeout_seconds must be a finite value > 0")
         if not isfinite(self.connect_timeout_seconds) or self.connect_timeout_seconds <= 0:
@@ -105,7 +116,10 @@ class HonchoConfig:
         base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
         api_key = cfg.get("api_key") or None
         allow_insecure = bool(cfg.get("allow_insecure_http", False))
-        if api_key and base_url.startswith("http://") and not allow_insecure:
+        # The parsed scheme, not startswith("http://"): a caller can write
+        # "HTTP://internal:8000" and urlsplit/httpx both treat that as plain
+        # HTTP, so a case-sensitive prefix test leaks the key unencrypted.
+        if api_key and urlsplit(base_url).scheme == "http" and not allow_insecure:
             raise ValueError("Honcho backend: api_key over plain http requires backend_config.allow_insecure_http: true (the key would be sent unencrypted). Use https, or set the opt-in for local development.")
         return cls(
             base_url=base_url,

@@ -41,6 +41,22 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def create_first_admin(self, user: User) -> User | None:
+        """Create *user* as the first admin, atomically.
+
+        Implementations must read the admin count and insert in one
+        serialized transaction: a count-then-create pair lets two concurrent
+        first-boot requests both find an empty system.
+
+        Returns:
+            The created User, or None if an admin already exists.
+
+        Raises:
+            ValueError: If email already exists
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_user_by_id(self, user_id: str) -> User | None:
         """Get user by ID.
 
@@ -86,6 +102,11 @@ class UserRepository(ABC):
     @abstractmethod
     async def count_users(self) -> int:
         """Return total number of registered users."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_user_ids(self) -> list[str]:
+        """Return every registered user ID in deterministic creation order."""
         raise NotImplementedError
 
     @abstractmethod

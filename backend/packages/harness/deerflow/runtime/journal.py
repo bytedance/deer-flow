@@ -34,6 +34,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+_MAX_RUN_SKILL_SNAPSHOTS = 64
 
 
 @dataclass
@@ -288,6 +290,10 @@ class RunJournal(BaseCallbackHandler):
         self._memory_context_recorded = False
         self._tool_promotion_claim_lock = threading.Lock()
         self._claimed_tool_promotions: set[str] = set()
+        # Only lead producers receive this journal in runtime.context. Keep
+        # display snapshots separate from tool/secret authorization state.
+        self._skill_usage_lock = threading.Lock()
+        self._skill_usages: dict[str, dict[str, Any]] = {}
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -509,11 +515,18 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
+            content = message.model_dump()
+            if is_canonical_callback and caller == "lead_agent" and isinstance(message, AIMessage) and not message.tool_calls:
+                with self._skill_usage_lock:
+                    skill_usages = deepcopy(list(self._skill_usages.values()))
+                if skill_usages:
+                    content["additional_kwargs"] = {**content.get("additional_kwargs", {}), SKILL_USAGES_KEY: skill_usages}
+
             response_events.append(
                 self._make_event(
                     event_type=LLM_AI_RESPONSE_EVENT.event_type,
                     category=LLM_AI_RESPONSE_EVENT.category,
-                    content=message.model_dump(),
+                    content=content,
                     metadata={
                         "caller": caller,
                         "usage": usage_dict,
@@ -619,6 +632,30 @@ class RunJournal(BaseCallbackHandler):
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
+
+    def record_skill_usage(self, usage: Mapping[str, Any]) -> None:
+        """Capture first-load display evidence from a successful lead producer.
+
+        Tool wrappers run after ``on_tool_end`` serialized the raw response;
+        slash producers register before invoking their model handler. The next
+        terminal lead response carries these snapshots in the history feed so
+        pagination and checkpoint compaction do not lose the menu's evidence.
+        No event-store or other loop-bound work happens on this producer path.
+        """
+        with self._skill_usage_lock:
+            if self._closed:
+                return
+            path = usage.get("path")
+            content = usage.get("content")
+            if not isinstance(path, str) or not path or not isinstance(content, str):
+                return
+            if path in self._skill_usages or len(self._skill_usages) >= _MAX_RUN_SKILL_SNAPSHOTS:
+                return
+            snapshot = deepcopy(dict(usage))
+            if len(content) > MAX_SKILL_SNAPSHOT_CHARS:
+                snapshot["content"] = content[:MAX_SKILL_SNAPSHOT_CHARS]
+                snapshot["partial"] = True
+            self._skill_usages[path] = snapshot
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
@@ -1156,6 +1193,8 @@ class RunJournal(BaseCallbackHandler):
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
         self._closed = True
+        with self._skill_usage_lock:
+            self._skill_usages.clear()
         self._store = None
         self._progress_reporter = None
         self._buffer.clear()

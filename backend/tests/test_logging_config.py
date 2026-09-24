@@ -807,3 +807,50 @@ def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> Non
         assert record.getMessage() == expected, (t1, t2)
         assert "LeakedSig" not in record.getMessage()
         assert "token=QuerySecret" not in record.getMessage()
+
+
+def test_url_redaction_filter_collapses_space_carrying_targets_in_every_retry_shape() -> None:
+    """Every urllib3 shape that carries a raw request target has to tolerate
+    interior spaces, not only ``Redirecting``.
+
+    On the recursive redirect frame urllib3 hands the raw ``Location`` field
+    value on as ``url`` (connectionpool.py:923-925), and that field grammar
+    admits interior spaces — the same fact rounds 13 and 16 rest on. The three
+    shapes pinned here bounded their target at the first space, so a signed
+    path survived all of them while the two sibling passes that never did
+    (``Incremented Retry for (url='…')`` and ``Redirecting``) redacted it.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    def _formatted(fmt: str, args: tuple) -> str:
+        record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, fmt, args, None)
+        assert filt.filter(record) is True
+        return record.getMessage()
+
+    signed = "/private/a b?sig=LeakedSig"
+
+    # connectionpool.py:954 — bare target after the "Retry: " literal.
+    assert _formatted("Retry: %s", (signed,)) == "Retry: /<redacted>"
+
+    # connectionpool.py:869 — WARNING, so it clears the Gateway's INFO root.
+    retries_repr = "Retry(total=0, connect=None, read=None, redirect=None, status=None)"
+    error_repr = "ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    retrying = _formatted("Retrying (%r) after connection broken by '%r': %s", (retries_repr, error_repr, signed))
+    assert retrying == f"Retrying ({retries_repr!r}) after connection broken by '{error_repr!r}': /<redacted>"
+
+    # connectionpool.py:545 — the quoted per-request line.
+    request_line = _formatted('%s://%s:%s "%s %s %s" %s %s', ("https", "cdn.example", 443, "GET", signed, "HTTP/1.1", 200, None))
+    assert request_line == 'https://cdn.example:443 "GET /<redacted> HTTP/1.1" 200 None'
+
+    for formatted in (retrying, request_line, _formatted("Retry: %s", (signed,))):
+        assert "LeakedSig" not in formatted
+        assert "sig=" not in formatted
+
+    # The looser tails trade reach for one class of prose: a line that opens
+    # with urllib3's own ``Retry: `` literal AND a slash-initial tail collapses
+    # whole even when it is not a request target. Prose after ``Retry: `` that
+    # does not start with ``/`` keeps passing through untouched, which
+    # test_url_redaction_filter_covers_urllib3_retry_lines already pins.
+    assert _formatted("Retry: /tmp/build.sock went away", ()) == "Retry: /<redacted>"

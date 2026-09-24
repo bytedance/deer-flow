@@ -211,6 +211,30 @@ def test_normalize_input_none():
     assert normalize_input(None) == {}
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("channel", ["viewed_images", "thread_data"])
+def test_external_image_runtime_state_is_rejected(boundary, channel):
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({channel: {"synthetic": "untrusted"}})
+
+    assert error.value.status_code == 400
+
+
+def test_trusted_internal_run_preserves_image_runtime_state():
+    from app.gateway.services import normalize_input
+
+    viewed_images = {"/mnt/user-data/outputs/chart.png": {"actual_path": "/synthetic/chart.png"}}
+    thread_data = {"outputs_path": "/synthetic/outputs"}
+    result = normalize_input({"viewed_images": viewed_images, "thread_data": thread_data}, trusted_internal=True)
+    assert result["viewed_images"] == viewed_images
+    assert result["thread_data"] == thread_data
+
+
 def test_normalize_input_with_messages():
     from app.gateway.services import normalize_input
 
