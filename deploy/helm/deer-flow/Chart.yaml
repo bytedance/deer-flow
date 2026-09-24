@@ -2,8 +2,8 @@ apiVersion: v2
 name: deer-flow
 description: DeerFlow — LangGraph-based AI super-agent (gateway + frontend + nginx + sandbox provisioner) deployed to Kubernetes.
 type: application
-version: 2.1.0-rc0
-appVersion: "2.1.0-rc0"
+version: 2.1.0
+appVersion: "2.1.0"
 keywords:
   - deerflow
   - langgraph
