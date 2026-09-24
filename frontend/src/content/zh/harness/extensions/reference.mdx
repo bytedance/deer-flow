@@ -350,7 +350,7 @@ Gateway 的实现接受 1 到 2000 的 `limit` 和非负的 `after_seq`，否则
 
 当调用者对已安装插件的 *namespace* 拥有 `plugin_management` 的指定 **scope** 时返回该主体，否则抛出 `PermissionError`。在自有的管理路由里，读取（`scope="read"`）或修改（`scope="write"`）企业自己的策略存储之前调用它。宿主会用调用者的可信身份询问其配置的授权 provider，因此读和写是两个独立决策，且都不由页面访问或工具授权隐含。
 
-它按失败关闭（fail closed）：未知 namespace、匿名调用者、宿主解析器缺失或失败、以及非允许的决策都会抛 `PermissionError`。当宿主 `authorization.enabled: false` 时答案恒为「允许」，因此该 helper 是 no-op，不会开始拒绝路由；需要无条件底线的企业仍应同时调用 `require_admin`。`scope` 不是 `"read"`/`"write"`，或 namespace 不符合 `[a-z][a-z0-9_.-]{0,95}`，都会在任何决策之前抛 `ValueError`。
+它按失败关闭（fail closed）：未知 namespace、匿名调用者、宿主解析器缺失或失败、宿主无法读取配置、以及非允许的决策都会抛 `PermissionError`。当宿主 `authorization.enabled: false` 时答案恒为「允许」，因此该 helper 是 no-op，不会开始拒绝路由；需要无条件底线的企业仍应同时调用 `require_admin`。`scope` 不是 `"read"`/`"write"`，或 namespace 不符合 `[a-z][a-z0-9_.-]{0,95}`，都会在任何决策之前抛 `ValueError`。
 
 这是同步形式。请在 FastAPI 的 `def` 端点（在线程池中执行）中调用，不要在 async 端点中使用。
 

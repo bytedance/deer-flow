@@ -270,6 +270,10 @@ async def write_permissions(namespace: str, request: Request):
   no-op and a deployment that turns authorization off does not start rejecting
   enterprise routes. An enterprise that needs an unconditional floor keeps
   calling `require_admin` as well.
+- "Cannot answer" includes a configuration the host cannot read right now
+  (for example mid-write during a hot reload): the decision uses the config
+  snapshot captured when the request's provider was resolved, and an unavailable
+  snapshot is a denial, never an implicit allow.
 - Use `arequire_plugin_management` from an async endpoint. `require_plugin_management`
   is the synchronous form for a FastAPI `def` endpoint, which FastAPI runs in
   its thread pool; calling it from an async endpoint would do the host's

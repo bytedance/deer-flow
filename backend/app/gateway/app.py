@@ -114,15 +114,21 @@ def _resolve_extension_plugin_management(request: Request, namespace: str, scope
     if not _installed_plugin_namespace(request, namespace):
         return None
     try:
-        provider, principal = resolve_plugin_authorization(request)
+        provider, principal, app_config = resolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
         return not unavailable.fail_closed
-    if provider is None:
+    if provider is None or app_config is None:
         return True
     if principal is None:
         return None
     try:
-        enforce_plugin_management(principal=principal, namespace=namespace, write=scope == "write", provider=provider)
+        enforce_plugin_management(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            write=scope == "write",
+            provider=provider,
+        )
     except PluginAuthorizationError:
         return False
     return True
@@ -136,15 +142,21 @@ async def _resolve_extension_plugin_management_async(request: Request, namespace
     if not _installed_plugin_namespace(request, namespace):
         return None
     try:
-        provider, principal = await aresolve_plugin_authorization(request)
+        provider, principal, app_config = await aresolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
         return not unavailable.fail_closed
-    if provider is None:
+    if provider is None or app_config is None:
         return True
     if principal is None:
         return None
     try:
-        await aenforce_plugin_management(principal=principal, namespace=namespace, write=scope == "write", provider=provider)
+        await aenforce_plugin_management(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            write=scope == "write",
+            provider=provider,
+        )
     except PluginAuthorizationError:
         return False
     return True

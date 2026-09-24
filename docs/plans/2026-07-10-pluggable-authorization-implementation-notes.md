@@ -548,6 +548,38 @@ Phase 1 最低验证要求：
   PR3（`pages`/`shared_operation` 声明门、`extensions/catalog.py`、`/api/plugins` 只读投影、
   前端页面 gate、企业示例与剩余文档）。
 
+### 2026-09-24 — Phase 5 / PR1 review round 1（PR #5842，willem-bd）
+
+- **背景：** 静态审查对 PR1 提出两条授权缺陷：P1 —— 决策层为了判断 `enabled`/`fail_closed`
+  会**第二次**读取配置，而 Gateway 已经用可读配置解析出 provider/principal；这次重读若在
+  热重载窗口内失败（文件缺失/暂时非法），`_enabled_config(None)` 会把「配置不可用」当作
+  「授权已关闭」，于是受保护的插件 action/management 请求在未询问 `fail_closed` 的情况下被放行。
+  P2 —— `AuthzDecision` 是普通 dataclass，自定义 provider 可以返回
+  `AuthzDecision(allow="false")`；`isinstance` 校验通过后真值字符串被当作 allow。
+- **决策（P1，采纳审查建议的第一种修法）：** 决策层不再自行读取配置。`plugin_authz` 的六个函数
+  把 `app_config` 改为**必填**，语义是「调用方用于解析 provider 的那个请求级快照」；
+  §5.3-C 的两个 Gateway 解析辅助函数改为返回 `(provider, principal, app_config)` 三元组，
+  并把同一快照交给执行层，因此一次请求只有一次配置读取，也不存在两次读取之间的状态漂移。
+  快照为 `None`（调用方完全读不到配置）时，视为**不可用**而非「已关闭」：
+  以 `authz.config_unavailable` + `fail_closed=True` 失败关闭（能放行的那个开关本身读不到）。
+  同时 Gateway 侧新增 `_plugin_app_config[_async]`，把「不存在 config.yaml」(`FileNotFoundError`
+  → 今日行为，无门禁) 与「配置存在但当前读不了/解析不了」（异常上抛 → 拒绝）区分开；
+  后者不再被 `safe_app_config` 的宽泛 `except Exception` 吞掉。
+- **决策（P2）：** 新增 `_validated_decision`，要求返回值是 `AuthzDecision` 且
+  `type(decision.allow) is bool`（同步 `authorize` 与异步 `aauthorize` 两条路径都走它）；
+  非 bool 的 `allow` 与 `AuthzDecision` 类型错误一样按 provider 失败处理，遵循 `fail_closed`。
+- **证据：** 新增回归测试并做了反证（revert 修复后必须变红）——
+  `test_unreadable_config_denies_the_action`（200 vs 403）、
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（True vs False）、
+  `test_a_non_bool_allow_is_a_malformed_decision[...]`（12 项红）与对应异步/路由用例、
+  `test_installed_resolver_allows_when_no_config_exists`（不存在 config.yaml 仍为放行）、
+  `test_no_config_at_all_keeps_todays_behavior`。全部 95 项插件套件在修复后通过。
+- **兼容性：** `authorization.enabled: false` 与「没有 config.yaml」两种情形行为不变；
+  harness 内部函数签名由「可选 app_config」变为「必填快照」，属 PR1 内的内部契约调整，
+  不涉及 `deerflow_extension_api` 公开面（公开 helper 的 fail-closed 语义只在“宿主读不到配置”
+  时更严格）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。
+
 ### 新记录模板
 
 ```markdown

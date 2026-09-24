@@ -12,23 +12,30 @@ Semantics, uniform across every function here:
 * ``authorization.enabled is not True`` → no-op (allow). The identity check
   mirrors :mod:`deerflow.authz.tool_filter`, so a ``Mock``/``SimpleNamespace``
   app config cannot turn a non-bool into an enabled gate.
+* The caller supplies ``app_config``: the *same* request-scoped snapshot it used
+  to resolve ``provider``. This module never reads the configuration itself, so
+  a config file that disappears or fails to parse mid-request cannot be mistaken
+  for a disabled policy. ``app_config=None`` means the caller could not read it
+  at all — *unavailable*, not disabled — and the check fails closed
+  (``authz.config_unavailable``) because the flag that would permit an allow is
+  unreadable.
 * A caller-supplied ``provider`` is reused, so one request resolves the provider
   once (the Gateway hands in the instance from its loop-keyed cache).
 * An explicit deny raises :class:`PluginAuthorizationError`.
-* A provider exception, a resolution failure, a malformed decision or a missing
-  principal follows ``fail_closed``: raise the same error, or log a warning and
-  allow. This mirrors the sandbox / route-scoped semantics — not the tool
-  filter's silent-set behavior.
+* A provider exception, a resolution failure, a malformed decision (a non-
+  :class:`AuthzDecision`, or one whose ``allow`` is not a real ``bool``) or a
+  missing principal follows ``fail_closed``: raise the same error, or log a
+  warning and allow. This mirrors the sandbox / route-scoped semantics — not the
+  tool filter's silent-set behavior.
 
-Execution placement (identical to :mod:`deerflow.authz.sandbox_authz`, and the
-reason this module reuses its config helpers): on the async path config load and
-provider *discovery* are offloaded, while provider *construction* stays on the
-calling loop because a valid async provider may create loop-affine clients in
-``__init__``; a sync caller loads the config inline, which is what makes it a
-sync caller. The async batch helpers hand the provider to a worker thread, which
-is why ``filter_resources`` must be thread-safe. The sync helpers serve
-genuinely synchronous callers (a FastAPI ``def`` endpoint runs in the thread
-pool); an async endpoint uses the ``a*`` variant.
+Execution placement: provider *discovery* is offloaded on the async path while
+provider *construction* stays on the calling loop, because a valid async
+provider may create loop-affine clients in ``__init__``; the configuration read
+belongs to the caller (the Gateway performs it off-loop). The async batch
+helpers hand the provider to a worker thread, which is why ``filter_resources``
+must be thread-safe. The sync helpers serve genuinely synchronous callers (a
+FastAPI ``def`` endpoint runs in the thread pool); an async endpoint uses the
+``a*`` variant.
 """
 
 from __future__ import annotations
@@ -49,7 +56,6 @@ from deerflow.authz.runtime import (
     resolve_authorization_provider,
     resolve_authorization_provider_spec,
 )
-from deerflow.authz.sandbox_authz import safe_app_config, safe_app_config_async
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -122,6 +128,31 @@ def _fail_closed(authz_config: Any) -> bool:
     return getattr(authz_config, "fail_closed", False) is True
 
 
+def _authorization_config(app_config: AppConfig | None, *, resource: str, target: str) -> Any | None:
+    """Return the enabled authorization config, or ``None`` when policy is explicitly disabled.
+
+    ``app_config is None`` means the caller could not read the configuration,
+    which is not the same as an explicitly disabled policy: the flag that would
+    permit an allow is unreadable, so the check fails closed.
+    """
+    if app_config is None:
+        raise PluginAuthorizationError(resource=resource, target=target, reason_code="authz.config_unavailable", fail_closed=True)
+    return _enabled_config(app_config)
+
+
+def _validated_decision(decision: object, *, method_name: str) -> AuthzDecision:
+    """Reject a verdict that is not an ``AuthzDecision`` with a real ``bool`` allow.
+
+    ``AuthzDecision`` is a plain dataclass, so a custom provider can return
+    ``AuthzDecision(allow="false")``; the truthy string would otherwise be read
+    as an allow. A malformed verdict follows ``fail_closed`` like any other
+    provider failure.
+    """
+    if not isinstance(decision, AuthzDecision) or type(decision.allow) is not bool:
+        raise TypeError(f"AuthorizationProvider.{method_name} must return AuthzDecision with a bool allow")
+    return decision
+
+
 async def _aresolve_provider(authz_config: Any) -> AuthorizationProvider:
     """Resolve off-loop discovery, then construct on this loop (see module docstring)."""
     if getattr(authz_config, "provider", None) is None:
@@ -136,11 +167,7 @@ async def _aresolve_provider(authz_config: Any) -> AuthorizationProvider:
 
 
 def _enforce_single(*, principal, app_config, resource, action, target, provider, context) -> None:
-    if app_config is None:
-        # A sync caller (or a FastAPI ``def`` worker) loads the config inline;
-        # the async twin offloads the same load instead.
-        app_config = safe_app_config()
-    authz_config = _enabled_config(app_config)
+    authz_config = _authorization_config(app_config, resource=resource, target=target)
     if authz_config is None:
         return
     fail_closed = _fail_closed(authz_config)
@@ -151,9 +178,10 @@ def _enforce_single(*, principal, app_config, resource, action, target, provider
         active_provider = provider if provider is not None else resolve_authorization_provider(authz_config)
         if active_provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
-        decision = active_provider.authorize(_authorization_request(principal, resource, action, target, context))
-        if not isinstance(decision, AuthzDecision):
-            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        decision = _validated_decision(
+            active_provider.authorize(_authorization_request(principal, resource, action, target, context)),
+            method_name="authorize",
+        )
     except PluginAuthorizationError:
         raise
     except Exception:
@@ -165,9 +193,7 @@ def _enforce_single(*, principal, app_config, resource, action, target, provider
 
 
 async def _aenforce_single(*, principal, app_config, resource, action, target, provider, context) -> None:
-    if app_config is None:
-        app_config = await safe_app_config_async()
-    authz_config = _enabled_config(app_config)
+    authz_config = _authorization_config(app_config, resource=resource, target=target)
     if authz_config is None:
         return
     fail_closed = _fail_closed(authz_config)
@@ -176,9 +202,10 @@ async def _aenforce_single(*, principal, app_config, resource, action, target, p
         return
     try:
         active_provider = provider if provider is not None else await _aresolve_provider(authz_config)
-        decision = await active_provider.aauthorize(_authorization_request(principal, resource, action, target, context))
-        if not isinstance(decision, AuthzDecision):
-            raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+        decision = _validated_decision(
+            await active_provider.aauthorize(_authorization_request(principal, resource, action, target, context)),
+            method_name="aauthorize",
+        )
     except PluginAuthorizationError:
         raise
     except Exception:
@@ -191,9 +218,7 @@ async def _aenforce_single(*, principal, app_config, resource, action, target, p
 
 async def _afilter(*, principal, app_config, resource, candidates: Iterable[str], provider) -> frozenset[str]:
     candidate_list = list(candidates)
-    if app_config is None:
-        app_config = await safe_app_config_async()
-    authz_config = _enabled_config(app_config)
+    authz_config = _authorization_config(app_config, resource=resource, target=_BATCH_TARGET)
     if authz_config is None:
         return frozenset(candidate_list)
     if not candidate_list:
@@ -221,7 +246,7 @@ async def _afilter(*, principal, app_config, resource, candidates: Iterable[str]
 def enforce_plugin_action(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     namespace: str,
     action_name: str,
     provider: AuthorizationProvider | None = None,
@@ -243,7 +268,7 @@ def enforce_plugin_action(
 async def aenforce_plugin_action(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     namespace: str,
     action_name: str,
     provider: AuthorizationProvider | None = None,
@@ -265,7 +290,7 @@ async def aenforce_plugin_action(
 def enforce_plugin_management(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     namespace: str,
     write: bool,
     provider: AuthorizationProvider | None = None,
@@ -288,7 +313,7 @@ def enforce_plugin_management(
 async def aenforce_plugin_management(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     namespace: str,
     write: bool,
     provider: AuthorizationProvider | None = None,
@@ -311,7 +336,7 @@ async def aenforce_plugin_management(
 async def afilter_plugin_pages(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     candidates: Iterable[str],
     provider: AuthorizationProvider | None = None,
 ) -> frozenset[str]:
@@ -328,7 +353,7 @@ async def afilter_plugin_pages(
 async def afilter_plugin_management(
     *,
     principal: Principal | None,
-    app_config: AppConfig | None = None,
+    app_config: AppConfig | None,
     candidates: Iterable[str],
     provider: AuthorizationProvider | None = None,
 ) -> frozenset[str]:

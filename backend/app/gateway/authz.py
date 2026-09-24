@@ -48,7 +48,6 @@ from fastapi import HTTPException, Request
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
-from deerflow.authz.sandbox_authz import safe_app_config, safe_app_config_async
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
@@ -514,6 +513,28 @@ class _PluginAuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
+def _plugin_app_config() -> AppConfig | None:
+    """Read the config for a plugin decision, distinguishing absent from unreadable.
+
+    An absent ``config.yaml`` cannot have enabled authorization, so it maps to
+    ``None`` (today's behavior: no gate). A config file that exists but cannot be
+    read or validated right now — the hot-reload window — is **not** "disabled":
+    the error propagates so the caller denies instead of silently allowing a
+    request whose provider was resolved from a config that has since vanished.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config()
+    except FileNotFoundError:
+        return None
+
+
+async def _plugin_app_config_async() -> AppConfig | None:
+    """Off-loop :func:`_plugin_app_config` for async request paths."""
+    return await asyncio.to_thread(_plugin_app_config)
+
+
 def _plugin_config_signature(config: AuthorizationConfig) -> str:
     return repr(sorted(config.model_dump().items()))
 
@@ -574,45 +595,58 @@ def _plugin_request_principal(request: Request, authz_config: AuthorizationConfi
     )
 
 
-def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None]:
-    """Return ``(provider, principal)`` for plugin resources, for synchronous callers.
+def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Return ``(provider, principal, app_config)`` for plugin resources, for sync callers.
 
-    ``(None, None)`` means authorization is disabled or no config is readable —
-    the caller keeps today's behavior. Raises ``_PluginAuthorizationUnavailable``
-    (carrying ``fail_closed``) when the provider cannot be resolved.
+    ``(None, None, None)`` means authorization is disabled or no config exists —
+    the caller keeps today's behavior. The same ``app_config`` snapshot that
+    produced the provider is returned so the enforcement layer never re-reads the
+    configuration. Raises ``_PluginAuthorizationUnavailable`` (carrying
+    ``fail_closed``) when the config is unreadable or the provider cannot be
+    resolved.
     """
-    app_config = safe_app_config()
+    try:
+        app_config = _plugin_app_config()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=True) from None
     if app_config is None:
-        return None, None
+        return None, None, None
     authz_config = getattr(app_config, "authorization", None)
     if getattr(authz_config, "enabled", None) is not True:
-        return None, None
+        return None, None, app_config
     try:
         provider = _get_cached_plugin_provider_sync(authz_config)
     except Exception:
         logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
         raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
-    return provider, _plugin_request_principal(request, authz_config)
+    return provider, _plugin_request_principal(request, authz_config), app_config
 
 
-async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None]:
-    """Async ``(provider, principal)`` for plugin resources.
+async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Async ``(provider, principal, app_config)`` for plugin resources.
 
     Never returns the sync slot, and never performs synchronous config loading,
-    provider discovery or provider calls on the event loop.
+    provider discovery or provider calls on the event loop. The returned
+    ``app_config`` is the snapshot the provider was resolved from, so the
+    enforcement layer never re-reads the configuration.
     """
-    app_config = await safe_app_config_async()
+    try:
+        app_config = await _plugin_app_config_async()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=True) from None
     if app_config is None:
-        return None, None
+        return None, None, None
     authz_config = getattr(app_config, "authorization", None)
     if getattr(authz_config, "enabled", None) is not True:
-        return None, None
+        return None, None, app_config
     try:
         provider = await _aget_cached_plugin_provider(authz_config)
     except Exception:
         logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
         raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
-    return provider, _plugin_request_principal(request, authz_config)
+    return provider, _plugin_request_principal(request, authz_config), app_config
 
 
 async def authorize_plugin_action_for_request(request: Request, *, namespace: str, action_name: str) -> None:
@@ -625,16 +659,22 @@ async def authorize_plugin_action_for_request(request: Request, *, namespace: st
     from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_action
 
     try:
-        provider, principal = await aresolve_plugin_authorization(request)
+        provider, principal, app_config = await aresolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
         if unavailable.fail_closed:
             raise _plugin_action_denied() from None
         return
-    if provider is None:
-        # Authorization is disabled (or no config is readable): today's behavior.
+    if provider is None or app_config is None:
+        # Authorization is disabled (or no config exists): today's behavior.
         return
     try:
-        await aenforce_plugin_action(principal=principal, namespace=namespace, action_name=action_name, provider=provider)
+        await aenforce_plugin_action(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            action_name=action_name,
+            provider=provider,
+        )
     except PluginAuthorizationError as error:
         raise _plugin_action_denied() from error
 

@@ -364,6 +364,63 @@ async def test_async_decision_honours_fail_closed(monkeypatch):
     await aenforce_plugin_action(principal=_principal(), app_config=_app_config(fail_closed=False), namespace=NAMESPACE, action_name="check")
 
 
+def test_an_unreadable_config_denies_instead_of_allowing(monkeypatch):
+    """Review P1: config *unavailable* is not the same as a disabled policy.
+
+    The flag that would permit an allow cannot be read, so the check fails closed
+    rather than silently passing the request.
+    """
+    _use_provider(monkeypatch, _RecordingProvider())
+
+    with pytest.raises(PluginAuthorizationError) as error:
+        enforce_plugin_action(principal=_principal(), app_config=None, namespace=NAMESPACE, action_name="check")
+
+    assert error.value.reason_code == "authz.config_unavailable"
+    assert error.value.fail_closed is True
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_config_denies_the_async_paths(monkeypatch):
+    _use_provider(monkeypatch, _RecordingProvider())
+
+    with pytest.raises(PluginAuthorizationError) as error:
+        await aenforce_plugin_management(principal=_principal(), app_config=None, namespace=NAMESPACE, write=True)
+    assert error.value.reason_code == "authz.config_unavailable"
+
+    with pytest.raises(PluginAuthorizationError):
+        await afilter_plugin_management(principal=_principal(), app_config=None, candidates=[READ_TARGET])
+
+
+@pytest.mark.parametrize("allow", ["false", "true", 1, 0, [], None])
+@pytest.mark.parametrize("fail_closed", [True, False])
+def test_a_non_bool_allow_is_a_malformed_decision(monkeypatch, allow, fail_closed):
+    """Review P2: ``AuthzDecision(allow="false")`` is truthy and must not be an allow."""
+    _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=allow)))
+    config = _app_config(fail_closed=fail_closed)
+
+    if fail_closed:
+        with pytest.raises(PluginAuthorizationError) as error:
+            enforce_plugin_management(principal=_principal(), app_config=config, namespace=NAMESPACE, write=True)
+        assert error.value.reason_code == "authz.provider_error"
+    else:
+        enforce_plugin_management(principal=_principal(), app_config=config, namespace=NAMESPACE, write=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow", ["false", 1])
+@pytest.mark.parametrize("fail_closed", [True, False])
+async def test_async_non_bool_allow_is_a_malformed_decision(monkeypatch, allow, fail_closed):
+    _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=allow)))
+    config = _app_config(fail_closed=fail_closed)
+
+    if fail_closed:
+        with pytest.raises(PluginAuthorizationError) as error:
+            await aenforce_plugin_action(principal=_principal(), app_config=config, namespace=NAMESPACE, action_name="check")
+        assert error.value.reason_code == "authz.provider_error"
+    else:
+        await aenforce_plugin_action(principal=_principal(), app_config=config, namespace=NAMESPACE, action_name="check")
+
+
 @pytest.mark.asyncio
 async def test_batch_filters_use_the_batch_entry_point(monkeypatch):
     provider = _RecordingProvider()
@@ -516,6 +573,35 @@ async def test_installed_async_resolver_matches_the_sync_answer(host_app):
         await arequire_plugin_management(request, NAMESPACE, scope="write")
 
 
+def test_installed_resolver_denies_when_the_config_cannot_be_read(host_app, monkeypatch):
+    """Review P1: a config read failure must not resolve to 'allowed'."""
+    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
+
+    def broken_config():
+        raise RuntimeError("config is being rewritten")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", broken_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", broken_config)
+
+    resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
+
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
+
+
+def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
+    """An absent config.yaml cannot have enabled authorization: today's behavior."""
+
+    def absent_config():
+        raise FileNotFoundError("`config.yaml` file not found")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", absent_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
+
+    resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
+
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
+
+
 @pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])
 def test_installed_resolver_applies_the_failure_policy(host_app, fail_closed: bool, expected: bool):
     set_app_config(_app_config(fail_closed=fail_closed, provider_use="nonexistent.module:FakeProvider"))
@@ -572,12 +658,13 @@ async def test_async_resolution_constructs_on_the_calling_loop(monkeypatch):
     class_path, constructed = _loop_affine_module(monkeypatch)
     set_app_config(_app_config(provider_use=class_path))
 
-    provider, principal = await gateway_authz.aresolve_plugin_authorization(_plain_request())
+    provider, principal, app_config = await gateway_authz.aresolve_plugin_authorization(_plain_request())
 
     running_loop = asyncio.get_running_loop()
     assert provider is not None and provider.loop is running_loop
     assert constructed == [running_loop]
     assert principal is not None and principal.user_id == "user-1"
+    assert app_config is not None and app_config.authorization.enabled is True
 
 
 @pytest.mark.asyncio
@@ -585,12 +672,12 @@ async def test_a_hot_path_neither_rediscovers_nor_reconstructs(monkeypatch):
     class_path, constructed = _loop_affine_module(monkeypatch)
     set_app_config(_app_config(provider_use=class_path))
     request = _plain_request()
-    first, _ = await gateway_authz.aresolve_plugin_authorization(request)
+    first, _, _ = await gateway_authz.aresolve_plugin_authorization(request)
 
     discoveries: list = []
     monkeypatch.setattr(gateway_authz, "resolve_authorization_provider_spec", lambda config: discoveries.append(1))
 
-    second, _ = await gateway_authz.aresolve_plugin_authorization(request)
+    second, _, _ = await gateway_authz.aresolve_plugin_authorization(request)
 
     assert second is first
     assert constructed == [asyncio.get_running_loop()]
@@ -601,11 +688,11 @@ async def test_a_hot_path_neither_rediscovers_nor_reconstructs(monkeypatch):
 async def test_a_configuration_change_rebuilds_the_provider(monkeypatch):
     class_path, constructed = _loop_affine_module(monkeypatch)
     set_app_config(_app_config(provider_use=class_path))
-    first, _ = await gateway_authz.aresolve_plugin_authorization(_plain_request())
+    first, _, _ = await gateway_authz.aresolve_plugin_authorization(_plain_request())
 
     set_app_config(_app_config(provider_use=class_path, default_role="guest"))
 
-    second, _ = await gateway_authz.aresolve_plugin_authorization(_plain_request())
+    second, _, _ = await gateway_authz.aresolve_plugin_authorization(_plain_request())
     assert second is not first
     assert len(constructed) == 2
 
@@ -619,7 +706,7 @@ def test_the_sync_slot_never_reuses_a_loop_provider(monkeypatch):
         return (await gateway_authz.aresolve_plugin_authorization(_plain_request()))[0]
 
     loop_provider = asyncio.run(_async_resolve())
-    sync_provider, principal = gateway_authz.resolve_plugin_authorization(_plain_request())
+    sync_provider, principal, sync_config = gateway_authz.resolve_plugin_authorization(_plain_request())
 
     assert loop_provider is not None and loop_provider.loop is not None
     assert sync_provider is not None
@@ -659,7 +746,7 @@ async def test_concurrent_cold_requests_still_decide_correctly(monkeypatch):
     )
 
     assert len(constructed) == 2
-    for provider, principal in (first, second):
+    for provider, principal, _snapshot in (first, second):
         assert provider is not None and principal is not None
         decision = await provider.aauthorize(AuthzRequest(principal=principal, resource="plugin_action", action="invoke", target=f"{NAMESPACE}/check"))
         assert decision.allow is True
@@ -669,7 +756,7 @@ def test_anonymous_callers_get_a_provider_without_a_principal(monkeypatch):
     class_path, _ = _loop_affine_module(monkeypatch)
     set_app_config(_app_config(provider_use=class_path, provider_config={"tolerate_no_loop": True}))
 
-    provider, principal = gateway_authz.resolve_plugin_authorization(_plain_request(user=None))
+    provider, principal, app_config = gateway_authz.resolve_plugin_authorization(_plain_request(user=None))
 
     assert provider is not None
     assert principal is None

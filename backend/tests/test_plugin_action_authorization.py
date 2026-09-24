@@ -286,6 +286,51 @@ def test_a_policy_change_is_observed_without_a_restart(plugin_app):
     assert len(calls) == 1
 
 
+def test_unreadable_config_denies_the_action(plugin_app, monkeypatch):
+    """Review P1: a config that cannot be read mid-request is unavailable, not disabled."""
+    http, calls, _ = plugin_app
+    _use_authorization(roles={"user": {"plugin_actions": {"allow": "*"}}})
+
+    def broken_config():
+        raise RuntimeError("config is being rewritten")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", broken_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", broken_config)
+
+    response = http.post(ACTION_URL, json={"text": "hello"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Plugin action not permitted for your role."}
+    assert calls == []
+
+
+def test_no_config_at_all_keeps_todays_behavior(plugin_app):
+    """An absent config cannot have enabled authorization, so the route is unchanged."""
+    http, calls, _ = plugin_app
+
+    assert http.post(ACTION_URL, json={"text": "hello"}).status_code == 200
+    assert len(calls) == 1
+
+
+def test_malformed_allow_denies_under_fail_closed(plugin_app, monkeypatch):
+    """Review P2: a truthy non-bool ``allow`` is a malformed decision, not a grant."""
+    http, calls, _ = plugin_app
+    class_path = _recording_provider_class_path(monkeypatch, "plugin_action_malformed_provider")
+    _use_authorization(fail_closed=True, provider_use=class_path, provider_config={"allow": "false"})
+
+    assert http.post(ACTION_URL, json={"text": "hello"}).status_code == 403
+    assert calls == []
+
+
+def test_malformed_allow_follows_fail_open(plugin_app, monkeypatch):
+    http, calls, _ = plugin_app
+    class_path = _recording_provider_class_path(monkeypatch, "plugin_action_malformed_provider_open")
+    _use_authorization(fail_closed=False, provider_use=class_path, provider_config={"allow": "false"})
+
+    assert http.post(ACTION_URL, json={"text": "hello"}).status_code == 200
+    assert len(calls) == 1
+
+
 def _extensions(*, enabled: bool) -> object:
     async def check(payload, context):  # pragma: no cover - never invoked
         return {}

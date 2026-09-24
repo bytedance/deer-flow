@@ -32,7 +32,6 @@ from app.gateway import authz as gateway_authz
 from app.gateway.app import _resolve_extension_plugin_management_async
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.routers.plugins import invoke_plugin_action
-from deerflow.authz import sandbox_authz
 from deerflow.authz.plugin_authz import afilter_plugin_management
 from deerflow.authz.provider import Principal
 from deerflow.authz.rbac import RbacAuthorizationProvider
@@ -125,7 +124,7 @@ async def test_action_route_offloads_config_load_and_provider_discovery(tmp_path
         discoveries.append("discovered")
         return discover(config)
 
-    monkeypatch.setattr(sandbox_authz, "safe_app_config", blocking_config_load)
+    monkeypatch.setattr(gateway_authz, "_plugin_app_config", blocking_config_load)
     monkeypatch.setattr(gateway_authz, "resolve_authorization_provider_spec", blocking_discovery)
 
     request = _action_request(_plugin_extensions())
@@ -157,7 +156,7 @@ async def test_async_management_resolver_offloads_the_same_resolution(tmp_path: 
         probe.read_text(encoding="utf-8")
         return discover(config)
 
-    monkeypatch.setattr(sandbox_authz, "safe_app_config", blocking_config_load)
+    monkeypatch.setattr(gateway_authz, "_plugin_app_config", blocking_config_load)
     monkeypatch.setattr(gateway_authz, "resolve_authorization_provider_spec", blocking_discovery)
 
     answer = await _resolve_extension_plugin_management_async(_unknown_request(extensions=_plugin_extensions()), NAMESPACE, "read")
