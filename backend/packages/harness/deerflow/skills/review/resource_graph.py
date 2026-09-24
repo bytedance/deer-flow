@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Set as AbstractSet
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -11,7 +12,7 @@ from deerflow.skills.review.models import make_finding, normalize_relative_path
 
 _MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+-]+")
+_PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+#-]+")
 _RESOURCE_DIRS = {"references", "scripts", "templates", "assets", "evals"}
 
 
@@ -29,7 +30,7 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
             continue
         content = str(entry.get("content") or "")
         for raw_ref in _extract_references(content):
-            resolved = _resolve_reference(path, raw_ref)
+            resolved = _resolve_reference(path, raw_ref, files.keys())
             if resolved is None:
                 continue
             if resolved == "__ESCAPES__":
@@ -96,21 +97,26 @@ _TRAILING_SENTENCE_PUNCTUATION = ".?!"
 
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
+    # Keep '#' inside every raw reference: _resolve_reference prefers the
+    # exact token when it names a real file (package filenames may contain
+    # '#') and only treats the suffix as a section fragment otherwise.
+    # Trailing sentence punctuation is still stripped here (#5739).
     for match in _MARKDOWN_LINK_RE.finditer(content):
-        refs.add(match.group(1).split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+        refs.add(match.group(1).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:
-            # A code span can carry a section anchor just like a markdown
-            # link target ("`references/faq.md#pricing`"); drop it the same
-            # way, then strip trailing sentence punctuation.
-            refs.add(token.split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+            refs.add(token.rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     for match in _PATH_TOKEN_RE.finditer(content):
         refs.add(match.group(0).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     return refs
 
 
-def _resolve_reference(source_path: str, raw_ref: str) -> str | None:
+def _resolve_reference(
+    source_path: str,
+    raw_ref: str,
+    files: AbstractSet[str] | None = None,
+) -> str | None:
     ref = raw_ref.strip().strip("\"'")
     if not ref or ref.startswith("#") or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", ref):
         return None
@@ -121,6 +127,19 @@ def _resolve_reference(source_path: str, raw_ref: str) -> str | None:
         if "://" in ref:
             return None
         candidate = (base / ref).as_posix()
-        return normalize_relative_path(candidate)
+        normalized = normalize_relative_path(candidate)
     except ValueError:
         return "__ESCAPES__"
+    if files is not None and "#" in ref and normalized not in files:
+        # A package filename may legally contain '#'. Prefer the exact
+        # reference when it names a real file; treat the suffix after the
+        # first '#' as a section fragment only when the exact path does
+        # not exist ("references/C#.md" stays whole,
+        # "references/faq.md#pricing" resolves to faq.md).
+        stripped = ref.split("#", 1)[0]
+        if stripped and stripped != ref:
+            try:
+                return normalize_relative_path((base / stripped).as_posix())
+            except ValueError:
+                return "__ESCAPES__"
+    return normalized

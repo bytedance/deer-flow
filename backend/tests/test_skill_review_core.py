@@ -185,6 +185,25 @@ def test_resource_graph_keeps_real_dots_when_stripping_code_span_fragments(tmp_p
     assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
+def test_resource_graph_prefers_hash_filenames_over_fragments(tmp_path):
+    # A package filename may legally contain '#': a code-span reference to
+    # `references/C#.md` must resolve to the real file, not be truncated to
+    # `references/C` by fragment stripping. The suffix is only treated as a
+    # fragment when the exact path does not exist.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/C#.md` and `references/faq.md#pricing`.\n",
+    )
+    _write(tmp_path / "references" / "C#.md", "# C#\n")
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/C#.md"} in facts["resources"]["edges"]
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(
