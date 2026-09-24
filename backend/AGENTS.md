@@ -269,6 +269,7 @@ Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
 markers with `os.name` for Windows collection.
 
 Jina logging tests use dummy keys (`tests/test_jina_client.py`).
+The Jina API redirect regression uses an offline `httpx.MockTransport` and checks that temporary redirects keep the POST method.
 Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML.
 InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
 

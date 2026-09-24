@@ -23,7 +23,7 @@ class JinaClient:
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
-            client_kwargs: dict[str, object] = {"trust_env": trust_env}
+            client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
             if proxy:
                 client_kwargs["proxy"] = proxy
             async with httpx.AsyncClient(**client_kwargs) as client:

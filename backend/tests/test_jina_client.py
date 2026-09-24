@@ -34,6 +34,28 @@ async def test_crawl_success(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
+    """A redirected Jina API endpoint should still return fetched content."""
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/":
+            return httpx.Response(307, headers={"Location": "https://r.jina.ai/reader"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+
+    result = await jina_client.crawl("https://example.com")
+
+    assert result == "Fetched page"
+    assert [request.url.path for request in requests] == ["/", "/reader"]
+    assert all(request.method == "POST" for request in requests)
+
+
+@pytest.mark.anyio
 async def test_crawl_non_200_status(jina_client, monkeypatch):
     """Test that non-200 status returns error message."""
 
@@ -150,6 +172,7 @@ async def test_crawl_passes_proxy_to_httpx_client(jina_client, monkeypatch):
     assert result == "ok"
     assert captured_client_kwargs["proxy"] == "http://127.0.0.1:7890"
     assert captured_client_kwargs["trust_env"] is True
+    assert captured_client_kwargs["follow_redirects"] is True
 
 
 @pytest.mark.anyio
@@ -175,7 +198,7 @@ async def test_crawl_can_disable_trust_env(jina_client, monkeypatch):
     result = await jina_client.crawl("https://example.com", trust_env=False)
 
     assert result == "ok"
-    assert captured_client_kwargs == {"trust_env": False}
+    assert captured_client_kwargs == {"trust_env": False, "follow_redirects": True}
 
 
 @pytest.mark.anyio
