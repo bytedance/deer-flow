@@ -212,6 +212,14 @@ class ModelConfig(BaseModel):
         for source, mapping in sources:
             if mapping is None:
                 continue
+            # The thinking shortcut becomes the nested ``thinking`` payload;
+            # the other sources are merged at the constructor-settings root.
+            generic_path = "thinking.reasoning_effort" if source == "thinking" else "reasoning_effort"
+            generic_mapping = self.thinking if source == "thinking" else mapping
+            if effort_path != generic_path and isinstance(generic_mapping, dict) and "reasoning_effort" in generic_mapping:
+                if contract.effort is None:
+                    raise ValueError(f"{source} reasoning_effort is set, but the reasoning contract declares no effort control")
+                raise ValueError(f"{source} reasoning_effort conflicts with reasoning.effort.path={effort_path!r}; remove the legacy key")
             value = _lookup_dotted(mapping, effort_path)
             if value is None:
                 continue

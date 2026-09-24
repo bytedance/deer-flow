@@ -76,7 +76,8 @@ export function getReasoningEffortOptions(
  * Map a requested effort onto a value the model accepts.
  *
  * - `undefined` stays `undefined` (the Gateway applies the contract default).
- * - Legacy profiles forward the value untouched, exactly as before.
+ * - Legacy profiles keep only their advertised generic values. A remembered
+ *   contract-only value is dropped when the user switches models.
  * - Declared contracts keep accepted values, map generic values through the
  *   contract's aliases, and otherwise fall back to the contract default.
  */
@@ -89,7 +90,9 @@ export function resolveReasoningEffort(
   }
   const capabilities = getReasoningCapabilities(model);
   if (capabilities.source === "legacy") {
-    return requested;
+    return capabilities.effort?.values.includes(requested)
+      ? requested
+      : undefined;
   }
   const effort = capabilities.effort;
   if (!effort) {

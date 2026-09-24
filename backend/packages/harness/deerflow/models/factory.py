@@ -181,7 +181,7 @@ def _apply_contract_thinking_settings(
     thinking_enabled: bool,
     effective_wte: dict,
     requested_reasoning_effort: str | None,
-    is_codex_model: bool,
+    codex_handles_generic_effort: bool,
 ) -> None:
     """Thinking/effort payload path for profiles that declare a ``reasoning:`` contract.
 
@@ -213,9 +213,12 @@ def _apply_contract_thinking_settings(
         _merge_settings(settings, model_config.when_thinking_disabled)
     else:
         _merge_settings(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
-    if contract.effort is None:
+    if contract.effort is None or contract.effort.path != "reasoning_effort":
+        # A custom path is the only effort wire format for this contract.
+        # Drop a generic key supplied by model_overrides as well as stale
+        # settings on a ModelConfig mutated after load-time validation.
         settings.pop("reasoning_effort", None)
-    elif requested_reasoning_effort is not None and not is_codex_model:
+    if contract.effort is not None and requested_reasoning_effort is not None and not codex_handles_generic_effort:
         _set_dotted_setting(settings, contract.effort.path, requested_reasoning_effort)
 
 
@@ -424,6 +427,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # all land here, so required thinking, unsupported thinking and restricted
     # effort vocabularies are enforced in exactly one place.
     contract = resolve_reasoning_contract(model_config)
+    # Codex's legacy/default-path adapter writes the generic constructor key.
+    # A declared custom path takes precedence even for a Codex subclass.
+    codex_handles_generic_effort = is_codex_model and (contract.source == "legacy" or contract.effort is None or contract.effort.path == "reasoning_effort")
     if contract.source == "legacy" and thinking_enabled and has_thinking_settings and not contract.supports_thinking:
         raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
     try:
@@ -457,7 +463,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             thinking_enabled=thinking_enabled,
             effective_wte=effective_wte,
             requested_reasoning_effort=requested_reasoning_effort,
-            is_codex_model=is_codex_model,
+            codex_handles_generic_effort=codex_handles_generic_effort,
         )
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
@@ -470,13 +476,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
-        if not thinking_enabled:
-            model_settings_from_config["reasoning_effort"] = "none"
-        elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
-            model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
-        elif "reasoning_effort" not in model_settings_from_config:
-            model_settings_from_config["reasoning_effort"] = "medium"
+        if codex_handles_generic_effort:
+            # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+            if not thinking_enabled:
+                model_settings_from_config["reasoning_effort"] = "none"
+            elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
+                model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
+            elif "reasoning_effort" not in model_settings_from_config:
+                model_settings_from_config["reasoning_effort"] = "medium"
 
     # For MindIE models: enforce conservative retry defaults.
     # Timeout normalization is handled inside MindIEChatModel itself.

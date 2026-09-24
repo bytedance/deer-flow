@@ -502,7 +502,10 @@ This release closes that milestone with **765 merged pull requests**.
   disable payload and unsupported effort values never reach the provider;
   `/api/models` projects the contract as `reasoning`, the composer derives its
   effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
-  `low/high/max` effort control. Profiles without the block are unchanged.
+  `low/high/max` effort control. Custom effort paths reject leftover generic
+  effort keys, and the chat UI drops remembered contract-only levels when
+  switching to legacy models. Profiles without the block keep their existing
+  provider behavior.
   ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`

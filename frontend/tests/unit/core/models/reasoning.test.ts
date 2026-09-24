@@ -95,9 +95,16 @@ describe("resolveReasoningEffort", () => {
     expect(resolveReasoningEffort(glm, undefined)).toBeUndefined();
   });
 
-  it("forwards legacy values untouched", () => {
+  it("keeps advertised legacy values and drops remembered contract-only values", () => {
     expect(resolveReasoningEffort(legacyThinking, "minimal")).toBe("minimal");
-    expect(resolveReasoningEffort(legacyThinking, "xhigh")).toBe("xhigh");
+    expect(resolveReasoningEffort(legacyThinking, "xhigh")).toBeUndefined();
+    expect(
+      resolveReasoningEffort(
+        legacyThinking,
+        resolveReasoningEffort(glm, "max"),
+      ),
+    ).toBeUndefined();
+    expect(resolveReasoningEffort(legacyPlain, "high")).toBeUndefined();
   });
 
   it("maps generic presets through the contract aliases", () => {

@@ -243,8 +243,9 @@ models:
   # subagents — so pick a level you are happy to pay for on every background
   # call. Contradictory profiles fail at startup: `required` plus
   # `when_thinking_disabled`, a `default` outside `values`, an effort value in
-  # the profile or in `when_thinking_*` templates that the contract rejects, or
-  # a `path` that would overwrite a whole mapping such as `extra_body`.
+  # the profile or in `when_thinking_*` templates that the contract rejects, a
+  # stale `reasoning_effort` beside a custom `effort.path`, or a `path` that
+  # would overwrite a whole mapping such as `extra_body`.
   # Profiles without `reasoning:` behave exactly as before.
 
   # Example: Z.AI GLM-5.3-Flash (required thinking, restricted effort)

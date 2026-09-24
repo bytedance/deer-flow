@@ -276,7 +276,9 @@ are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
 `max` flow through local settings and account preferences unchanged; the custom
 agent dialog offers only the intersection with the per-agent `low/medium/high`
 schema and hides "off" for required-thinking models. Do not read the booleans in
-components directly.
+components directly. On a legacy model, `resolveReasoningEffort` keeps only its
+advertised generic values; this drops a remembered provider-specific token after
+a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 

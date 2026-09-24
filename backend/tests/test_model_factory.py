@@ -1929,6 +1929,33 @@ def test_contract_unknown_effort_without_default_is_not_forwarded(monkeypatch):
     assert "reasoning_effort" not in captured
 
 
+def test_contract_custom_effort_path_drops_generic_override(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in captured
+    assert captured["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_contract_custom_effort_path_stays_canonical_for_codex(monkeypatch):
+    model = _contract_model(
+        "codex-model",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}},
+    )
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in FakeChatModel.captured_kwargs
+    assert FakeChatModel.captured_kwargs["extra_body"]["thinking"]["effort"] == "high"
+
+
 def test_contract_without_effort_never_forwards_reasoning_effort(monkeypatch):
     model = _contract_model(reasoning={"thinking": "optional"})
     captured: dict = {}

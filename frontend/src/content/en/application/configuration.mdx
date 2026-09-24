@@ -177,6 +177,7 @@ models:
 
 - `thinking: required` keeps thinking on even when a background caller asks for it off; set `on_disable_request: reject` to fail such calls instead.
 - Effort values outside `values` map through `aliases` or fall back to `default`; they never reach the provider. Effort values written into the profile or into `when_thinking_enabled` / `when_thinking_disabled` are validated against `values` at startup for the same reason.
+- When changing `effort.path`, remove old `reasoning_effort` keys from the profile and thinking templates. A declared contract rejects these conflicting keys at startup. The chat UI also drops a remembered provider-specific effort when switching to a legacy model that does not advertise it.
 - `default` also applies to callers that never choose an effort — summarization, title generation, and subagents — so pick a level you are happy to pay for on every background call (`high` above, with `max` left selectable in the composer).
 - `dialect: auto` (the default) infers the on/off payload from `when_thinking_enabled`, so existing profiles can add `reasoning` without rewriting their templates. Profiles without a `reasoning` block behave exactly as before.
 - Contradictory profiles (for example `required` together with `when_thinking_disabled`) fail at startup.

@@ -30,7 +30,9 @@ profiles fail at config load (`required` + `when_thinking_disabled`, `unsupporte
 + an enable template, a `default` outside `values`, an explicit boolean that
 disagrees, an effort value at `effort.path` in the profile or in the
 `when_thinking_*` / `thinking` templates that the contract rejects, a `path` that
-is not a dotted identifier or would overwrite a whole mapping). `default` also
+is not a dotted identifier or would overwrite a whole mapping, or a stale
+`reasoning_effort` key beside a custom effort path). The factory strips a
+generic effort key from runtime overrides for custom-path contracts. `default` also
 governs callers that never choose an effort (summarization, title, subagents), so
 shipped profiles keep it below the provider's deepest level.
 

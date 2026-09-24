@@ -76,7 +76,9 @@ frozen `ReasoningContract`:
 
 `strict=False` on the legacy effort contract means values are forwarded
 verbatim, exactly as before. `strict=True` means unknown values never reach the
-provider.
+provider. The chat UI still drops a remembered contract-only value when the
+selected legacy model does not advertise it; direct legacy backend requests
+retain their historical non-strict behavior.
 
 ### Request resolution
 
@@ -145,6 +147,9 @@ is present:
   contract does not accept, or any such value on a model that declares no
   effort control. These operator-supplied values are forwarded when the caller
   chooses nothing, so they must satisfy the contract too.
+- A stale `reasoning_effort` key in the profile or a thinking template when
+  `effort.path` points elsewhere. The factory also removes a generic key from
+  runtime overrides before forwarding a custom-path contract to the provider.
 
 When the contract is present the legacy booleans are projected from it, so
 `ModelConfig.supports_thinking` and `supports_reasoning_effort` stay correct
@@ -182,6 +187,9 @@ when an older Gateway omits `reasoning`) and owns the mode/effort decisions:
 - Mode presets (`thinking → low`, `pro → medium`, `ultra → high`) are mapped
   through `resolveReasoningEffort`, so a preset that the model does not accept
   becomes the alias or the default instead of an invalid request.
+- When a remembered provider-specific effort is used with a legacy model,
+  `resolveReasoningEffort` keeps only the legacy model's advertised generic
+  values and drops the rest.
 - The custom-agent dialog hides the "off" thinking option for required models
   and offers only the effort values both the model and the per-agent schema
   accept.

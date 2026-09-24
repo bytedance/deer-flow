@@ -191,6 +191,28 @@ def test_thinking_shortcut_effort_is_validated_at_the_declared_path():
         _model(reasoning=contract, thinking={"budget_tokens": 1024, "effort": "max"})
 
 
+@pytest.mark.parametrize("source", ["profile-level", "when_thinking_enabled", "when_thinking_disabled"])
+@pytest.mark.parametrize("stale_effort", ["minimal", "low"])
+def test_custom_effort_path_rejects_stale_generic_reasoning_effort(source, stale_effort):
+    contract = {"thinking": "optional", "effort": {"values": ["low", "high"], "path": "extra_body.thinking.effort"}}
+    extras = {"reasoning_effort": stale_effort} if source == "profile-level" else {source: {"reasoning_effort": stale_effort}}
+
+    with pytest.raises(ValidationError, match=f"{source} reasoning_effort"):
+        _model(reasoning=contract, **extras)
+
+
+def test_custom_effort_path_rejects_stale_generic_key_in_thinking_shortcut():
+    contract = {"thinking": "optional", "effort": {"values": ["low", "high"], "path": "thinking.effort"}}
+
+    with pytest.raises(ValidationError, match="thinking reasoning_effort"):
+        _model(reasoning=contract, thinking={"reasoning_effort": "minimal"})
+
+
+def test_thinking_shortcut_generic_effort_rejected_without_effort_control():
+    with pytest.raises(ValidationError, match="declares no effort control"):
+        _model(reasoning={"thinking": "optional"}, thinking={"reasoning_effort": "minimal"})
+
+
 @pytest.mark.parametrize(
     "path",
     [
