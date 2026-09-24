@@ -88,6 +88,19 @@ spec:
             {{- end }}
             - name: SANDBOX_CONTAINER_PORT
               value: {{ .Values.provisioner.sandboxPort | quote }}
+            # Optional lark-cli sandbox runtime images. The provisioner keys off
+            # "non-empty", so render the variables only when set; an empty
+            # string would still mean "off" but would churn the Pod spec on
+            # every values edit. Broker (Pattern B) supersedes init (Pattern A)
+            # in the provisioner when both are set.
+            {{- with .Values.provisioner.larkCliInitImage }}
+            - name: LARK_CLI_INIT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.provisioner.larkCliBrokerImage }}
+            - name: LARK_CLI_BROKER_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /health
