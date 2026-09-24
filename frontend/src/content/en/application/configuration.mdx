@@ -276,12 +276,13 @@ Docker startup sequence.
 
 Set these before running `pnpm build` or starting the frontend in production:
 
-| Variable              | Required                   | Description                                                      |
-| --------------------- | -------------------------- | ---------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`  | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.       |
-| `BETTER_AUTH_URL`     | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)         |
-| `SKIP_ENV_VALIDATION` | Optional                   | Set to `1` to skip env validation during build (not recommended) |
-| `NEXT_PUBLIC_API_URL` | Optional                   | Override the API base URL for the frontend                       |
+| Variable                         | Required                   | Description                                                       |
+| -------------------------------- | -------------------------- | ----------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`             | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.        |
+| `BETTER_AUTH_URL`                | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)          |
+| `SKIP_ENV_VALIDATION`            | Optional                   | Set to `1` to skip env validation during build (not recommended)  |
+| `NEXT_PUBLIC_BACKEND_BASE_URL`   | Optional                   | Override the Gateway base URL used for REST and SSR calls         |
+| `NEXT_PUBLIC_LANGGRAPH_BASE_URL` | Optional                   | Override the LangGraph API base URL (defaults to `<backend>/api`) |
 
 In development, set these in a `.env` file at the repo root:
 
