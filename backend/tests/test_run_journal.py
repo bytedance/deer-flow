@@ -493,6 +493,231 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
 
 
 @pytest.mark.anyio
+async def test_close_with_flush_persists_buffer_when_cancelled_during_progress_wait(monkeypatch):
+    """Cancelling the close caller during progress quiescence must not drop B.
+
+    Nothing is durable yet: one event is buffered and a best-effort progress
+    snapshot is stuck, so ``close(flush=True)`` reaches ``_quiesce_progress``
+    with no predecessor write. Cancelling the close caller there must not clear
+    the never-written B: the owned close runs the progress wait to its bounded
+    deadline, persists B, detaches, and only then re-raises the caller's
+    cancellation. The stuck reporter is cancelled and globally retained until it
+    settles on its own.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = MemoryRunEventStore()
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+    quiesce_entered = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    journal = RunJournal(
+        "r-close-progress",
+        "t-close-progress",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="B", category="trace", content="buffered")
+
+    original_quiesce = journal._quiesce_progress
+
+    async def observed_quiesce() -> None:
+        quiesce_entered.set()
+        await original_quiesce()
+
+    journal._quiesce_progress = observed_quiesce
+
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        # Deterministic barrier: the owned close is inside the progress wait, and
+        # nothing has been written yet, so B is still only buffered.
+        await asyncio.wait_for(quiesce_entered.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert await store.list_events("t-close-progress", "r-close-progress") == []
+        assert [event["event_type"] for event in journal._buffer] == ["B"]
+
+        close_task.cancel()
+        await asyncio.sleep(0)
+        # The owned close owns the drain: it keeps waiting for B instead of
+        # abandoning the buffered event to the caller's cancellation.
+        assert not close_task.done()
+
+        # ``asyncio.wait`` (not ``wait_for``) so a regression that leaves the
+        # owned close waiting forever fails here instead of hanging the suite.
+        done, _ = await asyncio.wait({close_task}, timeout=0.5)
+        assert close_task in done, "the owned close must finish once its bounded progress deadline expires"
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # B is durable and the detach already ran when the cancellation surfaces.
+        events = await store.list_events("t-close-progress", "r-close-progress")
+        assert [event["event_type"] for event in events] == ["B"]
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+
+        # The best-effort snapshot was cancelled and retained, never awaited to
+        # completion once its bounded deadline expired.
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        assert progress_task in journal_module._cancelling_progress_tasks
+    finally:
+        # Release the reporter first so a regression that awaits it still settles.
+        release_progress.set()
+        if not progress_task.done():
+            progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    assert progress_task not in journal_module._cancelling_progress_tasks
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_bounds_stubborn_progress_and_keeps_buffer(monkeypatch):
+    """A reporter that swallows cancellation must not deadlock the final close.
+
+    The reporter catches the cancellation and waits for another event, so it is
+    still pending when the bounded progress deadline expires. ``close()`` must
+    stop waiting there, persist the buffered event, detach, and leave the
+    reporter in the global retain set until it settles on its own.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = MemoryRunEventStore()
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    journal = RunJournal(
+        "r-close-stubborn",
+        "t-close-stubborn",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="B", category="trace", content="buffered")
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        # ``asyncio.wait`` (not ``wait_for``) so an unbounded progress wait fails
+        # here instead of deadlocking the suite.
+        done, _ = await asyncio.wait({close_task}, timeout=0.5)
+        assert close_task in done, "close() must stop waiting at the bounded progress deadline"
+        await close_task
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+
+        events = await store.list_events("t-close-stubborn", "r-close-stubborn")
+        assert [event["event_type"] for event in events] == ["B"]
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+        # The reporter never settled, so it stays supervised globally.
+        assert progress_task in journal_module._cancelling_progress_tasks
+    finally:
+        # Release the reporter first so a regression that awaits it still settles.
+        release_progress.set()
+        if not progress_task.done():
+            progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    assert progress_task not in journal_module._cancelling_progress_tasks
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_failure_keeps_progress_reporting_attached():
+    """A failed close must not detach the progress reporter either.
+
+    The definite failure keeps the store and the buffer attached for a retry;
+    progress reporting has to survive that retry window too, so the reporter
+    stays attached and still receives snapshots afterwards.
+    """
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def put_batch(self, batch):
+            self.attempts += 1
+            raise RuntimeError("durable write failed")
+
+    snapshots: list[dict] = []
+
+    async def reporter(snapshot):
+        snapshots.append(snapshot)
+
+    store = FailingStore()
+    journal = RunJournal(
+        "r-close-failure-progress",
+        "t-close-failure-progress",
+        store,
+        flush_threshold=100,
+        progress_reporter=reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="A", category="trace", content="first")
+
+    with pytest.raises(RuntimeError, match="durable write failed"):
+        await asyncio.wait_for(journal.close(), timeout=0.5)
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is reporter
+    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert getattr(journal, "_close_owner_task", None) is None
+    assert store.attempts == 1
+
+    # Progress reporting is still live for the retry window.
+    journal._schedule_progress_flush()
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+    await asyncio.wait_for(progress_task, timeout=0.2)
+    assert len(snapshots) == 1
+
+
+@pytest.mark.anyio
 async def test_close_flush_reports_definite_failure_under_cancellation():
     """A definite write failure survives caller cancellation instead of detaching.
 
