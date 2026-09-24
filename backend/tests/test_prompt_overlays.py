@@ -49,9 +49,11 @@ def test_builtin_overlay_does_not_mutate_registry(name):
 
     original = BUILTIN_SUBAGENTS[name].system_prompt
     config = SubagentsAppConfig(agents={name: {"prompt_overlay": {"prepend": "First rule", "append": "Operator rule"}}})
-    expected = "First rule\n\n" + original + "\n\nOperator rule"
-    assert get_subagent_config(name, app_config=config).system_prompt == expected
-    assert get_subagent_config(name, app_config=config).system_prompt == expected
+    first = get_subagent_config(name, app_config=config)
+    second = get_subagent_config(name, app_config=config)
+    assert first.system_prompt == second.system_prompt == original
+    assert first.prompt_overlay.apply("assembled") == "First rule\n\nassembled\n\nOperator rule"
+    assert second.prompt_overlay == first.prompt_overlay
     assert BUILTIN_SUBAGENTS[name].system_prompt == original
     assert get_subagent_config(name, app_config=SubagentsAppConfig()).system_prompt == original
 

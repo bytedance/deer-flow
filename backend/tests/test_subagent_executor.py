@@ -648,6 +648,27 @@ class TestAgentConstruction:
         assert isinstance(messages[1], HumanMessage)
 
     @pytest.mark.anyio
+    async def test_prompt_overlay_surrounds_complete_system_message(self, classes):
+        from langchain_core.messages import SystemMessage
+
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        overrides = SubagentsAppConfig(agents={"general-purpose": {"prompt_overlay": {"prepend": "Operator first", "append": "Operator last"}}})
+        config = get_subagent_config("general-purpose", app_config=overrides)
+        executor = classes["SubagentExecutor"](config=config, tools=[], thread_id="test-thread")
+
+        state, _tools, _setup = await executor._build_initial_state("Do the task")
+
+        system = state["messages"][0]
+        assert isinstance(system, SystemMessage)
+        assert system.content.startswith("Operator first\n\n")
+        assert system.content.endswith("\n\nOperator last")
+        assert config.system_prompt in system.content
+        assert "report" in system.content[len(config.system_prompt) : -len("Operator last")].lower()
+        assert executor._assembled_system_prompt == system.content
+
+    @pytest.mark.anyio
     async def test_build_initial_state_inherits_background_without_execution_evidence(self, classes, base_config):
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 

@@ -141,7 +141,7 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     if agent_override is not None:
         overlay = agent_override.prompt_overlay
         if overlay.prepend or overlay.append:
-            overrides["system_prompt"] = overlay.apply(config.system_prompt)
+            overrides["prompt_overlay"] = overlay
 
     # Timeout: per-agent override > global default (builtins only) > config's own value
     if agent_override is not None and agent_override.timeout_seconds is not None:
