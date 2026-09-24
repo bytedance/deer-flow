@@ -39,6 +39,8 @@ database:
 
 The knob buys storage against read cost, never a different answer. A low cadence snapshots the message list far more often than the default while materialized state stays identical, and the tests pin both halves: the configured frequency must reach the compiled channel table, and materialization must produce the same values at any cadence.
 
+It is also a first-order capacity knob, because those snapshots are what dominate the retained total: with K = `snapshot_frequency`, N turns retain O(N²/K + N) rather than O(N²), while the per-step write payloads are independent of K. Sizing a store from the per-step cost alone understates it; see [Checkpoints and Delta Channels](/docs/harness/checkpoints) for the derivation.
+
 ## Interaction with LangGraph's superstep bound
 
 Snapshot writing is driven by two counters, and whichever trips first wins:

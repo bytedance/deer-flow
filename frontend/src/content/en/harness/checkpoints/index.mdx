@@ -15,7 +15,7 @@ import { Callout } from "nextra/components";
   and reconstructs the list when a read needs it. The default is `full`.
 </Callout>
 
-Every DeerFlow run writes thread state to a checkpoint after each step: the message list, the goal, sandbox handles, durable context, and any channels contributed by middleware. The message list dominates that state in a long run, so how it is represented on disk is the difference between a store that grows quadratically in turns and one that grows linearly. This manual covers both representations, the switch that selects one, and what each choice costs an operator.
+Every DeerFlow run writes thread state to a checkpoint after each step: the message list, the goal, sandbox handles, durable context, and any channels contributed by middleware. The message list dominates that state in a long run, so how it is represented on disk decides how much a store retains after N turns: `full` mode retains a quadratic amount of it, and `delta` mode shrinks that quadratic component by a factor set by the snapshot cadence rather than removing it. This manual covers both representations, the switch that selects one, and what each choice costs an operator.
 
 ## How to read this manual
 
@@ -33,14 +33,25 @@ Every DeerFlow run writes thread state to a checkpoint after each step: the mess
 
 ## Why delta exists
 
-In `full` mode every checkpoint carries the complete channel values, so each step re-serializes the whole message list: storage and serialization cost grow O(N²) in turns. In `delta` mode the message list is a LangGraph `DeltaChannel`. A non-snapshot checkpoint stores no message value in `channel_values`, each step's updates are appended as writes, and a read reconstructs the list by replaying the ancestor writes through the reducer. Storage and serialization then grow O(N) in turns.
+In `full` mode every checkpoint carries the complete channel values, so each step re-serializes the whole message list, and all of those checkpoints are retained: total storage grows O(N²) in turns.
+
+In `delta` mode the message list is a LangGraph `DeltaChannel`. A non-snapshot checkpoint stores no message value in `channel_values`, each step's updates are appended as writes, and a read reconstructs the list by replaying the ancestor writes through the reducer. That removes the whole-list serialization from most checkpoints — but it does not remove the quadratic term, because every `snapshot_frequency` writes a `_DeltaSnapshot` holds the **entire** message list as of that step, and those snapshots are retained like any other checkpoint.
+
+Let K be `snapshot_frequency`. The two quantities a capacity plan depends on are different:
+
+| Quantity                   | `full`                                                                     | `delta`                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Marginal cost of one step  | Re-serializes the whole list into one more retained checkpoint             | Appends that step's writes; every K writes also stores a full-list snapshot                                                |
+| Total retained after N turns | O(N²)                                                                    | O(N²/K + N)                                                                                                                |
+
+Delta therefore divides the quadratic component by roughly K — `10` by default — instead of deleting it. Fewer snapshots mean a smaller residual *and* slower reads, since materialization replays from the nearest one ([Snapshot Cadence](/docs/harness/checkpoints/cadence)). Nothing in DeerFlow prunes those snapshots yet, so size a store from the retained total rather than from the per-step write cost ([Operating Checkpoints](/docs/harness/checkpoints/operations)).
 
 |                      | `full`                                                                     | `delta`                                                                                                                   |
 | -------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | Checkpoint payload   | Complete `channel_values`, message list included                           | No message blob on non-snapshot steps; a sentinel `_DeltaSnapshot` blob appears every `snapshot_frequency` writes          |
 | Step updates         | Folded into the next checkpoint's payload                                  | Stored as per-step writes                                                                                                  |
 | Read path            | Stored values are used directly                                            | Reconstructed from the nearest stored snapshot plus replayed writes                                                        |
-| Growth in turns      | O(N²)                                                                      | O(N)                                                                                                                      |
+| Total retained after N turns | O(N²)                                                              | O(N²/K + N), where K = `snapshot_frequency`                                                                                |
 
 The mode is a **process-level, restart-required choice**. Each process resolves it once, before the first graph is compiled, and cannot change it afterwards; every process sharing one checkpoint database must use the same value. [Quick Start](/docs/harness/checkpoints/quick-start) covers the switch, and [Snapshot Cadence](/docs/harness/checkpoints/cadence) covers the second frozen knob, the snapshot cadence.
 

@@ -382,3 +382,5 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | [#3559](https://github.com/bytedance/deer-flow/pull/3559) | `## [2.0.0]` → `### 修复` | **subagent：** 让子 Agent 与父 run 的 checkpointer 隔离。 |
 
 本列表没有任何条目改动过模式默认值，它一直是 `full`。
+
+`#4292` 一行是对已发布 changelog 条目的逐字引用。其中「近线性」的说法描述的是单步表示；保留的存储总量仍然叠加到 O(N²/K + N)（K 为 `snapshot_frequency`），因为每一份周期性快照都保存着当时整份增长中的列表——见[检查点与增量通道](/docs/harness/checkpoints)。

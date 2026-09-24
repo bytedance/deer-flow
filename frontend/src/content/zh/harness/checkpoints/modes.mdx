@@ -14,7 +14,7 @@ import { Callout } from "nextra/components";
 | | `full` | `delta` |
 | --- | --- | --- |
 | 消息列表存放位置 | 每份检查点的 `channel_values` 里 | 逐步写入里。非快照步骤不把该通道放进 `channel_values`；每 `snapshot_frequency` 次写入落一份 `_DeltaSnapshot` 大对象 |
-| 单步代价 | 序列化整份列表，随轮次 O(N²) | 只有写入，随轮次 O(N) |
+| 单步代价 | 把整份列表重新序列化进又一份会被保留的检查点 | 追加该步写入；另外每 K 次写入落一份整份 `_DeltaSnapshot`（N 轮后保留总量：O(N²) 对 O(N²/K + N)） |
 | 快照触发 | 不适用——每一步都是完整载荷 | 更新计数达到 `snapshot_frequency`，或 superstep 计数达到 LangGraph 的 `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT` 上限（5000） |
 | 读取路径 | 直接使用已存储的取值 | 先补齐通道；`channel_values` 中缺失的增量通道合并为一次 saver 调用；再做 `from_checkpoint(seed)` 加 `replay_writes` |
 | 直接读 checkpointer | 返回已存储的取值 | 返回哨兵，而不是消息列表 |

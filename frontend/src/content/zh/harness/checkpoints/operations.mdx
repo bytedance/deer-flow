@@ -24,7 +24,7 @@ import { Callout } from "nextra/components";
 - **模式必须一致。** 共享同一个检查点数据库的所有进程必须使用相同的 `database.checkpoint_channel_mode`。模式被编译进每个图的通道表，不随检查点存储。
 - **节奏必须一致。** `database.checkpoint_delta.snapshot_frequency` 同样被编译进通道表。它被刻意不写入检查点元数据，因此逐检查点无法检测不一致，这属于运维责任。失败关闭的门只约束*模式*，运行时不做节奏比对。
 
-增量模式在所有后端上都改变存储形态：逐步检查点不再携带整份 `messages` 负载，存储随轮次线性增长而不是平方增长。见[通道模式](/docs/harness/checkpoints/modes)。
+增量模式在所有后端上都改变存储形态：逐步检查点不再携带整份 `messages` 负载，因此单步的边际成本不再随历史增长。但保留的存储里仍然有每 `snapshot_frequency` 次写入落下的整份 `_DeltaSnapshot`，所以 N 轮之后总量按 O(N²/K + N) 增长（K 为 `snapshot_frequency`）——是按 K 大致缩小，而不是线性。请按保留总量做容量规划，见[检查点与增量通道](/docs/harness/checkpoints)与[通道模式](/docs/harness/checkpoints/modes)。
 
 ## 保留与裁剪
 

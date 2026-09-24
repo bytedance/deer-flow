@@ -24,7 +24,7 @@ Two process-level rules bind regardless of backend, and neither is enforced by t
 - **Mode must match.** Every process sharing one checkpoint database must use the same `database.checkpoint_channel_mode`. The mode is baked into each compiled graph's channel table, not stored per checkpoint.
 - **Cadence must match.** `database.checkpoint_delta.snapshot_frequency` is baked into the channel table the same way. It is deliberately not stamped into checkpoint metadata, so a mismatch is undetectable per checkpoint and remains an operator responsibility. The fail-closed gate enforces the *mode* only; there is no runtime cadence comparison.
 
-Delta mode changes the storage shape on every backend: per-step checkpoints carry no full `messages` blob, so storage grows with the number of turns rather than with the number of turns squared. See [Channel Modes](/docs/harness/checkpoints/modes).
+Delta mode changes the storage shape on every backend: per-step checkpoints carry no full `messages` blob, so the marginal cost of a step no longer scales with the history. Retained storage still includes a full-list `_DeltaSnapshot` every `snapshot_frequency` writes, so after N turns it grows as O(N²/K + N) with K = `snapshot_frequency` — reduced by roughly K, not linear. Plan capacity from the retained total; see [Checkpoints and Delta Channels](/docs/harness/checkpoints) and [Channel Modes](/docs/harness/checkpoints/modes).
 
 ## Retention and pruning
 

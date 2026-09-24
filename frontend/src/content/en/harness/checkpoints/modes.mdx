@@ -14,7 +14,7 @@ import { Callout } from "nextra/components";
 | | `full` | `delta` |
 | --- | --- | --- |
 | Where the message list lives | In every checkpoint's `channel_values` | In the per-step writes. A non-snapshot step leaves the channel out of `channel_values`; a `_DeltaSnapshot` blob is stored every `snapshot_frequency` writes |
-| What one step costs | Whole-list serialization, O(N²) in turns | Writes only, O(N) in turns |
+| What one step costs | Re-serializing the whole list into one more retained checkpoint | Appending that step's writes; every K writes also stores a full-list `_DeltaSnapshot` (total retained after N turns: O(N²) vs O(N²/K + N)) |
 | Snapshot trigger | n/a — every step is a full payload | The update count reaches `snapshot_frequency`, or the supersteps count reaches LangGraph's `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT` bound (5000) |
 | Read path | Stored values are used directly | Hydrate channels; delta channels absent from `channel_values` are batched into a single saver call; then `from_checkpoint(seed)` plus `replay_writes` |
 | Raw checkpointer read | Returns the stored value | Returns a sentinel, not the message list |

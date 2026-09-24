@@ -382,3 +382,5 @@ Pull requests whose changelog entries concern dual-mode checkpoint storage. Engl
 | [#3559](https://github.com/bytedance/deer-flow/pull/3559) | `## [2.0.0]` → `### Fixed` | **subagent:** isolate subagents from the parent run's checkpointer. |
 
 No entry in this list records a change to the mode default, which has been `full` throughout.
+
+The `#4292` row quotes the released changelog entry verbatim. Its "near-linear" wording describes the per-step representation; retained storage still adds up to O(N²/K + N) with K = `snapshot_frequency`, because every periodic snapshot holds the whole growing list — see [Checkpoints and Delta Channels](/docs/harness/checkpoints).
