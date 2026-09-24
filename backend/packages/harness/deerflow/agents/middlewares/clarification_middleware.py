@@ -451,8 +451,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         Returns a plain ToolMessage (not a ``Command(goto=END)``) so the
         agent loop continues instead of ending — the agent receives this
-        as the tool result and either continues low-risk, reversible work
-        or reports a blocked result rather than re-asking.
+            as the tool result and either continues low-risk, reversible work
+            or reports a blocked result rather than re-asking.
         """
         tool_call_id = request.tool_call.get("id", "")
         logger.info("ask_clarification suppressed by run interaction policy; applying unattended risk guidance")

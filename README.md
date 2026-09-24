@@ -211,6 +211,12 @@ It is disabled by default; see the linked guide to enable it.
    so they do not sync to another browser or device and do not require a startup
    setting. The compact favorites picker intentionally omits search and only
    adds favorite ordering to the two-line model list.
+   > **Custom Agent UI**: If you want to create and manage custom agents from the web UI, enable the protected HTTP API in `config.yaml`:
+   >
+   > ```yaml
+   > agents_api:
+   >   enabled: true
+   > ```
 
    <details>
    <summary>Manual model configuration examples</summary>

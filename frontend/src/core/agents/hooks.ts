@@ -5,6 +5,7 @@ import {
   createAgent,
   deleteAgent,
   fetchAgentsApiEnabled,
+  getAgentsApiStatus,
   getAgent,
   listAgents,
   updateAgent,
@@ -55,10 +56,19 @@ export function useAgentsApiEnabled() {
   };
 }
 
-export function useAgents() {
+export function useAgentsApiStatus() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agents-api", "status"],
+    queryFn: () => getAgentsApiStatus(),
+  });
+  return { status: data ?? null, isLoading, error };
+}
+
+export function useAgents(options?: { enabled?: boolean }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["agents"],
     queryFn: () => listAgents(),
+    enabled: options?.enabled ?? true,
   });
   return { agents: data ?? [], isLoading, error };
 }

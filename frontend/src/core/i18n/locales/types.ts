@@ -748,6 +748,11 @@ export interface Translations {
     emptyDescription: string;
     featureDisabledTitle: string;
     featureDisabledDescription: string;
+    apiDisabledTitle: string;
+    apiDisabledDescription: string;
+    apiDisabledConfigHint: string;
+    apiStatusErrorTitle: string;
+    apiStatusErrorDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;

@@ -701,8 +701,9 @@ class TestClarificationCommandIdempotency:
 
 class TestClarificationDisabled:
     """When ``disable_clarification`` is set in runtime context, a clarification
-    must NOT interrupt the run — it returns a ToolMessage nudging the agent to
-    proceed, so non-interactive channels (GitHub) don't dead-end."""
+    must NOT interrupt the run — it returns a ToolMessage that applies the
+    unattended minimal-risk/blocked-outcome policy, so non-interactive channels
+    (GitHub) don't dead-end or push risky ambiguity forward."""
 
     def _request(self, *, runtime_context):
         return SimpleNamespace(
@@ -724,11 +725,15 @@ class TestClarificationDisabled:
         assert result.tool_call_id == "call-clarify-1"
         assert result.artifact is None
 
-    def test_disabled_message_tells_agent_to_proceed(self, middleware):
+    def test_disabled_message_applies_unattended_safety_policy(self, middleware):
         request = self._request(runtime_context={"disable_clarification": True})
         result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
-        assert "disabled" in result.content.lower()
-        assert "proceed" in result.content.lower()
+        content = result.content.lower()
+        assert "disabled" in content
+        assert "low-risk and reversible work" in content
+        assert "do not guess or act" in content
+        assert "structured blocked result" in content
+        assert "carry out the requested action" not in content
 
     @pytest.mark.parametrize("mode", ["autonomous", "webhook", "scheduled"])
     @pytest.mark.parametrize("async_path", [False, True])
