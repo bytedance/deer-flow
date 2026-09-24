@@ -126,20 +126,16 @@ def _resolve_reference(
         base = PurePosixPath(source_path).parent
         if "://" in ref:
             return None
-        candidate = (base / ref).as_posix()
-        normalized = normalize_relative_path(candidate)
+        if files is not None and "#" in ref and (base / ref).as_posix() not in files:
+            # A package filename may legally contain '#'. Prefer the exact
+            # token when it names a literal package file; otherwise drop the
+            # fragment BEFORE normalizing — normalizing first would collapse
+            # a segment like "faq.md#/.." and silently retarget the edge
+            # ("references/C#.md" stays whole, "references/faq.md#pricing"
+            # resolves to faq.md).
+            stripped = ref.split("#", 1)[0]
+            if stripped and stripped != ref:
+                ref = stripped
+        return normalize_relative_path((base / ref).as_posix())
     except ValueError:
         return "__ESCAPES__"
-    if files is not None and "#" in ref and normalized not in files:
-        # A package filename may legally contain '#'. Prefer the exact
-        # reference when it names a real file; treat the suffix after the
-        # first '#' as a section fragment only when the exact path does
-        # not exist ("references/C#.md" stays whole,
-        # "references/faq.md#pricing" resolves to faq.md).
-        stripped = ref.split("#", 1)[0]
-        if stripped and stripped != ref:
-            try:
-                return normalize_relative_path((base / stripped).as_posix())
-            except ValueError:
-                return "__ESCAPES__"
-    return normalized

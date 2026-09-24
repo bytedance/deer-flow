@@ -204,6 +204,24 @@ def test_resource_graph_prefers_hash_filenames_over_fragments(tmp_path):
     assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
+def test_resource_graph_strips_fragment_before_normalizing_fallback(tmp_path):
+    # The exact-path preference must check the literal token: normalizing
+    # first collapses a hash-bearing segment ("faq.md#/.." -> "other.md")
+    # and can silently retarget the edge and orphan faq.md. The fragment is
+    # dropped first when the literal token is not a real file.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/faq.md#/../other.md`.\n",
+    )
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+    _write(tmp_path / "references" / "other.md", "# Other\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(
