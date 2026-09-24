@@ -15,6 +15,7 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -31,7 +32,9 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     seams; message objects are rebuilt rather than mutated. Structured
     tool-call arguments are covered too — backends like OpenViking retain the full
     message object, including ``tool_calls`` and provider-format arguments in
-    ``additional_kwargs``.
+    ``additional_kwargs``. The ``original_user_content`` provenance field is
+    covered as well: UploadsMiddleware preserves the raw user turn there, so a
+    redacted ``content`` alone would still leak it to the memory backend.
     """
     redactor = _make_redactor(pii_redaction_config)
 
@@ -47,10 +50,19 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
             if rewritten != tool_calls:
                 updates["tool_calls"] = rewritten
         additional_kwargs = getattr(message, "additional_kwargs", None)
-        if isinstance(additional_kwargs, dict) and additional_kwargs.get("tool_calls"):
-            rewritten = _redact_strings(additional_kwargs["tool_calls"], redactor)
-            if rewritten != additional_kwargs["tool_calls"]:
-                updates["additional_kwargs"] = {**additional_kwargs, "tool_calls": rewritten}
+        if isinstance(additional_kwargs, dict):
+            new_additional_kwargs = additional_kwargs
+            if additional_kwargs.get("tool_calls"):
+                rewritten = _redact_strings(additional_kwargs["tool_calls"], redactor)
+                if rewritten != additional_kwargs["tool_calls"]:
+                    new_additional_kwargs = {**new_additional_kwargs, "tool_calls": rewritten}
+            original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if isinstance(original_content, str) and original_content:
+                redacted_original = redactor.redact(original_content)
+                if redacted_original != original_content:
+                    new_additional_kwargs = {**new_additional_kwargs, ORIGINAL_USER_CONTENT_KEY: redacted_original}
+            if new_additional_kwargs is not additional_kwargs:
+                updates["additional_kwargs"] = new_additional_kwargs
         redacted.append(message.model_copy(update=updates) if updates else message)
     return redacted
 

@@ -10,6 +10,7 @@ from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 _TOKEN_SECRET = "unit-test-deployment-secret-0123456789"
 
@@ -194,3 +195,32 @@ def test_distinct_identities_keep_distinct_tokens():
     assert a != b
     both = redact_text("contact3513@example.com and contact3727@example.com", cfg)
     assert a in both and b in both
+
+
+def test_original_user_content_provenance_redacted(monkeypatch):
+    # Review round 12 on #5577: UploadsMiddleware preserves the raw user turn
+    # in additional_kwargs.original_user_content, so a redacted content alone
+    # still leaks the raw value to the memory backend. The queued copy must
+    # redact the provenance field too, and the thread-state message must stay
+    # untouched.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
+    original = HumanMessage("reach alice@example.com", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "reach alice@example.com"})
+    _run(mw, manager, monkeypatch, [original])
+    queued = manager.add.call_args.args[1][0]
+    assert EMAIL_TOKEN in queued.content and "alice@example.com" not in queued.content
+    assert EMAIL_TOKEN in queued.additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+    assert "alice@example.com" not in queued.additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+    assert original.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "reach alice@example.com"
+    assert original.content == "reach alice@example.com"
+
+
+def test_original_user_content_redacted_in_compaction_flush_hook(monkeypatch):
+    # Same provenance leak through the compaction-triggered hook, which shares
+    # redact_queued_messages: one fix must cover both enqueues.
+    queued = _flush_hook_call(
+        monkeypatch,
+        PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET),
+        [HumanMessage("reach alice@example.com", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "reach alice@example.com"})],
+    )
+    assert EMAIL_TOKEN in queued[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+    assert "alice@example.com" not in queued[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
