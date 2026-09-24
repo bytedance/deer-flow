@@ -69,7 +69,31 @@ def _make_service(task_repo, run_repo, launched: list) -> ScheduledTaskService:
     )
 
 
-async def _seed_task(task_repo: ScheduledTaskRepository, task_id: str) -> dict:
+class _PausingTaskRepo(ScheduledTaskRepository):
+    """Real repository that parks the first task-row lock it takes.
+
+    The pause transaction stops after acquiring the row (holding SQLite's
+    writer) and before committing, so a dispatch release genuinely runs while
+    a pause is in flight — the window in which the release used to read a
+    stale ``lease_owner`` and write the task back to ``enabled``.
+    """
+
+    def __init__(self, session_factory, *, holding: asyncio.Event, resume: asyncio.Event) -> None:
+        super().__init__(session_factory)
+        self._holding = holding
+        self._resume = resume
+        self._parked = False
+
+    async def _lock_task(self, session, task_id):  # type: ignore[override]
+        row = await ScheduledTaskRepository._lock_task(session, task_id)
+        if not self._parked:
+            self._parked = True
+            self._holding.set()
+            await self._resume.wait()
+        return row
+
+
+async def _seed_task(task_repo: ScheduledTaskRepository, task_id: str, *, next_run_at: datetime | None = None) -> dict:
     # fresh_thread_per_run: every dispatch gets a NEW thread_id, so #4003's
     # per-thread uq_runs_thread_active can never fire for two dispatches of the
     # same task — this is precisely the gap the per-task index closes.
@@ -84,7 +108,7 @@ async def _seed_task(task_repo: ScheduledTaskRepository, task_id: str) -> dict:
         schedule_type="cron",
         schedule_spec={"cron": "*/5 * * * *"},
         timezone="UTC",
-        next_run_at=None,
+        next_run_at=next_run_at,
     )
     task = await task_repo.get(task_id, user_id="user-1")
     assert task is not None
@@ -215,5 +239,42 @@ async def test_partial_unique_index_enforces_one_active_run_per_task(tmp_path):
         assert await run_repo.has_active_runs("t1") is False
         await run_repo.create(run_record_id="r5", task_id="t1", thread_id="th5", scheduled_for=now, trigger="scheduled", status="queued")
         assert await run_repo.has_active_runs("t1") is True
+    finally:
+        await close_engine()
+
+
+async def test_release_dispatch_lease_does_not_revive_a_paused_task(tmp_path):
+    """A pause landing mid-dispatch must survive the scheduler's lease release.
+
+    ``release_dispatch_lease`` writes the status its caller asked for
+    (``"enabled"`` for scheduled dispatch) and only guards on the lease owner.
+    Reading that owner outside SQLite's writer lock let the release pass its
+    guard against a pre-pause snapshot and then overwrite the user's pause.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        holding, resume = asyncio.Event(), asyncio.Event()
+        task_repo = _PausingTaskRepo(sf, holding=holding, resume=resume)
+        now = datetime.now(UTC)
+        await _seed_task(task_repo, "task-pause-race", next_run_at=now)
+        claimed = await task_repo.claim_due_tasks(now=now, lease_owner="scheduler-A", lease_seconds=120, limit=10)
+        assert [row["id"] for row in claimed] == ["task-pause-race"]
+
+        pause = asyncio.create_task(task_repo.pause_with_queue_cancellation("task-pause-race", user_id="user-1", error="paused by user", now=now))
+        await asyncio.wait_for(holding.wait(), timeout=5)
+
+        release = asyncio.create_task(task_repo.release_dispatch_lease("task-pause-race", expected_lease_owner="scheduler-A", status="enabled"))
+        await asyncio.sleep(0.2)  # the release is in flight while the pause holds the row
+        resume.set()
+
+        assert await asyncio.wait_for(pause, timeout=10) == "paused"
+        assert await asyncio.wait_for(release, timeout=10) is False
+
+        task = await task_repo.get("task-pause-race", user_id="user-1")
+        assert task is not None
+        assert task["status"] == "paused", "the user's pause must not be reverted by the lease release"
+        assert task["lease_owner"] is None
     finally:
         await close_engine()

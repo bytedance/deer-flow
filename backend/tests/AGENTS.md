@@ -67,3 +67,11 @@ against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
 `DEEPSEEK_TEST_API_KEY`, never in CI. Keep credentials and provider payloads out of
 committed evidence. A passing connectivity probe does not establish full agent
 compatibility; distinguish protocol assertions from observed live behavior.
+
+## Classification request packing
+
+Pin the Jev example's outbound byte budget against captured HTTP request bodies.
+Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
+inputs that fit the host's separate input limit. Use offline transports.
+Check the host's JSON output bound with the maximum item count and keys that
+expand when escaped; preserving raw UTF-8 limits alone does not cover it.

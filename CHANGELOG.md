@@ -941,6 +941,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** Pausing a scheduled task no longer loses the pause when a
+  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
+  owner — which pausing clears — but read the row without taking SQLite's
+  writer, so a stale read passed the guard and wrote the task back to
+  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
+  the API had reported as paused. The read now takes the writer first, as every
+  other mutating path in that repository does. PostgreSQL was unaffected.
+  ([#5777])
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
@@ -2792,6 +2800,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
+  first-boot requests both create an admin. The handler counted admins in one
+  session and created the account in another, so two requests with different
+  emails both saw an empty system; the loser now gets the documented
+  `409 system_already_initialized`. The count and the insert share one
+  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
+  PostgreSQL advisory lock). ([#5776])
 - **uploads:** Document conversion no longer re-opens the upload by name. The
   Gateway converted the committed file and the embedded client converted the
   copy it had just placed in the thread's uploads directory, so a sandbox that
@@ -2980,6 +2995,21 @@ This release closes that milestone with **765 merged pull requests**.
   change log. The former single page becomes the section index, so existing
   page links keep working; deep links to sections of the old page now land
   on the index.
+- **docs:** Add an extension developer manual under `harness/extensions/` in
+  both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
+  to write an extension, a quick start, the runtime model, middleware
+  placements, lifecycle and observer hooks, services and routes, the run
+  evidence reader, operating extensions, troubleshooting by error message,
+  and a reference of every public name with the contract's version history.
+  Also correct stale descriptions of the contribution kinds and of run
+  evidence metadata redaction in `AGENTS.md`.
+- **docs:** Bring the extension developer manual up to the
+  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
+  covering `registry.plugin()`, browser modules and packaged assets, backend
+  actions, model tools and settings; the request-scoped run evidence reader
+  with a per-user route example; and plugin troubleshooting and operations
+  notes. Also correct the plugin `mount` return value in
+  `docs/full-stack-plugins.md`.
 
 ### Internal
 
@@ -4356,3 +4386,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776
+[#5777]: https://github.com/bytedance/deer-flow/pull/5777
+

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from .frontmatter import _FRONTMATTER_RE
 from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
 
         # Keep parser diagnostics richer than the pure helper's host-path-free
         # error string; tests and authoring UX depend on the line-specific hint.
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
+        front_matter_match = _FRONTMATTER_RE.match(content)
         if not front_matter_match:
             return None
         front_matter_text = front_matter_match.group(1)

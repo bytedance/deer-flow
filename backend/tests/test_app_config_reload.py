@@ -23,6 +23,7 @@ from deerflow.config.title_config import get_title_config, load_title_config_fro
 from deerflow.config.tool_search_config import get_tool_search_config, load_tool_search_config_from_dict
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.store import get_store, reset_store
+from deerflow.storage import BlobNotConfiguredError, get_blob_store, get_blob_store_if_enabled, reset_blob_store
 
 
 def _reset_config_singletons() -> None:
@@ -801,6 +802,40 @@ def test_get_memory_config_self_syncs_without_prior_get_app_config(tmp_path, mon
 
         assert get_memory_config().enabled is True
     finally:
+        _reset_config_singletons()
+
+
+def test_blob_store_follows_config_file_reload(tmp_path, monkeypatch):
+    """The storage accessor must see config edits without a prior app-config read."""
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_config_with_sections(config_path, {"blob_storage": {"enabled": True, "backend_config": {"root": str(first_root)}}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+    reset_blob_store()
+
+    try:
+        get_app_config()
+        first_store = get_blob_store()
+
+        _write_config_with_sections(config_path, {"blob_storage": {"enabled": True, "backend_config": {"root": str(second_root)}}})
+        second_store = get_blob_store()
+        assert second_store is not first_store
+        ref = second_store.put_bytes(b"after reload", kind="tool-output")
+        assert (second_root / ref.kind / ref.sha256[:2] / ref.sha256).is_file()
+        assert not (first_root / ref.kind / ref.sha256[:2] / ref.sha256).exists()
+
+        _write_config_with_sections(config_path, {"blob_storage": {"enabled": False}})
+        assert get_blob_store_if_enabled() is None
+        with pytest.raises(BlobNotConfiguredError):
+            get_blob_store()
+    finally:
+        reset_blob_store()
         _reset_config_singletons()
 
 

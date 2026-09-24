@@ -375,6 +375,37 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     return _resolve_route_scoped_authorization(user, is_internal=is_internal)
 
 
+def authorize_model_use(user: User, model_name: str | None, *, is_internal: bool, app_config: AppConfig) -> None:
+    """Enforce model:use for an explicit model or the factory's default model.
+
+    Shared by model details and caller-selected one-shot requests. Explicit
+    denies always reject; provider failures honor the configured failure policy.
+    """
+    if model_name is None:
+        if not app_config.models:
+            return  # The caller's existing no-model handling remains authoritative.
+        model_name = app_config.models[0].name
+    detail = f"Model '{model_name}' is not available for your role"
+    try:
+        provider, principal = resolve_model_authorization(user, is_internal=is_internal)
+    except _AuthorizationUnavailable:
+        if app_config.authorization.fail_closed:
+            raise HTTPException(status_code=403, detail=detail) from None
+        return
+    if provider is None or principal is None:
+        return
+    try:
+        decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        allowed = decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking model:use for %s", model_name, exc_info=True)
+        allowed = not app_config.authorization.fail_closed
+    if not allowed:
+        raise HTTPException(status_code=403, detail=detail)
+
+
 def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
     """Return ``(provider, principal)`` for skill-route authorization.
 

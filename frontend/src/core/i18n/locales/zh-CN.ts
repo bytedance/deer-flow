@@ -178,6 +178,19 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  skillUsage: {
+    used: "使用的技能",
+    title: "技能",
+    name: "名称",
+    description: "描述",
+    builtIn: "内置",
+    custom: "自定义",
+    integration: "集成",
+    legacy: "旧版",
+    copy: "复制技能快照",
+    partial: "此快照仅包含本次运行加载的部分技能内容。",
+  },
+
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",
@@ -1332,6 +1345,7 @@ export const zhCN: Translations = {
         work: "工作",
         personal: "个人",
         topOfMind: "近期关注（Top of mind）",
+        cognitiveStyle: "思维习惯",
         historyBackground: "历史背景",
         recentMonths: "近几个月",
         earlierContext: "更早上下文",
@@ -1350,6 +1364,7 @@ export const zhCN: Translations = {
           },
           content: "内容",
           source: "来源",
+          unknown: "未知",
           createdAt: "创建时间",
           view: "查看",
         },
