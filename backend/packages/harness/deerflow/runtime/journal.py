@@ -305,6 +305,8 @@ class RunJournal(BaseCallbackHandler):
         self._current_run_tool_call_names: dict[str, str] = {}
         self._active_tool_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+        self._root_graph_run_id: UUID | None = None
+        self._tools_node_run_ids: set[UUID] = set()
 
         # Bumped once per successful event-store write. A reader that cached a
         # "the feed does not hold this message" answer compares this between
@@ -354,8 +356,12 @@ class RunJournal(BaseCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._closed:
+            return
         caller = self._identify_caller(tags)
         if parent_run_id is None:
+            if caller == "lead_agent":
+                self._root_graph_run_id = run_id
             # Root graph invocation — emit a single trace event for the run start.
             chain_name = (serialized or {}).get("name", "unknown")
             self._put(
@@ -364,6 +370,10 @@ class RunJournal(BaseCallbackHandler):
                 content={"chain": chain_name},
                 metadata={"caller": caller, **(metadata or {})},
             )
+        elif parent_run_id == self._root_graph_run_id and (metadata or {}).get("langgraph_node") == "tools":
+            # Metadata is inherited by nested chains; parentage limits this to
+            # the lead graph's tools node, excluding delegated agent results.
+            self._tools_node_run_ids.add(run_id)
 
     def on_chain_end(
         self,
@@ -373,11 +383,18 @@ class RunJournal(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if run_id in self._tools_node_run_ids:
+            self._tools_node_run_ids.discard(run_id)
+            # Middleware can return without on_tool_end. Persist those results
+            # before the graph advances to the next model response.
+            self._reconcile_tool_messages(outputs)
         # Nested chain ends fire for internal graph nodes; only the root chain
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
             return
-        self._reconcile_final_tool_messages(outputs)
+        self._root_graph_run_id = None
+        self._tools_node_run_ids.clear()
+        self._reconcile_tool_messages(outputs)
         self._put(
             event_type=RUN_END_EVENT.event_type,
             category=RUN_END_EVENT.category,
@@ -387,6 +404,10 @@ class RunJournal(BaseCallbackHandler):
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        self._tools_node_run_ids.discard(run_id)
+        if run_id == self._root_graph_run_id:
+            self._root_graph_run_id = None
+            self._tools_node_run_ids.clear()
         self._put(
             event_type=RUN_ERROR_EVENT.event_type,
             category=RUN_ERROR_EVENT.category,
@@ -663,14 +684,21 @@ class RunJournal(BaseCallbackHandler):
             self._persisted_tool_message_identities.add(identity)
         self._record_message_summary(message)
 
-    def _final_output_messages(self, outputs: Any) -> list[Any]:
-        if isinstance(outputs, Mapping):
+    def _output_messages(self, outputs: Any) -> Iterable[Any]:
+        if isinstance(outputs, Command):
+            yield from self._output_messages(outputs.update)
+        elif isinstance(outputs, Mapping):
             messages = outputs.get("messages", [])
-            return messages if isinstance(messages, list) else []
-        return []
+            if isinstance(messages, (list, tuple)):
+                yield from messages
+        elif isinstance(outputs, (list, tuple)):
+            for output in outputs:
+                yield from self._output_messages(output)
+        elif isinstance(outputs, ToolMessage):
+            yield outputs
 
     def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
-        """Whether a final-output ToolMessage still needs persisting.
+        """Whether a graph-output ToolMessage still needs persisting.
 
         A middleware can answer a tool call itself and short-circuit execution,
         so LangChain never emits ``on_tool_end`` and the result never reaches
@@ -695,11 +723,9 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
 
-    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
-        for message in self._final_output_messages(outputs):
-            if not isinstance(message, ToolMessage):
-                continue
-            if self._should_reconcile_tool_message(message):
+    def _reconcile_tool_messages(self, outputs: Any) -> None:
+        for message in self._output_messages(outputs):
+            if isinstance(message, ToolMessage) and self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
 
     def _make_event(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> dict:
@@ -1174,6 +1200,8 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
         self._persisted_tool_message_identities.clear()
+        self._root_graph_run_id = None
+        self._tools_node_run_ids.clear()
         self._produced_artifacts.clear()
         self._produced_artifact_keys.clear()
         self._last_ai_msg = None

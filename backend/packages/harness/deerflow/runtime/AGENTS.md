@@ -61,6 +61,17 @@ fetch-and-decode of every message row's tool outputs on long threads.
 client input, because a welded-in seq goes stale when a fork re-seeds the feed
 (#4380).
 
+**Short-circuited tool results** (`runtime/journal.py`): reconcile visible,
+unrecorded tool messages when the lead graph's direct `tools` node completes,
+before the next model response. Identify that node by its root parent run ID
+and `langgraph_node` metadata together; nested chains inherit the metadata and
+must not contribute subagent results, even with matching tool-call IDs. Handle
+message updates and `Command` batches through the existing ordered buffer,
+preserving current-run filtering and deduplication. Root completion remains a
+fallback; clear node tracking on completion, error/cancellation, and close.
+`tests/test_run_journal_tool_ordering.py` exercises real sync/async agent graphs
+with read-before-write recovery, skill-policy recovery, and clarification.
+
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
 counts zero) and immediately again with usage populated. The first callback's generation

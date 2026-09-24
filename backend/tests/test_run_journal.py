@@ -620,7 +620,80 @@ class TestToolCallbacks:
         assert isinstance(events, list)
 
 
-class TestFinalToolMessageReconciliation:
+class TestToolMessageReconciliation:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("output_shape", ["messages", "commands"])
+    async def test_tools_node_reconciles_before_next_response(self, journal_setup, output_shape):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        root_id, node_id = uuid4(), uuid4()
+        j.on_chain_start({}, {}, run_id=root_id)
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": name, "name": name, "args": {}} for name in ("normal", "blocked", "hidden")]),
+            run_id=uuid4(),
+        )
+        normal = ToolMessage("ok", tool_call_id="normal")
+        blocked = ToolMessage("denied", tool_call_id="blocked", status="error")
+        hidden = ToolMessage("internal", tool_call_id="hidden", additional_kwargs={"hide_from_ui": True})
+        old = ToolMessage("previous run", tool_call_id="old")
+        messages = [normal, blocked, hidden, old]
+        output = {"messages": messages} if output_shape == "messages" else [{"messages": [normal]}, Command(update={"messages": messages[1:]})]
+        j.on_chain_start({}, {}, run_id=node_id, parent_run_id=root_id, metadata={"langgraph_node": "tools"})
+        j.on_tool_end(normal, run_id=uuid4())
+        j.on_chain_end(output, run_id=node_id, parent_run_id=root_id)
+        j.on_llm_end(_make_llm_response("done"), run_id=uuid4())
+        j.on_chain_end({"messages": messages}, run_id=root_id)
+        await j.flush()
+
+        events = await store.list_messages("t1")
+        assert [event["content"]["content"] for event in events] == ["", "ok", "denied", "done"]
+        assert not j._tools_node_run_ids
+        assert j._root_graph_run_id is None
+
+    @pytest.mark.anyio
+    async def test_nested_tools_with_same_call_id_cannot_claim_lead_result(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        root_id, node_id, subgraph_id, nested_id = (uuid4() for _ in range(4))
+        j.on_chain_start({}, {}, run_id=root_id)
+        j.on_llm_end(_make_llm_response("", tool_calls=[{"id": "shared", "name": "tool", "args": {}}]), run_id=uuid4())
+        j.on_chain_start({}, {}, run_id=node_id, parent_run_id=root_id, metadata={"langgraph_node": "tools"})
+        # Nested callbacks inherit the tools metadata and may reuse a provider id.
+        j.on_chain_start({}, {}, run_id=subgraph_id, parent_run_id=node_id, metadata={"langgraph_node": "tools"})
+        j.on_chain_start({}, {}, run_id=nested_id, parent_run_id=subgraph_id, metadata={"langgraph_node": "tools"})
+        child_output = {"messages": [ToolMessage("child", tool_call_id="shared")]}
+        j.on_chain_end(child_output, run_id=nested_id, parent_run_id=subgraph_id)
+        j.on_chain_end(child_output, run_id=subgraph_id, parent_run_id=node_id)
+        j.on_chain_end({"messages": [ToolMessage("lead", tool_call_id="shared")]}, run_id=node_id, parent_run_id=root_id)
+        j.on_llm_end(_make_llm_response("done"), run_id=uuid4())
+        await j.flush()
+
+        events = await store.list_messages("t1")
+        assert [event["content"]["content"] for event in events] == ["", "lead", "done"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("termination", ["node_error", "root_error", "cancel", "close"])
+    async def test_tools_node_tracking_is_released(self, journal_setup, termination):
+        j, _ = journal_setup
+        root_id, node_id = uuid4(), uuid4()
+        j.on_chain_start({}, {}, run_id=root_id)
+        j.on_chain_start({}, {}, run_id=node_id, parent_run_id=root_id, metadata={"langgraph_node": "tools"})
+        assert j._tools_node_run_ids == {node_id}
+
+        if termination == "close":
+            await j.close()
+            j.on_chain_start({}, {}, run_id=uuid4())
+            j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=root_id, metadata={"langgraph_node": "tools"})
+        else:
+            error = asyncio.CancelledError() if termination == "cancel" else ValueError("failed")
+            j.on_chain_error(error, run_id=node_id if termination == "node_error" else root_id)
+            await j.flush()
+        assert not j._tools_node_run_ids
+        assert j._root_graph_run_id == (root_id if termination == "node_error" else None)
+
     @pytest.mark.anyio
     async def test_root_chain_end_reconciles_missing_ask_clarification_tool_message(self, journal_setup):
         from langchain_core.messages import ToolMessage
