@@ -247,12 +247,20 @@ class SQLiteUserRepository(UserRepository):
         transactions. Postgres has no row to lock — the table is empty on a
         first boot — so it takes a transaction-scoped advisory lock on a
         fixed key, the way the channel OAuth scope cap does.
+
+        A dialect with neither strategy raises: this is the point that makes
+        :meth:`create_first_admin` atomic, and falling through would leave a
+        plain check-then-act that lets two first-boot requests both create an
+        admin. The engine builds only these two dialects today, so the raise
+        is a guard for a future backend, not a reachable path.
         """
         dialect = session.get_bind().dialect.name
         if dialect == "sqlite":
             await session.execute(text("BEGIN IMMEDIATE"))
         elif dialect == "postgresql":
             await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _FIRST_ADMIN_LOCK_KEY})
+        else:
+            raise RuntimeError(f"Cannot serialize the first-admin claim: no locking strategy for SQL dialect {dialect!r}")
 
     async def create_first_admin(self, user: User) -> User | None:
         """Insert *user* as the first admin, or return None if one already exists.

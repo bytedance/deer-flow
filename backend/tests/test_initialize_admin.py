@@ -331,3 +331,18 @@ async def test_create_first_admin_reports_a_taken_email(_setup_auth):
         await repo.create_first_admin(User(email="taken@example.com", password_hash="hash", system_role="admin", needs_setup=False))
 
     assert await repo.count_admin_users() == 0
+
+
+@pytest.mark.asyncio
+async def test_create_first_admin_refuses_a_dialect_it_cannot_serialize():
+    """A new backend must fail loudly rather than fall back to check-then-act."""
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    class _UnknownDialectSession:
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="mysql"))
+
+    with pytest.raises(RuntimeError, match="serializ"):
+        await SQLiteUserRepository._serialize_first_admin_claim(_UnknownDialectSession())
