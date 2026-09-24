@@ -1,9 +1,32 @@
 import json
+import logging
 
 from exa_py import Exa
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_RESULTS = 5
+DEFAULT_CONTENTS_MAX_CHARACTERS = 1000
+
+
+def _coerce_positive_int(value: object, default: int, option: str) -> int:
+    """Normalize a config value before handing it to the Exa SDK.
+
+    ``$VAR`` references in config.yaml resolve to strings, and exa-py rejects a
+    string ``num_results`` outright, so every search would fail. Invalid values
+    (blank, non-numeric, zero or negative) warn and keep the default instead.
+    """
+    try:
+        count = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError):
+        count = 0
+    if count <= 0:
+        logger.warning("Invalid Exa %s=%r; using default %s", option, value, default)
+        return default
+    return count
 
 
 def _get_exa_client(tool_name: str = "web_search") -> Exa:
@@ -23,13 +46,17 @@ def web_search_tool(query: str) -> str:
     """
     try:
         config = get_app_config().get_tool_config("web_search")
-        max_results = 5
+        max_results = DEFAULT_MAX_RESULTS
         search_type = "auto"
-        contents_max_characters = 1000
+        contents_max_characters = DEFAULT_CONTENTS_MAX_CHARACTERS
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            max_results = _coerce_positive_int(config.model_extra.get("max_results", max_results), DEFAULT_MAX_RESULTS, "max_results")
             search_type = config.model_extra.get("search_type", search_type)
-            contents_max_characters = config.model_extra.get("contents_max_characters", contents_max_characters)
+            contents_max_characters = _coerce_positive_int(
+                config.model_extra.get("contents_max_characters", contents_max_characters),
+                DEFAULT_CONTENTS_MAX_CHARACTERS,
+                "contents_max_characters",
+            )
 
         client = _get_exa_client()
         res = client.search(
