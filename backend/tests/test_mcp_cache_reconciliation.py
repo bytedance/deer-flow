@@ -248,13 +248,13 @@ def _server_model(server: dict) -> McpServerConfigResponse:
 
 def _record_reconcile_calls(monkeypatch) -> list[set[str] | None]:
     calls: list[set[str] | None] = []
-    real_reconcile = mcp_router.reconcile_mcp_servers
+    real_prepare = mcp_router.prepare_mcp_reconciliation
 
     def _record(changed):
         calls.append(changed)
-        return real_reconcile(changed)
+        return real_prepare(changed)
 
-    monkeypatch.setattr(mcp_router, "reconcile_mcp_servers", _record)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", _record)
     return calls
 
 
@@ -1067,3 +1067,224 @@ def test_explicit_reconciliation_unions_the_full_diff(cache_globals, monkeypatch
     _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
     assert cache_module.reconcile_mcp_servers(["B"]) is True
     assert pool.active_binding("B") != old_binding_b
+
+
+def test_delete_then_identical_readd_advances_epoch_and_closes_old_session(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    binding_a_before = pool.active_binding("A")
+    binding_b = pool.active_binding("B")
+    _allow_router_admin(monkeypatch)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    async def _run() -> None:
+        await delete_mcp_server(None, "A")
+        await create_mcp_servers(
+            None,
+            McpConfigUpdateRequest(mcp_servers={"A": _server_model(_stdio("npx"))}),
+        )
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    binding_a_after = pool.active_binding("A")
+    assert binding_a_after is not None
+    assert binding_a_after.epoch > binding_a_before.epoch
+    assert session_a.closed is True
+    assert pool.active_binding("B") == binding_b
+    assert session_b.closed is False
+    assert _entry(pool, "B", owner_loop)[0] is session_b
+
+
+def test_disable_then_identical_enable_advances_epoch_and_closes_old_session(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    binding_a_before = pool.active_binding("A")
+    binding_b = pool.active_binding("B")
+    _allow_router_admin(monkeypatch)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    async def _run() -> None:
+        await update_mcp_server_state(None, McpServerStateUpdateRequest(server_name="A", enabled=False))
+        await update_mcp_server_state(None, McpServerStateUpdateRequest(server_name="A", enabled=True))
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    binding_a_after = pool.active_binding("A")
+    assert binding_a_after is not None
+    assert binding_a_after.epoch > binding_a_before.epoch
+    assert session_a.closed is True
+    assert pool.active_binding("B") == binding_b
+    assert session_b.closed is False
+    assert _entry(pool, "B", owner_loop)[0] is session_b
+
+
+def test_delete_then_readd_cannot_interleave_before_tombstone_installation(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    binding_a_before = pool.active_binding("A")
+    binding_b = pool.active_binding("B")
+    _allow_router_admin(monkeypatch)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    real_prepare = mcp_router.prepare_mcp_reconciliation
+    prepare_entered = threading.Event()
+    release_prepare = threading.Event()
+    prepare_lock = threading.Lock()
+    prepare_calls = 0
+
+    def blocking_prepare(changed):
+        nonlocal prepare_calls
+        with prepare_lock:
+            prepare_calls += 1
+            is_first = prepare_calls == 1
+        if is_first:
+            prepare_entered.set()
+            assert release_prepare.wait(timeout=10)
+        return real_prepare(changed)
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", blocking_prepare)
+
+    async def _run() -> None:
+        delete_task = asyncio.create_task(delete_mcp_server(None, "A"))
+        assert await asyncio.to_thread(prepare_entered.wait, 10), "first prepare was never entered"
+
+        create_task = asyncio.create_task(
+            create_mcp_servers(
+                None,
+                McpConfigUpdateRequest(mcp_servers={"A": _server_model(_stdio("npx"))}),
+            )
+        )
+        await asyncio.sleep(0.1)
+
+        assert not create_task.done(), "the second write completed before the first prepare was released"
+        assert "A" not in json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+
+        release_prepare.set()
+        await asyncio.gather(delete_task, create_task)
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    binding_a_after = pool.active_binding("A")
+    assert binding_a_after is not None
+    assert binding_a_after.epoch > binding_a_before.epoch
+    assert session_a.closed is True
+    assert pool.active_binding("B") == binding_b
+    assert session_b.closed is False
+
+
+def test_cancelled_delete_worker_still_installs_tombstone(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    _open_session(owner_loop, pool, "B")
+    binding_a_before = pool.active_binding("A")
+    _allow_router_admin(monkeypatch)
+
+    real_prepare = mcp_router.prepare_mcp_reconciliation
+    prepare_entered = threading.Event()
+    release_prepare = threading.Event()
+    prepare_lock = threading.Lock()
+    prepare_calls = 0
+
+    def blocking_prepare(changed):
+        nonlocal prepare_calls
+        with prepare_lock:
+            prepare_calls += 1
+            is_first = prepare_calls == 1
+        if is_first:
+            prepare_entered.set()
+            assert release_prepare.wait(timeout=10)
+        return real_prepare(changed)
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", blocking_prepare)
+
+    real_finish = mcp_router.finish_mcp_reconciliation
+    worker_finished = threading.Event()
+
+    def signal_finish(pending):
+        try:
+            real_finish(pending)
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", signal_finish)
+
+    async def _run() -> None:
+        delete_task = asyncio.create_task(delete_mcp_server(None, "A"))
+        assert await asyncio.to_thread(prepare_entered.wait, 10), "first prepare was never entered"
+
+        delete_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await delete_task
+
+        release_prepare.set()
+        assert await asyncio.to_thread(worker_finished.wait, 10), "delete worker did not finish"
+
+    asyncio.run(_run())
+
+    binding_a_after = pool.active_binding("A")
+    assert binding_a_after is not None
+    assert binding_a_after.fingerprint is None or binding_a_after.epoch > binding_a_before.epoch
+    assert session_a.closed is True
+
+
+def test_blocked_session_exit_does_not_block_next_config_write(cache_globals, monkeypatch, tmp_path, owner_loop):
+    cfg = tmp_path / "extensions_config.json"
+    teardown_started = threading.Event()
+    release_exit = threading.Event()
+
+    class _BlockingExitSessionCm(_FakeSessionCm):
+        async def __aexit__(self, *exc):
+            self.session.closed = True
+            teardown_started.set()
+            assert release_exit.wait(timeout=10)
+            return False
+
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", _BlockingExitSessionCm)
+
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    binding_b = pool.active_binding("B")
+    _allow_router_admin(monkeypatch)
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    async def _run() -> None:
+        delete_task = asyncio.create_task(delete_mcp_server(None, "A"))
+        try:
+            assert await asyncio.to_thread(teardown_started.wait, 10), "teardown never started"
+
+            # The config lock was released before teardown, so this write can
+            # complete while the old session's __aexit__ is still blocked.
+            await create_mcp_servers(
+                None,
+                McpConfigUpdateRequest(mcp_servers={"C": _server_model(_stdio("uvx", args=["c"]))}),
+            )
+            assert "C" in json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
+        finally:
+            release_exit.set()
+
+        await delete_task
+        await _wait_for_pending_teardowns()
+
+    asyncio.run(_run())
+
+    assert pool.active_binding("A").fingerprint is None
+    assert session_a.closed is True
+    assert pool.active_binding("B") == binding_b
+    assert session_b.closed is False
+    assert pool.active_binding("C") is not None
