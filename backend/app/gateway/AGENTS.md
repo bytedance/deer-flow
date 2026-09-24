@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
+
 Studio retains sanitized creation metadata.
 
 Capability Center's `business` adapter validates bundled-provider credentials
@@ -211,6 +213,12 @@ It must preserve the ordinary skill listing's caller visibility and provider
 failure policy rather than exposing the unfiltered user-scoped catalog.
 
 ### Route and skill-listing authorization
+
+`authz.authorize_model_use` shares the `model:use` decision between model details
+and follow-up suggestions, including the factory's first configured model when
+the caller omits `model_name`. Suggestions check admission before their
+best-effort LLM error handler: explicit denies return 403 without invoking the
+model, while provider failures honor `authorization.fail_closed`.
 
 `authz.py::resolve_route_permissions()` is shared by HTTP middleware, decorator-only auth, and Live Browser WebSocket admission. It evaluates registered permissions asynchronously as `resource="route"`, targeting full `resource:action` strings. HTTP caches decisions in `AuthContext`; provider errors follow `authorization.fail_closed` (decision errors are per-permission). Disabled authorization returns all permissions without a provider. Owner and admin checks remain independent. Live requires `threads:write` with `is_internal=False` after login/Origin checks but before acceptance, owner lookup, or session acquisition; denial closes 4403, unexpected setup errors close 4501, cancellation propagates. Checks are admission-only; restart Gateway to close old connections. Tests: `test_authorization_route_permissions.py`, `test_browser_readonly_security.py`, `test_auth.py`, `test_auth_middleware.py` in `tests/`.
 

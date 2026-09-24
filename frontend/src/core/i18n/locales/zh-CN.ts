@@ -178,6 +178,19 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  skillUsage: {
+    used: "使用的技能",
+    title: "技能",
+    name: "名称",
+    description: "描述",
+    builtIn: "内置",
+    custom: "自定义",
+    integration: "集成",
+    legacy: "旧版",
+    copy: "复制技能快照",
+    partial: "此快照仅包含本次运行加载的部分技能内容。",
+  },
+
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",
@@ -369,6 +382,10 @@ export const zhCN: Translations = {
     reasoningEffortMediumDescription: "多层逻辑分析 + 基础验证",
     reasoningEffortHigh: "高",
     reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
+    reasoningEffortXhigh: "极高",
+    reasoningEffortXhighDescription: "在“高”之上继续推演，最慢但最充分",
+    reasoningEffortMax: "最大",
+    reasoningEffortMaxDescription: "使用提供商允许的最大推理预算",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
     followupLoading: "正在生成可能的后续问题...",

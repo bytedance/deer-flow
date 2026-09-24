@@ -82,12 +82,21 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 ### Config Schema
 
 **`config.yaml`** key sections:
-- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
+- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields. An optional `reasoning:` block (issue #5073) declares thinking availability (`unsupported|optional|required`), the accepted effort `values` with `aliases`/`default`/`path`, the payload `dialect`, and the reasoning `history` requirement; when present, `supports_thinking` / `supports_reasoning_effort` are derived from it and contradictory combinations fail validation in `ModelConfig`
+  A declared custom `reasoning.effort.path` is the only effort serialization path: `ModelConfig` rejects leftover `reasoning_effort` keys in the profile or thinking templates, even if their values are otherwise accepted.
+  A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for gpt-oss style models) remains the legacy native ChatOllama setting and is passed to the provider; only a mapping opts into the contract.
 - `logging.enhance` - Log output only (`enabled`, `format`): whether log records carry a `trace_id` field, and in which format. Trace ids are issued unconditionally — the Gateway `X-Trace-Id` header and Langfuse `deerflow_trace_id` metadata are always present whatever this says (see the Request Trace Context section in `packages/harness/deerflow/AGENTS.md`); restart-required
 - vLLM reasoning models should use `deerflow.models.vllm_provider:VllmChatModel`; for Qwen-style parsers prefer `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking`, and DeerFlow will also normalize the older `thinking` alias
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
+- `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
+  and TTL multiplier must each be finite, and their derived lease TTL must also
+  remain finite. Redis-backed lease TTLs must be at least one millisecond and
+  use at most half of Redis's signed 64-bit millisecond range, leaving
+  deterministic headroom for conversion from a relative TTL to an absolute Unix
+  timestamp during validation. The Redis store rounds fractional milliseconds
+  up so its integer TTL never shortens the validated lease.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)

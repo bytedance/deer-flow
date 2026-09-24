@@ -176,7 +176,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
+   如果某个模型的 provider 约定与 DeerFlow 通用的 thinking/effort 假设不同，可以为该模型声明 `reasoning:` 块（thinking 为 `unsupported`/`optional`/`required`、允许的 effort 取值及别名和默认值、payload 方言、推理历史要求）。Setup Wizard 内置的 Z.AI GLM-5.3-Flash 配置就使用了它：前台和后台调用都会保持 thinking 开启，effort 选择器只提供该模型自己的 `low`/`high`/`max` 档位。未声明该块的配置行为保持不变。具体格式与等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
@@ -642,6 +642,8 @@ Skills 是 DeerFlow 能做“几乎任何事”的关键。
 标准的 Agent Skill 是一种结构化能力模块，通常就是一个 Markdown 文件，里面定义了工作流、最佳实践，以及相关的参考资源。DeerFlow 自带一批内置 skills，覆盖研究、报告生成、演示文稿制作、网页生成、图像和视频生成等场景。真正有意思的地方在于它的扩展性：你可以加自己的 skills，替换内置 skills，或者把多个 skills 组合成复合工作流。
 
 Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下文。只有任务确实需要时才加载，这样能把上下文窗口控制得更干净，也更适合对 token 比较敏感的模型。
+
+回答加载过技能时，底部工具栏会显示「使用的技能」。悬停或点击图标可查看本轮技能及其来源，悬停技能名称显示下划线，点击名称即可在可拖拽侧栏（手机端为抽屉）查看当时加载的 `SKILL.md` 快照。自动读取和 `/技能名` 显式调用均会记录，同一技能按首次加载顺序去重；之后修改或删除技能不会改变这份历史。复制得到包含 YAML 元数据的原始 Markdown 快照；包内相对链接和图片显示为引用，不会误跳转离开对话。范围读取或超出快照大小上限时会标明内容不完整。旧对话、失败读取以及通过 shell 等其他工具加载的技能不会凭回答文本推断为已使用。
 
 通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
 

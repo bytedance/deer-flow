@@ -288,6 +288,50 @@ def _rewrite_unique_bare_filenames(
     return rewritten
 
 
+def _rewrite_changed_paths_with_spaces(
+    text: str,
+    *,
+    changed_files: Iterable[Path],
+    thread_id: str,
+    user_id: str,
+    source_base_dir: Path | None,
+) -> str:
+    """Rewrite changed paths with spaces only at unambiguous text boundaries."""
+    candidates: dict[str, set[str]] = {}
+    for path in changed_files:
+        spellings = [str(path)]
+        if path.anchor == "/":
+            # Some servers print file URIs without percent-encoding spaces.
+            spellings.extend((f"file:{path}", f"file://{path}"))
+        if source_base_dir is not None:
+            try:
+                relative = path.relative_to(source_base_dir).as_posix()
+            except ValueError:
+                pass
+            else:
+                spellings.extend((relative, f"./{relative}"))
+        matching_spellings = [spelling for spelling in spellings if any(char.isspace() for char in spelling) and spelling in text]
+        if not matching_spellings:
+            continue
+        virtual_path = _local_uri_to_virtual_path(str(path), thread_id=thread_id, user_id=user_id)
+        if virtual_path is None:
+            continue
+        for spelling in matching_spellings:
+            candidates.setdefault(spelling, set()).add(virtual_path)
+
+    rewritten = text
+    for spelling in sorted(candidates, key=len, reverse=True):
+        destinations = candidates[spelling]
+        if len(destinations) != 1 or spelling not in rewritten:
+            continue
+        # Whitespace after an unquoted spelling may continue a longer filename.
+        # Require punctuation or the end of the text instead of rewriting a prefix.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
+        replacement = next(iter(destinations))
+        rewritten = pattern.sub(lambda _match: replacement, rewritten)
+    return rewritten
+
+
 def _rewrite_local_paths_in_text(
     text: str,
     *,
@@ -326,6 +370,16 @@ def _rewrite_local_paths_in_text(
         if rewritten is None:
             return token
         return f"{rewritten}{trailing}"
+
+    if changed_files is not None:
+        changed_files = list(changed_files)
+        text = _rewrite_changed_paths_with_spaces(
+            text,
+            changed_files=changed_files,
+            thread_id=thread_id,
+            user_id=user_id,
+            source_base_dir=source_base_dir,
+        )
 
     rewritten = _LOCAL_PATH_IN_TEXT_RE.sub(_replace, text)
     if changed_files is None:
@@ -780,13 +834,18 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
     consecutive calls within the same thread reuse the same MCP session.
     HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
     cleanup errors.
+
+    Args:
+        extensions_config: Optional pre-loaded extensions config. Callers that
+            must prove which config revision produced these tools pass the exact
+            instance they snapshotted; ``None`` loads the latest config from disk.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -798,11 +857,13 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    if extensions_config is None:
+        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+        # to always read the latest configuration from disk. This ensures that changes
+        # made through the Gateway API (which runs in a separate process) are immediately
+        # reflected when initializing MCP tools. Callers that need to prove which
+        # revision produced these tools pass the instance they snapshotted instead.
+        extensions_config = ExtensionsConfig.from_file()
     validate_mcp_task_config_snapshot(extensions_config)
     servers_config = build_servers_config(extensions_config)
 
