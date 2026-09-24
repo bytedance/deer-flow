@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
+from deerflow.utils.file_io import run_file_io
 
 # Backward-compat re-exports — outline extraction moved to file_outline.py.
 from deerflow.utils.file_outline import (  # noqa: F401
@@ -159,7 +160,10 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
     """
     try:
         pdf_converter = _get_pdf_converter()
-        file_size = file_path.stat().st_size
+        # stat and the write-back are blocking filesystem calls on the upload
+        # ingestion event loop; offload them like the large-file conversion
+        # above (run_file_io keeps the caller's context in the worker).
+        file_size = (await run_file_io(file_path.stat)).st_size
 
         if file_size > _ASYNC_THRESHOLD_BYTES:
             text = await asyncio.to_thread(_do_convert, file_path, pdf_converter)
@@ -167,7 +171,7 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
             text = _do_convert(file_path, pdf_converter)
 
         md_path = output_path if output_path is not None else file_path.with_suffix(".md")
-        md_path.write_text(text, encoding="utf-8")
+        await run_file_io(md_path.write_text, text, encoding="utf-8")
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path
