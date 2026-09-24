@@ -15,6 +15,11 @@ call `get_blob_store_if_enabled()` and keep their existing local-path code for t
 `get_blob_store()`, which raises `BlobNotConfiguredError` when it is disabled.
 Both accessors are exported from this package — prefer
 `from deerflow.storage import ...` over reaching into submodules.
+The factory compares the effective backend and backend config before reusing its
+cached store, so hot-reloaded `blob_storage` edits take effect on new accesses.
+Replaced stores stay open for callers that already hold them and are closed by
+`reset_blob_store()`; changing a root requires preserving existing blob refs
+and coordinating deployment instances.
 
 **Layout** (local_fs, the default)::
 

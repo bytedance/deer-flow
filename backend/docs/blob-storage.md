@@ -50,6 +50,8 @@ blob_storage:
 
 Fail-fast on an unresolvable backend (`ValueError`), mirroring `MemoryConfig.manager_class`: blobs are persistent state, so silently substituting a different backend would strand previously written content.
 
+The factory checks the effective backend and backend configuration on each access. After a `config.yaml` edit, new accesses use the new store; disabling storage makes the optional accessor return `None` and the required accessor raise `BlobNotConfiguredError`. A store already handed to an in-flight caller remains usable and is closed by `reset_blob_store()` rather than during the switch. When changing a storage root in a multi-instance deployment, coordinate the rollout and keep previously written blobs available until existing references have been migrated.
+
 ## What this PR deliberately does not do
 
 **No producer is migrated.** `blob_storage.enabled` defaults to `false`, no existing call site changed, and the diff is purely additive — a deployment that never sets the key behaves exactly as before.

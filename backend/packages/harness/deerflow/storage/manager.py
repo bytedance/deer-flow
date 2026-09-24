@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import logging
 import threading
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -37,8 +38,11 @@ _BACKENDS_DIR = Path(__file__).parent / "backends"
 # Sentinel attribute each backend's __init__ exposes (a BlobStore subclass).
 _STORE_CLASS_ATTR = "STORE_CLASS"
 
-# Singleton instance + backend-registry cache (reset together by reset_blob_store).
+# Singleton instance + the effective settings it was built with. Keep replaced
+# stores alive until reset so callers already holding one can finish using it.
 _blob_store: BlobStore | None = None
+_blob_store_settings: tuple[str, dict[str, Any]] | None = None
+_retired_blob_stores: list[BlobStore] = []
 _backends_cache: dict[str, type[BlobStore]] | None = None
 _store_lock = threading.Lock()
 
@@ -157,9 +161,7 @@ def get_blob_store_if_enabled() -> BlobStore | None:
     checkable signal that the deployment did not opt in, and the producer then
     keeps its existing server-local path.
     """
-    if not get_blob_storage_config().enabled:
-        return None
-    return get_blob_store()
+    return _get_blob_store_if_enabled()
 
 
 def get_blob_store() -> BlobStore:
@@ -168,35 +170,48 @@ def get_blob_store() -> BlobStore:
     Raises :class:`BlobNotConfiguredError` when ``blob_storage.enabled`` is
     False, and ``ValueError`` when the configured backend cannot be resolved.
     """
-    global _blob_store
-    if _blob_store is not None:
-        return _blob_store
+    store = _get_blob_store_if_enabled()
+    if store is None:
+        raise BlobNotConfiguredError("blob_storage.enabled is False; no blob store is available. Use get_blob_store_if_enabled() at optional call sites.")
+    return store
+
+
+def _get_blob_store_if_enabled() -> BlobStore | None:
+    """Select a store against one config snapshot under the singleton lock."""
+    global _blob_store, _blob_store_settings
 
     with _store_lock:
-        if _blob_store is not None:
-            return _blob_store
-
         cfg = get_blob_storage_config()
         if not cfg.enabled:
-            raise BlobNotConfiguredError("blob_storage.enabled is False; no blob store is available. Use get_blob_store_if_enabled() at optional call sites.")
+            return None
+
+        backend_config = _resolve_backend_config(cfg)
+        settings = (cfg.backend, deepcopy(backend_config))
+        if _blob_store is not None and _blob_store_settings == settings:
+            return _blob_store
 
         cls = _resolve_store_class(cfg.backend)
-        backend_config = _resolve_backend_config(cfg)
-        _blob_store = cls.from_config(backend_config)
+        new_store = cls.from_config(backend_config)
+        if _blob_store is not None:
+            _retired_blob_stores.append(_blob_store)
+        _blob_store = new_store
+        _blob_store_settings = settings
         logger.info("Blob store resolved: %s (backend=%r)", type(_blob_store).__name__, cfg.backend)
         return _blob_store
 
 
 def reset_blob_store() -> None:
-    """Drop the singleton and the backend registry (tests / config reload)."""
-    global _blob_store, _backends_cache
+    """Close current and replaced stores; clear the singleton and registry."""
+    global _blob_store, _blob_store_settings, _backends_cache
     with _store_lock:
-        if _blob_store is not None:
+        for store in [*_retired_blob_stores, *([_blob_store] if _blob_store is not None else [])]:
             try:
-                _blob_store.close()
+                store.close()
             except Exception:
                 logger.warning("Blob store close() raised during reset", exc_info=True)
+        _retired_blob_stores.clear()
         _blob_store = None
+        _blob_store_settings = None
         _backends_cache = None
 
 

@@ -310,6 +310,67 @@ def test_enabled_factory_resolves_folder_backend(tmp_path: Path):
     assert get_blob_store() is store
 
 
+def test_factory_replaces_store_when_root_changes(tmp_path: Path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(first_root)}))
+
+    first_store = get_blob_store()
+    first_store.put_bytes(b"before", kind="tool-output")
+
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(second_root)}))
+    second_store = get_blob_store_if_enabled()
+    assert second_store is not first_store
+    assert get_blob_store() is second_store
+
+    after = second_store.put_bytes(b"after", kind="tool-output")
+    assert (second_root / after.kind / after.sha256[:2] / after.sha256).is_file()
+    assert not (first_root / after.kind / after.sha256[:2] / after.sha256).exists()
+
+
+def test_factory_rejects_cached_store_after_disable(tmp_path: Path):
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(tmp_path)}))
+    get_blob_store()
+
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=False))
+    assert get_blob_store_if_enabled() is None
+    with pytest.raises(BlobNotConfiguredError):
+        get_blob_store()
+
+
+def test_factory_does_not_keep_cached_store_for_invalid_backend(tmp_path: Path):
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(tmp_path)}))
+    get_blob_store()
+
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend="does_not_exist"))
+    with pytest.raises(ValueError, match="Unknown blob store backend"):
+        get_blob_store()
+
+
+def test_replaced_store_stays_open_until_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import deerflow.storage.manager as mgr
+
+    closed: list[Path] = []
+
+    class TrackingStore(LocalFsBlobStore):
+        def close(self) -> None:
+            closed.append(self._root)
+
+    monkeypatch.setattr(mgr, "_resolve_store_class", lambda backend: TrackingStore)
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(first_root)}))
+    first_store = get_blob_store()
+
+    bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend_config={"root": str(second_root)}))
+    get_blob_store()
+    assert closed == []
+    first_store.put_bytes(b"in flight", kind="tool-output")
+
+    reset_blob_store()
+    assert set(closed) == {first_root, second_root}
+
+
 def test_unknown_backend_fails_fast(tmp_path: Path):
     bsc.set_blob_storage_config(bsc.BlobStorageConfig(enabled=True, backend="does_not_exist", backend_config={"root": str(tmp_path)}))
     reset_blob_store()
