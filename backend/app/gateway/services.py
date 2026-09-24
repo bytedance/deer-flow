@@ -42,6 +42,7 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -139,6 +140,8 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            SKILL_USAGE_KEY,
+            SKILL_USAGES_KEY,
             # Attached when a values frame is serialized, for display ordering only.
             # A replayed message carrying it back would write a thread-scoped seq
             # into the checkpoint, which a fork then re-seeds and reassigns (#4380).

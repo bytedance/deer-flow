@@ -184,6 +184,20 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  skillUsage: {
+    used: "Skills used",
+    title: "Skills",
+    name: "Name",
+    description: "Description",
+    builtIn: "Built-in",
+    custom: "Custom",
+    integration: "Integration",
+    legacy: "Legacy",
+    copy: "Copy skill snapshot",
+    partial:
+      "This is a partial snapshot of the skill instructions loaded during this run.",
+  },
+
   runDuration: {
     reasoning: "Reasoning",
     working: "Working…",

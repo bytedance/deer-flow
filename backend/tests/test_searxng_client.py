@@ -270,6 +270,24 @@ class TestSearxngTools:
         assert call_kwargs["max_results"] == 3
 
     @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_unparseable_max_results_uses_default(self, mock_get_client):
+        """A max_results the config cannot give as a number falls back to the default."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=[])
+        mock_get_client.return_value = mock_client
+
+        # ``max_results:`` left blank in config.yaml loads as None; a word is a
+        # typo an operator can just as easily make. Neither is a reason to stop
+        # searching -- every sibling provider falls back to the default.
+        for raw in (None, "many"):
+            with patch("deerflow.community.searxng.tools._get_tool_config", return_value={"max_results": raw}):
+                result = await tools.web_search_tool.ainvoke("test query")
+
+            assert "error" not in json.loads(result), f"max_results={raw!r} failed the whole call"
+            mock_client.search.assert_called_once_with("test query", max_results=5)
+            mock_client.search.reset_mock()
+
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
     async def test_web_search_tool_forwards_time_range(self, mock_get_client):
         """web_search_tool forwards the requested relative time range."""
         mock_client = MagicMock()
