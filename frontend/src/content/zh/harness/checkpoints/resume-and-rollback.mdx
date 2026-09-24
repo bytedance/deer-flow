@@ -37,7 +37,7 @@ DeerFlow 在 Postgres、SQLite 和内存 saver 上都复现过该问题。用户
 由此有两点：
 
 - **恢复是 DeerFlow 覆盖的那一半。** 运行路径会做线性化，因此 Gateway 与内嵌客户端在恢复或回滚时不会产生这种分叉。
-- **状态更新没有被覆盖。** `POST /api/threads/{thread_id}/state` 会把调用方传入的 `checkpoint_id` 直接送进访问器的写入，准备 `POST .../branches` 时用的变更访问器也接受同一个选择器。`messages` 这类 reducer 通道以 `Overwrite` 写入，因此针对较旧检查点的变更会把写入存在那个共享父节点下——这正是上游 issue **#8551**（"`update_state` against an older checkpoint writes into the branch it forked away from"）跟踪的写入形态，目前仍未修复。在它落地之前，不要为增量线程选择较旧的 `checkpoint_id`；改为更新 head。
+- **状态更新没有被覆盖。** `POST /api/threads/{thread_id}/state` 会把调用方传入的 `checkpoint_id` 直接送进访问器的写入，准备 `POST .../branches` 时用的变更访问器也接受同一个选择器。没有任何环节对它做线性化，因此写入会落在那个较旧的检查点（即共享父节点）下，进入该父节点每个其他孩子都会回走的写入集合。`messages` 这类 reducer 通道以 `Overwrite` 写入，会替换已累积的值，从而对新分支遮蔽该父节点的其他写入；一般情形由上游 issue **#8551**（"`update_state` against an older checkpoint writes into the branch it forked away from"）跟踪，目前仍未修复。在它落地之前，不要为增量线程选择较旧的 `checkpoint_id`；改为更新 head。
 
 ## 线性化做了什么
 
