@@ -2175,7 +2175,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         paths = get_paths()
         effective_user_id = self._effective_acquire_user_id(user_id)
         await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=effective_user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+
+        def _lock_path():
+            # Worker thread: thread_dir() resolves through Paths.base_dir, which is
+            # a syscall — the same reason ensure_thread_dirs directly above it, and
+            # every later step of this coroutine, is offloaded.
+            return paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+
+        lock_path = await asyncio.to_thread(_lock_path)
 
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False

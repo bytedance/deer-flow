@@ -44,6 +44,13 @@ Tool names are namespace-derived and collision-checked. Tool inputs are bounded 
 inputs up to 256 KiB and have a 30-second timeout. Cancellation does not guarantee
 rollback of external effects or already-running worker-thread operations.
 
+A plugin can also contribute tools alone. The
+[text classification example](../examples/deerflow-extension-jev-classify/README.md)
+registers one model tool and a status action, no browser code: the agent labels a
+list of texts through a deployment-configured Jev or chat-model backend, and the
+plugin keeps the whole call inside those bounds with its own batch and deadline
+limits. It requires deployment opt-in and a separate backend API key.
+
 Durable `batch_task` workers pin the Gateway app's extension snapshot at startup
 and use it for both plugin tools and subagent execution. Recovered items use the
 new worker's snapshot after restart; no Python snapshot is stored in the durable

@@ -6,10 +6,10 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import (
     _AuthorizationUnavailable,
     _is_internal_caller,
+    authorize_model_use,
     resolve_model_authorization,
 )
 from app.gateway.deps import get_config, get_optional_user_from_request
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -170,30 +170,9 @@ async def get_model(
 
     # Phase 3: enforce model:use authorization (deny → 403, not 404, since the
     # model exists but the role lacks permission to use it).
-    fail_closed = config.authorization.fail_closed
     user = await get_optional_user_from_request(request)
     if user is not None:
-        try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
-        except _AuthorizationUnavailable:
-            if fail_closed:
-                raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
-        else:
-            if provider is not None and principal is not None:
-                try:
-                    decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
-                    if not isinstance(decision, AuthzDecision):
-                        raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
-                    allowed = decision.allow
-                except Exception:
-                    logger.warning(
-                        "Authorization provider failed while checking model:use for %s",
-                        model_name,
-                        exc_info=True,
-                    )
-                    allowed = not fail_closed
-                if not allowed:
-                    raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
+        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
     return ModelResponse(
         name=model.name,

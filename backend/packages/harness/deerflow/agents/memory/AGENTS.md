@@ -37,6 +37,9 @@ Only `AuthMiddleware` can authorize the internal owner header.
 
 No-auth mode uses `DEFAULT_USER_ID`, which is `"default"`.
 An absolute `storage_path` opts out of the default per-user root.
+`UserRepository.list_user_ids()` returns registered IDs in creation order for
+administrative workflows such as `scripts/load_memory_sample.py --all-users`.
+The bulk loader requires persistent database mode and backs up each user's memory by default.
 
 DeerMem uses this layout:
 
