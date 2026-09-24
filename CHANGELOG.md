@@ -3026,6 +3026,14 @@ This release closes that milestone with **765 merged pull requests**.
   with a per-user route example; and plugin troubleshooting and operations
   notes. Also correct the plugin `mount` return value in
   `docs/full-stack-plugins.md`.
+- **docs:** Add a checkpoint storage manual under `harness/checkpoints/` in both
+  languages, covering the `full` and `delta` channel modes: concepts, quick
+  start, the mode marker and its fail-closed gate, the snapshot cadence, the
+  delta history cache, resume and rollback linearization, operating and
+  retention constraints, observability, troubleshooting by symptom, and a
+  reference of every configuration key, error message, and pinned upstream
+  defect. The section is a new directory rather than a restructured page, so
+  the existing checkpointer documentation is unchanged.
 
 ### Internal
 
