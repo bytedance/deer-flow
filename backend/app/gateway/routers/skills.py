@@ -22,7 +22,6 @@ from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
-    atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
@@ -31,6 +30,7 @@ from deerflow.config.extensions_config import (
     set_raw_skill_enabled,
     validate_raw_extensions_config,
 )
+from deerflow.mcp.commit import commit_extensions_config, validate_previous_config_lenient
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
@@ -760,10 +760,20 @@ def _write_extensions_skill_state(
                 raw_config = read_raw_extensions_config(config_path)
             else:
                 raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
+            # Capture the pre-mutation effective config so the shared commit can
+            # prove that a skills toggle changes no server or interceptor. This
+            # is lenient (D7-R3): an unverifiable stored document must not block
+            # the write, and a skills toggle can itself repair a bad skills entry.
+            previous_config = validate_previous_config_lenient(raw_config)
             set_raw_skill_enabled(raw_config, skill_name, enabled)
 
-            validate_raw_extensions_config(raw_config)
-            atomic_write_extensions_config(config_path, raw_config)
+            new_config = validate_raw_extensions_config(raw_config)
+            commit_extensions_config(
+                config_path=config_path,
+                raw_data=raw_config,
+                previous_config=previous_config,
+                new_config=new_config,
+            )
 
             logger.info(f"Skills configuration updated and saved to: {config_path}")
             reload_extensions_config()

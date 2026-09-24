@@ -41,7 +41,6 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
-    atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
@@ -52,6 +51,13 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp.commit import (
+    MCPCommitOutcomeUnknownError,
+    MCPCommittedNotReconciledError,
+    MCPCommittedReloadFailedError,
+    commit_extensions_config,
+    validate_previous_config_lenient,
+)
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
@@ -266,11 +272,6 @@ class DeerFlowClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _atomic_write_json(path: Path, data: dict) -> None:
-        """Write JSON to *path* atomically (temp file + replace)."""
-        atomic_write_extensions_config(path, data)
-
     @classmethod
     def _write_skill_enabled_state(cls, config_path: Path, name: str, enabled: bool) -> None:
         """Persist one skill state and reload; callers hold the extensions config locks.
@@ -279,9 +280,20 @@ class DeerFlowClient:
         resolved secrets.
         """
         config_data = read_raw_extensions_config(config_path)
+        # A skills edit changes no enabled server and no interceptor, so the
+        # shared commit advances only ``configRevision`` -- the block must still
+        # be persisted in the same write as the skill change. Deriving the
+        # previous config is lenient (D7-R3): an unverifiable stored document
+        # must not block the write.
+        previous_config = validate_previous_config_lenient(config_data)
         set_raw_skill_enabled(config_data, name, enabled)
-        validate_raw_extensions_config(config_data)
-        cls._atomic_write_json(config_path, config_data)
+        new_config = validate_raw_extensions_config(config_data)
+        commit_extensions_config(
+            config_path=config_path,
+            raw_data=config_data,
+            previous_config=previous_config,
+            new_config=new_config,
+        )
         reload_extensions_config()
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
@@ -1372,7 +1384,18 @@ class DeerFlowClient:
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
         """Update MCP server configurations.
 
-        Writes to extensions_config.json and reloads the cache.
+        Writes to extensions_config.json, reloads the cache, and reconciles the
+        process-local MCP session pool. The commit persists the shared
+        ``mcpLifecycle`` counters and the session fence is installed from that
+        same committed revision, so a delete followed by an identical re-add
+        cannot revive the retired binding.
+
+        The fence runs **inline on the calling thread**: this is a synchronous
+        embedded-client entry point with no event loop, so
+        ``prepare_mcp_reconciliation`` is called inside the config critical
+        section and ``finish_mcp_reconciliation`` completes the detached-owner
+        teardown from a post-lock ``finally`` before this returns -- including
+        when the in-process reload raises after a successful fence.
 
         Args:
             mcp_servers: Dict mapping server name to config dict.
@@ -1386,20 +1409,61 @@ class DeerFlowClient:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
         """
+        # Imported lazily: the MCP cache pulls in the session/transport stack,
+        # which the embedded client only needs once it actually writes config.
+        from deerflow.mcp.cache import (
+            finish_mcp_reconciliation,
+            force_local_mcp_invalidation,
+            prepare_mcp_reconciliation,
+        )
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
-        with extensions_config_write_lock, extensions_config_file_lock(config_path):
-            # The singleton is process-local, so re-read the shared file under
-            # the cross-process lock before merging the replacement MCP map.
-            # Read it raw so sibling keys keep their $VAR placeholders.
-            config_data = read_raw_extensions_config(config_path)
-            config_data["mcpServers"] = mcp_servers
+        pending_reconciliation = None
+        try:
+            with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                # The singleton is process-local, so re-read the shared file under
+                # the cross-process lock before merging the replacement MCP map.
+                # Read it raw so sibling keys keep their $VAR placeholders.
+                config_data = read_raw_extensions_config(config_path)
+                # Lenient (D7-R3): a stored server that no longer validates must not
+                # block this full replacement from repairing the document.
+                previous_config = validate_previous_config_lenient(config_data)
+                config_data["mcpServers"] = mcp_servers
 
-            validate_raw_extensions_config(config_data)
-            self._atomic_write_json(config_path, config_data)
-            reloaded = reload_extensions_config()
+                new_config = validate_raw_extensions_config(config_data)
+                commit_extensions_config(
+                    config_path=config_path,
+                    raw_data=config_data,
+                    previous_config=previous_config,
+                    new_config=new_config,
+                )
+                # Fence before reload: the ownership transfer is derived from the
+                # committed candidate, not from a successful reload.
+                try:
+                    pending_reconciliation = prepare_mcp_reconciliation(None)
+                except Exception as exc:
+                    # Do not invalidate here: this is inside the config critical
+                    # section and the conservative invalidation waits for the
+                    # retired pool's teardown. The writer does it below.
+                    raise MCPCommittedNotReconciledError(
+                        "MCP configuration was committed to disk but the local reconciliation fence failed; the caller must conservatively invalidate local MCP state",
+                    ) from exc
+                try:
+                    reloaded = reload_extensions_config()
+                except Exception as exc:
+                    raise MCPCommittedReloadFailedError(
+                        "MCP configuration was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
+                    ) from exc
+
+        except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+            # The locks are released here; never wait for teardown holding them.
+            force_local_mcp_invalidation()
+            raise
+        finally:
+            finish_mcp_reconciliation(pending_reconciliation)
 
         self.reset_agent()
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}

@@ -962,6 +962,48 @@ def _reset_mcp_tools_cache_state_and_retire_pool_locked():
     return retired_pool
 
 
+def force_local_mcp_invalidation() -> None:
+    """Conservatively retire every piece of process-local MCP state.
+
+    Config writers call this when a commit's outcome is unknown (D4) or the local
+    reconciliation fence could not be installed: published tool *descriptions*
+    may be retained, but no old session may stay usable while lifecycle identity
+    cannot be proven.
+
+    Callers MUST invoke this *outside* the config write locks: the retired
+    pool's blocking teardown can wait up to the pool's session-close timeout per
+    foreign-loop owner, and holding ``extensions_config_write_lock`` across that
+    wait would stall unrelated config writers.
+
+    Under ``_init_condition`` it retires the session-pool singleton (fencing
+    every existing binding), clears the published tool cache, drops the applied
+    baseline and notifies waiters via the existing full-reset machinery; the
+    retired pool's blocking teardown then runs *outside* the lock. Session
+    closing is deliberately not re-implemented here.
+
+    Never raises: it runs on an error path where masking the original commit
+    error would be worse than partially-completed cleanup. A failure to detach
+    the pool/cache is logged at error level; a failure to finish the retired
+    pool's teardown is logged as a warning stating that the bindings were fenced
+    but their teardown did not complete.
+    """
+    try:
+        with _init_condition:
+            retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+    except Exception:
+        logger.exception("Could not conservatively invalidate local MCP state: the pool was not retired and the tool cache was not cleared")
+        return
+    if retired_pool is not None:
+        try:
+            retired_pool.close_all_sync()
+        except Exception:
+            logger.warning(
+                "Conservative MCP invalidation fenced the retired pool, but its session teardown did not complete",
+                exc_info=True,
+            )
+    logger.info("MCP state conservatively invalidated")
+
+
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 

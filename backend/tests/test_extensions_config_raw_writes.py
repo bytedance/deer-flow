@@ -143,6 +143,12 @@ def test_gateway_skill_toggle_preserves_placeholders(tmp_path: Path, monkeypatch
 
     expected = _raw_config_with_placeholders()
     expected["skills"]["demo-skill"] = {"enabled": False}
+    expected["mcpLifecycle"] = {
+        "schemaVersion": 1,
+        "configRevision": 1,
+        "globalGeneration": 0,
+        "serverGenerations": {"github": 0},
+    }
     written_text = config_path.read_text(encoding="utf-8")
     assert json.loads(written_text) == expected
     assert SECRET not in written_text
@@ -159,7 +165,15 @@ def test_gateway_skill_toggle_new_file_does_not_serialize_resolved_cache(tmp_pat
     skills_router._write_extensions_skill_state(None, "demo-skill", True, rebuild_public_projection=False)
 
     written_text = config_path.read_text(encoding="utf-8")
-    assert json.loads(written_text) == {"skills": {"existing-skill": {"enabled": False}, "demo-skill": {"enabled": True}}}
+    assert json.loads(written_text) == {
+        "skills": {"existing-skill": {"enabled": False}, "demo-skill": {"enabled": True}},
+        "mcpLifecycle": {
+            "schemaVersion": 1,
+            "configRevision": 1,
+            "globalGeneration": 0,
+            "serverGenerations": {},
+        },
+    }
     assert SECRET not in written_text
     assert "demo-skill" not in cached.skills
 

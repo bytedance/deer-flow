@@ -1039,6 +1039,12 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     # its $VAR values are already resolved.
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "skills": {"public-skill": {"enabled": False}},
+        "mcpLifecycle": {
+            "schemaVersion": 1,
+            "configRevision": 1,
+            "globalGeneration": 0,
+            "serverGenerations": {},
+        },
     }
 
 
