@@ -296,7 +296,7 @@ def _rewrite_changed_paths_with_spaces(
     user_id: str,
     source_base_dir: Path | None,
 ) -> str:
-    """Rewrite exact paths for files produced by this call when whitespace splits regex tokens."""
+    """Rewrite changed paths with spaces only at unambiguous text boundaries."""
     candidates: dict[str, set[str]] = {}
     for path in changed_files:
         spellings = [str(path)]
@@ -324,7 +324,9 @@ def _rewrite_changed_paths_with_spaces(
         destinations = candidates[spelling]
         if len(destinations) != 1 or spelling not in rewritten:
             continue
-        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w/\\-]|\.[\w]))")
+        # Whitespace after an unquoted spelling may continue a longer filename.
+        # Require punctuation or the end of the text instead of rewriting a prefix.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
         replacement = next(iter(destinations))
         rewritten = pattern.sub(lambda _match: replacement, rewritten)
     return rewritten

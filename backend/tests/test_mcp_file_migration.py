@@ -215,7 +215,7 @@ class TestRewriteLocalPathsInText:
     def test_new_absolute_path_with_spaces_is_rewritten(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         src = _workspace_file(paths, "reports/final report.txt")
-        text = f"Saved as {src} and ready."
+        text = f'Saved as "{src}" and ready.'
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(
@@ -226,7 +226,7 @@ class TestRewriteLocalPathsInText:
                 changed_files=[src],
             )
 
-        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/reports/final report.txt and ready."
+        assert result == f'Saved as "{VIRTUAL_PATH_PREFIX}/workspace/reports/final report.txt" and ready.'
 
     def test_new_relative_path_with_spaces_is_rewritten(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
@@ -235,6 +235,21 @@ class TestRewriteLocalPathsInText:
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(
                 "Saved as final reports/result.txt.",
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/final reports/result.txt."
+
+    def test_new_dot_relative_path_with_spaces_is_rewritten(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "final reports/result.txt")
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                "Saved as ./final reports/result.txt.",
                 thread_id="t1",
                 user_id="u1",
                 source_base_dir=workspace,
@@ -276,6 +291,35 @@ class TestRewriteLocalPathsInText:
     def test_changed_path_with_spaces_does_not_rewrite_longer_name(self, paths: Paths):
         src = _workspace_file(paths, "final report.txt")
         text = f"Backup: {src}.bak"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == text
+
+    def test_changed_path_with_spaces_does_not_rewrite_whitespace_suffix(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        longer = _workspace_file(paths, "final report.txt copy")
+        text = f"Backup: {longer}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == text
+
+    def test_changed_path_with_spaces_followed_by_prose_is_untouched(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        text = f"Saved as {src} and ready."
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(
