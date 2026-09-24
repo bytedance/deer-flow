@@ -2,14 +2,23 @@ import asyncio
 import copy
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from deerflow_extension_api import ExtensionData
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.extensions.registry import ExtensionRegistry
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.goal import GoalEvaluation, attach_goal_evaluation, build_goal_state, latest_visible_assistant_signature, read_thread_goal, write_thread_goal
 from deerflow.runtime.runs import worker
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+
+
+def _full_accessor(checkpointer) -> CheckpointStateAccessor:
+    """Bind a full-mode accessor over a state-only graph for materialized reads."""
+    graph = build_state_mutation_graph("goal_evaluator", "full")
+    return CheckpointStateAccessor.bind(graph, checkpointer, mode="full")
 
 
 class _CollectingBridge:
@@ -46,6 +55,47 @@ class _ClearBeforeSecondGoalReadCheckpointer:
 
     async def aput(self, *args, **kwargs):
         return await self.inner.aput(*args, **kwargs)
+
+
+class _RaceAfterFirstContinuationCommitCheckpointer:
+    """Wrap a saver and inject a racing user message right after the first
+    goal-continuation commit lands.
+
+    ``_prepare_goal_continuation_input``'s real continuation commit (the
+    ``_persist(..., continuation_count=next_count)`` call that records the
+    evaluator's decision to continue) performs this scenario's first
+    ``aput``. Injecting a racing visible message immediately after that write
+    lands lets the worker's trailing visible-conversation-signature re-check
+    observe a thread change that happened *after* the continuation was
+    committed but *before* that re-check runs -- modelling the
+    ``thread_changed_before_continuation`` race.
+    """
+
+    def __init__(self, inner: InMemorySaver, thread_id: str) -> None:
+        self.inner = inner
+        self.thread_id = thread_id
+        self.put_count = 0
+
+    def get_next_version(self, current, channel):
+        return self.inner.get_next_version(current, channel)
+
+    async def aget_tuple(self, config):
+        return await self.inner.aget_tuple(config)
+
+    async def aput(self, *args, **kwargs):
+        result = await self.inner.aput(*args, **kwargs)
+        self.put_count += 1
+        if self.put_count == 1:
+            checkpoint_tuple = await self.inner.aget_tuple({"configurable": {"thread_id": self.thread_id, "checkpoint_ns": ""}})
+            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+            channel_values = checkpoint.get("channel_values", {}) or {}
+            current_messages = channel_values.get("messages", []) or []
+            await _write_messages(
+                self.inner,
+                thread_id=self.thread_id,
+                messages=[*current_messages, HumanMessage(content="Actually, stop and wait.")],
+            )
+        return result
 
 
 async def _seed_goal_thread(
@@ -102,10 +152,14 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
     thread_id = "goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
     bridge = _CollectingBridge()
+    task_store = ExtensionData("run-1")
+    extensions = ExtensionRegistry().build()
 
-    async def fake_evaluate_goal_completion(goal, messages, **_kwargs):
+    async def fake_evaluate_goal_completion(goal, messages, **kwargs):
         assert goal["objective"] == "Finish all tests"
         assert [message.content for message in messages][-1] == "I made a start, but I am not done."
+        assert kwargs["task_store"] is task_store
+        assert kwargs["extensions"] is extensions
         return GoalEvaluation(
             satisfied=False,
             blocker="goal_not_met_yet",
@@ -116,12 +170,15 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
         run_id="run-1",
         model_name="test-model",
         app_config=None,
+        task_store=task_store,
+        extensions=extensions,
     )
 
     assert continuation is not None
@@ -156,6 +213,7 @@ async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -167,6 +225,53 @@ async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
     assert continuation is None
     assert await read_thread_goal(checkpointer, thread_id) is None
     assert bridge.events[0][0] == "values"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_evaluates_materialized_messages_in_delta_mode(monkeypatch):
+    """Delta checkpoints store no ``channel_values.messages``; the goal flow must
+    read messages through the mode-matched accessor or it sees an empty list,
+    loses the durable-receipt check, and stands down every continuation.
+    """
+    checkpointer = InMemorySaver()
+    thread_id = "delta-goal-thread"
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("goal_evaluator", "delta"), checkpointer, mode="delta")
+    await accessor.aupdate(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        {
+            "messages": [
+                HumanMessage(content="Please finish this task."),
+                AIMessage(content="I made a start, but I am not done."),
+            ]
+        },
+        as_node="goal_evaluator",
+    )
+    await write_thread_goal(checkpointer, thread_id, build_goal_state("Finish all tests", max_continuations=2))
+    bridge = _CollectingBridge()
+    seen: dict[str, list] = {}
+
+    async def fake_evaluate_goal_completion(_goal, messages, **_kwargs):
+        seen["messages"] = list(messages)
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="Tests have not passed yet.",
+            evidence_summary="Implementation is incomplete.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(accessor=accessor, bridge=bridge, checkpointer=checkpointer, thread_id=thread_id, run_id="run-delta", model_name="test-model", app_config=None)
+
+    assert continuation is not None
+    assert [message.content for message in seen["messages"]] == [
+        "Please finish this task.",
+        "I made a start, but I am not done.",
+    ]
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 1
+    assert "stand_down_reason" not in latest_goal["last_evaluation"]
 
 
 @pytest.mark.asyncio
@@ -187,6 +292,7 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -201,6 +307,186 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
     assert latest_goal["continuation_count"] == 0
     assert latest_goal["last_evaluation"]["blocker"] == "missing_evidence"
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "blocked:missing_evidence"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="Tests have not passed yet.",
+            evidence_summary="Implementation is incomplete.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "token_capped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_text", ["Let me check one thing first.", ""])
+@pytest.mark.parametrize("with_parallel_tool_result", [False, True])
+async def test_goal_worker_waits_for_an_unanswered_clarification(monkeypatch, assistant_text, with_parallel_tool_result):
+    """The clarification question lives in a ToolMessage the evaluator never reads."""
+    checkpointer = InMemorySaver()
+    thread_id = "clarification-goal-thread"
+    ask = {"name": "ask_clarification", "args": {"question": "Drop the legacy table?"}, "id": "call-ask"}
+    look = {"name": "bash", "args": {"command": "ls"}, "id": "call-ls"}
+    messages = [
+        HumanMessage(content="Migrate the orders database."),
+        AIMessage(content=assistant_text, tool_calls=[look, ask] if with_parallel_tool_result else [ask]),
+        ToolMessage(
+            content="Drop the legacy table?",
+            tool_call_id="call-ask",
+            name="ask_clarification",
+            artifact={"human_input": {"version": 1, "kind": "human_input_request", "source": "ask_clarification", "request_id": "req-1", "question": "Drop the legacy table?"}},
+        ),
+    ]
+    if with_parallel_tool_result:
+        messages.append(ToolMessage(content="orders_v1 orders_v2", tool_call_id="call-ls", name="bash"))
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish the migration", messages=messages)
+    evaluator_calls = []
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        evaluator_calls.append(_messages)
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Not migrated yet.", evidence_summary="")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-clarification",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    assert evaluator_calls == []
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert latest_goal["last_evaluation"]["blocker"] == "needs_user_input"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "blocked:needs_user_input"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_later_tool_result", [False, True])
+async def test_goal_worker_resumes_after_the_user_answers_clarification(monkeypatch, with_later_tool_result):
+    """An old card remains in history, but cannot block the answered turn."""
+    checkpointer = InMemorySaver()
+    thread_id = "answered-clarification-goal-thread"
+    messages = [
+        HumanMessage(content="Migrate the orders database."),
+        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {"question": "Keep the legacy table?"}, "id": "call-ask"}]),
+        ToolMessage(
+            content="Keep the legacy table?",
+            tool_call_id="call-ask",
+            name="ask_clarification",
+            artifact={"human_input": {"kind": "human_input_request"}},
+        ),
+    ]
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish the migration", messages=messages)
+    evaluator_calls = []
+
+    async def fake_evaluate_goal_completion(_goal, evaluated_messages, **_kwargs):
+        evaluator_calls.append(evaluated_messages)
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Validation remains.", evidence_summary="Migrated while retaining the legacy table.")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+    kwargs = {
+        "accessor": _full_accessor(checkpointer),
+        "bridge": _CollectingBridge(),
+        "checkpointer": checkpointer,
+        "thread_id": thread_id,
+        "model_name": "test-model",
+        "app_config": None,
+    }
+    assert await worker._prepare_goal_continuation_input(**kwargs, run_id="run-question") is None
+    assert evaluator_calls == []
+    waiting_goal = await read_thread_goal(checkpointer, thread_id)
+    assert waiting_goal["last_evaluation"]["stand_down_reason"] == "blocked:needs_user_input"
+
+    messages.extend(
+        [
+            HumanMessage(content="Yes, keep the legacy table."),
+            AIMessage(
+                content="Migrated the schema and kept the legacy table. Validation remains.",
+                tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-ls"}] if with_later_tool_result else [],
+            ),
+        ]
+    )
+    if with_later_tool_result:
+        messages.append(ToolMessage(content="orders_v1 orders_v2", tool_call_id="call-ls", name="bash"))
+    await _write_messages(checkpointer, thread_id=thread_id, messages=messages)
+
+    continuation = await worker._prepare_goal_continuation_input(**kwargs, run_id="run-answer")
+
+    assert len(evaluator_calls) == 1
+    assert any(isinstance(message, HumanMessage) and message.content == "Yes, keep the legacy table." for message in evaluator_calls[0])
+    assert continuation is not None
+    assert continuation["messages"][0].additional_kwargs["hide_from_ui"] is True
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert "stand_down_reason" not in latest_goal["last_evaluation"]
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-done-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=True,
+            blocker="none",
+            reason="The visible conversation says the task is done.",
+            evidence_summary="Done.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped-done",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    # The satisfied branch runs before the token-cap stand-down: the goal is cleared, not stood down.
+    assert continuation is None
+    assert await read_thread_goal(checkpointer, thread_id) is None
 
 
 @pytest.mark.asyncio
@@ -234,6 +520,7 @@ async def test_goal_worker_stands_down_when_no_progress_repeats(monkeypatch):
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -268,6 +555,7 @@ async def test_goal_worker_does_not_resurrect_goal_cleared_during_evaluation(mon
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -330,6 +618,7 @@ async def test_goal_worker_stops_when_abort_is_requested_during_evaluation(monke
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -369,6 +658,7 @@ async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monk
     monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -385,6 +675,61 @@ async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monk
 
 
 @pytest.mark.asyncio
+async def test_goal_worker_stands_down_when_thread_changes_before_continuation(monkeypatch):
+    """A user message racing in right after the continuation commits must not
+    double-bump continuation_count.
+
+    Sibling scenario to ``..._after_evaluation`` above, but the race lands
+    later: after the evaluator runs and after _prepare_goal_continuation_input
+    commits the real continuation (``_persist(..., continuation_count=next_count)``),
+    a racing visible message arrives before the function's trailing re-check.
+    That re-check detects the changed thread and stands down via a second
+    ``_persist(..., continuation_count=next_count, stand_down_reason=...)``
+    call using the *same* next_count as the first, already-successful call.
+
+    Without the fix, that second call re-triggers PR #4088's
+    max(continuation_count, current_count + 1) guard against its own sibling
+    call's prior write (current_count is already next_count from the first
+    call), bumping continuation_count to next_count + 1 a second time --
+    consuming 2 units of the continuation budget for a cycle that delivered
+    zero actual continuations. The fix must leave it at next_count (1).
+    """
+    inner = InMemorySaver()
+    thread_id = "race-before-continuation-thread"
+    await _seed_goal_thread(inner, thread_id=thread_id, goal_text="Finish all tests")
+    checkpointer = _RaceAfterFirstContinuationCommitCheckpointer(inner, thread_id)
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-race-before-continuation",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(inner, thread_id)
+    assert latest_goal is not None
+    # Without the fix this is 2 (double-bumped). It must be 1: one real
+    # continuation attempt was committed and then stood down, not two.
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_before_continuation"
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     checkpointer = InMemorySaver()
     thread_id = "no-receipt-thread"
@@ -397,6 +742,7 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     bridge = _CollectingBridge()
 
     continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
         bridge=bridge,
         checkpointer=checkpointer,
         thread_id=thread_id,
@@ -448,8 +794,16 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
             return _gen()
 
     class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
 
         async def update_model_name(self, *_args, **_kwargs):
             return None
@@ -462,6 +816,9 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
 
         async def set_finalizing(self, _run_id, finalizing):
             record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
 
     class FakeBridge:
         async def publish(self, *_args, **_kwargs):
@@ -506,6 +863,97 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_agent_passes_the_run_stop_reason_to_the_goal_loop(monkeypatch):
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.metadata = {}
+            self.checkpointer = None
+            self.store = None
+            self.interrupt_before_nodes = []
+            self.interrupt_after_nodes = []
+
+        def astream(self, input_payload, **kwargs):
+            self.inputs.append(input_payload)
+            # TokenBudgetMiddleware stamps the cap into the run's runtime context.
+            kwargs["config"]["configurable"]["__pregel_runtime"].context["stop_reason"] = "token_capped"
+
+            async def _gen():
+                yield {"messages": []}
+
+            return _gen()
+
+    class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
+        async def set_status(self, _run_id, status, **_kwargs):
+            record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
+
+        async def update_model_name(self, *_args, **_kwargs):
+            return None
+
+        async def update_run_completion(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+            return None
+
+        async def set_finalizing(self, _run_id, finalizing):
+            record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    class FakeBridge:
+        async def publish(self, *_args, **_kwargs):
+            return None
+
+        async def publish_end(self, *_args, **_kwargs):
+            return None
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    stop_reasons = []
+
+    async def fake_prepare(**kwargs):
+        stop_reasons.append(kwargs.get("run_stop_reason"))
+        return None
+
+    monkeypatch.setattr(worker, "_prepare_goal_continuation_input", fake_prepare)
+
+    fake_agent = FakeAgent()
+    record = RunRecord(
+        run_id="run-token-capped",
+        thread_id="thread-token-capped",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="test-model",
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        FakeBridge(),
+        FakeRunManager(),
+        record,
+        ctx=worker.RunContext(checkpointer=None),
+        agent_factory=lambda config: fake_agent,
+        graph_input={"messages": [HumanMessage(content="start")]},
+        config={"configurable": {"thread_id": "thread-token-capped"}},
+    )
+
+    assert stop_reasons == ["token_capped"]
+    assert len(fake_agent.inputs) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
     class FakeAgent:
         def __init__(self) -> None:
@@ -525,8 +973,16 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
             return _gen()
 
     class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
 
         async def update_model_name(self, *_args, **_kwargs):
             return None
@@ -539,6 +995,9 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
 
         async def set_finalizing(self, _run_id, finalizing):
             record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
 
     class FakeBridge:
         async def publish(self, *_args, **_kwargs):
@@ -597,6 +1056,90 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_persist_goal_evaluation_does_not_regress_continuation_count_on_race():
+    """A racing continuation must not overwrite a higher count with a lower one.
+
+    Scenario: two goal continuations run concurrently.  Continuation A reads
+    continuation_count=1, computes next=2.  Continuation B reads the same
+    count=1, computes next=2, but acquires the lock first and writes count=2.
+    When A acquires the lock, the current_goal already has count=2.  Without
+    the defensive guard, A would write count=2 again (stale computation),
+    effectively losing one continuation event.  The guard must compute
+    ``max(stale_next, current_count + 1)`` so A writes count=3.
+    """
+    checkpointer = InMemorySaver()
+    thread_id = "race-count-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Race test")
+    # Simulate a racing continuation: bump the persisted continuation_count to 2
+    # before calling _persist_goal_evaluation with a next_count computed from
+    # stale state (count=1 → next=2).
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+    bumped_goal = attach_goal_evaluation(
+        existing_goal,
+        GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="racing", evidence_summary=""),
+        run_id="racing-run",
+        continuation_count=2,  # racing continuation already bumped to 2
+    )
+    await write_thread_goal(checkpointer, thread_id, bumped_goal)
+
+    # Now call _persist_goal_evaluation with continuation_count=2 computed from
+    # stale state (old count was 1).  The guard should detect current_count=2
+    # and write max(2, 2+1) = 3.
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-late",
+        goal=existing_goal,  # stale goal with continuation_count=1
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        ),
+        no_progress_count=1,
+        continuation_count=2,  # computed from stale state: stale_count(1) + 1
+    )
+
+    assert result is not None
+    # Without the guard this would be 2 (stale computation wins).  With the
+    # guard it must be 3 (current_count + 1 taken inside the lock).
+    assert result["continuation_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_persist_goal_evaluation_no_race_uses_caller_count():
+    """When no racing continuation exists, the caller's continuation_count is used."""
+    checkpointer = InMemorySaver()
+    thread_id = "no-race-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="No race test")
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-normal",
+        goal=existing_goal,
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work.",
+            evidence_summary="Work.",
+        ),
+        no_progress_count=1,
+        continuation_count=1,  # 0 + 1 = 1
+    )
+
+    assert result is not None
+    assert result["continuation_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypatch):
     class FakeAgent:
         def __init__(self) -> None:
@@ -617,8 +1160,16 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
             return _gen()
 
     class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
 
         async def update_model_name(self, *_args, **_kwargs):
             return None
@@ -631,6 +1182,9 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
 
         async def set_finalizing(self, _run_id, finalizing):
             record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
 
     class FakeBridge:
         async def publish(self, *_args, **_kwargs):

@@ -3,14 +3,19 @@
 import asyncio
 import concurrent.futures
 import json
+import os
+import shutil
+import stat
 import tempfile
 import zipfile
 from enum import Enum
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
+from langchain_core.tools import StructuredTool
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -18,9 +23,18 @@ from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient
+from deerflow.config.agents_config import AgentConfig
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.types import SkillCategory
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -44,6 +58,9 @@ def mock_app_config():
     config.skills.deferred_discovery = False
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
+    config.database.checkpoint_channel_mode = "full"
+    config.database.checkpoint_delta.snapshot_frequency = 10
+    config.authorization = AuthorizationConfig(enabled=False)
     return config
 
 
@@ -112,11 +129,56 @@ class TestClientInit:
             DeerFlowClient(config_path="/tmp/custom.yaml")
             mock_reload.assert_called_once_with("/tmp/custom.yaml")
 
+    def test_installs_process_subagent_capacity_from_frozen_config(self, mock_app_config):
+        runtime_config = SubagentRuntimeConfig(max_running=7)
+        mock_app_config.subagent_runtime = runtime_config
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            patch("deerflow.client.configure_subagent_execution_capacity") as configure,
+        ):
+            DeerFlowClient()
+        configure.assert_called_once_with(runtime_config)
+
     def test_checkpointer_stored(self, mock_app_config):
         cp = MagicMock()
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             c = DeerFlowClient(checkpointer=cp)
         assert c._checkpointer is cp
+
+    def test_process_mode_is_frozen_from_app_config(self, mock_app_config, monkeypatch: pytest.MonkeyPatch):
+        from deerflow.runtime import checkpoint_mode
+
+        monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            client = DeerFlowClient()
+        assert client._checkpoint_channel_mode == "full"
+
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            pytest.raises(
+                checkpoint_mode.CheckpointModeReconfigurationError,
+                match="restart",
+            ),
+        ):
+            DeerFlowClient()
+
+    def test_delta_snapshot_frequency_is_frozen_from_app_config(self, mock_app_config):
+        from typing import get_type_hints
+
+        from langgraph.channels import DeltaChannel
+
+        from deerflow.agents import thread_state
+
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        mock_app_config.database.checkpoint_delta.snapshot_frequency = 7
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            DeerFlowClient()
+
+        schema = thread_state.get_thread_state_schema("delta")
+        hint = get_type_hints(schema, include_extras=True)["messages"]
+        channel = next(item for item in hint.__metadata__ if isinstance(item, DeltaChannel))
+        assert channel.snapshot_frequency == 7
 
 
 # ---------------------------------------------------------------------------
@@ -167,16 +229,20 @@ class TestConfigQueries:
 
     def test_get_memory(self, client):
         memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.get_memory()
-            mock_mem.assert_called_once()
+            mock_mgr.get_memory.assert_called_once()
         assert result == memory
 
     def test_export_memory(self, client):
         memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.export_memory()
-            mock_mem.assert_called_once()
+            mock_mgr.get_memory.assert_called_once()
         assert result == memory
 
 
@@ -185,7 +251,7 @@ class TestConfigQueries:
 # ---------------------------------------------------------------------------
 
 
-def _make_agent_mock(chunks: list[dict]):
+def _make_agent_mock(chunks: list[dict | tuple[str, dict]]):
     """Create a mock agent whose .stream() yields the given chunks."""
     agent = MagicMock()
     agent.stream.return_value = iter(chunks)
@@ -276,6 +342,94 @@ class TestStream:
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
 
+    def test_full_mode_overwrites_internal_delta_before_agent_creation(self, client):
+        from deerflow.runtime.checkpoint_mode import (
+            CHECKPOINT_MODE_METADATA_KEY,
+            INTERNAL_CHECKPOINT_MODE_KEY,
+        )
+
+        config = {
+            "configurable": {
+                "thread_id": "t-mode",
+                INTERNAL_CHECKPOINT_MODE_KEY: "delta",
+            },
+            "metadata": {CHECKPOINT_MODE_METADATA_KEY: "delta"},
+        }
+        checkpointer = MagicMock()
+        checkpointer.get_tuple.return_value = None
+        client._checkpointer = checkpointer
+        agent = _make_agent_mock([])
+
+        with (
+            patch.object(client, "_get_runnable_config", return_value=config),
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            list(client.stream("hi", thread_id="t-mode"))
+
+        assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
+        assert CHECKPOINT_MODE_METADATA_KEY not in config["metadata"]
+        checkpointer.get_tuple.assert_called_once_with(
+            {
+                "configurable": {
+                    "thread_id": "t-mode",
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+
+    def test_full_mode_rejects_delta_before_agent_creation(self, client):
+        from types import SimpleNamespace
+
+        from deerflow.runtime.checkpoint_mode import (
+            CHECKPOINT_MODE_METADATA_KEY,
+            CheckpointModeMismatchError,
+        )
+
+        checkpointer = MagicMock()
+        checkpointer.get_tuple.return_value = SimpleNamespace(
+            metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"},
+            checkpoint={"channel_values": {}},
+        )
+        client._checkpointer = checkpointer
+        agent = _make_agent_mock([])
+
+        with (
+            patch.object(client, "_ensure_agent") as ensure_agent,
+            patch.object(client, "_agent", agent),
+            pytest.raises(CheckpointModeMismatchError, match="requires delta mode"),
+        ):
+            list(client.stream("hi", thread_id="t-delta"))
+
+        ensure_agent.assert_not_called()
+        agent.stream.assert_not_called()
+
+    def test_stream_assigns_unique_run_id_per_call(self, client):
+        """Each embedded client stream call has a run identity for per-run middleware."""
+        agent = MagicMock()
+        agent.stream.side_effect = [
+            iter([{"messages": [AIMessage(content="one", id="ai-1")]}]),
+            iter([{"messages": [AIMessage(content="two", id="ai-2")]}]),
+        ]
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            list(client.stream("first", thread_id="t1"))
+            list(client.stream("second", thread_id="t1"))
+
+        first_args, first_call = agent.stream.call_args_list[0].args, agent.stream.call_args_list[0].kwargs
+        second_args, second_call = agent.stream.call_args_list[1].args, agent.stream.call_args_list[1].kwargs
+        first_run_id = first_call["context"]["run_id"]
+        second_run_id = second_call["context"]["run_id"]
+
+        assert first_run_id
+        assert second_run_id
+        assert first_run_id != second_run_id
+        assert first_args[0]["messages"][0].additional_kwargs["run_id"] == first_run_id
+        assert second_args[0]["messages"][0].additional_kwargs["run_id"] == second_run_id
+
     def test_custom_mode_is_normalized_to_string(self, client):
         """stream() forwards custom events even when the mode is not a plain string."""
 
@@ -345,6 +499,33 @@ class TestStream:
         assert len(values_events) >= 1
         assert values_events[-1].data["title"] == "Greeting"
         assert "messages" in values_events[-1].data
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_preserve_summary_text_updates(self, client, mode_tagged):
+        messages = [HumanMessage(content="hi", id="h-1"), AIMessage(content="ok", id="ai-1")]
+        summaries = [None, "first summary", "first summary", "revised summary", "", None]
+        chunks = [{"messages": messages, "summary_text": summary} for summary in summaries]
+        agent = _make_agent_mock([("values", chunk) for chunk in chunks] if mode_tagged else chunks)
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="summary-stream"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert [event.data["summary_text"] for event in values_events] == summaries
+        assert all(len(event.data["messages"]) == 2 for event in values_events)
+        assert len(_ai_events(events)) == 1
+        assert events[-1].type == "end"
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_without_summary_expose_none(self, client, mode_tagged):
+        chunk = {"messages": [HumanMessage(content="hi", id="h-1")]}
+        agent = _make_agent_mock([("values", chunk) if mode_tagged else chunk])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="no-summary"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert values_events[0].data["summary_text"] is None
 
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
@@ -444,6 +625,56 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert "messages" in call_kwargs["stream_mode"]
 
+    def test_stream_emits_streamed_tool_calls_once_with_complete_args(self, client):
+        """Tool-call arguments streamed in fragments are emitted once, complete.
+
+        Each chunk only parses to a partial call (``args={}``, or no name/id), so
+        the tool_calls event comes from the values snapshot, not from the chunks.
+        """
+        call = {"name": "bash", "args": {"command": "ls -la"}, "id": "call-1"}
+        attribution = {"version": 1, "kind": "tool_batch", "shared_attribution": False, "actions": []}
+        assembled = AIMessage(content="", id="ai-1", tool_calls=[call], additional_kwargs={"token_usage_attribution": attribution})
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": "bash", "args": "", "id": "call-1", "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": None, "args": '{"command": "ls -la"}', "id": None, "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-tools"))
+
+        tool_call_events = _tool_call_events(events)
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].data["id"] == "ai-1"
+        assert [(tc["name"], tc["args"], tc["id"]) for tc in tool_call_events[0].data["tool_calls"]] == [("bash", {"command": "ls -la"}, "call-1")]
+        assert tool_call_events[0].data["additional_kwargs"] == {"token_usage_attribution": attribution}
+
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""
         assembled = AIMessage(
@@ -475,6 +706,68 @@ class TestStream:
         ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai" and event.data.get("id") == "ai-1"]
         assert any(event.data.get("content") == "Hello!" for event in ai_events)
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
+
+    @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
+        """A guard's ``after_model`` replaces the message under the same id after it was sent."""
+        call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
+        sent = AIMessage(content="Checking again.", id="ai-1", tool_calls=[call])
+        stopped = AIMessage(content="Checking again.\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit.", id="ai-1")
+        chunks = [
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+            ("values", {"messages": [HumanMessage(content="hi", id="h-1"), stopped]}),
+        ]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content="Checking again.", id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-replaced"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Checking again.", "\n\n[FORCED STOP] Repeated tool calls exceeded the safety limit."]
+
+    def test_stream_does_not_resend_a_replacement_that_does_not_extend_the_sent_text(self, client):
+        """Only appended text is sent; a rewrite of what was already sent would duplicate output."""
+        sent = AIMessage(content="Let me look.", id="ai-1")
+        rewritten = AIMessage(content="The model returned no final response.", id="ai-1")
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), rewritten]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-rewritten"))
+
+        assert [event.data["content"] for event in _ai_events(events)] == ["Let me look."]
+
+    def test_stream_emits_metadata_a_later_node_adds_to_a_sent_ai_message(self, client):
+        attribution = {"version": 1, "kind": "final_answer", "shared_attribution": False, "actions": []}
+        sent = AIMessage(content="Hello!", id="ai-1")
+        attributed = AIMessage(content="Hello!", id="ai-1", additional_kwargs={"token_usage_attribution": attribution})
+        agent = _make_agent_mock(
+            [
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), sent]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), attributed]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-attributed"))
+
+        ai_events = [event for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
+        assert [(event.data["content"], event.data.get("additional_kwargs")) for event in ai_events] == [("Hello!", None), ("", {"token_usage_attribution": attribution})]
 
     def test_stream_emits_new_additional_kwargs_after_prior_metadata(self, client):
         """stream() emits later attribution metadata even after earlier kwargs for the same id."""
@@ -572,6 +865,47 @@ class TestStream:
         assert tool_events[0].data["content"] == "file.txt"
         assert tool_events[0].data["name"] == "bash"
         assert tool_events[0].data["tool_call_id"] == "tc-1"
+        assert "artifact" not in tool_events[0].data
+
+    def test_messages_mode_tool_message_preserves_human_input_artifact(self, client):
+        """Structured clarification data survives both embedded stream paths."""
+        artifact = {
+            "human_input": {
+                "request_id": "request-1",
+                "tool_call_id": "tc-1",
+                "question": "Which environment should be used?",
+                "options": [{"label": "Production", "value": "production"}],
+            }
+        }
+        tool_message = ToolMessage(
+            content="Which environment should be used?",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="ask_clarification",
+            artifact=artifact,
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (tool_message, {})),
+                ("values", {"messages": [HumanMessage(content="deploy", id="h-1"), tool_message]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("deploy", thread_id="t-tool-artifact"))
+
+        tool_event = next(event for event in events if event.type == "messages-tuple" and event.data.get("type") == "tool")
+        values_event = next(event for event in events if event.type == "values")
+        serialized_tool_message = next(message for message in values_event.data["messages"] if message["type"] == "tool")
+
+        assert tool_event.data["artifact"] == artifact
+        assert serialized_tool_message["artifact"] == artifact
+        assert tool_event.data["artifact"] is artifact
+        assert serialized_tool_message["artifact"] is artifact
 
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
@@ -711,6 +1045,7 @@ class TestStream:
                 "values",
                 {
                     "title": None,
+                    "summary_text": None,
                     "messages": [
                         {"type": "human", "content": "hi", "id": "h-1"},
                         {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
@@ -862,6 +1197,40 @@ class TestChat:
 
         assert result == "final answer"
 
+    def test_returns_the_loop_detection_stop_notice(self, client):
+        """Real graph: the hard stop rewrites the last AI message after it was sent."""
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        @tool
+        def bash(command: str) -> str:
+            """Run a command."""
+            return "ok"
+
+        responses = [AIMessage(content="Checking again.", id=f"ai-{i}", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": f"call-{i}"}]) for i in range(3)]
+        graph = create_agent(
+            model=_ToolCallingFakeModel(responses=[*responses, AIMessage(content="unreachable", id="ai-end")]),
+            tools=[bash],
+            middleware=[LoopDetectionMiddleware(warn_threshold=10, hard_limit=3)],
+            state_schema=ThreadState,
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+        ):
+            result = client.chat("q", thread_id="t-loop-stop")
+
+        assert result.startswith("Checking again.")
+        assert "[FORCED STOP]" in result
+
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""
         chunks = [{"messages": []}]
@@ -908,7 +1277,380 @@ class TestExtractText:
 # ---------------------------------------------------------------------------
 
 
+class TestClientMcpSelection:
+    @pytest.fixture
+    def mcp_client(self, client):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        app_config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        app_config.tool_search.enabled = False
+        client._app_config = app_config
+        client._agent_name = "researcher"
+        extensions = ExtensionsConfig.model_validate({"mcpServers": {name: {"enabled": True, "capability": {"id": identity}} for name, identity in [("work", "installation-A"), ("personal", "installation-B")]}})
+        cached_tools = [tag_mcp_tool(StructuredTool.from_function(lambda: "result", name=f"{name}_search", description="Search"), server_name=name) for name in extensions.mcp_servers]
+        graph = MagicMock()
+        graph.stream.return_value = []
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=graph) as create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch("deerflow.client.load_agent_config") as load_config,
+            patch("deerflow.tools.tools.get_app_config", return_value=app_config),
+            patch("deerflow.config.acp_config.get_acp_agents", return_value={}),
+            patch.object(ExtensionsConfig, "from_file", return_value=extensions),
+            patch("deerflow.mcp.cache.get_cached_mcp_tools", return_value=cached_tools),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            yield SimpleNamespace(client=client, graph=graph, create_agent=create_agent, load_config=load_config, cached_tools=cached_tools)
+
+    @pytest.mark.parametrize(
+        ("selection", "expected_names"),
+        [(None, ["work_search", "personal_search"]), ([], []), (["installation-A"], ["work_search"])],
+    )
+    def test_selects_mcp_tools_without_changing_shared_cache(self, mcp_client, selection, expected_names):
+        from deerflow.tools.mcp_metadata import is_mcp_tool
+
+        mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+        config = mcp_client.client._get_runnable_config("t1")
+        mcp_client.client._ensure_agent(config)
+
+        tools = mcp_client.create_agent.call_args.kwargs["tools"]
+        assert [tool.name for tool in tools if is_mcp_tool(tool)] == expected_names
+        assert [tool.name for tool in mcp_client.cached_tools] == ["work_search", "personal_search"]
+
+    @pytest.mark.parametrize("selection", [None, [], ["installation-A"]])
+    def test_each_stream_carries_mcp_selection_for_delegation_on_cache_hit(self, mcp_client, selection):
+        mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+        for _ in range(2):
+            list(mcp_client.client.stream("hello", thread_id="t1"))
+
+        mcp_client.create_agent.assert_called_once()
+        mcp_client.load_config.assert_called_once()
+        assert mcp_client.graph.stream.call_count == 2
+        for call in mcp_client.graph.stream.call_args_list:
+            metadata = call.kwargs["config"]["metadata"]
+            assert metadata["mcp_plugins"] == selection
+
+    def test_reuses_graph_when_mcp_selection_order_changes(self, mcp_client):
+        agent_config = AgentConfig(name="researcher", mcp_plugins=["installation-A", "installation-B"])
+        mcp_client.load_config.return_value = agent_config
+        client = mcp_client.client
+        client._ensure_agent(client._get_runnable_config("t1"))
+
+        agent_config.mcp_plugins = ["installation-B", "installation-A"]
+        config = client._get_runnable_config("t2")
+        client._ensure_agent(config)
+
+        mcp_client.create_agent.assert_called_once()
+        assert config["metadata"]["mcp_plugins"] == ["installation-B", "installation-A"]
+
+    def test_reset_refreshes_mcp_selection_and_graph_cache_identity(self, mcp_client):
+        client = mcp_client.client
+        keys = []
+        for selection in [None, [], ["installation-A"]]:
+            mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+            client.reset_agent()
+            config = client._get_runnable_config("t1")
+            config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
+            client._ensure_agent(config)
+            keys.append(client._agent_config_key)
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+
+            # Changing the saved config takes effect only after reset_agent().
+            mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
+            cached_config = client._get_runnable_config("t2")
+            client._ensure_agent(cached_config)
+            assert cached_config["metadata"]["mcp_plugins"] == selection
+
+        assert keys[0] != keys[1] != keys[2]
+        assert mcp_client.load_config.call_count == 3
+        assert mcp_client.create_agent.call_count == 3
+
+
 class TestEnsureAgent:
+    @pytest.mark.parametrize(
+        ("agent_name", "agent_config", "expected_memory_enabled"),
+        [
+            ("stateless-agent", AgentConfig(name="stateless-agent", memory_enabled=False), False),
+            ("stateful-agent", AgentConfig(name="stateful-agent"), True),
+            (None, None, True),
+        ],
+    )
+    def test_applies_custom_agent_memory_policy(
+        self,
+        client,
+        agent_name,
+        agent_config,
+        expected_memory_enabled,
+    ):
+        client._agent_name = agent_name
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.load_agent_config", return_value=agent_config) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        if agent_name is None:
+            mock_load_agent_config.assert_not_called()
+        else:
+            mock_load_agent_config.assert_called_once_with(agent_name, user_id="owner-1")
+        assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is expected_memory_enabled
+        assert mock_apply_prompt.call_args.kwargs["memory_enabled"] is expected_memory_enabled
+
+    def test_reuses_named_agent_config_on_cached_agent_fast_path(self, client):
+        client._agent_name = "stateful-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                return_value=AgentConfig(name="stateful-agent"),
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("stateful-agent", user_id="owner-1")
+        assert mock_create_agent.call_count == 1
+
+    def test_reset_agent_refreshes_named_agent_config(self, client):
+        client._agent_name = "custom-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                side_effect=[
+                    AgentConfig(name="custom-agent", memory_enabled=False),
+                    AgentConfig(name="custom-agent", memory_enabled=True),
+                ],
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client.reset_agent()
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        assert mock_load_agent_config.call_count == 2
+
+    @pytest.mark.parametrize(
+        "config_error",
+        [
+            FileNotFoundError("missing config"),
+            ValueError("invalid config"),
+        ],
+        ids=["missing", "invalid"],
+    )
+    def test_unreadable_named_agent_config_preserves_legacy_memory_default(
+        self,
+        client,
+        caplog,
+        config_error,
+    ):
+        client._agent_name = "soul-only-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.load_agent_config", side_effect=config_error) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("soul-only-agent", user_id="owner-1")
+        assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is True
+        assert "using the memory-enabled compatibility default" in caplog.text
+
+    def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
+        from deerflow.authz.provider import AuthzDecision, AuthzReason
+
+        class Provider:
+            name = "test"
+
+            def filter_resources(self, principal, resource_type, candidates):
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
+
+            def authorize(self, request):
+                # Phase 3: model:use is now checked during assembly; allow it so
+                # the model name passes through. Tool-level authorize is still
+                # not invoked here (filter_resources drives tool assembly).
+                return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
+
+            async def aauthorize(self, request):
+                return self.authorize(request)
+
+        provider = Provider()
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(use="unused:Provider"),
+        )
+        mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
+        client._app_config = mock_app_config
+
+        safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
+        denied_tool = StructuredTool.from_function(lambda: "denied", name="denied_tool", description="denied")
+        describe_tool = StructuredTool.from_function(lambda: "describe", name="describe_skill", description="describe")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[MagicMock()]),
+            patch("deerflow.client.build_skill_search_setup", return_value=SimpleNamespace(describe_skill_tool=describe_tool, skill_names=frozenset({"example"}))),
+            patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
+            patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
+
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
+        assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
+
+    def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            client._ensure_agent(config, context={"user_id": "u1", "user_role": "user", "authz_attributes": {"department": "eng"}})
+            client._ensure_agent(config, context={"user_id": "u2", "user_role": "user", "authz_attributes": {"department": "eng"}})
+
+        assert mock_create_agent.call_count == 2
+
+    def test_disabled_authorization_cache_key_still_isolates_effective_users(self, client, mock_app_config):
+        """User-bound prompts/middleware must never be reused across embedded callers."""
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        client._app_config = mock_app_config
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            client._ensure_agent(config, context={"user_id": "alice"})
+            client._ensure_agent(config, context={"user_id": "bob"})
+
+        assert mock_create_agent.call_count == 2
+        assert [call.kwargs["user_id"] for call in mock_build_middlewares.call_args_list] == ["alice", "bob"]
+        assert [call.kwargs["user_id"] for call in mock_apply_prompt.call_args_list] == ["alice", "bob"]
+
+    def test_authorization_cache_key_snapshots_nested_attributes(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+        attributes = {"groups": ["reader"]}
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            context = {
+                "user_role": "user",
+                "authz_attributes": attributes,
+            }
+            client._ensure_agent(config, context=context)
+            attributes["groups"].append("admin")
+            client._ensure_agent(config, context=context)
+
+        assert mock_create_agent.call_count == 2
+
+    def test_disabled_authorization_preserves_framework_tool_order(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        mock_app_config.tool_search.enabled = True
+        mock_app_config.skills.deferred_discovery = True
+        client._app_config = mock_app_config
+        mcp_tool = tag_mcp_tool(StructuredTool.from_function(lambda: "mcp", name="mcp_tool", description="mcp"))
+        describe_tool = StructuredTool.from_function(lambda: "describe", name="describe_skill", description="describe")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[MagicMock()]),
+            patch(
+                "deerflow.client.build_skill_search_setup",
+                return_value=SimpleNamespace(
+                    describe_skill_tool=describe_tool,
+                    skill_names=frozenset({"example"}),
+                ),
+            ),
+            patch.object(client, "_get_tools", return_value=[mcp_tool]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"))
+
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == [
+            "mcp_tool",
+            "tool_search",
+            "describe_skill",
+        ]
+
     def test_creates_agent(self, client):
         """_ensure_agent creates an agent on first call."""
         mock_agent = MagicMock()
@@ -916,9 +1658,10 @@ class TestEnsureAgent:
 
         with (
             patch("deerflow.client.create_chat_model"),
-            patch("deerflow.client.create_agent", return_value=mock_agent),
+            patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.load_agent_config", return_value=AgentConfig(name="custom-agent")),
             patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -931,9 +1674,35 @@ class TestEnsureAgent:
         # Verify agent_name propagation
         mock_build_middlewares.assert_called_once()
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
+        assert mock_build_middlewares.call_args.kwargs.get("memory_enabled") is True
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
+        assert mock_apply_prompt.call_args.kwargs.get("memory_enabled") is True
+        assert mock_create_agent.call_args.kwargs["state_schema"] is ThreadState
+
+    def test_delta_mode_selects_state_and_normalizes_middleware(self, client):
+        mock_agent = MagicMock()
+        middleware = ViewImageMiddleware()
+        original_schema = middleware.state_schema
+        client._checkpoint_channel_mode = "delta"
+        config = client._get_runnable_config("t-delta")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[middleware]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        call_kwargs = mock_create_agent.call_args.kwargs
+        assert call_kwargs["state_schema"] is DeltaThreadState
+        assert call_kwargs["middleware"][0] is not middleware
+        assert middleware.state_schema is original_schema
 
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
@@ -1001,15 +1770,65 @@ class TestEnsureAgent:
 
     def test_reuses_agent_same_config(self, client):
         """_ensure_agent does not recreate if config key unchanged."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None)
+        client._agent_config_key = (
+            None,
+            True,
+            False,
+            False,
+            None,
+            None,
+            None,
+            True,
+            None,
+            None,
+            "full",
+            10,
+            get_effective_user_id(),
+            None,
+        )
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
+
+    def test_recreates_agent_when_subagent_limits_change(self, client):
+        """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
+        config1 = client._get_runnable_config("t1")
+        config1["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 2,
+                "max_total_subagents": 5,
+            }
+        )
+        config2 = client._get_runnable_config("t1")
+        config2["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 4,
+                "max_total_subagents": 5,
+            }
+        )
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config1)
+            client._ensure_agent(config2)
+
+        assert mock_create_agent.call_count == 2
 
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
@@ -1087,6 +1906,68 @@ class TestEnsureAgent:
         skill_names_arg = mock_apply_prompt.call_args.kwargs.get("skill_names")
         assert skill_names_arg is None, "skill_names must be None when deferred_discovery=False"
 
+    def test_mcp_routing_middleware_wired_when_tool_search_enabled(self, client, mock_app_config):
+        """Embedded client builds McpRoutingMiddleware from routed deferred MCP tools.
+
+        RFC §10.3/§12.5 requires verifying the actual embedded-client builder path
+        rather than assuming it inherits lead-agent behavior. Exercises the real
+        assemble_deferred_tools + build_mcp_routing_middleware wiring and asserts a
+        genuine McpRoutingMiddleware reaches build_middlewares.
+        """
+        from langchain_core.tools import tool as as_tool
+
+        from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+        from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+
+        @as_tool
+        def postgres_query(sql: str) -> str:
+            "Query Postgres."
+            return sql
+
+        tag_mcp_tool(postgres_query)
+        tag_mcp_routing(postgres_query, {"mode": "prefer", "priority": 100, "keywords": ["orders"]})
+
+        mock_app_config.tool_search.enabled = True
+        mock_app_config.tool_search.auto_promote_top_k = 3
+        mock_app_config.skills.deferred_discovery = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[postgres_query]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+        ):
+            client._ensure_agent(config)
+
+        routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
+        assert isinstance(routing_arg, McpRoutingMiddleware)
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+
+    def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
+        """No routing middleware is built on the embedded path when tool_search is off."""
+        mock_app_config.tool_search.enabled = False
+        mock_app_config.skills.deferred_discovery = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware") is None
+
 
 # ---------------------------------------------------------------------------
 # get_model
@@ -1155,6 +2036,18 @@ class TestThreadQueries:
         cp.pending_writes = pending_writes or []
         return cp
 
+    @staticmethod
+    def _make_mock_snapshot(checkpoint_tuple):
+        snapshot = MagicMock()
+        snapshot.values = dict(checkpoint_tuple.checkpoint["channel_values"])
+        snapshot.config = checkpoint_tuple.config
+        snapshot.parent_config = checkpoint_tuple.parent_config
+        snapshot.metadata = checkpoint_tuple.metadata
+        snapshot.next = ()
+        snapshot.tasks = ()
+        snapshot.created_at = checkpoint_tuple.checkpoint["ts"]
+        return snapshot
+
     def test_list_threads_empty(self, client):
         mock_checkpointer = MagicMock()
         mock_checkpointer.list.return_value = []
@@ -1208,56 +2101,113 @@ class TestThreadQueries:
     def test_get_thread(self, client):
         mock_checkpointer = MagicMock()
         client._checkpointer = mock_checkpointer
+        client._agent = MagicMock()
 
         msg1 = HumanMessage(content="Hello", id="m1")
         msg2 = AIMessage(content="Hi there", id="m2")
 
         cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", messages=[msg1])
-        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:01:00Z", parent_id="c1", messages=[msg1, msg2], pending_writes=[("task_1", "messages", {"text": "pending"})])
+        cp2 = self._make_mock_checkpoint_tuple(
+            "t1",
+            "c2",
+            "2023-01-01T10:01:00Z",
+            parent_id="c1",
+            messages=[msg1, msg2],
+            pending_writes=[("task_1", "messages", {"text": "pending"})],
+        )
         cp3_no_ts = self._make_mock_checkpoint_tuple("t1", "c3", None)
+        snapshots = [
+            self._make_mock_snapshot(cp2),
+            self._make_mock_snapshot(cp1),
+            self._make_mock_snapshot(cp3_no_ts),
+        ]
+        # get_thread collects pending_writes via one checkpointer.list walk
+        # instead of a get_tuple round-trip per checkpoint.
+        mock_checkpointer.list.return_value = [cp1, cp2, cp3_no_ts]
+        accessor = MagicMock()
+        accessor.history.return_value = snapshots
 
-        # checkpointer.list yields in reverse time or random order, test sorting
-        mock_checkpointer.list.return_value = [cp2, cp1, cp3_no_ts]
-
-        result = client.get_thread("t1")
-
-        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t1"}})
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch("deerflow.client.CheckpointStateAccessor.bind", return_value=accessor),
+        ):
+            result = client.get_thread("t1")
 
         assert result["thread_id"] == "t1"
         checkpoints = result["checkpoints"]
         assert len(checkpoints) == 3
-
-        # None timestamp remains None but is sorted first via a fallback key
         assert checkpoints[0]["checkpoint_id"] == "c3"
         assert checkpoints[0]["ts"] is None
-
-        # Should be sorted by timestamp globally
         assert checkpoints[1]["checkpoint_id"] == "c1"
         assert checkpoints[1]["ts"] == "2023-01-01T10:00:00Z"
         assert len(checkpoints[1]["values"]["messages"]) == 1
-
         assert checkpoints[2]["checkpoint_id"] == "c2"
         assert checkpoints[2]["parent_checkpoint_id"] == "c1"
         assert checkpoints[2]["ts"] == "2023-01-01T10:01:00Z"
         assert len(checkpoints[2]["values"]["messages"]) == 2
-        # Verify message serialization
         assert checkpoints[2]["values"]["messages"][1]["content"] == "Hi there"
-
-        # Verify pending writes
         assert len(checkpoints[2]["pending_writes"]) == 1
         assert checkpoints[2]["pending_writes"][0]["task_id"] == "task_1"
         assert checkpoints[2]["pending_writes"][0]["channel"] == "messages"
 
+    def test_get_thread_uses_materialized_snapshot_values(self, client):
+        mock_checkpointer = MagicMock()
+        raw_checkpoint = self._make_mock_checkpoint_tuple(
+            "thread-1",
+            "ckpt-2",
+            "2026-07-18T00:00:00Z",
+            parent_id="ckpt-1",
+        )
+        mock_checkpointer.list.return_value = [raw_checkpoint]
+        mock_checkpointer.get_tuple.return_value = raw_checkpoint
+        client._checkpointer = mock_checkpointer
+        client._agent = MagicMock()
+        client._ensure_agent = MagicMock()
+
+        snapshot = MagicMock()
+        snapshot.values = {
+            "messages": [
+                HumanMessage(id="h1", content="question"),
+                AIMessage(id="a1", content="answer"),
+            ]
+        }
+        snapshot.config = {
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "ckpt-2",
+            }
+        }
+        snapshot.parent_config = {"configurable": {"checkpoint_id": "ckpt-1"}}
+        snapshot.metadata = {"step": 2}
+        snapshot.next = ()
+        snapshot.tasks = ()
+        snapshot.created_at = "2026-07-18T00:00:00Z"
+        accessor = MagicMock()
+        accessor.history.return_value = [snapshot]
+
+        with patch("deerflow.client.CheckpointStateAccessor", create=True) as accessor_type:
+            accessor_type.bind.return_value = accessor
+            result = client.get_thread("thread-1")
+
+        messages = result["checkpoints"][0]["values"]["messages"]
+        assert [message["id"] for message in messages] == ["h1", "a1"]
+
     def test_get_thread_fallback_checkpointer(self, client):
         mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
+        accessor = MagicMock()
+        accessor.history.return_value = []
+        client._agent = MagicMock()
 
-        with patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer):
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer),
+            patch.object(client, "_ensure_agent"),
+            patch("deerflow.client.CheckpointStateAccessor.bind", return_value=accessor),
+        ):
             result = client.get_thread("t99")
 
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
-        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
 
 
 # ---------------------------------------------------------------------------
@@ -1304,13 +2254,9 @@ class TestMcpConfig:
 
     def test_update_mcp_config(self, client):
         # Set up current config with skills
-        current_config = MagicMock()
-        current_config.skills = {}
+        current_config = ExtensionsConfig()
 
-        reloaded_server = MagicMock()
-        reloaded_server.model_dump.return_value = {"enabled": True, "type": "sse"}
-        reloaded_config = MagicMock()
-        reloaded_config.mcp_servers = {"new-server": reloaded_server}
+        reloaded_config = ExtensionsConfig(mcp_servers={"new-server": McpServerConfig(enabled=True, type="sse")})
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump({}, f)
@@ -1337,6 +2283,51 @@ class TestMcpConfig:
             assert "mcpServers" in saved
         finally:
             tmp_path.unlink()
+
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+        """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"old": {"type": "stdio", "command": "npx"}},
+                    "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+                    "skills": {"kept": {"enabled": False}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
+
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == {
+            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {"kept": {"enabled": False}},
+        }
+        assert "ghp_live_secret_value" not in written_text
+
+    def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
+        config_file = tmp_path / "extensions_config.json"
+        original = json.dumps({"mcpServers": {}, "skills": {"kept": {"enabled": False}}})
+        config_file.write_text(original, encoding="utf-8")
+        reload = MagicMock()
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", reload),
+            pytest.raises(ValueError),
+        ):
+            client.update_mcp_config({"bad": {"enabled": "not-a-bool"}})
+
+        assert config_file.read_text(encoding="utf-8") == original
+        reload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1370,12 +2361,8 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
 
-        ext_config = MagicMock()
-        ext_config.mcp_servers = {}
-        ext_config.skills = {}
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({}, f)
+            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
             tmp_path = Path(f.name)
 
         try:
@@ -1392,14 +2379,77 @@ class TestSkillsManagement:
                     side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
                 ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
             assert client._agent is None  # M2: agent invalidated
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"]["untouched-skill"] == {"enabled": False}
         finally:
             tmp_path.unlink()
+
+    def test_update_skill_persists_state_when_source_omits_skills(self, client):
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"mcpServers": {}}, f)
+            tmp_path = Path(f.name)
+
+        try:
+            with (
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                patch("deerflow.client.reload_extensions_config"),
+            ):
+                client.update_skill("test-skill", enabled=False)
+
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"] == {"test-skill": {"enabled": False}}
+        finally:
+            tmp_path.unlink()
+
+    @staticmethod
+    def _config_with_placeholders() -> dict:
+        return {
+            "mcpServers": {"github": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "$DEERFLOW_TEST_GH_TOKEN", "OPTIONAL": "$DEERFLOW_TEST_UNSET_VAR"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {},
+        }
+
+    @pytest.mark.parametrize("category", ["public", "custom"])
+    def test_update_skill_preserves_env_placeholders(self, client, tmp_path, monkeypatch, category):
+        """Toggling a skill must not persist resolved ``$VAR`` values or blank unset ones.
+
+        ``public`` covers the shared-state path; ``custom`` with non-user-scoped
+        storage covers the fallback that also writes ``extensions_config.json``.
+        """
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps(self._config_with_placeholders()), encoding="utf-8")
+
+        skill = self._make_skill(enabled=True)
+        skill.category = category
+        storage = MagicMock()
+        storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
+
+        with (
+            patch("deerflow.client.get_or_new_user_skill_storage", return_value=storage),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        expected = self._config_with_placeholders()
+        expected["skills"]["test-skill"] = {"enabled": False}
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == expected
+        assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]):
@@ -1457,112 +2507,139 @@ class TestSkillsManagement:
 class TestMemoryManagement:
     def test_import_memory(self, client):
         imported = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
+        mock_mgr = MagicMock()
+        mock_mgr.import_memory.return_value = imported
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.import_memory(imported)
-
-        assert mock_import.call_count == 1
-        call_args = mock_import.call_args
+        assert mock_mgr.import_memory.call_count == 1
+        call_args = mock_mgr.import_memory.call_args
         assert call_args.args == (imported,)
         assert "user_id" in call_args.kwargs
         assert result == imported
 
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
+        mock_mgr = MagicMock()
+        mock_mgr.reload_memory.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.reload_memory()
         assert result == data
 
+    def test_reload_memory_raises_clean_error_when_read_also_unsupported(self, client):
+        """A minimal backend (only add + get_context) exposes neither reload nor
+        get_memory; reload_memory surfaces a clean NotImplementedError instead of
+        an uncaught propagation from the fallback (mirrors the router's 501)."""
+        mock_mgr = MagicMock()
+        mock_mgr.reload_memory.side_effect = NotImplementedError("reload not supported")
+        mock_mgr.get_memory.side_effect = NotImplementedError("get_memory not supported")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError, match="implements neither"):
+                client.reload_memory()
+        mock_mgr.reload_memory.assert_called_once()
+        mock_mgr.get_memory.assert_called_once()
+
     def test_clear_memory(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.clear_memory_data", return_value=data):
+        mock_mgr = MagicMock()
+        mock_mgr.clear_memory.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.clear_memory()
         assert result == data
 
     def test_create_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.create_memory_fact", return_value=data) as create_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.create_fact.return_value = (data, "fact_new")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.create_memory_fact(
                 "User prefers concise code reviews.",
                 category="preference",
                 confidence=0.88,
             )
-            create_fact.assert_called_once_with(
+            mock_mgr.create_fact.assert_called_once_with(
                 content="User prefers concise code reviews.",
                 category="preference",
                 confidence=0.88,
+                user_id=ANY,
             )
         assert result == data
 
     def test_delete_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.delete_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.delete_memory_fact("fact_123")
-            delete_fact.assert_called_once_with("fact_123")
+            mock_mgr.delete_fact.assert_called_once_with("fact_123", user_id=ANY)
         assert result == data
 
     def test_update_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.update_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.update_memory_fact(
                 "fact_123",
                 "User prefers spaces",
                 category="workflow",
                 confidence=0.91,
             )
-            update_fact.assert_called_once_with(
+            mock_mgr.update_fact.assert_called_once_with(
                 fact_id="fact_123",
                 content="User prefers spaces",
                 category="workflow",
                 confidence=0.91,
+                user_id=ANY,
             )
         assert result == data
 
     def test_update_memory_fact_preserves_omitted_fields(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.update_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.update_memory_fact(
                 "fact_123",
                 "User prefers spaces",
             )
-            update_fact.assert_called_once_with(
+            mock_mgr.update_fact.assert_called_once_with(
                 fact_id="fact_123",
                 content="User prefers spaces",
                 category=None,
                 confidence=None,
+                user_id=ANY,
             )
         assert result == data
 
     def test_get_memory_config(self, client):
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=config):
             result = client.get_memory_config()
 
         assert result["enabled"] is True
-        assert result["max_facts"] == 100
+        assert result["manager_class"] == "deermem"
 
     def test_get_memory_status(self, client):
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
         data = {"version": "1.0", "facts": []}
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = data
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             result = client.get_memory_status()
 
@@ -1621,8 +2698,8 @@ class TestUploads:
             created_executors = []
             real_executor_cls = concurrent.futures.ThreadPoolExecutor
 
-            async def fake_convert(path: Path) -> Path:
-                md_path = path.with_suffix(".md")
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
                 md_path.write_text(f"converted {path.name}")
                 return md_path
 
@@ -1660,6 +2737,197 @@ class TestUploads:
             assert result["files"][0]["markdown_file"] == "first.md"
             assert result["files"][1]["markdown_file"] == "second.md"
 
+    def test_upload_files_converted_markdown_uses_unique_names_on_stem_collision(self, client):
+        """Companion .md from convert must not clobber another same-stem companion."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            docx = tmp_path / "a.docx"
+            pdf = tmp_path / "a.pdf"
+            docx.write_bytes(b"DOCX")
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx", ".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [docx, pdf])
+
+            assert result["success"] is True
+            assert result["files"][0]["markdown_file"] == "a.md"
+            assert result["files"][1]["markdown_file"] == "a_1.md"
+            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+
+    def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
+        """A conversion that writes nothing must not reserve stem.md against a later companion.
+
+        Destination names are claimed upfront, so a same-stem ``.md`` upload
+        always wins ``a.md``; the only reachable victim of a stale claim is the
+        next convertible's companion.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            docx = tmp_path / "a.docx"
+            pdf = tmp_path / "a.pdf"
+            docx.write_bytes(b"DOCX")
+            pdf.write_bytes(b"PDF")
+
+            async def convert_failing_on_docx(path: Path, output_path: Path | None = None) -> Path | None:
+                if path.suffix.lower() == ".docx":
+                    return None
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx", ".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=convert_failing_on_docx),
+            ):
+                result = client.upload_files("thread-1", [docx, pdf])
+
+            assert result["success"] is True
+            assert result["files"][0].get("markdown_file") is None
+            assert result["files"][1]["markdown_file"] == "a.md"
+            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert not (uploads_dir / "a_1.md").exists()
+
+    def test_upload_files_converts_the_source_not_the_landed_copy(self, client):
+        """A sandbox swapping the landed upload must not redirect conversion at a host file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            host_file = tmp_path / "host-secret.pdf"
+            host_file.write_bytes(b"HOST SECRET")
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"pdf-bytes")
+
+            async def racing_convert(path: Path, output_path: Path | None = None) -> Path:
+                # The sandbox wins the race: the landed upload now points outside uploads.
+                landed = uploads_dir / "report.pdf"
+                if landed.exists() and not landed.is_symlink():
+                    landed.unlink()
+                    try:
+                        landed.symlink_to(host_file)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) == 1314:
+                            pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                        raise
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=racing_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            companion = uploads_dir / result["files"][0]["markdown_file"]
+            assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+            assert b"HOST SECRET" not in companion.read_bytes()
+
+    def test_upload_files_converts_the_source_inside_an_event_loop_too(self, client):
+        """The pooled conversion branch reads the source file as well."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            host_file = tmp_path / "host-secret.pdf"
+            host_file.write_bytes(b"HOST SECRET")
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"pdf-bytes")
+
+            async def racing_convert(path: Path, output_path: Path | None = None) -> Path:
+                landed = uploads_dir / "report.pdf"
+                if landed.exists() and not landed.is_symlink():
+                    landed.unlink()
+                    try:
+                        landed.symlink_to(host_file)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) == 1314:
+                            pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                        raise
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                return md_path
+
+            async def call_upload() -> dict:
+                return client.upload_files("thread-async", [pdf])
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=racing_convert),
+            ):
+                result = asyncio.run(call_upload())
+
+            companion = uploads_dir / result["files"][0]["markdown_file"]
+            assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+
+    def test_upload_files_rejects_reuploading_a_file_already_in_the_thread(self, client):
+        """Uploading an existing upload onto itself must not destroy its bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+            existing = uploads_dir / "existing.txt"
+            existing.write_text("IMPORTANT BYTES")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(shutil.SameFileError):
+                    client.upload_files("thread-1", [existing])
+
+            assert existing.read_text() == "IMPORTANT BYTES"
+
+    def test_upload_files_markdown_companion_keeps_converted_permissions(self, client):
+        """The companion stays as readable as the converter wrote it (sandbox reads it)."""
+        if os.chmod not in os.supports_fd:
+            pytest.skip("descriptor-based chmod is unavailable on this platform")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("converted", encoding="utf-8")
+                os.chmod(md_path, 0o644)
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["files"][0]["markdown_file"] == "report.md"
+            companion = uploads_dir / "report.md"
+            assert companion.read_text(encoding="utf-8") == "converted"
+            assert stat.S_IMODE(companion.stat().st_mode) == 0o644
+
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
@@ -1690,6 +2958,21 @@ class TestUploads:
             assert result["success"] is True
             assert "delete-me.txt" in result["message"]
             assert not (uploads_dir / "delete-me.txt").exists()
+
+    def test_delete_upload_keeps_the_converted_markdown(self, client):
+        """A .md sharing the document's stem may belong to another document."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp)
+            (uploads_dir / "report.docx").write_bytes(b"docx-bytes")
+            (uploads_dir / "report.md").write_text("converted from the docx", encoding="utf-8")
+            (uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                result = client.delete_upload("thread-1", "report.pdf")
+
+            assert result["success"] is True
+            assert not (uploads_dir / "report.pdf").exists()
+            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "converted from the docx"
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2011,13 +3294,9 @@ class TestScenarioConfigManagement:
             config_file.write_text("{}")
 
             # --- MCP update ---
-            current_config = MagicMock()
-            current_config.skills = {}
+            current_config = ExtensionsConfig()
 
-            reloaded_server = MagicMock()
-            reloaded_server.model_dump.return_value = {"enabled": True, "type": "sse"}
-            reloaded_config = MagicMock()
-            reloaded_config.mcp_servers = {"my-mcp": reloaded_server}
+            reloaded_config = ExtensionsConfig(mcp_servers={"my-mcp": McpServerConfig(enabled=True, type="sse")})
 
             client._agent = MagicMock()  # Simulate existing agent
             with (
@@ -2044,9 +3323,7 @@ class TestScenarioConfigManagement:
             toggled.category = "custom"
             toggled.enabled = False
 
-            ext_config = MagicMock()
-            ext_config.mcp_servers = {}
-            ext_config.skills = {}
+            ext_config = ExtensionsConfig()
 
             client._agent = MagicMock()  # Simulate re-created agent
             with (
@@ -2152,7 +3429,7 @@ class TestScenarioAgentRecreation:
 
         agents_created = []
 
-        def fake_ensure(config):
+        def fake_ensure(config, **kwargs):
             key = tuple(config.get("configurable", {}).get(k) for k in ["model_name", "thinking_enabled", "is_plan_mode", "subagent_enabled"])
             agents_created.append(key)
             client._agent = agent
@@ -2164,6 +3441,68 @@ class TestScenarioAgentRecreation:
         # Two different config keys should have been created
         assert len(agents_created) == 2
         assert agents_created[0] != agents_created[1]
+
+    def test_stream_propagates_trusted_authorization_context(self, client):
+        ai = AIMessage(content="ok", id="ai-1")
+        agent = _make_agent_mock([{"messages": [ai]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(
+                client.stream(
+                    "hi",
+                    thread_id="t1",
+                    user_id="u1",
+                    user_role="guest",
+                    is_internal=True,
+                    authz_attributes={"department": "eng"},
+                )
+            )
+
+        assert captured["user_id"] == "u1"
+        assert captured["user_role"] == "guest"
+        assert captured["is_internal"] is True
+        assert captured["authz_attributes"] == {"department": "eng"}
+        assert agent.stream.call_args.kwargs["context"]["user_role"] == "guest"
+
+    def test_stream_uses_effective_user_for_authorization_context(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(use="unused:Provider"),
+        )
+        client._app_config = mock_app_config
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(client.stream("hi", thread_id="t1"))
+
+        assert captured["user_id"] == "test-user-autouse"
+        assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
+
+    def test_stream_uses_effective_user_context_when_authorization_is_disabled(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        client._app_config = mock_app_config
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(client.stream("hi", thread_id="t1"))
+
+        assert captured["user_id"] == "test-user-autouse"
+        assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
 
 
 class TestScenarioThreadIsolation:
@@ -2229,24 +3568,26 @@ class TestScenarioMemoryWorkflow:
 
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=initial_data):
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.side_effect = [initial_data, updated_data]
+        mock_mgr.reload_memory.return_value = updated_data
+
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             mem = client.get_memory()
         assert len(mem["facts"]) == 1
 
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=updated_data):
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             refreshed = client.reload_memory()
         assert len(refreshed["facts"]) == 2
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=updated_data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             status = client.get_memory_status()
         assert status["config"]["enabled"] is True
@@ -2552,20 +3893,17 @@ class TestGatewayConformance:
         assert "test" in parsed.mcp_servers
 
     def test_update_mcp_config(self, client, tmp_path):
-        server = MagicMock()
-        server.model_dump.return_value = {
-            "enabled": True,
-            "type": "stdio",
-            "command": "npx",
-            "args": [],
-            "env": {},
-            "url": None,
-            "headers": {},
-            "description": "",
-        }
-        ext_config = MagicMock()
-        ext_config.mcp_servers = {"srv": server}
-        ext_config.skills = {}
+        server = McpServerConfig(
+            enabled=True,
+            type="stdio",
+            command="npx",
+            args=[],
+            env={},
+            url=None,
+            headers={},
+            description="",
+        )
+        ext_config = ExtensionsConfig(mcp_servers={"srv": server})
 
         config_file = tmp_path / "extensions_config.json"
         config_file.write_text("{}")
@@ -2575,7 +3913,7 @@ class TestGatewayConformance:
             patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
             patch("deerflow.client.reload_extensions_config", return_value=ext_config),
         ):
-            result = client.update_mcp_config({"srv": server.model_dump.return_value})
+            result = client.update_mcp_config({"srv": server.model_dump()})
 
         parsed = McpConfigResponse(**result)
         assert "srv" in parsed.mcp_servers
@@ -2610,32 +3948,25 @@ class TestGatewayConformance:
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
+        mem_cfg.manager_class = "deermem"
+        mem_cfg.backend_config = {}
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
 
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
-        assert parsed.max_facts == 100
-        assert parsed.token_counting == "tiktoken"
+        assert parsed.manager_class == "deermem"
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
+        mem_cfg.manager_class = "deermem"
+        mem_cfg.backend_config = {}
 
         memory_data = {
             "version": "1.0",
@@ -2652,16 +3983,18 @@ class TestGatewayConformance:
             },
             "facts": [],
         }
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory_data
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory_data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             result = client.get_memory_status()
 
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
-        assert parsed.config.token_counting == "tiktoken"
+        assert parsed.config.manager_class == "deermem"
         assert parsed.data.version == "1.0"
 
 
@@ -2993,6 +4326,85 @@ class TestStreamHardening:
             with pytest.raises(RuntimeError, match="model quota exceeded"):
                 list(client.stream("hi", thread_id="t-err"))
 
+    def test_agent_exception_releases_embedded_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def failing_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-err-lease",
+                user_id="anonymous",
+            )
+            raise RuntimeError("model quota exceeded")
+            yield  # pragma: no cover
+
+        agent = MagicMock()
+        agent.stream.side_effect = failing_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+                pytest.raises(RuntimeError, match="model quota exceeded"),
+            ):
+                list(client.stream("hi", thread_id="t-err-lease"))
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
+
+    def test_abandoned_embedded_stream_releases_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def blocking_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-abandoned-lease",
+                user_id="anonymous",
+            )
+            yield "values", {"messages": []}
+            raise AssertionError("abandoned stream continued")
+
+        agent = MagicMock()
+        agent.stream.side_effect = blocking_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+            ):
+                stream = client.stream("hi", thread_id="t-abandoned-lease")
+                assert next(stream).type == "values"
+                stream.close()
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
+
     def test_messages_without_id(self, client):
         """Messages without id attribute are emitted without crashing."""
         ai = AIMessage(content="no id here")
@@ -3098,6 +4510,35 @@ class TestSerializeMessage:
         result = DeerFlowClient._serialize_message(msg)
         assert result["type"] == "tool"
         assert isinstance(result["content"], str)
+        assert "artifact" not in result
+
+    def test_tool_message_event_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._tool_message_event(msg)
+
+        assert result.data["artifact"] is msg.artifact
+
+    def test_tool_message_values_serialization_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._serialize_message(msg)
+
+        assert result["artifact"] is msg.artifact
 
 
 # ===========================================================================
@@ -3133,6 +4574,104 @@ class TestUploadDeleteSymlink:
 
             # The outside file must NOT have been deleted.
             assert outside.exists()
+
+    def test_delete_upload_symlink_to_sibling_upload(self, client):
+        """A symlink aliasing another upload is not followed to delete that upload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp) / "uploads"
+            uploads_dir.mkdir()
+
+            victim = uploads_dir / "victim.txt"
+            victim.write_text("keep me")
+
+            link = uploads_dir / "alias.txt"
+            try:
+                link.symlink_to(victim.name)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                with pytest.raises(FileNotFoundError):
+                    client.delete_upload("thread-1", "alias.txt")
+
+            assert victim.read_text() == "keep me"
+            assert link.is_symlink()
+
+    def test_upload_files_skips_symlinked_destination(self, client):
+        """A symlink planted at an upload name is skipped, not written through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.txt"
+            outside.write_text("original")
+            link = uploads_dir / "note.txt"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            src_dir = tmp_path / "src"
+            src_dir.mkdir()
+            (src_dir / "note.txt").write_text("uploaded")
+            (src_dir / "other.txt").write_text("other")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+                result = client.upload_files("thread-1", [src_dir / "note.txt", src_dir / "other.txt"])
+
+            parsed = UploadResponse(**result)
+            assert parsed.success is False
+            assert parsed.skipped_files == ["note.txt"]
+            assert [f.filename for f in parsed.files] == ["other.txt"]
+            assert parsed.message == "Successfully uploaded 1 file(s); skipped 1 unsafe file(s)"
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "other.txt").read_text() == "other"
+
+    def test_upload_files_does_not_write_markdown_companion_through_symlink(self, client):
+        """A symlink planted at the companion name does not receive converted text."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            outside = tmp_path / "outside.md"
+            outside.write_text("original")
+            link = uploads_dir / "report.md"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+                raise
+
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert [f["filename"] for f in result["files"]] == ["report.pdf"]
+            assert "markdown_file" not in result["files"][0]
+            assert outside.read_text() == "original"
+            assert link.is_symlink()
+            assert (uploads_dir / "report.pdf").read_bytes() == b"PDF"
 
     def test_upload_filename_with_spaces_and_unicode(self, client):
         """Files with spaces and unicode characters in names upload correctly."""
@@ -3339,10 +4878,8 @@ class TestBugAgentInvalidationInconsistency:
         client._agent = MagicMock()
         client._agent_config_key = ("model", True, False, False)
 
-        current_config = MagicMock()
-        current_config.skills = {}
-        reloaded = MagicMock()
-        reloaded.mcp_servers = {}
+        current_config = ExtensionsConfig()
+        reloaded = ExtensionsConfig()
 
         with tempfile.TemporaryDirectory() as tmp:
             config_file = Path(tmp) / "ext.json"

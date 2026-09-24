@@ -4,12 +4,14 @@ Builds the ``describe_skill`` tool as a closure over a :class:`SkillCatalog`.
 The tool returns structured metadata (description, allowed tools, file location)
 so the LLM can decide whether to ``read_file`` the full SKILL.md.
 
-Mirrors ``build_tool_search_tool`` from ``tool_search.py``: same query syntax,
-same ``Command`` + ``ToolMessage`` return shape, same fail-safe degradation.
+Shares query forms, ``Command`` + ``ToolMessage`` return shape, and fail-safe
+degradation with ``build_tool_search_tool`` from ``tool_search.py``. Skill
+queries intentionally rank literal intent terms rather than matching regexes.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
@@ -131,9 +133,21 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     blocks: list[str] = []
     for s in skills:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
-        tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
+        # `()` is an explicit empty allowlist — the policy middleware strips every
+        # business tool for it — so only an omitted field (`None`) means unrestricted.
+        # `(all)` describes this skill's own frontmatter, not the enforced union: once
+        # any loaded skill declares allowed-tools,
+        # ``allowed_tool_names_for_skills`` (tool_policy.py) gives a `None` skill no
+        # tools, so a mixed set can render `(all)` while the middleware restricts it.
+        tools_line = "(all)" if s.allowed_tools is None else (", ".join(s.allowed_tools) or "(none)")
         location = s.get_container_file_path(container_base_path)
-        blocks.append(f"## Skill: {s.name}\n- Description: {s.description} {mutability}\n- Allowed tools: {tools_line}\n- Location: {location}")
+        # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
+        # escape so a value cannot forge a framework tag in the describe_skill output.
+        name = html.escape(s.name, quote=False)
+        description = html.escape(s.description, quote=False)
+        tools = html.escape(tools_line, quote=False)
+        loc = html.escape(location, quote=False)
+        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {loc}")
     return "\n\n".join(blocks)
 
 
@@ -156,7 +170,7 @@ def get_skill_index_prompt_section(
     if not skill_names:
         return ""
 
-    names = ", ".join(sorted(skill_names))
+    names = ", ".join(html.escape(name, quote=False) for name in sorted(skill_names))
     evolution = f"\n{skill_evolution_section}" if skill_evolution_section else ""
 
     return f"""<skill_system>

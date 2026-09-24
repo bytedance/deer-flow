@@ -4,15 +4,15 @@ from deerflow.subagents.config import SubagentConfig
 
 BASH_AGENT_CONFIG = SubagentConfig(
     name="bash",
-    description="""Command execution specialist for running bash commands in a separate context.
+    description="""Command execution specialist for bounded shell workflows with clear delegation benefit.
 
 Use this subagent when:
-- You need to run a series of related bash commands
-- Terminal operations like git, npm, docker, etc.
-- Command output is verbose and would clutter main context
-- Build, test, or deployment operations
+- A multi-command workflow's logs or intermediate state would materially displace lead context
+- It owns an independent, non-overlapping shell workload that can run in parallel
+- Keeping a justified sequential command chain in one isolated context reduces coordination cost
 
-Do NOT use for simple single commands - use bash tool directly instead.""",
+Routine git, build, test, or deploy operations are not sufficient reason to delegate.
+Use the direct bash tool when delegation and synthesis cost more than the bounded workflow.""",
     system_prompt="""You are a bash command execution specialist. Execute the requested commands carefully and report results clearly.
 
 <guidelines>

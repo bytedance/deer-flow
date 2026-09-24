@@ -6,6 +6,8 @@ test_skills_router.py and this module) into a single dedicated module.
 
 from pathlib import Path
 
+import pytest
+
 from deerflow.skills.validation import ALLOWED_FRONTMATTER_PROPERTIES, _validate_skill_frontmatter
 
 
@@ -47,17 +49,57 @@ class TestValidateSkillFrontmatter:
         assert msg == "Skill is valid!"
         assert name == "my-skill"
 
-    def test_rejects_allowed_tools_string(self, tmp_path):
+    @pytest.mark.parametrize("optional", ["", "    optional: false\n", "    optional: true\n"])
+    def test_required_secrets_optional_boolean_values(self, tmp_path, optional):
         skill_dir = _write_skill(
             tmp_path,
-            "---\nname: my-skill\ndescription: A skill\nallowed-tools: bash\n---\n\nBody\n",
+            f"---\nname: my-skill\ndescription: A skill\nrequired-secrets:\n  - name: ERP_TOKEN\n{optional}---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+    @pytest.mark.parametrize("optional", ['"false"', '"true"', '"no"', "1", "[]", "{}", "null"])
+    def test_required_secrets_optional_rejects_non_booleans(self, tmp_path, optional):
+        skill_dir = _write_skill(
+            tmp_path,
+            f"---\nname: my-skill\ndescription: A skill\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: {optional}\n---\n\nBody\n",
         )
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is False
-        assert "allowed-tools" in msg
-        assert str(tmp_path) not in msg
-        assert "SKILL.md" in msg
+        assert msg == "required-secrets entry 'ERP_TOKEN' optional must be a boolean"
         assert name is None
+
+    def test_required_secrets_optional_error_identifies_unnamed_entry(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            '---\nname: my-skill\ndescription: A skill\nrequired-secrets:\n  - optional: "true"\n---\n\nBody\n',
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert msg == "required-secrets entry without a name has an optional field that must be a boolean"
+        assert name is None
+
+    def test_allows_argument_hint(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: A skill\nargument-hint: '[issue-number]'\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+    def test_allows_allowed_tools_string(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: A skill\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*)\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
 
     def test_rejects_allowed_tools_non_string_entry(self, tmp_path):
         skill_dir = _write_skill(
@@ -115,6 +157,17 @@ class TestValidateSkillFrontmatter:
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "custom-field" in msg
+
+    def test_non_string_frontmatter_key_reports_cleanly_instead_of_crashing(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: test\n42: bad\ncustom-field: bad\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "custom-field" in msg
+        assert "42" in msg
+        assert name is None
 
     def test_name_must_be_hyphen_case(self, tmp_path):
         skill_dir = _write_skill(
@@ -180,6 +233,37 @@ class TestValidateSkillFrontmatter:
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "too long" in msg.lower()
+
+    def test_description_at_max_length_accepted(self, tmp_path):
+        max_desc = "a" * 1024
+        skill_dir = _write_skill(
+            tmp_path,
+            f"---\nname: my-skill\ndescription: {max_desc}\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+    def test_empty_description_rejected(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: ''\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "empty" in msg.lower()
+        assert name is None
+
+    def test_whitespace_only_description_rejected(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: '   '\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "empty" in msg.lower()
+        assert name is None
 
     def test_empty_name_rejected(self, tmp_path):
         skill_dir = _write_skill(

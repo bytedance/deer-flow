@@ -1,15 +1,21 @@
 "use client";
 
+import type { Message } from "@langchain/langgraph-sdk";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
   GraduationCapIcon,
   LightbulbIcon,
+  Loader2Icon,
+  MicIcon,
   PaperclipIcon,
   PlusIcon,
-  SparklesIcon,
   RocketIcon,
+  SparklesIcon,
+  SquareIcon,
   TargetIcon,
+  Undo2Icon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -17,12 +23,15 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ComponentProps,
+  type ClipboardEvent,
+  type FormEvent,
   type KeyboardEvent,
-  type RefObject,
 } from "react";
 import { toast } from "sonner";
 
@@ -34,9 +43,9 @@ import {
   PromptInputActionMenuTrigger,
   PromptInputAttachment,
   PromptInputAttachments,
-  PromptInputBody,
   PromptInputButton,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
@@ -60,33 +69,61 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
+import {
+  buildConversationReferenceMetadata,
+  type ConversationReference,
+} from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
+import { polishInputDraft } from "@/core/input-polish/api";
+import {
+  isHiddenFromUIMessage,
+  type FileInMessage,
+} from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
+import {
+  buildReferenceMessageMetadata,
+  type SidecarContext,
+} from "@/core/sidecar";
 import { useSkills } from "@/core/skills/hooks";
+import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
+import { compactThreadContext } from "@/core/threads/api";
+import {
+  buildComposerDraftKey,
+  clearComposerDraft,
+  getSessionComposerDraftStorage,
+  readComposerDraft,
+  resolveComposerDraft,
+  type ComposerDraft,
+  writeComposerDraft,
+} from "@/core/threads/composer-draft";
+import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
+  splitUnsupportedUploadFiles,
   useUploadLimits,
   validateUploadLimits,
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import {
+  appendSpeechTranscript,
+  getSpeechRecognitionConstructor,
+  getSpeechRecognitionLanguage,
+  mapSpeechRecognitionError,
+  readSpeechRecognitionTranscript,
+  shouldRestartSpeechRecognition,
+  type BrowserSpeechRecognition,
+  type SpeechRecognitionErrorKind,
+} from "@/core/voice-input/speech-recognition";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -95,26 +132,82 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
+import { ReferenceConversationsButton } from "./conversation-references/reference-conversations-button";
 import {
   abortGoalRequest,
   beginGoalRequest,
+  canPolishInput,
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  filterSkillsForAgent,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
   type SlashSuggestion,
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "./model-picker-content";
+import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
+
+function focusContentEditableEnd(element: HTMLElement | null) {
+  if (!element) {
+    return;
+  }
+
+  element.focus();
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertPlainTextAtSelection(container: HTMLElement, text: string) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  const ancestor = range.commonAncestorContainer;
+  if (ancestor !== container && !container.contains(ancestor)) {
+    return false;
+  }
+
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.setEndAfter(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -129,6 +222,74 @@ function getResolvedMode(
   return supportsThinking ? "pro" : "flash";
 }
 
+function escapeXmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export type InputBoxSubmitOptions = {
+  additionalKwargs?: Record<string, unknown>;
+  additionalInputMessages?: Message[];
+  /** Thread IDs attached through the conversation picker; sent as run context. */
+  conversationReferences?: string[];
+  onSent?: () => void;
+};
+
+type VoiceRecognitionStartOptions = {
+  focusAfterStart?: boolean;
+};
+
+function buildHiddenConversationQuoteMessage({
+  contexts,
+}: {
+  contexts: SidecarContext[];
+}): Message {
+  return {
+    type: "human",
+    content: [
+      {
+        type: "text",
+        text: [
+          contexts.length === 1
+            ? "The user added the following quoted context to this conversation."
+            : `The user added the following ${contexts.length} quoted contexts to this conversation.`,
+          "Use the referenced_message blocks as reference material for the user's next message.",
+          "",
+          ...contexts.flatMap((context, index) =>
+            [
+              `<referenced_message index="${index + 1}" label="${escapeXmlAttribute(
+                context.label,
+              )}">`,
+              `Role: ${context.role === "user" ? "User" : "Assistant"}`,
+              context.messageId ? `Message ID: ${context.messageId}` : null,
+              "",
+              context.content,
+              "</referenced_message>",
+              "",
+            ].filter((line): line is string => line !== null),
+          ),
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      },
+    ],
+    additional_kwargs: {
+      hide_from_ui: true,
+      conversation_quote_context: true,
+      // Keep ids/roles/count 1:1 parallel with `contexts` so consumers can zip
+      // them safely; do not dedupe ids here.
+      referenced_message_ids: contexts.map(
+        (context) => context.messageId ?? "",
+      ),
+      referenced_message_roles: contexts.map((context) => context.role),
+      quote_context_count: contexts.length,
+    },
+  } as Message;
+}
+
 export function InputBox({
   className,
   disabled,
@@ -138,12 +299,21 @@ export function InputBox({
   extraHeader,
   isWelcomeMode,
   threadId,
+  draftThreadId = threadId,
+  draftAgentName,
+  defaultModelName,
+  knowledgeScopeControl,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
+  canCreateRuns = true,
+  agentSkillNames,
+  agentSkillsLoading = false,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -164,50 +334,208 @@ export function InputBox({
    */
   isWelcomeMode?: boolean;
   threadId: string;
+  draftThreadId?: string;
+  draftAgentName?: string | null;
+  agentSkillNames?: string[] | null;
+  agentSkillsLoading?: boolean;
+  /**
+   * The active custom agent's configured default model, if any. Used as the
+   * auto-selection fallback so an agent chat honors the agent's own default
+   * model instead of silently snapping to the first configured model
+   * (issue #4336). ``null`` / undefined = no agent default → use models[0].
+   */
+  defaultModelName?: string | null;
+  /** Optional knowledge-scope control rendered directly after mode. */
+  knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
   onContextChange?: (
-    context: Omit<
-      AgentThreadContext,
-      "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
-    > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-      reasoning_effort?: "minimal" | "low" | "medium" | "high";
-    },
+    // Explicit selections contain only the fields changed by that action,
+    // never the whole thread-resolved context (which may override the account).
+    context: Partial<
+      Omit<
+        AgentThreadContext,
+        "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+      > & {
+        mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+        reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      }
+    >,
+    options?: { automatic: boolean },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
-  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
+  /**
+   * Prepare a not-yet-materialized thread before a builtin command creates
+   * it server-side. The `/goal <condition>` PUT endpoint materializes a
+   * missing thread row itself, so a project-scoped new chat uses this to
+   * assign membership first — the later idempotent thread create would
+   * otherwise return that unassigned row without the project. Only runs for
+   * goal-set: status/clear never create a thread server-side. Rejecting
+   * aborts the command and keeps the composer's text for a retry.
+   */
+  onPrepareThread?: () => void | Promise<void>;
+  onSubmit?: (
+    message: PromptInputMessage,
+    options?: InputBoxSubmitOptions,
+  ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
+  /**
+   * Whether the caller's role holds `runs:create` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canCreateRuns?: boolean;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { user } = useAuth();
   const { thread, isMock } = useThread();
   const { attachments, textInput } = usePromptInputController();
+  const setTextInput = textInput.setInput;
+  const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
+  // Conversations attached for the next message only. Not persisted with the
+  // draft; cleared once a send proceeds or the composer moves to another thread.
+  const [conversationReferences, setConversationReferences] = useState<
+    ConversationReference[]
+  >([]);
+  useEffect(() => {
+    setConversationReferences([]);
+  }, [threadId]);
   const removeAttachment = attachments.remove;
-  const { skills } = useSkills();
+  // Project documents attached from the shelf arrive already ingested
+  // thread-side (spec §9): the composer shows them as completed attachments
+  // and includes them in the next send without a re-upload. Staged only on
+  // attach success; the hook consumes the staged entry once per thread and
+  // keeps it across a Strict-Mode effect replay.
+  const [projectAttachments, setProjectAttachments] =
+    useStagedProjectAttachments(threadId);
+  const { skills, isLoading: skillsLoading } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
+  const inlineSkillComposingRef = useRef(false);
   const goalRequestStateRef = useRef(createGoalRequestState());
+  const compactRequestStateRef = useRef(createGoalRequestState());
+  const inputPolishRequestRef = useRef<{
+    controller: AbortController | null;
+    sequence: number;
+  }>({
+    controller: null,
+    sequence: 0,
+  });
+  const voiceRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseTextRef = useRef("");
+  const voiceLatestTextRef = useRef("");
+  const voiceLastErrorKindRef = useRef<SpeechRecognitionErrorKind | null>(null);
+  const voiceStopRequestedRef = useRef(false);
+  const voiceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const startVoiceRecognitionRef = useRef<
+    ((options?: VoiceRecognitionStartOptions) => boolean) | null
+  >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
+  const pendingDraftSubmissionKeyRef = useRef<string | null>(null);
+  const latestDraftRef = useRef<{
+    key: string;
+    draft: { text: string; skillName: string | null };
+  } | null>(null);
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const draftSaveGenerationRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
   const suggestionsConfigLoaded = suggestionsConfig !== undefined;
   const suggestionsEnabled = suggestionsConfig?.enabled;
+  const maxFollowupSuggestions =
+    suggestionsConfig?.max_suggestions ?? DEFAULT_MAX_SUGGESTIONS;
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
+  const [polishingInput, setPolishingInput] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [inputPolishUndo, setInputPolishUndo] = useState<{
+    originalText: string;
+    rewrittenText: string;
+  } | null>(null);
   const [textareaFocused, setTextareaFocused] = useState(false);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [selectedSlashSkill, setSelectedSlashSkill] =
+    useState<SlashSuggestion | null>(null);
+  const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  // Set when the user stops a streaming turn. Such a turn ends on a
+  // half-finished response, so we must NOT generate follow-up suggestions for it.
+  const stoppedByUserRef = useRef(false);
   const messagesRef = useRef(thread.messages);
+
+  const clearVoiceRestartTimer = useCallback(() => {
+    if (voiceRestartTimerRef.current === null) {
+      return;
+    }
+    clearTimeout(voiceRestartTimerRef.current);
+    voiceRestartTimerRef.current = null;
+  }, []);
+
+  const cleanupVoiceRecognition = useCallback(
+    (
+      recognition: BrowserSpeechRecognition | null,
+      options: { keepListening?: boolean } = {},
+    ) => {
+      clearVoiceRestartTimer();
+      if (!recognition) {
+        if (!options.keepListening) {
+          voiceLastErrorKindRef.current = null;
+          voiceStopRequestedRef.current = false;
+          setVoiceListening(false);
+        }
+        return;
+      }
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      if (voiceRecognitionRef.current === recognition) {
+        voiceRecognitionRef.current = null;
+      }
+      if (!options.keepListening) {
+        voiceLastErrorKindRef.current = null;
+        voiceStopRequestedRef.current = false;
+        setVoiceListening(false);
+      }
+    },
+    [clearVoiceRestartTimer],
+  );
+
+  const abortVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    cleanupVoiceRecognition(recognition);
+    try {
+      recognition.abort();
+    } catch {
+      // Browser implementations can throw when the recognizer already ended.
+    }
+  }, [cleanupVoiceRecognition]);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -220,8 +548,13 @@ export function InputBox({
         description: t.inputBox.goalCommandDescription,
         kind: "builtin",
       },
+      {
+        name: "compact",
+        description: t.inputBox.compactCommandDescription,
+        kind: "builtin",
+      },
     ],
-    [t.inputBox.goalCommandDescription],
+    [t.inputBox.compactCommandDescription, t.inputBox.goalCommandDescription],
   );
 
   const reportUploadLimitViolations = useCallback(
@@ -289,7 +622,13 @@ export function InputBox({
       return;
     }
     const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    // Prefer the active agent's configured default model over models[0] as the
+    // auto-selection fallback, so an agent chat respects the agent's own
+    // default instead of snapping to the first model (issue #4336).
+    const agentDefaultModel = defaultModelName
+      ? models.find((m) => m.name === defaultModelName)
+      : undefined;
+    const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
@@ -298,12 +637,15 @@ export function InputBox({
       return;
     }
 
-    onContextChange?.({
-      ...context,
-      model_name: nextModelName,
-      mode: nextMode,
-    });
-  }, [context, models, onContextChange]);
+    onContextChange?.(
+      {
+        ...context,
+        model_name: nextModelName,
+        mode: nextMode,
+      },
+      { automatic: true },
+    );
+  }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -322,6 +664,90 @@ export function InputBox({
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
+  );
+
+  const draftKey = useMemo(
+    () =>
+      buildComposerDraftKey({
+        userId: user?.id ?? "anonymous",
+        agentName:
+          draftAgentName ??
+          (typeof context.agent_name === "string" ? context.agent_name : null),
+        threadId: draftThreadId,
+      }),
+    [context.agent_name, draftAgentName, draftThreadId, user?.id],
+  );
+  const agentScopedSkills = useMemo(
+    () =>
+      agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
+    [agentSkillNames, agentSkillsLoading, skills],
+  );
+  const enabledSkillNames = useMemo(
+    () =>
+      new Set(
+        agentScopedSkills
+          .filter((skill) => skill.enabled)
+          .map((skill) => skill.name),
+      ),
+    [agentScopedSkills],
+  );
+  const cancelDraftSaveTimer = useCallback(() => {
+    if (draftSaveTimerRef.current === null) {
+      return;
+    }
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = null;
+  }, []);
+  const invalidateDraftSaveTimer = useCallback(() => {
+    draftSaveGenerationRef.current += 1;
+    cancelDraftSaveTimer();
+  }, [cancelDraftSaveTimer]);
+  const scheduleDraftSave = useCallback(
+    (draft: ComposerDraft, key = draftKey) => {
+      if (
+        !draft.text &&
+        !draft.skillName &&
+        pendingDraftSubmissionKeyRef.current === key
+      ) {
+        return null;
+      }
+      if (draft.text || draft.skillName) {
+        pendingDraftSubmissionKeyRef.current = null;
+      }
+
+      latestDraftRef.current = { key, draft };
+      cancelDraftSaveTimer();
+      draftSaveGenerationRef.current += 1;
+      const generation = draftSaveGenerationRef.current;
+      const timer = window.setTimeout(() => {
+        if (
+          draftSaveGenerationRef.current !== generation ||
+          draftSaveTimerRef.current !== timer
+        ) {
+          return;
+        }
+        draftSaveTimerRef.current = null;
+        writeComposerDraft(getSessionComposerDraftStorage(), key, draft);
+      }, COMPOSER_DRAFT_SAVE_DELAY_MS);
+      draftSaveTimerRef.current = timer;
+      return timer;
+    },
+    [cancelDraftSaveTimer, draftKey],
+  );
+  const flushLatestDraft = useCallback(
+    (expectedKey?: string) => {
+      const latest = latestDraftRef.current;
+      if (!latest || (expectedKey && latest.key !== expectedKey)) {
+        return;
+      }
+      cancelDraftSaveTimer();
+      writeComposerDraft(
+        getSessionComposerDraftStorage(),
+        latest.key,
+        latest.draft,
+      );
+    },
+    [cancelDraftSaveTimer],
   );
 
   const promptHistory = useMemo(() => {
@@ -349,15 +775,118 @@ export function InputBox({
     return history;
   }, [thread.messages]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
-  }, [threadId]);
+    setTextInput("");
+    setSelectedSlashSkill(null);
+    setInputPolishUndo(null);
+    setHydratedDraftKey(null);
+    pendingDraftSubmissionKeyRef.current = null;
+    latestDraftRef.current = null;
+    invalidateDraftSaveTimer();
+    return () => flushLatestDraft(draftKey);
+  }, [draftKey, flushLatestDraft, invalidateDraftSaveTimer, setTextInput]);
+
+  useLayoutEffect(() => {
+    const handlePageHide = () => flushLatestDraft();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [flushLatestDraft]);
+
+  useEffect(() => {
+    if (skillsLoading || agentSkillsLoading || hydratedDraftKey === draftKey) {
+      return;
+    }
+
+    const savedDraft = readComposerDraft(
+      getSessionComposerDraftStorage(),
+      draftKey,
+    );
+    if (!savedDraft) {
+      if (!textInput.value && initialValue) {
+        setTextInput(initialValue);
+      }
+      setHydratedDraftKey(draftKey);
+      return;
+    }
+
+    const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
+    setTextInput(resolvedDraft.text);
+    const restoredSkill = resolvedDraft.skillName
+      ? agentScopedSkills.find(
+          (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
+        )
+      : undefined;
+    setSelectedSlashSkill(
+      restoredSkill
+        ? {
+            name: restoredSkill.name,
+            description: restoredSkill.description,
+            kind: "skill",
+          }
+        : null,
+    );
+    setHydratedDraftKey(draftKey);
+  }, [
+    draftKey,
+    enabledSkillNames,
+    hydratedDraftKey,
+    initialValue,
+    setTextInput,
+    agentScopedSkills,
+    agentSkillsLoading,
+    skillsLoading,
+    textInput.value,
+  ]);
+
+  useEffect(() => {
+    if (hydratedDraftKey !== draftKey) {
+      return;
+    }
+
+    const draft: ComposerDraft = {
+      text: textInput.value ?? "",
+      skillName:
+        selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+    };
+    const timer = scheduleDraftSave(draft, draftKey);
+    return () => {
+      if (timer === null) {
+        return;
+      }
+      window.clearTimeout(timer);
+      if (draftSaveTimerRef.current === timer) {
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    draftKey,
+    hydratedDraftKey,
+    scheduleDraftSave,
+    selectedSlashSkill,
+    textInput.value,
+  ]);
 
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
-    return () => abortGoalRequest(goalRequestState);
+    const compactRequestState = compactRequestStateRef.current;
+    return () => {
+      abortGoalRequest(goalRequestState);
+      abortGoalRequest(compactRequestState);
+    };
   }, [threadId]);
+
+  const abortInputPolishRequest = useCallback(() => {
+    inputPolishRequestRef.current.controller?.abort();
+    inputPolishRequestRef.current.controller = null;
+    inputPolishRequestRef.current.sequence += 1;
+    setPolishingInput(false);
+  }, []);
+
+  useEffect(() => {
+    return () => abortInputPolishRequest();
+  }, [abortInputPolishRequest, threadId]);
 
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
@@ -369,25 +898,32 @@ export function InputBox({
 
   const handleModelSelect = useCallback(
     (model_name: string) => {
+      if (disabled || polishingInput) {
+        return;
+      }
       const model = models.find((m) => m.name === model_name);
       if (!model) {
         return;
       }
+      const mode = getResolvedMode(
+        context.mode,
+        model.supports_thinking ?? false,
+      );
       onContextChange?.({
-        ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        ...(mode !== context.mode ? { mode } : {}),
       });
       setModelDialogOpen(false);
     },
-    [onContextChange, context, models],
+    [disabled, onContextChange, context, models, polishingInput],
   );
 
   const handleModeSelect = useCallback(
     (mode: InputMode) => {
+      if (disabled || polishingInput) {
+        return;
+      }
       onContextChange?.({
-        ...context,
         mode: getResolvedMode(mode, supportThinking),
         reasoning_effort:
           mode === "ultra"
@@ -399,17 +935,19 @@ export function InputBox({
                 : "minimal",
       });
     },
-    [onContextChange, context, supportThinking],
+    [disabled, onContextChange, polishingInput, supportThinking],
   );
 
   const handleReasoningEffortSelect = useCallback(
     (effort: "minimal" | "low" | "medium" | "high") => {
+      if (disabled || polishingInput) {
+        return;
+      }
       onContextChange?.({
-        ...context,
         reasoning_effort: effort,
       });
     },
-    [onContextChange, context],
+    [disabled, onContextChange, polishingInput],
   );
 
   const handleGoalCommand = useCallback(
@@ -529,6 +1067,69 @@ export function InputBox({
     ],
   );
 
+  const handleCompactCommand = useCallback(async (): Promise<void> => {
+    if (isWelcomeMode) {
+      textInput.setInput("");
+      toast.info(t.inputBox.compactSkipped);
+      return;
+    }
+    const request = beginGoalRequest(compactRequestStateRef.current, threadId);
+    const signal = request.controller.signal;
+    try {
+      const result = await compactThreadContext(threadId, {
+        signal,
+        agentName:
+          typeof context.agent_name === "string" ? context.agent_name : null,
+        modelName:
+          typeof context.model_name === "string" ? context.model_name : null,
+      });
+      if (
+        !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
+      ) {
+        return;
+      }
+      textInput.setInput("");
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      setFollowups([]);
+      setFollowupsHidden(false);
+      setFollowupsLoading(false);
+
+      void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+      void queryClient.invalidateQueries({
+        queryKey: threadTokenUsageQueryKey(threadId),
+      });
+
+      if (result.compacted) {
+        toast.success(t.inputBox.compactSuccess);
+      } else {
+        toast.info(t.inputBox.compactSkipped);
+      }
+    } catch (error) {
+      if (
+        isAbortError(error) ||
+        !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
+      ) {
+        return;
+      }
+      toast.error(
+        error instanceof Error ? error.message : t.inputBox.compactFailed,
+      );
+    } finally {
+      finishGoalRequest(compactRequestStateRef.current, request);
+    }
+  }, [
+    context.agent_name,
+    context.model_name,
+    queryClient,
+    t.inputBox.compactFailed,
+    t.inputBox.compactSkipped,
+    t.inputBox.compactSuccess,
+    isWelcomeMode,
+    textInput,
+    threadId,
+  ]);
+
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
       const files = message.files.flatMap((file) =>
@@ -541,7 +1142,7 @@ export function InputBox({
       }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
-        toast.error(t.inputBox.suggestionPlaceholderRequired);
+        toast.warning(t.inputBox.suggestionPlaceholderRequired);
         requestAnimationFrame(() => {
           const textarea = textareaRef.current;
           if (!textarea) {
@@ -556,41 +1157,124 @@ export function InputBox({
       }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
+      setInputPolishUndo(null);
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+      const quotes = sidecar?.conversationQuotes ?? [];
+      const quoteIds = quotes.map((quote) => quote.id);
+      const quoteContexts = quotes.map((quote) => quote.context);
+      pendingDraftSubmissionKeyRef.current = draftKey;
+      const referenceIds = conversationReferences.map(
+        (reference) => reference.threadId,
+      );
+      // Project-shelf attachments are already ingested thread-side (§9):
+      // they join ``additional_kwargs.files`` as completed uploads without a
+      // re-upload, and merge with any files uploaded in this send
+      // (buildThreadSubmitMessages concatenates the two lists).
+      const stagedFiles: FileInMessage[] = projectAttachments.map(
+        (attachment) => ({
+          filename: attachment.filename,
+          size: attachment.size_bytes,
+          path: attachment.virtual_path,
+          status: "uploaded" as const,
+        }),
+      );
+      const additionalKwargs = {
+        ...(quotes.length ? buildReferenceMessageMetadata(quoteContexts) : {}),
+        ...(referenceIds.length
+          ? buildConversationReferenceMetadata(conversationReferences)
+          : {}),
+        ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
+      };
+      const submitOptions: InputBoxSubmitOptions = {
+        ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
+        ...(quotes.length
+          ? {
+              additionalInputMessages: [
+                buildHiddenConversationQuoteMessage({
+                  contexts: quoteContexts,
+                }),
+              ],
+            }
+          : {}),
+        ...(referenceIds.length
+          ? { conversationReferences: referenceIds }
+          : {}),
+        // Clear one-time state only once the send genuinely proceeds. If the
+        // send is dropped by the in-flight guard, `onSent` never fires.
+        onSent: () => {
+          if (pendingDraftSubmissionKeyRef.current === draftKey) {
+            pendingDraftSubmissionKeyRef.current = null;
+            latestDraftRef.current = null;
+            invalidateDraftSaveTimer();
+            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+          }
+          sidecar?.clearConversationQuotes(quoteIds);
+          setConversationReferences([]);
+          setProjectAttachments([]);
+        },
+      };
+      const submit = () => onSubmit?.(message, submitOptions);
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
-        onContextChange?.({
-          ...context,
-          model_name: resolvedModelName,
-          mode: getResolvedMode(
-            context.mode,
-            selectedModel?.supports_thinking ?? false,
-          ),
-        });
+        onContextChange?.(
+          {
+            ...context,
+            model_name: resolvedModelName,
+            mode: getResolvedMode(
+              context.mode,
+              selectedModel?.supports_thinking ?? false,
+            ),
+          },
+          { automatic: true },
+        );
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+            Promise.resolve(submit()).then(resolve).catch(reject);
           }, 0);
         });
       }
 
-      return onSubmit?.(message);
+      return submit();
     },
     [
       context,
+      conversationReferences,
+      draftKey,
+      invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
+      projectAttachments,
+      setProjectAttachments,
       reportUploadLimitViolations,
       resolvedModelName,
-      selectedModel?.supports_thinking,
+      selectedModel,
+      sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
     ],
   );
+
+  const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
+    if (!canStopStreaming) {
+      return;
+    }
+    // Mark the in-progress turn as user-interrupted so the next
+    // streaming->ready transition does not suggest follow-ups for it.
+    stoppedByUserRef.current = true;
+    setFollowups([]);
+    setFollowupsHidden(true);
+    setFollowupsLoading(false);
+    onStop?.();
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -598,12 +1282,78 @@ export function InputBox({
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
+      abortVoiceInput();
+      const messageWithSlashSkill = selectedSlashSkill
+        ? {
+            ...message,
+            text: `/${selectedSlashSkill.name} ${message.text}`,
+          }
+        : message;
       const submitAction = getInputSubmitAction({
-        text: message.text,
-        fileCount: message.files.length,
+        text: messageWithSlashSkill.text,
+        // Staged project-shelf attachments count exactly like uploaded
+        // files: submitThreadMessage maps them into the outgoing message's
+        // ``additional_kwargs.files``, so an attachment-only submit must not
+        // read as empty, and /goal or /compact must not intercept while an
+        // attach chip is present.
+        fileCount:
+          messageWithSlashSkill.files.length + projectAttachments.length,
         status,
       });
+      // Check run-starting actions before goal preparation or persistence:
+      // saving a goal also clears the draft and announces success. Status,
+      // clear, and compact commands do not start runs and keep their own gates.
+      if (
+        !canCreateRuns &&
+        (submitAction.kind === "message" ||
+          (submitAction.kind === "goal" && submitAction.command.kind === "set"))
+      ) {
+        toast.info(t.inputBox.startTurnUnavailable);
+        return Promise.reject(new Error("runs-create-denied"));
+      }
       if (submitAction.kind === "goal") {
+        if (
+          submitAction.command.kind === "set" &&
+          isGoalObjectiveTooLong(submitAction.command.objective)
+        ) {
+          toast.error(
+            t.inputBox.goalTooLong.replace("{max}", () =>
+              String(MAX_GOAL_OBJECTIVE_CHARS),
+            ),
+          );
+          // Reject so the composer keeps the user's text for editing instead of
+          // clearing it (PromptInput only preserves input on a rejected submit).
+          return Promise.reject(new Error("goal-too-long"));
+        }
+        if (submitAction.command.kind === "set") {
+          // A goal-set PUT creates the thread server-side when missing, so a
+          // project-scoped new chat must assign membership first. The prepare
+          // callback toasts its own failure; reject so the composer keeps the
+          // text for a retry instead of issuing an unassigned goal.
+          //
+          // Fence against conversation switches while preparation runs: the
+          // goal PUT registers its AbortController only when it starts, so
+          // the thread-change/unmount cleanup cannot cancel an in-flight
+          // prepare. Capture the goal-request epoch before the await — the
+          // cleanup bumps it via abortGoalRequest — and drop the stale
+          // continuation before it can clear the new conversation's composer
+          // or launch the abandoned submission.
+          const requestEpoch = goalRequestStateRef.current.sequence;
+          try {
+            await onPrepareThread?.();
+          } catch (error) {
+            return Promise.reject(
+              error instanceof Error
+                ? error
+                : new Error("thread preparation failed"),
+            );
+          }
+          if (goalRequestStateRef.current.sequence !== requestEpoch) {
+            // Reject (not resolve) so PromptInput keeps the current
+            // conversation's composer text untouched.
+            return Promise.reject(new Error("goal-preparation-stale"));
+          }
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -620,16 +1370,31 @@ export function InputBox({
         }
         return;
       }
-      if (submitAction.kind === "stop") {
-        onStop?.();
-        return;
+      if (submitAction.kind === "compact") {
+        return handleCompactCommand();
       }
       if (submitAction.kind === "empty") {
         return;
       }
-      return submitThreadMessage(message);
+      await submitThreadMessage(messageWithSlashSkill);
+      if (selectedSlashSkill) {
+        setSelectedSlashSkill(null);
+      }
     },
-    [handleGoalCommand, onStop, status, submitThreadMessage],
+    [
+      abortVoiceInput,
+      canCreateRuns,
+      handleCompactCommand,
+      handleGoalCommand,
+      onPrepareThread,
+      projectAttachments.length,
+      selectedSlashSkill,
+      status,
+      submitThreadMessage,
+      t.inputBox.goalTooLong,
+      t.inputBox.pleaseWaitStreaming,
+      t.inputBox.startTurnUnavailable,
+    ],
   );
 
   const requestFormSubmit = useCallback(() => {
@@ -687,23 +1452,251 @@ export function InputBox({
     () => getLeadingSlashSkillQuery(textInput.value ?? ""),
     [textInput.value],
   );
-  const skillSuggestions = useMemo(
-    () =>
-      slashSkillQuery === null
-        ? []
-        : getMatchingSkillSuggestions(
-            skills,
-            slashSkillQuery,
-            builtinSlashCommands,
-          ),
-    [builtinSlashCommands, skills, slashSkillQuery],
+  const goalObjectiveCounter = useMemo(
+    () => getGoalObjectiveCounter(textInput.value ?? ""),
+    [textInput.value],
   );
+  const skillSuggestions = useMemo(() => {
+    if (slashSkillQuery === null) {
+      return [];
+    }
+    const matches = getMatchingSkillSuggestions(
+      agentScopedSkills,
+      slashSkillQuery,
+      builtinSlashCommands,
+    );
+    // Builtin commands own the whole composer line, so they cannot be combined
+    // with a skill activation: `/goal` behind a selected skill would submit as
+    // chat text instead of running the command. Drop them from the result
+    // rather than withholding them from the helper, which needs the list to
+    // reserve their names — a skill named after a builtin is unusable for the
+    // mirrored reason, its submitted text runs the command, not the skill.
+    return selectedSlashSkill
+      ? matches.filter(({ kind }) => kind === "skill")
+      : matches;
+  }, [
+    agentScopedSkills,
+    builtinSlashCommands,
+    selectedSlashSkill,
+    slashSkillQuery,
+  ]);
+  // A selected skill does not close the catalog: `/` reopens it so a skill can
+  // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =
     !disabled &&
     textareaFocused &&
     slashSkillQuery !== null &&
     skillSuggestions.length > 0 &&
     dismissedSkillSuggestionValue !== textInput.value;
+  const isComposerDisabled = disabled === true;
+  const isMockThread = isMock === true;
+  const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
+  // Mirror for runs:create on the send side. While streaming the button is
+  // the stop affordance (gated above), so the send denial only applies to
+  // the send state.
+  const sendDenied = status !== "streaming" && !canCreateRuns;
+  const inputPolishUndoAvailable =
+    !polishingInput &&
+    inputPolishUndo !== null &&
+    (textInput.value ?? "") === inputPolishUndo.rewrittenText;
+  const inputPolishDisabled =
+    isComposerDisabled ||
+    isMockThread ||
+    polishingInput ||
+    (!inputPolishUndoAvailable &&
+      (status === "streaming" ||
+        slashSkillQuery !== null ||
+        !canPolishInput(textInput.value ?? "")));
+  const speechRecognitionConstructor = useMemo(
+    () =>
+      typeof window === "undefined"
+        ? null
+        : getSpeechRecognitionConstructor(window),
+    [],
+  );
+  const voiceInputSupported = speechRecognitionConstructor !== null;
+
+  const getVoiceInputErrorMessage = useCallback(
+    (kind: SpeechRecognitionErrorKind) => {
+      switch (kind) {
+        case "permission_denied":
+          return t.inputBox.voiceInputPermissionDenied;
+        case "microphone_unavailable":
+          return t.inputBox.voiceInputMicrophoneUnavailable;
+        case "unsupported_language":
+          return t.inputBox.voiceInputUnsupportedLanguage;
+        case "network":
+          return t.inputBox.voiceInputNetworkError;
+        case "no_speech":
+          return t.inputBox.voiceInputNoSpeech;
+        case "cancelled":
+          return null;
+        default:
+          return t.inputBox.voiceInputFailed;
+      }
+    },
+    [t],
+  );
+
+  const startVoiceRecognition = useCallback(
+    (options: VoiceRecognitionStartOptions = {}) => {
+      if (composerLocked || !speechRecognitionConstructor) {
+        return false;
+      }
+
+      const recognition = new speechRecognitionConstructor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = getSpeechRecognitionLanguage(locale);
+      recognition.maxAlternatives = 1;
+      voiceLastErrorKindRef.current = null;
+      voiceLatestTextRef.current = voiceBaseTextRef.current;
+      voiceRecognitionRef.current = recognition;
+
+      recognition.onresult = (event) => {
+        if (voiceRecognitionRef.current !== recognition) {
+          return;
+        }
+        const transcript = readSpeechRecognitionTranscript(event.results).text;
+        const nextValue = appendSpeechTranscript(
+          voiceBaseTextRef.current,
+          transcript,
+        );
+        voiceLatestTextRef.current = nextValue;
+        textInput.setInput(nextValue);
+      };
+      recognition.onerror = (event) => {
+        const errorKind = mapSpeechRecognitionError(event.error);
+        voiceLastErrorKindRef.current = errorKind;
+        if (
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(errorKind)
+        ) {
+          return;
+        }
+
+        const message = getVoiceInputErrorMessage(errorKind);
+        if (message) {
+          toast.error(message);
+        }
+      };
+      recognition.onend = () => {
+        const shouldRestart =
+          voiceRecognitionRef.current === recognition &&
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(voiceLastErrorKindRef.current);
+        if (shouldRestart) {
+          voiceBaseTextRef.current = voiceLatestTextRef.current;
+          cleanupVoiceRecognition(recognition, { keepListening: true });
+          voiceRestartTimerRef.current = setTimeout(() => {
+            voiceRestartTimerRef.current = null;
+            if (voiceStopRequestedRef.current) {
+              cleanupVoiceRecognition(null);
+              return;
+            }
+            const restarted = startVoiceRecognitionRef.current?.() ?? false;
+            if (!restarted) {
+              cleanupVoiceRecognition(null);
+            }
+          }, 150);
+          return;
+        }
+        cleanupVoiceRecognition(recognition);
+      };
+
+      setVoiceListening(true);
+      try {
+        recognition.start();
+        if (options.focusAfterStart) {
+          requestAnimationFrame(() => {
+            if (selectedSlashSkill) {
+              focusContentEditableEnd(inlineSkillTextRef.current);
+            } else {
+              textareaRef.current?.focus();
+            }
+          });
+        }
+        return true;
+      } catch {
+        cleanupVoiceRecognition(recognition);
+        toast.error(t.inputBox.voiceInputFailed);
+        return false;
+      }
+    },
+    [
+      cleanupVoiceRecognition,
+      composerLocked,
+      getVoiceInputErrorMessage,
+      locale,
+      selectedSlashSkill,
+      speechRecognitionConstructor,
+      t.inputBox.voiceInputFailed,
+      textInput,
+    ],
+  );
+
+  useEffect(() => {
+    startVoiceRecognitionRef.current = startVoiceRecognition;
+  }, [startVoiceRecognition]);
+
+  const stopVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    try {
+      recognition.stop();
+    } catch {
+      cleanupVoiceRecognition(recognition);
+    }
+  }, [cleanupVoiceRecognition]);
+
+  const toggleVoiceInput = useCallback(() => {
+    if (voiceListening) {
+      stopVoiceInput();
+      return;
+    }
+    if (composerLocked) {
+      return;
+    }
+    if (!speechRecognitionConstructor) {
+      toast.error(t.inputBox.voiceInputUnsupported);
+      return;
+    }
+
+    abortInputPolishRequest();
+    setInputPolishUndo(null);
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    voiceStopRequestedRef.current = false;
+    voiceBaseTextRef.current = textInput.value ?? "";
+    voiceLatestTextRef.current = voiceBaseTextRef.current;
+    startVoiceRecognition({ focusAfterStart: true });
+  }, [
+    abortInputPolishRequest,
+    composerLocked,
+    speechRecognitionConstructor,
+    startVoiceRecognition,
+    stopVoiceInput,
+    t.inputBox.voiceInputUnsupported,
+    textInput,
+    voiceListening,
+  ]);
+
+  useEffect(() => {
+    if (composerLocked && voiceListening) {
+      stopVoiceInput();
+    }
+  }, [composerLocked, stopVoiceInput, voiceListening]);
+
+  useEffect(() => {
+    return () => abortVoiceInput();
+  }, [abortVoiceInput, threadId]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -711,6 +1704,16 @@ export function InputBox({
 
   const applySkillSuggestion = useCallback(
     (suggestion: SlashSuggestion) => {
+      if (suggestion.kind === "skill") {
+        setSelectedSlashSkill(suggestion);
+        textInput.setInput("");
+        setDismissedSkillSuggestionValue(null);
+        requestAnimationFrame(() => {
+          focusContentEditableEnd(inlineSkillTextRef.current);
+        });
+        return;
+      }
+
       const nextValue = `/${suggestion.name} `;
       textInput.setInput(nextValue);
       setDismissedSkillSuggestionValue(nextValue);
@@ -727,7 +1730,7 @@ export function InputBox({
   );
 
   const handleSkillSuggestionKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (!showSkillSuggestions) {
         return;
       }
@@ -790,14 +1793,103 @@ export function InputBox({
     [textInput],
   );
 
+  const handlePolishInput = useCallback(async () => {
+    if (inputPolishDisabled) {
+      return;
+    }
+
+    const originalText = textInput.value ?? "";
+    const controller = new AbortController();
+    inputPolishRequestRef.current.controller?.abort();
+    const sequence = inputPolishRequestRef.current.sequence + 1;
+    inputPolishRequestRef.current = {
+      controller,
+      sequence,
+    };
+    setPolishingInput(true);
+
+    try {
+      const result = await polishInputDraft(
+        {
+          text: originalText,
+          locale,
+          thread_id: threadId,
+        },
+        { signal: controller.signal },
+      );
+
+      const isCurrentRequest =
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence &&
+        !controller.signal.aborted;
+      if (!isCurrentRequest || (textInput.value ?? "") !== originalText) {
+        return;
+      }
+
+      const rewrittenText = result.rewritten_text.trim();
+      if (!rewrittenText || !result.changed) {
+        toast.info(t.inputBox.inputPolishNoChanges);
+        return;
+      }
+
+      // Applying the rewrite replaces the draft outside the textarea change
+      // handler, so clear any in-progress history browse state; otherwise a
+      // stale index would let the next ArrowDown overwrite the rewrite.
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      setPromptHistoryValue(rewrittenText);
+      setInputPolishUndo({
+        originalText,
+        rewrittenText,
+      });
+    } catch (error) {
+      const isCurrentRequest =
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence;
+      if (isAbortError(error) || !isCurrentRequest) {
+        return;
+      }
+      toast.error(
+        error instanceof Error ? error.message : t.inputBox.inputPolishFailed,
+      );
+    } finally {
+      if (
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence
+      ) {
+        inputPolishRequestRef.current.controller = null;
+        setPolishingInput(false);
+      }
+    }
+  }, [
+    inputPolishDisabled,
+    locale,
+    setPromptHistoryValue,
+    t.inputBox.inputPolishFailed,
+    t.inputBox.inputPolishNoChanges,
+    textInput,
+    threadId,
+  ]);
+
+  const handleUndoInputPolish = useCallback(() => {
+    if (!inputPolishUndoAvailable || inputPolishUndo === null) {
+      return;
+    }
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    setPromptHistoryValue(inputPolishUndo.originalText);
+    setInputPolishUndo(null);
+  }, [inputPolishUndo, inputPolishUndoAvailable, setPromptHistoryValue]);
+
   const handlePromptHistoryKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
         event.shiftKey ||
         isIMEComposing(event) ||
+        selectedSlashSkill ||
         promptHistory.length === 0 ||
         (event.key !== "ArrowUp" && event.key !== "ArrowDown")
       ) {
@@ -841,30 +1933,208 @@ export function InputBox({
       promptHistoryIndexRef.current = nextIndex;
       setPromptHistoryValue(promptHistory[nextIndex] ?? "");
     },
-    [promptHistory, setPromptHistoryValue, textInput.value],
+    [promptHistory, selectedSlashSkill, setPromptHistoryValue, textInput.value],
+  );
+
+  const handleSelectedSlashSkillKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (
+        event.key !== "Backspace" ||
+        !selectedSlashSkill ||
+        textInput.value.length > 0 ||
+        isIMEComposing(event)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setSelectedSlashSkill(null);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+    },
+    [selectedSlashSkill, textInput.value],
   );
 
   const handlePromptTextareaKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       handleSkillSuggestionKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
       }
       handlePromptHistoryKeyDown(event);
     },
-    [handlePromptHistoryKeyDown, handleSkillSuggestionKeyDown],
+    [
+      handlePromptHistoryKeyDown,
+      handleSelectedSlashSkillKeyDown,
+      handleSkillSuggestionKeyDown,
+    ],
   );
 
-  const handlePromptTextareaChange = useCallback(() => {
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
+  const handlePromptTextareaChange = useCallback(
+    (event: ChangeEvent<HTMLTextAreaElement>) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
+      abortInputPolishRequest();
+      setInputPolishUndo(null);
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      scheduleDraftSave({
+        text: event.currentTarget.value,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
+    },
+    [
+      abortInputPolishRequest,
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      voiceListening,
+    ],
+  );
+
+  const updateInlineSkillTextInput = useCallback(
+    (element: HTMLElement) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      const nextText = element.textContent ?? "";
+      textInput.setInput(nextText);
+      scheduleDraftSave({
+        text: nextText,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
+    },
+    [
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      textInput,
+      voiceListening,
+    ],
+  );
+
+  useEffect(() => {
+    if (!selectedSlashSkill) {
+      return;
+    }
+
+    const element = inlineSkillTextRef.current;
+    if (element && element.textContent !== textInput.value) {
+      element.textContent = textInput.value;
+    }
+  }, [selectedSlashSkill, textInput.value]);
+
+  const handleInlineSkillInput = useCallback(
+    (event: FormEvent<HTMLSpanElement>) => {
+      updateInlineSkillTextInput(event.currentTarget);
+    },
+    [updateInlineSkillTextInput],
+  );
+
+  const handleInlineSkillPaste = useCallback(
+    (event: ClipboardEvent<HTMLSpanElement>) => {
+      const pastedFiles = Array.from(event.clipboardData.items)
+        .filter((item) => item.kind === "file")
+        .flatMap((item) => {
+          const file = item.getAsFile();
+          return file ? [file] : [];
+        });
+
+      if (pastedFiles.length > 0) {
+        event.preventDefault();
+        const { accepted, message } = splitUnsupportedUploadFiles(pastedFiles);
+        if (message) {
+          toast.error(message);
+        }
+        if (accepted.length > 0) {
+          attachments.add(accepted);
+        }
+        return;
+      }
+
+      const text = event.clipboardData.getData("text/plain");
+      if (!text) {
+        return;
+      }
+
+      event.preventDefault();
+      if (insertPlainTextAtSelection(event.currentTarget, text)) {
+        updateInlineSkillTextInput(event.currentTarget);
+      }
+    },
+    [attachments, updateInlineSkillTextInput],
+  );
+
+  const handleInlineSkillKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLSpanElement>) => {
+      // The catalog can be reopened from here, so its navigation keys must win
+      // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
+      // the IME candidate rather than the list.
+      if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        handleSkillSuggestionKeyDown(event);
+        if (event.defaultPrevented) {
+          return;
+        }
+      }
+
+      handleSelectedSlashSkillKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      if (isIMEComposing(event, inlineSkillComposingRef.current)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (event.shiftKey) {
+        if (insertPlainTextAtSelection(event.currentTarget, "\n")) {
+          updateInlineSkillTextInput(event.currentTarget);
+        }
+        return;
+      }
+
+      event.currentTarget.closest("form")?.requestSubmit();
+    },
+    [
+      handleSelectedSlashSkillKeyDown,
+      handleSkillSuggestionKeyDown,
+      updateInlineSkillTextInput,
+    ],
+  );
+
+  const clearSelectedSlashSkill = useCallback(() => {
+    setSelectedSlashSkill(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
   }, []);
 
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
     !showSkillSuggestions &&
+    !selectedSlashSkill &&
     !followupsHidden &&
+    // Never show stale follow-up chips while a turn is streaming: a message
+    // sent before the previous response finished would otherwise leave the
+    // old chips (and the lone close button) overlapping the input box.
+    status !== "streaming" &&
     (followupsLoading || followups.length > 0);
 
   useEffect(() => {
@@ -884,6 +2154,13 @@ export function InputBox({
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (!wasStreaming || streaming) {
+      return;
+    }
+
+    // The turn was interrupted by the user, so skip generating follow-ups for
+    // this half-finished response.
+    if (stoppedByUserRef.current) {
+      stoppedByUserRef.current = false;
       return;
     }
 
@@ -933,7 +2210,7 @@ export function InputBox({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: recent,
-        n: 3,
+        n: maxFollowupSuggestions,
         model_name: context.model_name ?? undefined,
       }),
       signal: controller.signal,
@@ -948,7 +2225,7 @@ export function InputBox({
         const suggestions = (data.suggestions ?? [])
           .map((s) => (typeof s === "string" ? s.trim() : ""))
           .filter((s) => s.length > 0)
-          .slice(0, 5);
+          .slice(0, maxFollowupSuggestions);
         setFollowups(suggestions);
       })
       .catch(() => {
@@ -963,11 +2240,24 @@ export function InputBox({
     context.model_name,
     disabled,
     isMock,
+    maxFollowupSuggestions,
     status,
     suggestionsConfigLoaded,
     suggestionsEnabled,
     threadId,
   ]);
+
+  const onSelectPlaceholder = useCallback((newText: string) => {
+    const placeholder = findSuggestionTemplatePlaceholder(newText);
+    if (placeholder) {
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(placeholder.start, placeholder.end);
+      });
+    }
+  }, []);
 
   return (
     <div
@@ -1057,15 +2347,23 @@ export function InputBox({
       )}
       <PromptInput
         className={cn(
-          "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          polishingInput &&
+            "shadow-primary/10 ring-primary/25 shadow-lg ring-1",
           className,
         )}
-        disabled={disabled}
+        disabled={composerLocked}
         globalDrop
         multiple
         onSubmit={handleSubmit}
         {...props}
       >
+        {polishingInput && (
+          <div
+            aria-hidden="true"
+            className="border-primary/30 bg-primary/5 pointer-events-auto absolute inset-0 z-20 animate-pulse cursor-wait rounded-2xl border opacity-80"
+          />
+        )}
         {extraHeader && (
           <div className="absolute top-0 right-0 left-0 z-10">
             <div className="absolute right-0 bottom-0 left-0 flex items-center justify-center">
@@ -1073,38 +2371,196 @@ export function InputBox({
             </div>
           </div>
         )}
-        <PromptInputAttachments>
-          {(attachment) => <PromptInputAttachment data={attachment} />}
-        </PromptInputAttachments>
-        <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
-          <PromptInputTextarea
-            className={cn("size-full")}
-            disabled={disabled}
-            placeholder={t.inputBox.placeholder}
-            autoFocus={autoFocus}
-            defaultValue={initialValue}
-            onBlur={() => setTextareaFocused(false)}
-            onChange={handlePromptTextareaChange}
-            onFocus={() => setTextareaFocused(true)}
-            onKeyDown={handlePromptTextareaKeyDown}
-            ref={textareaRef}
-          />
-        </PromptInputBody>
+        <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          <PromptInputAttachments className="contents p-0">
+            {(attachment) => (
+              <div className="max-w-60">
+                <PromptInputAttachment data={attachment} />
+              </div>
+            )}
+          </PromptInputAttachments>
+          {projectAttachments.map((attachment) => (
+            <div
+              key={attachment.virtual_path}
+              className="bg-muted text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+              data-testid="project-attachment-chip"
+            >
+              <PaperclipIcon className="size-3" />
+              <span className="max-w-40 truncate">{attachment.filename}</span>
+              <button
+                aria-label={t.inputBox.removeProjectAttachment}
+                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                type="button"
+                onClick={() =>
+                  setProjectAttachments((previous) =>
+                    previous.filter(
+                      (candidate) =>
+                        candidate.virtual_path !== attachment.virtual_path,
+                    ),
+                  )
+                }
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+          {conversationReferences.map((reference) => (
+            <ConversationReferenceChip
+              key={reference.threadId}
+              onRemove={() =>
+                setConversationReferences((current) =>
+                  current.filter(
+                    (item) => item.threadId !== reference.threadId,
+                  ),
+                )
+              }
+              removeLabel={t.inputBox.referenceConversationsRemove(
+                reference.title,
+              )}
+              title={reference.title}
+            />
+          ))}
+          {polishingInput && (
+            <div
+              aria-live="polite"
+              className="text-primary bg-primary/10 border-primary/20 relative z-30 flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+              role="status"
+            >
+              <Loader2Icon className="size-3 animate-spin" />
+              {t.inputBox.inputPolishing}
+              <button
+                aria-label={t.inputBox.inputPolishCancel}
+                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                data-testid="cancel-polish-input-button"
+                onClick={abortInputPolishRequest}
+                type="button"
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          )}
+          {sidecar && sidecar.conversationQuotes.length > 0 && (
+            <ReferenceAttachmentSummary
+              references={sidecar.conversationQuotes}
+              testId="conversation-quote-attachment"
+              onClear={() => sidecar.clearConversationQuotes()}
+            />
+          )}
+        </PromptInputHeader>
+        <div className="min-h-16 w-full min-w-0 px-3 py-3">
+          {selectedSlashSkill ? (
+            <div
+              className="max-h-48 min-h-6 w-full min-w-0 cursor-text overflow-y-auto text-base leading-6 break-all whitespace-pre-wrap md:text-sm"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  focusContentEditableEnd(inlineSkillTextRef.current);
+                }
+              }}
+            >
+              <SlashSkillChip
+                name={selectedSlashSkill.name}
+                className="mr-2 max-w-[min(11rem,45%)] align-top"
+                onRemove={clearSelectedSlashSkill}
+              />
+              <span
+                aria-label={t.inputBox.placeholder}
+                aria-multiline="true"
+                contentEditable={!composerLocked}
+                data-empty={textInput.value.length === 0}
+                data-placeholder={t.inputBox.placeholder}
+                data-slot="input-group-control"
+                onBlur={() => setTextareaFocused(false)}
+                onCompositionEnd={() => {
+                  inlineSkillComposingRef.current = false;
+                }}
+                onCompositionStart={() => {
+                  inlineSkillComposingRef.current = true;
+                }}
+                onFocus={() => setTextareaFocused(true)}
+                onInput={handleInlineSkillInput}
+                onKeyDown={handleInlineSkillKeyDown}
+                onPaste={handleInlineSkillPaste}
+                aria-placeholder={t.inputBox.placeholder}
+                ref={inlineSkillTextRef}
+                role="textbox"
+                suppressContentEditableWarning
+                className={cn(
+                  "outline-none",
+                  "before:text-muted-foreground before:pointer-events-none",
+                  "data-[empty=true]:before:content-[attr(data-placeholder)]",
+                  composerLocked && "cursor-not-allowed opacity-50",
+                )}
+                tabIndex={composerLocked ? -1 : 0}
+              />
+            </div>
+          ) : (
+            <PromptInputTextarea
+              className="min-h-6! w-full min-w-0 p-0! leading-6!"
+              disabled={composerLocked}
+              placeholder={t.inputBox.placeholder}
+              autoFocus={autoFocus}
+              defaultValue={initialValue}
+              onBlur={() => setTextareaFocused(false)}
+              onChange={handlePromptTextareaChange}
+              onFocus={() => setTextareaFocused(true)}
+              onKeyDown={handlePromptTextareaKeyDown}
+              ref={textareaRef}
+            />
+          )}
+        </div>
         <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
           <PromptInputTools className="min-w-0 flex-1 flex-wrap">
-            {/* TODO: Add more connectors here
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger className="px-2!" />
-            <PromptInputActionMenuContent>
-              <PromptInputActionAddAttachments
-                label={t.inputBox.addAttachments}
-              />
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu> */}
             <AddAttachmentsButton
               className="px-2!"
+              disabled={composerLocked}
               uploadLimits={uploadLimits}
             />
+            <ReferenceConversationsButton
+              className="px-2!"
+              currentThreadId={threadId}
+              disabled={composerLocked}
+              onChange={setConversationReferences}
+              references={conversationReferences}
+            />
+            <VoiceInputButton
+              disabled={composerLocked}
+              listening={voiceListening}
+              supported={voiceInputSupported}
+              onToggle={toggleVoiceInput}
+            />
+            <Tooltip
+              content={
+                polishingInput
+                  ? t.inputBox.inputPolishing
+                  : inputPolishUndoAvailable
+                    ? t.inputBox.inputPolishUndo
+                    : t.inputBox.inputPolish
+              }
+            >
+              <PromptInputButton
+                aria-label={
+                  inputPolishUndoAvailable
+                    ? t.inputBox.inputPolishUndo
+                    : t.inputBox.inputPolish
+                }
+                className="px-2!"
+                data-testid="polish-input-button"
+                disabled={inputPolishDisabled}
+                onClick={
+                  inputPolishUndoAvailable
+                    ? handleUndoInputPolish
+                    : handlePolishInput
+                }
+              >
+                {polishingInput ? (
+                  <Loader2Icon className="size-3 animate-spin" />
+                ) : inputPolishUndoAvailable ? (
+                  <Undo2Icon className="size-3" />
+                ) : (
+                  <SparklesIcon className="size-3" />
+                )}
+              </PromptInputButton>
+            </Tooltip>
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -1116,7 +2572,10 @@ export function InputBox({
                     : "flash"
                 }
               >
-                <PromptInputActionMenuTrigger className="max-w-28 gap-1! px-2! sm:max-w-none">
+                <PromptInputActionMenuTrigger
+                  className="max-w-28 gap-1! px-2! sm:max-w-none"
+                  disabled={composerLocked}
+                >
                   <div>
                     {context.mode === "flash" && <ZapIcon className="size-3" />}
                     {context.mode === "thinking" && (
@@ -1276,16 +2735,21 @@ export function InputBox({
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
+            {knowledgeScopeControl}
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="hidden gap-1! px-2! sm:inline-flex">
+                <PromptInputActionMenuTrigger
+                  className="hidden gap-1! px-2! sm:inline-flex"
+                  disabled={composerLocked}
+                >
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
                     {context.reasoning_effort === "minimal" &&
                       " " + t.inputBox.reasoningEffortMinimal}
                     {context.reasoning_effort === "low" &&
                       " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
+                    {(context.reasoning_effort === "medium" ||
+                      !context.reasoning_effort) &&
                       " " + t.inputBox.reasoningEffortMedium}
                     {context.reasoning_effort === "high" &&
                       " " + t.inputBox.reasoningEffortHigh}
@@ -1394,70 +2858,100 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
-            <ModelSelector
+            {goalObjectiveCounter && (
+              <span
+                aria-label={t.inputBox.goalLengthCounter
+                  .replace("{length}", () =>
+                    String(goalObjectiveCounter.length),
+                  )
+                  .replace("{max}", () => String(goalObjectiveCounter.max))}
+                className={cn(
+                  "shrink-0 text-xs tabular-nums",
+                  goalObjectiveCounter.overLimit
+                    ? "text-destructive font-medium"
+                    : "text-muted-foreground",
+                )}
+                data-testid="goal-length-counter"
+              >
+                {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
+              </span>
+            )}
+            <ModelPicker
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
-              <ModelSelectorTrigger asChild>
-                <PromptInputButton className="max-w-40 min-w-0 sm:max-w-56">
-                  <div className="flex min-w-0 flex-col items-start text-left">
-                    <ModelSelectorName className="text-xs font-normal">
+              <ModelPickerTrigger asChild>
+                <PromptInputButton
+                  className="max-w-40 min-w-0 sm:max-w-56"
+                  disabled={composerLocked}
+                >
+                  <div className="flex min-w-0 flex-col text-left">
+                    <span className="flex-1 truncate text-left text-xs font-normal">
                       {selectedModel?.display_name}
-                    </ModelSelectorName>
+                    </span>
                   </div>
                 </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
+              </ModelPickerTrigger>
+              <ModelPickerContent
+                open={modelDialogOpen}
+                models={models}
+                selectedModelName={selectedModel?.name}
+                onModelSelect={handleModelSelect}
+              />
+            </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={disabled}
+              disabled={composerLocked || stopDenied || sendDenied}
               variant="outline"
               status={status}
+              // A bare disabled square reads as a broken composer; explain
+              // the permission boundary (native title, since a Radix
+              // tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : sendDenied
+                  ? {
+                      "aria-label": t.inputBox.startTurnUnavailable,
+                      title: t.inputBox.startTurnUnavailable,
+                    }
+                  : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
-                  onStop?.();
+                  handleStopStreaming();
                 }
               }}
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {!isWelcomeMode && (
-          <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
-        )}
       </PromptInput>
+      {!isWelcomeMode && (
+        <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
+      )}
 
       {isWelcomeMode &&
         searchParams.get("mode") !== "skill" &&
+        !selectedSlashSkill &&
         !showSkillSuggestions && (
           <div className="flex items-center justify-center pt-2">
-            <SuggestionList textareaRef={textareaRef} />
+            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
+
+      <p
+        className={cn(
+          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
+          !isWelcomeMode && "absolute top-full right-0 left-0",
+        )}
+      >
+        {t.inputBox.disclaimer}
+      </p>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
@@ -1484,10 +2978,54 @@ export function InputBox({
   );
 }
 
-function SuggestionList({
-  textareaRef,
+function VoiceInputButton({
+  disabled,
+  listening,
+  supported,
+  onToggle,
 }: {
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  disabled?: boolean;
+  listening: boolean;
+  supported: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  const tooltipContent = !supported
+    ? t.inputBox.voiceInputUnsupported
+    : listening
+      ? t.inputBox.voiceInputListening
+      : t.inputBox.voiceInputStart;
+  const label = listening
+    ? t.inputBox.voiceInputStopLabel
+    : t.inputBox.voiceInputStartLabel;
+
+  return (
+    <Tooltip content={<span className="block max-w-72">{tooltipContent}</span>}>
+      <PromptInputButton
+        aria-label={label}
+        aria-pressed={listening}
+        className={cn(
+          "px-2!",
+          listening && "text-primary bg-primary/10 hover:bg-primary/15",
+        )}
+        data-testid="voice-input-button"
+        disabled={(disabled ?? false) || !supported}
+        onClick={onToggle}
+      >
+        {listening ? (
+          <SquareIcon className="size-3 fill-current" />
+        ) : (
+          <MicIcon className="size-3" />
+        )}
+      </PromptInputButton>
+    </Tooltip>
+  );
+}
+
+function SuggestionList({
+  onSelectPlaceholder,
+}: {
+  onSelectPlaceholder: (newText: string) => void;
 }) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
@@ -1495,16 +3033,9 @@ function SuggestionList({
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        const placeholder = findSuggestionTemplatePlaceholder(prompt);
-        if (textarea && placeholder) {
-          textarea.focus();
-          textarea.setSelectionRange(placeholder.start, placeholder.end);
-        }
-      });
+      onSelectPlaceholder(prompt);
     },
-    [textareaRef, textInput],
+    [textInput, onSelectPlaceholder],
   );
   return (
     <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
@@ -1554,9 +3085,11 @@ function SuggestionList({
 
 function AddAttachmentsButton({
   className,
+  disabled,
   uploadLimits,
 }: {
   className?: string;
+  disabled?: boolean;
   uploadLimits?: UploadLimits;
 }) {
   const { t } = useI18n();
@@ -1574,6 +3107,7 @@ function AddAttachmentsButton({
         aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
         data-testid="add-attachments-button"
+        disabled={disabled}
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

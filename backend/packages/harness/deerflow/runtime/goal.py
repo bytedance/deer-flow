@@ -13,10 +13,8 @@ import hashlib
 import inspect
 import json
 import logging
-import threading
-import weakref
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import os
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -25,6 +23,9 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -54,30 +55,16 @@ _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
 
-_goal_locks_guard = threading.Lock()
-_goal_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_goal_locks = AsyncKeyedLockTable[str]()
 
 
 class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
 
 
-@asynccontextmanager
-async def goal_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize goal read-modify-write sequences within the current event loop."""
-    loop = asyncio.get_running_loop()
-    with _goal_locks_guard:
-        locks = _goal_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _goal_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _goal_locks.hold(thread_id)
 
 
 class GoalCommand(NamedTuple):
@@ -242,13 +229,27 @@ def create_goal_evaluator_model(
     model_name: str | None = None,
     app_config: Any | None = None,
 ) -> Any:
-    """Create the non-thinking chat model used by the goal evaluator."""
+    """Create the non-thinking chat model used by the goal evaluator.
+
+    The evaluator runs from ``runtime/runs/worker.py`` after the main graph
+    run has already completed, so — unlike ``make_lead_agent``/
+    ``DeerFlowClient.stream``, which attach ``build_tracing_callbacks()`` at
+    the graph root and correctly pass ``attach_tracing=False`` to avoid
+    double-attaching — there is no graph root here for the evaluator's model
+    call to inherit tracing from. It must attach its own model-level tracing
+    callbacks, same as the other standalone, non-graph callers
+    (``oneshot_llm.run_oneshot_llm``, ``MemoryUpdater``).
+    """
     return create_chat_model(
         name=model_name,
         thinking_enabled=False,
         app_config=app_config,
-        attach_tracing=False,
+        attach_tracing=True,
     )
+
+
+def _resolve_environment() -> str | None:
+    return os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT")
 
 
 async def evaluate_goal_completion(
@@ -258,8 +259,21 @@ async def evaluate_goal_completion(
     model: Any | None = None,
     model_name: str | None = None,
     app_config: Any | None = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> GoalEvaluation:
-    """Ask a small non-thinking model whether the active goal is satisfied."""
+    """Ask a small non-thinking model whether the active goal is satisfied.
+
+    ``thread_id``/``user_id``/``deerflow_trace_id`` are forwarded to Langfuse
+    trace metadata only (mirrors ``oneshot_llm.run_oneshot_llm``): this is a
+    standalone model call outside the main graph, so it must inject its own
+    Langfuse session/user attribution instead of relying on graph-root
+    callbacks to lift it — same fix as PR #2944 (main graph) and PR #3902
+    (memory_agent/suggest_agent).
+    """
     conversation = format_visible_conversation(messages)
     if not conversation or not has_visible_assistant_evidence(messages):
         return GoalEvaluation(
@@ -283,10 +297,36 @@ async def evaluate_goal_completion(
 
     if model is None:
         model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
-    response = await model.ainvoke(
-        [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
-        config={"run_name": "goal_evaluator"},
+    invoke_config: dict[str, Any] = {"run_name": "goal_evaluator"}
+    inject_langfuse_metadata(
+        invoke_config,
+        thread_id=thread_id,
+        user_id=user_id,
+        assistant_id="goal_evaluator",
+        model_name=model_name,
+        environment=_resolve_environment(),
+        deerflow_trace_id=deerflow_trace_id,
     )
+    prompt_messages = [
+        SystemMessage(content=system_instruction),
+        HumanMessage(content=user_content),
+    ]
+    if extensions is None:
+        response = await model.ainvoke(prompt_messages, config=invoke_config)
+    else:
+        from deerflow_extension_api import SystemOperationKind
+
+        from deerflow.extensions.notify import observe_system_model_call
+
+        response = await observe_system_model_call(
+            extensions,
+            SystemOperationKind.GOAL,
+            messages=prompt_messages,
+            model_name=model_name,
+            invoke_config=invoke_config,
+            invoke=lambda: model.ainvoke(prompt_messages, config=invoke_config),
+            task_store=task_store,
+        )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 
 
@@ -380,9 +420,21 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
     # Offload the synchronous checkpointer call so its blocking IO never runs on
-    # the event loop (backend/AGENTS.md blocking-IO gate).
-    result = await asyncio.to_thread(sync_method, *args, **kwargs)
+    # the event loop (backend/AGENTS.md blocking-IO gate). A sync checkpoint
+    # mutation must finish before cancellation propagates; otherwise the caller
+    # can observe cancellation while the worker commits state afterwards.
+    worker = asyncio.to_thread(sync_method, *args, **kwargs)
+    result = await await_drained(worker) if sync_name in {"put", "put_writes", "delete_thread"} else await worker
     return await result if inspect.isawaitable(result) else result
+
+
+def _next_channel_version(checkpointer: Any, current_version: Any) -> Any:
+    get_next_version = getattr(checkpointer, "get_next_version", None)
+    if callable(get_next_version):
+        return get_next_version(current_version, None)
+    if isinstance(current_version, int):
+        return current_version + 1
+    return 1
 
 
 async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str) -> None:
@@ -464,13 +516,7 @@ async def write_thread_goal(
 
     channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
     current_version = channel_versions.get("goal")
-    get_next_version = getattr(checkpointer, "get_next_version", None)
-    if callable(get_next_version):
-        next_version = get_next_version(current_version, None)
-    elif isinstance(current_version, int):
-        next_version = current_version + 1
-    else:
-        next_version = 1
+    next_version = _next_channel_version(checkpointer, current_version)
     channel_versions["goal"] = next_version
 
     checkpoint["channel_values"] = channel_values
@@ -485,6 +531,11 @@ async def write_thread_goal(
         "configurable": {
             "thread_id": thread_id,
             "checkpoint_ns": "",
+            # Parent the new checkpoint to the one it was derived from.
+            # Without this the saver stores a parentless checkpoint, which
+            # severs Delta-channel replay ancestry (and truncates history
+            # walks in full mode too).
+            "checkpoint_id": _checkpoint_id_from_tuple(checkpoint_tuple),
         }
     }
     await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, {"goal": next_version})

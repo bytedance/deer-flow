@@ -22,7 +22,48 @@ def _make_app() -> FastAPI:
     async def protected_mutation():
         return {"ok": True}
 
+    @app.post("/api/v1/auth/log{gap}in/local")
+    async def control_gap(gap: str):
+        return {"gap": gap}
+
+    @app.post("/api/v1/auth/me{suffix}")
+    async def delimiter_suffix(suffix: str):
+        return {"suffix": suffix}
+
     return app
+
+
+def test_url_reconstruction_cannot_create_a_csrf_exemption():
+    client = TestClient(_make_app(), base_url="https://deerflow.example")
+
+    for encoded_path in (
+        "/api/v1/auth/log%0Ain/local",
+        "/api/v1/auth/log%0Din/local",
+        "/api/v1/auth/log%09in/local",
+        "/api/v1/auth/me%23private",
+        "/api/v1/auth/me%3Fprivate",
+    ):
+        response = client.post(encoded_path)
+        assert response.status_code == 403, encoded_path
+
+
+def test_csrf_uses_the_same_root_path_projection_as_the_router():
+    child = FastAPI()
+    child.add_middleware(CSRFMiddleware)
+
+    @child.post("/api/v1/auth/login/local")
+    async def login_local():
+        return {"ok": True}
+
+    parent = FastAPI()
+    parent.mount("/prefix", child)
+
+    response = TestClient(
+        parent,
+        base_url="https://deerflow.example",
+    ).post("/prefix/api/v1/auth/login/local")
+
+    assert response.status_code == 200
 
 
 def test_auth_post_rejects_cross_origin_browser_request():

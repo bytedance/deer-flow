@@ -9,14 +9,20 @@ persisting in long-term memory:
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
-from deerflow.agents.memory.updater import _strip_upload_mentions_from_memory
+from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
+from deerflow.agents.memory.backends.deermem.deermem.core.updater import _strip_upload_mentions_from_memory
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_UPLOAD_BLOCK = "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- filename: secret.txt\n  path: /mnt/user-data/uploads/abc123/secret.txt\n  size: 42 bytes\n</uploaded_files>"
+# ``_UPLOAD_BLOCK`` uses the tag UploadsMiddleware actually emits since #4174.
+# ``_LEGACY_UPLOAD_BLOCK`` is the pre-#4174 tag: after the #4212 cleanup it is
+# treated as ordinary user content by the memory pipeline (see the dedicated
+# scope-decision tests below).
+_UPLOAD_BLOCK = "<current_uploads>\nThe following files have been uploaded and are available for use:\n\n- filename: secret.txt\n  path: /mnt/user-data/uploads/abc123/secret.txt\n  size: 42 bytes\n</current_uploads>"
+
+_LEGACY_UPLOAD_BLOCK = "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- filename: report.pdf\n  path: /mnt/user-data/uploads/def456/report.pdf\n  size: 2048 bytes\n</uploaded_files>"
 
 
 def _human(text: str) -> HumanMessage:
@@ -39,7 +45,7 @@ class TestFilterMessagesForMemory:
     # --- upload-only turns are excluded ---
 
     def test_upload_only_turn_is_excluded(self):
-        """A human turn containing only <uploaded_files> (no real question)
+        """A human turn containing only the upload-context tag (no real question)
         and its paired AI response must both be dropped."""
         msgs = [
             _human(_UPLOAD_BLOCK),
@@ -60,9 +66,21 @@ class TestFilterMessagesForMemory:
 
         assert len(result) == 2
         human_result = result[0]
-        assert "<uploaded_files>" not in human_result.content
+        assert "<current_uploads>" not in human_result.content
         assert "What does this file contain?" in human_result.content
         assert result[1].content == "The file contains: Hello DeerFlow."
+
+    def test_legacy_uploaded_files_block_is_plain_user_content(self):
+        """Scope decision for #4212: the pre-#4174 ``<uploaded_files>`` tag is no
+        longer special-cased. A turn containing only that tag flows through as
+        ordinary user content instead of being silently dropped."""
+        msgs = [
+            _human(_LEGACY_UPLOAD_BLOCK),
+            _ai("I see a legacy upload block."),
+        ]
+        result = filter_messages_for_memory(msgs)
+        assert len(result) == 2
+        assert result[0].content == _LEGACY_UPLOAD_BLOCK
 
     # --- non-upload turns pass through unchanged ---
 
@@ -131,7 +149,7 @@ class TestFilterMessagesForMemory:
         result = filter_messages_for_memory(msgs)
         all_content = " ".join(m.content for m in result if isinstance(m.content, str))
         assert "/mnt/user-data/uploads/" not in all_content
-        assert "<uploaded_files>" not in all_content
+        assert "<current_uploads>" not in all_content
 
     # --- hide_from_ui messages are excluded ---
 
@@ -176,6 +194,59 @@ class TestFilterMessagesForMemory:
         assert len(human_contents) == 1
         assert "Help me with Python." in human_contents[0]
         assert not any("<memory>" in c for c in human_contents)
+
+    def test_hide_from_ui_human_input_response_is_preserved(self):
+        """Hidden card replies are user-authored answers, not framework context."""
+        hidden_response = HumanMessage(
+            content="For your clarification, my answer is: staging",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": "clarification:call-abc",
+                    "response_kind": "option",
+                    "option_id": "option-2",
+                    "value": "staging",
+                },
+            },
+        )
+        msgs = [
+            _human("Deploy the app."),
+            _ai("Which environment?"),
+            hidden_response,
+            _ai("Deploying to staging."),
+        ]
+
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert "Deploy the app." in human_contents
+        assert "For your clarification, my answer is: staging" in human_contents
+
+    def test_hide_from_ui_malformed_human_input_response_is_excluded(self):
+        hidden_response = HumanMessage(
+            content="For your clarification, my answer is: staging",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": "clarification:call-abc",
+                    "response_kind": "option",
+                    "value": "staging",
+                },
+            },
+        )
+        msgs = [_human("Deploy the app."), _ai("Which environment?"), hidden_response]
+
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert "Deploy the app." in human_contents
+        assert "For your clarification, my answer is: staging" not in human_contents
 
     def test_hide_from_ui_false_is_preserved(self):
         """Messages without hide_from_ui (or with it set to False) are kept."""
@@ -317,6 +388,13 @@ class TestStripUploadMentionsFromMemory:
         mem = self._make_memory("", facts=facts)
         result = _strip_upload_mentions_from_memory(mem)
         assert len(result["facts"]) == 2
+
+    def test_legacy_uploaded_files_tag_sentence_preserved(self):
+        """Scope decision for #4212: only the ``<current_uploads>`` tag is
+        stripped from stored summaries; the pre-#4174 tag is ordinary text."""
+        mem = self._make_memory("User works on reports. <uploaded_files>session.pdf</uploaded_files> is old context.")
+        result = _strip_upload_mentions_from_memory(mem)
+        assert "<uploaded_files>session.pdf</uploaded_files>" in result["user"]["topOfMind"]["summary"]
 
     def test_empty_memory_handled_gracefully(self):
         mem = {"user": {}, "history": {}, "facts": []}

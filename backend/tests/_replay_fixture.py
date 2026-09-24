@@ -156,7 +156,10 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
         body = {
             "assistant_id": "lead_agent",
             "input": {"messages": [{"role": "user", "content": prompt}]},
-            "config": {"recursion_limit": 50},
+            # Keep replay close to the Gateway default. A tighter limit can
+            # produce false golden drift when protocol-neutral middleware adds
+            # graph steps without changing the streamed SSE contract.
+            "config": {"recursion_limit": 100},
             "context": context,
             "stream_mode": ["values"],
         }

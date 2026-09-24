@@ -1,0 +1,35 @@
+{
+  "artifacts": {
+    "answer_prompt_sha256": "2bd4f166219946ccff7ac86f52a053c6dbf8be6d27e178c398d6bf70cf8a7423",
+    "config_sha256": "e0bcd1581be8457c614a4159b87304e54501d48a7e07990b02f1f6f8627fa026",
+    "dataset_sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+    "official_manifest_sha256": "7f9b26f3bfb7a19c75af53af77ac5ebaa02eeb05c7824c5b5c08be0d9e43db4b",
+    "synthetic_manifest_sha256": "2f0c7f9bc05f87322bf3e2d8c33aeb9ec3bf27fb12772cda43915e4d75c2be1e"
+  },
+  "created_at": "2026-08-18T04:12:21.258451Z",
+  "dataset": {
+    "filename": "longmemeval_oracle.json",
+    "repository": "xiaowu0162/longmemeval-cleaned",
+    "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+    "sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c"
+  },
+  "git": {
+    "dirty": false,
+    "head": "01f99d61d3e068083978c72c43f5de67d2543c92"
+  },
+  "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
+  "qa": {
+    "api_key_env": "DEERMEM_EVAL_ANSWER_API_KEY",
+    "base_url_env": "DEERMEM_EVAL_ANSWER_BASE_URL",
+    "capacity": 7,
+    "grader_version": "deterministic-overlap-v1",
+    "max_attempts": 3,
+    "max_tokens": 2048,
+    "model": "deepseek-v4-flash",
+    "stream": false,
+    "temperature": 0.0,
+    "timeout_seconds": 120,
+    "workers": 3
+  },
+  "schema_version": 2
+}

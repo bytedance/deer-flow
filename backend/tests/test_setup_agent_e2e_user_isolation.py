@@ -316,7 +316,7 @@ async def test_real_graph_real_setup_agent_writes_to_authenticated_user_dir(tmp_
 
     # Patch get_paths only (the file-system rooting); everything else is real
     with patch(
-        "deerflow.tools.builtins.setup_agent_tool.get_paths",
+        "deerflow.config.agents_config.get_paths",
         return_value=_make_paths_mock(tmp_path),
     ):
         # Drive the real graph. This goes through real ToolNode + real Runtime merge.
@@ -365,7 +365,7 @@ async def test_inject_failure_falls_back_to_default_proving_test_is_load_bearing
     graph = _build_real_bootstrap_graph("does-not-matter")
 
     with patch(
-        "deerflow.tools.builtins.setup_agent_tool.get_paths",
+        "deerflow.config.agents_config.get_paths",
         return_value=_make_paths_mock(tmp_path),
     ):
         await graph.ainvoke(
@@ -434,7 +434,7 @@ async def test_subgraph_invocation_preserves_user_id_in_runtime(tmp_path: Path):
     config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
     with patch(
-        "deerflow.tools.builtins.setup_agent_tool.get_paths",
+        "deerflow.config.agents_config.get_paths",
         return_value=_make_paths_mock(tmp_path),
     ):
         # Direct sub-graph invoke (mimics what a subagent invocation looks like
@@ -498,7 +498,7 @@ def test_sync_tool_dispatch_through_thread_pool_uses_runtime_context(tmp_path: P
     config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
     with patch(
-        "deerflow.tools.builtins.setup_agent_tool.get_paths",
+        "deerflow.config.agents_config.get_paths",
         return_value=_make_paths_mock(tmp_path),
     ):
         # Use SYNC invoke to hit the ContextThreadPoolExecutor path

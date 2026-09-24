@@ -5,7 +5,27 @@ query params; this locks the wiring so a rename/typo can't silently drop them
 (which would make reload backfill fetch the whole run again, or nothing).
 """
 
+import hashlib
+from types import SimpleNamespace
+from unittest import mock
+
 import pytest
+from langchain_core.messages import HumanMessage
+
+from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
+
+
+class _ModelRequestFake:
+    """Minimal ModelRequest stand-in for the wrap_model_call hooks."""
+
+    def __init__(self, messages, runtime):
+        self.messages = list(messages)
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return _ModelRequestFake(kwargs.get("messages", self.messages), self.runtime)
 
 
 @pytest.mark.anyio
@@ -43,3 +63,109 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
     assert calls["task_id"] == "task-A"
     assert calls["after_seq"] == 7
     assert calls["event_types"] == ["subagent.start", "subagent.step", "subagent.end"]
+
+
+@pytest.mark.anyio
+async def test_list_run_events_redacts_historical_run_start_metadata():
+    from app.gateway.routers.thread_runs import list_run_events
+
+    stored_row = {
+        "seq": 1,
+        "event_type": "run.start",
+        "metadata": {
+            "caller": "lead_agent",
+            "auth_token": "legacy-secret",
+            "token_usage": 7,
+        },
+    }
+
+    class FakeStore:
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+            return [stored_row]
+
+    class FakeState:
+        run_event_store = FakeStore()
+
+    class FakeApp:
+        state = FakeState()
+
+    class FakeRequest:
+        app = FakeApp()
+        _deerflow_test_bypass_auth = True
+
+    events = await list_run_events(
+        thread_id="legacy-thread",
+        run_id="legacy-run",
+        request=FakeRequest(),
+        event_types=None,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+    )
+
+    assert events[0]["metadata"] == {
+        "caller": "lead_agent",
+        "token_usage": 7,
+    }
+    assert stored_row["metadata"]["auth_token"] == "legacy-secret"
+    assert events[0] is not stored_row
+
+
+@pytest.mark.anyio
+async def test_effective_memory_flows_from_injection_to_the_existing_debug_api():
+    """The production run-events route is the field-level consumer for M1.
+
+    The event fires at the first model-request assembly (wrap_model_call),
+    once injection results are known.
+    """
+    from app.gateway.routers.thread_runs import list_run_events
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r1", "t1", store, flush_threshold=100)
+    runtime = SimpleNamespace(context={"__run_journal": journal})
+    memory = "<memory>\nUser prefers Python.\n</memory>\n"
+    mw = DynamicContextMiddleware()
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=memory),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        update = mw.before_agent(
+            {"messages": [HumanMessage(content="Hi", id="msg-1")]},
+            runtime,
+        )
+
+    from langgraph.graph.message import add_messages
+
+    assembled = add_messages([HumanMessage(content="Hi", id="msg-1")], update["messages"])
+
+    mw.wrap_model_call(_ModelRequestFake(assembled, runtime), lambda _request: "response")
+    await journal.flush()
+
+    class FakeState:
+        run_event_store = store
+
+    class FakeApp:
+        state = FakeState()
+
+    class FakeRequest_:
+        app = FakeApp()
+        _deerflow_test_bypass_auth = True
+
+    events = await list_run_events(
+        thread_id="t1",
+        run_id="r1",
+        request=FakeRequest_(),
+        event_types="context:memory",
+        task_id=None,
+        limit=500,
+        after_seq=None,
+    )
+
+    effective_content = update["messages"][1].content
+    assert events[0]["content"] == {
+        "content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest(),
+        "project_context_revision": None,
+        "project_shelf_revision": None,
+    }

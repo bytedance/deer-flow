@@ -12,6 +12,7 @@ class SkillCategory(StrEnum):
 
     - ``PUBLIC``: built-in skill bundled with the platform, read-only.
     - ``CUSTOM``: user-authored skill that can be edited or deleted.
+    - ``INTEGRATION``: managed third-party integration skill, read-only.
     - ``LEGACY``: global custom skill from before user-isolation migration,
       presented as read-only (visible but not editable/deletable). These
       skills are mounted at ``/mnt/skills/legacy/<name>/`` in the sandbox.
@@ -19,6 +20,7 @@ class SkillCategory(StrEnum):
 
     PUBLIC = "public"
     CUSTOM = "custom"
+    INTEGRATION = "integrations"
     LEGACY = "legacy"
 
 

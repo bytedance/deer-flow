@@ -7,7 +7,7 @@ Uses ``graph.astream(stream_mode=[...])`` which gives correct full-state
 snapshots for ``values`` mode, proper ``{node: writes}`` for ``updates``,
 and ``(chunk, metadata)`` tuples for ``messages`` mode.
 
-Note: ``events`` mode is not supported through the gateway — it requires
+Note: ``events`` mode is rejected by the gateway — it requires
 ``graph.astream_events()`` which cannot simultaneously produce ``values``
 snapshots.  The JS open-source LangGraph API server works around this via
 internal checkpoint callbacks that are not exposed in the Python public API.
@@ -17,17 +17,54 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import inspect
 import logging
 import os
+import sys
+import threading
+import time
+import weakref
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
+from contextvars import Context
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
+from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
+from deerflow.runtime.checkpoint_mode import (
+    aensure_checkpoint_mode_compatible,
+    inject_checkpoint_mode,
+)
+from deerflow.runtime.checkpoint_state import (
+    CheckpointStateAccessor,
+    build_state_mutation_graph,
+    graph_reducer_channels,
+    graph_state_schema,
+    graph_writable_channels,
+)
+from deerflow.runtime.context_keys import (
+    CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    DEFAULT_AGENT_NAME_METADATA_VALUE,
+    PROJECT_CONTEXT_KEY,
+    checkpoint_agent_binding_metadata,
+)
+from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -47,21 +84,457 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
+from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
+from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord
+from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+_THREAD_INCARNATION_UNSET = object()
 
-# Valid stream_mode values for LangGraph's graph.astream()
-_VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+_checkpoint_locks = AsyncKeyedLockTable[str]()
+
+# Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
+# instances in unreachable reference cycles. They are collectable, but a busy
+# Gateway may promote those cycles into older GC generations faster than the
+# automatic collector revisits them, producing a rising post-GC heap floor.
+# Coalesce terminal full collections so the cycles have a bounded lifetime
+# without paying for a stop-the-world collection on every run.
+_TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS = 10.0
+_TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS = 0.1
+_terminal_cycle_collection_guard = threading.Lock()
+_terminal_cycle_collection_last_at = time.monotonic()
+_terminal_cycle_collection_scheduled_loops: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+
+
+def _create_contextless_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Schedule terminal housekeeping without retaining the run's ContextVars."""
+    return asyncio.create_task(coro, context=Context())
+
+
+def _schedule_terminal_cycle_collection() -> None:
+    """Coalesce full cyclic-GC passes after completed LangGraph runs."""
+    loop = asyncio.get_running_loop()
+    with _terminal_cycle_collection_guard:
+        if loop in _terminal_cycle_collection_scheduled_loops:
+            return
+        elapsed = time.monotonic() - _terminal_cycle_collection_last_at
+        delay = max(0.0, _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS - elapsed)
+        _terminal_cycle_collection_scheduled_loops.add(loop)
+
+    async def _collect() -> None:
+        global _terminal_cycle_collection_last_at
+
+        try:
+            with _terminal_cycle_collection_guard:
+                now = time.monotonic()
+                if now - _terminal_cycle_collection_last_at < _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS:
+                    return
+                _terminal_cycle_collection_last_at = now
+
+            started_at = time.perf_counter()
+            # Do not run a heap walk synchronously from the event-loop timer.
+            # CPython's collector can still contend for the GIL, so surface slow
+            # passes below rather than claiming this removes every pause.
+            collected = await loop.run_in_executor(None, gc.collect)
+            duration = time.perf_counter() - started_at
+            if duration >= _TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS:
+                logger.info(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+            else:
+                logger.debug(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+        finally:
+            with _terminal_cycle_collection_guard:
+                _terminal_cycle_collection_scheduled_loops.discard(loop)
+
+    def _start_collection() -> None:
+        _create_contextless_task(_collect())
+
+    # A blank Context prevents the timer itself from retaining the completed
+    # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
+    # short-lived embedded-client event loop alive.
+    loop.call_later(delay, _start_collection, context=Context())
+
+
+def _remove_callback(config: dict[str, Any], handler: Any) -> None:
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, list):
+        callbacks[:] = [callback for callback in callbacks if callback is not handler]
+        return
+    remove_handler = getattr(callbacks, "remove_handler", None)
+    if callable(remove_handler):
+        try:
+            remove_handler(handler)
+        except Exception:
+            logger.debug("could not detach terminal callback", exc_info=True)
+
+
+def _release_run_scoped_references(
+    configs: list[dict[str, Any]],
+    runtime_context: dict[str, Any] | None,
+    journal: Any | None,
+) -> None:
+    """Remove worker-owned graph references once durable finalization is done."""
+    internal_context_keys = {
+        "__run_journal",
+        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        CONVERSATION_READER_CONTEXT_KEY,
+    }
+    try:
+        from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+        internal_context_keys.add(EXTENSION_SNAPSHOT_CONTEXT_KEY)
+    except Exception:
+        pass
+    try:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        internal_context_keys.add(EXTENSION_TASK_STORE_KEY)
+    except Exception:
+        pass
+
+    seen_configs: set[int] = set()
+    handlers = [journal] if journal is not None else []
+    for runnable_config in configs:
+        if not isinstance(runnable_config, dict) or id(runnable_config) in seen_configs:
+            continue
+        seen_configs.add(id(runnable_config))
+        configurable = runnable_config.get("configurable")
+        if isinstance(configurable, dict):
+            configurable.pop("__pregel_runtime", None)
+            configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        context = runnable_config.get("context")
+        if isinstance(context, dict):
+            for key in internal_context_keys:
+                context.pop(key, None)
+        for handler in handlers:
+            _remove_callback(runnable_config, handler)
+
+    if isinstance(runtime_context, dict):
+        for key in internal_context_keys:
+            runtime_context.pop(key, None)
+
+
+def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
+    """Serialize checkpoint mutations for one thread without blocking goal commands."""
+    return _checkpoint_locks.hold(thread_id)
+
+
+_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
+
+def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the bounded model-state projection without trusting display names."""
+    return [
+        {
+            "task_id": row["id"],
+            "task_name": neutralize_untrusted_tags(str(row["task_name"])),
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+        }
+        for row in task_rows
+    ]
+
+
+async def _persist_delivery_receipt(
+    event_store: Any,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+) -> bool:
+    """Persist a terminal receipt with short bounded retries.
+
+    The owning worker still knows the real terminal outcome and renews its
+    lease while this coroutine runs. Retrying here handles transient event
+    store failures without handing a successful run to orphan recovery, which
+    cannot reconstruct either the terminal status or the detailed receipt.
+    """
+    attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            await event_store.put_if_absent(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content=content,
+            )
+            return True
+        except Exception:
+            if attempt == attempts - 1:
+                logger.warning(
+                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
+                    run_id,
+                    attempts,
+                    exc_info=True,
+                )
+                return False
+            delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                run_id,
+                attempt + 1,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+    return False  # pragma: no cover - loop always returns
+
+
+_DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+_DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+
+
+def _empty_delivery_content() -> dict[str, Any]:
+    return {"presented": 0, "paths": [], "by_tool": {}}
+
+
+def _presented_path_covers_output(presented_path: str, produced_path: str) -> bool:
+    presented_path = presented_path.rstrip("/")
+    return bool(presented_path) and (produced_path == presented_path or produced_path.startswith(f"{presented_path}/"))
+
+
+def _delivery_content_with_outputs(
+    content: dict[str, Any],
+    produced_paths: list[str],
+) -> dict[str, Any]:
+    """Attach a delivery verdict when this run created or modified outputs."""
+    if not produced_paths:
+        return content
+
+    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
+    satisfied = bool(matched_paths)
+    return {
+        **content,
+        "verification": {
+            "source": "outputs_changed",
+            "requirement": "present_files_matches_produced_output",
+        },
+        "produced_paths": produced_paths,
+        "presented_paths": presented_paths,
+        "matched_paths": matched_paths,
+        "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
+        "satisfied": satisfied,
+    }
+
+
+def _delivery_error(content: dict[str, Any]) -> str | None:
+    """Return the terminal error when no changed output was presented."""
+    if not content.get("produced_paths") or content.get("satisfied") is True:
+        return None
+    return _DELIVERY_INCOMPLETE_ERROR
+
+
+def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
+    """Directory names workspace snapshots must skip for this deployment.
+
+    The tool-output budget middleware externalizes oversized tool outputs into
+    a storage subdir under outputs (default ``.tool-results``). Those files are
+    process feedback referenced from the budget preview via ``read_file``, not
+    deliverables: counting them as produced artifacts would fail run delivery
+    verification for any run that externalized a tool output without also
+    presenting a real artifact. The default name is excluded by the scanner
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
+    """
+    storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
+    return frozenset({storage_subdir})
+
+
+async def _produced_output_paths(
+    before: WorkspaceSnapshot | None,
+    *,
+    thread_id: str,
+    user_id: str | None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
+) -> list[str]:
+    """Detect regular output files created or modified by this run."""
+    if before is None:
+        return []
+    try:
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+        return get_changed_output_paths(before, after)
+    except Exception:
+        logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
+        return []
+
+
+# Keep this streaming policy separate from middleware write-authorization sets.
+_LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
+_LARGE_FILE_TOOL_BATCH_SIZE = 32
+
+
+@dataclass
+class _LargeFileToolChunkBatcher:
+    """Batch file-body argument deltas to avoid quadratic browser parsing.
+
+    Normal assistant text and non-file tool calls remain token-streamed. Large
+    file arguments still update progressively, but in bounded batches instead
+    of forcing the browser to reparse the growing JSON on every model token.
+    """
+
+    batch_size: int = _LARGE_FILE_TOOL_BATCH_SIZE
+    tool_names: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    pending_identity: tuple[str, str, str] | None = None
+    pending_message: Any | None = None
+    pending_metadata: dict[str, Any] = field(default_factory=dict)
+    pending_count: int = 0
+
+    def push(self, chunk: Any) -> list[Any]:
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return [*self.flush(), chunk]
+
+        message, metadata = chunk
+        message_id = getattr(message, "id", None)
+        tool_call_chunks = getattr(message, "tool_call_chunks", None)
+        if not isinstance(message_id, str) or not message_id or not isinstance(tool_call_chunks, list) or len(tool_call_chunks) != 1:
+            return [*self.flush(), chunk]
+
+        tool_chunk = tool_call_chunks[0]
+        if not isinstance(tool_chunk, dict):
+            return [*self.flush(), chunk]
+        index = tool_chunk.get("index")
+        tool_call_id = tool_chunk.get("id")
+        if isinstance(index, int):
+            discriminator = f"index:{index}"
+        elif isinstance(tool_call_id, str) and tool_call_id:
+            discriminator = f"id:{tool_call_id}"
+        else:
+            discriminator = "single"
+        raw_namespace = None
+        if isinstance(metadata, dict):
+            raw_namespace = metadata.get("langgraph_checkpoint_ns") or metadata.get("checkpoint_ns")
+        namespace = raw_namespace if isinstance(raw_namespace, str) else ""
+        identity = (namespace, message_id, discriminator)
+        name_fragment = tool_chunk.get("name")
+        tool_name = self.tool_names.get(identity, "")
+        if tool_name not in _LARGE_FILE_TOOL_NAMES and isinstance(name_fragment, str) and name_fragment:
+            tool_name += name_fragment
+            if any(candidate.startswith(tool_name) for candidate in _LARGE_FILE_TOOL_NAMES):
+                self.tool_names[identity] = tool_name
+            else:
+                self.tool_names.pop(identity, None)
+        # Batching starts only after the accumulated name matches; split or
+        # incomplete name fragments stream per-chunk until then.
+        if tool_name not in _LARGE_FILE_TOOL_NAMES:
+            return [*self.flush(), chunk]
+
+        model_copy = getattr(message, "model_copy", None)
+        if not callable(model_copy):
+            return [*self.flush(), chunk]
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        sanitized_additional_kwargs = additional_kwargs
+        if isinstance(additional_kwargs, dict) and ("function_call" in additional_kwargs or "tool_calls" in additional_kwargs):
+            sanitized_additional_kwargs = {key: value for key, value in additional_kwargs.items() if key not in {"function_call", "tool_calls"}}
+        has_non_tool_payload = bool(getattr(message, "content", None) or sanitized_additional_kwargs or getattr(message, "usage_metadata", None) or getattr(message, "response_metadata", None))
+        outputs: list[Any] = []
+        if self.pending_identity is not None and self.pending_identity != identity:
+            outputs.extend(self.flush())
+        if has_non_tool_payload:
+            visible_message = model_copy(
+                update={
+                    "additional_kwargs": sanitized_additional_kwargs,
+                    "invalid_tool_calls": [],
+                    "tool_call_chunks": [],
+                    "tool_calls": [],
+                }
+            )
+            outputs.append((visible_message, metadata))
+
+        tool_only_message = model_copy(
+            update={
+                "additional_kwargs": {},
+                "content": "",
+                "invalid_tool_calls": [],
+                "response_metadata": {},
+                "tool_calls": [],
+                "usage_metadata": None,
+            }
+        )
+        self.pending_identity = identity
+        self.pending_message = tool_only_message if self.pending_message is None else self.pending_message + tool_only_message
+        if isinstance(metadata, dict):
+            self.pending_metadata.update(metadata)
+        self.pending_count += 1
+        if self.pending_count >= self.batch_size:
+            outputs.extend(self.flush())
+        return outputs
+
+    def flush(self) -> list[Any]:
+        if self.pending_message is None:
+            return []
+        chunk = (self.pending_message, self.pending_metadata)
+        self.pending_identity = None
+        self.pending_message = None
+        self.pending_metadata = {}
+        self.pending_count = 0
+        return [chunk]
+
+    def finish(self) -> list[Any]:
+        """Flush and release identities at a values or end-of-stream boundary.
+
+        A regular batch-size or interleaved-mode flush must retain identities
+        because continuation chunks commonly omit the tool name.
+        """
+        chunks = self.flush()
+        self.tool_names.clear()
+        return chunks
+
+
+# Runtime-context keys the worker owns outright. A same-named key in the
+# caller's ``config['context']`` is dropped rather than merged: the Gateway
+# strips ``__``-prefixed keys in build_run_config, but embedded harness callers
+# have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
+# by it anyway.
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
+    frozenset(
+        {
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            DEERFLOW_TRACE_METADATA_KEY,
+            CONVERSATION_READER_CONTEXT_KEY,
+            THREAD_INCARNATION_CONTEXT_KEY,
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
+            # The Gateway pins the run's project snapshot under this key at
+            # admission (spec §7.1); a caller-supplied value in
+            # ``config['context']`` must never be merged (§12).
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
+        }
+    )
+    | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+)
 
 
 def _build_runtime_context(
@@ -69,26 +542,69 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
+    conversation_reader: Any | None = None,
+    *,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
     Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
     ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
-    are merged in but never override ``thread_id``/``run_id``. The resolved
-    ``AppConfig`` is added by the worker so tools can consume it without ambient
-    global lookups.
+    are merged in but never override ``thread_id``/``run_id`` or the server-owned
+    keys in ``_SERVER_OWNED_RUNTIME_CONTEXT_KEYS``. The resolved ``AppConfig`` is
+    added by the worker so tools can consume it without ambient global lookups.
 
     langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
     under ``config['configurable']['__pregel_runtime']`` — see
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    if thread_incarnation is not _THREAD_INCARNATION_UNSET:
+        runtime_ctx[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
+            if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+                continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if conversation_reader is not None:
+        runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
+    if task_store is not None:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
+    # Publish the run's extension snapshot so work dispatched during graph
+    # execution (task delegation) binds the same generation the lead agent was
+    # built with, instead of re-reading a singleton that may have been replaced
+    # mid-run. Written after the caller merge and popped when absent, because a
+    # caller-supplied value for this host-internal key is never authoritative.
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+    if extensions is not None:
+        runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
+    else:
+        runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
+
+
+def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject the admission-pinned project snapshot into the runtime context.
+
+    The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
+    after stripping client-supplied values at admission (``build_run_config``
+    drops ``__``-prefixed context keys; the services pop-set covers both
+    sections), so a value surviving to this point is server-authoritative.
+    ``_build_runtime_context`` refuses server-owned keys from the caller
+    merge, and ``_install_runtime_context`` treats the runtime context as the
+    authoritative view — hoisting here is what lets middleware and tools read
+    exactly the snapshot admission pinned.
+    """
+    caller_context = config.get("context")
+    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+        runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
 
 
 @dataclass(frozen=True)
@@ -105,17 +621,37 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    extensions: Any | None = field(default=None)
+    checkpoint_channel_mode: CheckpointChannelMode = "full"
+    # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
+    # this process" (embedded/tests) and resolves to the config default.
+    checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    # The host binds this capability to one run's authenticated reader and references.
+    conversation_reader: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    # Configurable participates in lead-agent option merging and checkpoint
+    # persistence; the reader capability belongs only to host-owned context.
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict):
+        configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
-        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
+        # Keep both context views authoritative. A server-owned value is
+        # assigned from the runtime context when present and removed otherwise,
+        # so an embedded caller cannot preserve a forged lifecycle identity in
+        # ``config['context']`` after it was rejected by _build_runtime_context.
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            if key in runtime_context:
+                existing_context[key] = runtime_context[key]
+            else:
+                existing_context.pop(key, None)
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
         return
@@ -141,6 +677,17 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
     except TypeError:
         # Some callable instances are unhashable; fall back to a direct check.
         return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _agent_graph(agent_result: Any) -> Any:
+    """Unwrap the lead assembly, leaving any other factory result untouched."""
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+    return unwrap_agent_graph(agent_result)
 
 
 class _SubagentEventBuffer:
@@ -199,7 +746,66 @@ class _SubagentEventBuffer:
         try:
             await self._event_store.put_batch(batch)
         except Exception:
+            # Re-buffer the failed batch (ahead of any events queued since) so a
+            # transient store error does not silently drop subagent step events.
+            self._pending = batch + self._pending
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+
+
+def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
+    """Record the current request trace id on the runtime context and metadata.
+
+    The ContextVar is the only source. A ``deerflow_trace_id`` the caller sent
+    in ``config["metadata"]`` is overwritten rather than read: honouring it
+    would let the persisted run disagree with the ``X-Trace-Id`` and the log
+    lines the same request already produced, which is the correlation the id
+    exists to provide in the first place.
+
+    The two destinations serve different purposes. ``runtime_ctx`` is the
+    carrier across boundaries the ContextVar does not cross -- subagent
+    delegation, the memory update running on a Timer/executor thread -- while
+    ``config["metadata"]`` is persisted with the checkpoint and is what makes a
+    finished run traceable after the fact.
+    """
+    trace_id = ensure_trace_id()
+    runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    incoming_metadata = config.get("metadata")
+    # Replaced rather than mutated through: this mapping can be shared with the
+    # caller's request body.
+    merged_metadata = dict(incoming_metadata) if isinstance(incoming_metadata, dict) else {}
+    merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    config["metadata"] = merged_metadata
+    return trace_id
+
+
+def _defer_finalization_interrupt(
+    deferred: BaseException | None,
+    interrupt: BaseException,
+) -> BaseException:
+    """Preserve the first interrupt while allowing terminal awaits to finish."""
+    if isinstance(interrupt, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+    return deferred if deferred is not None else interrupt
+
+
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
 
 
 async def run_agent(
@@ -211,10 +817,12 @@ async def run_agent(
     agent_factory: Any,
     graph_input: dict,
     config: dict,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
+    knowledge_scope: dict[str, Any] | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -224,42 +832,117 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
+    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
-    requested_modes: set[str] = set(stream_modes or ["values"])
+
+    from deerflow_extension_api import ExtensionData, TaskInfo
+
+    from deerflow.extensions import get_loaded_extensions
+    from deerflow.extensions.notify import (
+        lead_task_id,
+        lead_task_outcome,
+        notify_task_start,
+        notify_task_stop,
+    )
+
+    extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    task_store: ExtensionData | None = None
+    task_info: TaskInfo | None = None
+    deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
-    pre_run_snapshot: dict[str, Any] | None = None
+    pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
+    workspace_changes_user_id: str | None = None
+    workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
+    checkpoint_rollback_completed = False
     # Message ids checkpointed *before* this run started. The stream loop uses
     # this set to mask out ``deerflow_error_fallback`` markers that belong to
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
 
+    # Bound agent graph accessor + captured pre-run rollback point; assigned
+    # inside the try block so the finally rollback path can fork the pre-run
+    # checkpoint lineage (see below).
+    accessor: CheckpointStateAccessor | None = None
+    rollback_point: RollbackPoint | None = None
     journal = None
+    runtime_ctx: dict[str, Any] | None = None
+    runtime: Any | None = None
+    agent: Any | None = None
+    runnable_configs: list[dict[str, Any]] = [config]
+    goal_evaluator_model: Any | None = None
+    delivery_content: dict[str, Any] | None = None
+    produced_output_paths: list[str] | None = None
+    # Journal construction moved ahead of preflight so every terminal run can
+    # emit a receipt. Completion persistence keeps its prior boundary: before
+    # #4272 the journal did not exist until preflight had succeeded, so early
+    # checkpoint failures / cancellation while waiting did not write an empty
+    # completion snapshot into RunStore.
+    persist_completion = False
+    completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
+    started = False
 
-    # Track whether "events" was requested but skipped
-    if "events" in requested_modes:
-        logger.info(
-            "Run %s: 'events' stream_mode not supported in gateway (requires astream_events + checkpoint callbacks). Skipping.",
-            run_id,
-        )
+    async def _finish_cancellation(
+        action: str,
+        *,
+        restore_checkpoint: bool = True,
+    ) -> None:
+        nonlocal checkpoint_rollback_completed
+        await run_manager.set_finalizing(run_id, True)
+        if action == "rollback":
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error="Rolled back by user",
+                **terminal_status_kwargs,
+            )
+            if not restore_checkpoint:
+                return
+            try:
+                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    rollback_point=rollback_point,
+                    snapshot_capture_failed=snapshot_capture_failed,
+                )
+                logger.info(
+                    "Run %s rolled back to pre-run checkpoint %s",
+                    run_id,
+                    pre_run_checkpoint_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Run %s cancellation rollback failed",
+                    run_id,
+                    exc_info=True,
+                )
+        else:
+            await run_manager.set_status(
+                run_id,
+                RunStatus.interrupted,
+                **terminal_status_kwargs,
+            )
+            logger.info("Run %s was cancelled", run_id)
 
     try:
-        await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-
-        # Initialize RunJournal + write human_message event.
-        # These are inside the try block so any exception (e.g. a DB
-        # error writing the event) flows through the except/finally
-        # path that publishes an "end" event to the SSE bridge —
-        # otherwise a failure here would leave the stream hanging
-        # with no terminator.
+        normalized_stream_modes = normalize_stream_modes(stream_modes)
+        requested_modes: set[str] = set(normalized_stream_modes)
+        lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
+        # Initialize the run-scoped journal before any fallible or cancellable
+        # preflight work. Every terminal run with an event store must reach the
+        # shared finally block with a journal available for its run.delivery
+        # receipt, including checkpoint validation failures and cancellation
+        # while waiting for an earlier run to finish finalizing.
         if event_store is not None:
             from deerflow.runtime.journal import RunJournal
 
@@ -271,27 +954,115 @@ async def run_agent(
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
-        # 1. Mark running
-        await run_manager.set_status(run_id, RunStatus.running)
-
-        # Snapshot the latest pre-run checkpoint so rollback can restore it.
-        if checkpointer is not None:
+        # Keep cancellable preflight work under the worker's terminal guard so
+        # cancellation cannot strand a pending RunRecord or stream subscriber.
+        if ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
-                config_for_check = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(config_for_check)
-                if ckpt_tuple is not None:
-                    ckpt_config = getattr(ckpt_tuple, "config", {}).get("configurable", {})
-                    pre_run_checkpoint_id = ckpt_config.get("checkpoint_id")
-                    pre_run_snapshot = {
-                        "checkpoint_ns": ckpt_config.get("checkpoint_ns", ""),
-                        "checkpoint": copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {})),
-                        "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
-                        "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
-                    }
-                    pre_existing_message_ids = _collect_pre_existing_message_ids(pre_run_snapshot)
+                if thread_incarnation is _THREAD_INCARNATION_UNSET:
+                    raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
+                assert thread_incarnation is None or isinstance(thread_incarnation, str)
+                task_rows = await ctx.mcp_task_repo.list_by_thread(
+                    thread_id,
+                    user_id=record.user_id,
+                    thread_incarnation=thread_incarnation,
+                    limit=20,
+                )
+                graph_input = {
+                    **graph_input,
+                    "background_tasks": _project_background_tasks(task_rows),
+                }
             except Exception:
-                snapshot_capture_failed = True
-                logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
+
+        await run_manager.wait_for_prior_finalizing(
+            thread_id,
+            run_id,
+            abort_event=record.abort_event,
+        )
+
+        start_outcome = await run_manager.try_start(run_id)
+        if start_outcome is not RunStartOutcome.started:
+            if record.abort_event.is_set():
+                await _finish_cancellation(
+                    record.abort_action,
+                    restore_checkpoint=False,
+                )
+            return
+        started = True
+
+        task_id = lead_task_id(run_id)
+        if extensions.needs_task_store:
+            task_store = ExtensionData(task_id)
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
+
+        if not record.ownership_lost and thread_store is not None:
+            try:
+                await thread_store.update_status(thread_id, "running")
+            except Exception:
+                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+        mode = ctx.checkpoint_channel_mode
+        inject_checkpoint_mode(config, mode)
+        checkpoint_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        if checkpointer is not None:
+            await aensure_checkpoint_mode_compatible(
+                checkpointer,
+                checkpoint_config,
+                mode,
+            )
+            configurable = config["configurable"]
+            selected_configurable = {
+                "thread_id": thread_id,
+                "checkpoint_ns": configurable.get("checkpoint_ns", ""),
+            }
+            for selector_key in ("checkpoint_id", "checkpoint_map"):
+                if selector_key in configurable:
+                    selected_configurable[selector_key] = configurable[selector_key]
+            selected_checkpoint_config = {
+                "configurable": selected_configurable,
+            }
+            if selected_checkpoint_config != checkpoint_config:
+                await aensure_checkpoint_mode_compatible(
+                    checkpointer,
+                    selected_checkpoint_config,
+                    mode,
+                )
+
+        persist_completion = True
+
+        if event_store is not None:
+            workspace_changes_user_id = get_effective_user_id()
+            # Resolved once per run so the pre-run snapshot, the post-run
+            # delivery scan, and the workspace-changes scan all agree on the
+            # same exclusion set.
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
+            try:
+                pre_run_workspace_snapshot = await capture_workspace_snapshot(
+                    thread_id,
+                    user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                )
+            except Exception:
+                logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
         await bridge.publish(
@@ -311,11 +1082,35 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
-        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
-        if deerflow_trace_id:
-            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            task_store,
+            extensions,
+            ctx.conversation_reader,
+            thread_incarnation=thread_incarnation,
+        )
+        # Bind every checkpoint produced by this run to the effective agent
+        # identity that produced its state. Manual compaction uses only this
+        # server-overwritten value for memory policy; request metadata cannot
+        # forge it, and an explicit default sentinel distinguishes new default
+        # checkpoints from unbound legacy state.
+        if "agent_name" in runtime_ctx:
+            checkpoint_agent_name = runtime_ctx["agent_name"]
+        else:
+            configurable = config.get("configurable")
+            checkpoint_agent_name = configurable.get("agent_name") if isinstance(configurable, dict) else None
+        checkpoint_metadata = config.get("metadata")
+        if not isinstance(checkpoint_metadata, dict):
+            checkpoint_metadata = {}
+            config["metadata"] = checkpoint_metadata
+        checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        _pin_admission_project_context(config, runtime_ctx)
+        if knowledge_scope is not None:
+            runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
+        deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -338,7 +1133,7 @@ async def run_agent(
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
-            user_id=get_effective_user_id(),
+            user_id=resolve_runtime_user_id(runtime),
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
@@ -349,6 +1144,7 @@ async def run_agent(
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         initial_runnable_config = RunnableConfig(**config)
+        runnable_configs.append(initial_runnable_config)
 
         def _continuation_runnable_config() -> RunnableConfig:
             continuation_config = dict(config)
@@ -357,12 +1153,73 @@ async def run_agent(
             configurable.pop("checkpoint_id", None)
             configurable.pop("checkpoint_map", None)
             continuation_config["configurable"] = configurable
-            return RunnableConfig(**continuation_config)
+            continuation = RunnableConfig(**continuation_config)
+            runnable_configs.append(continuation)
+            return continuation
 
+        agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
-        else:
-            agent = agent_factory(config=initial_runnable_config)
+            agent_factory_kwargs["app_config"] = ctx.app_config
+        from deerflow.extensions import bind_agent_build_extensions
+
+        with bind_agent_build_extensions(extensions):
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
+
+        accessor = CheckpointStateAccessor.bind(
+            agent,
+            checkpointer,
+            store=store,
+            mode=mode,
+        )
+
+        # Capture the pre-run rollback point (materialized state + raw pending
+        # writes) before this run mutates the thread. Raw checkpoint blobs
+        # cannot reconstruct Delta-channel messages (their checkpoints omit
+        # channel_values), so rollback forks the pre-run lineage through the
+        # graph and needs the materialized messages up front. Any capture
+        # failure disables rollback: restoring an empty or partial message
+        # history would silently truncate the thread.
+        if checkpointer is not None:
+            # A previous successful run may still be persisting duration
+            # metadata after its active admission slot is released. Share its
+            # checkpoint lock so the rollback snapshot and any resume rewrite
+            # are one uninterrupted read/write sequence against the head.
+            async with _checkpoint_thread_lock(thread_id):
+                try:
+                    rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
+                except Exception:
+                    snapshot_capture_failed = True
+                    logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                if rollback_point is not None:
+                    pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
+                    pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
+
+                # Resuming from an older checkpoint is a fork, and a delta fork
+                # materializes the abandoned sibling's writes back into state
+                # (#4458). Rewrite it as a linear head write *after* the rollback
+                # point is captured, so cancel-with-rollback still restores the
+                # real pre-run head rather than the rolled-back one.
+                resumed_messages = await _linearize_delta_checkpoint_resume(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    config=config,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
+            if resumed_messages is not None:
+                # The graph now starts from the selected state, so the
+                # current-run message boundary is that state, not the head we
+                # captured for rollback.
+                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
+                initial_runnable_config = RunnableConfig(**config)
+                runnable_configs.append(initial_runnable_config)
+
+        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+        _install_runtime_context(config, runtime_ctx)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -387,38 +1244,12 @@ async def run_agent(
         if interrupt_after:
             agent.interrupt_after_nodes = interrupt_after
 
-        # 6. Build LangGraph stream_mode list
-        #    "events" is NOT a valid astream mode — skip it
-        #    "messages-tuple" maps to LangGraph's "messages" mode
-        lg_modes: list[str] = []
-        for m in requested_modes:
-            if m == "messages-tuple":
-                lg_modes.append("messages")
-            elif m == "events":
-                # Skipped — see log above
-                continue
-            elif m in _VALID_LG_MODES:
-                lg_modes.append(m)
-        if not lg_modes:
-            lg_modes = ["values"]
-
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for m in lg_modes:
-            if m not in seen:
-                seen.add(m)
-                deduped.append(m)
-        lg_modes = deduped
-
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
         # Buffer subagent step events and persist them in batches (#3779) instead
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
-
-        goal_evaluator_model: Any | None = None
 
         def _get_goal_evaluator_model() -> Any:
             nonlocal goal_evaluator_model
@@ -429,47 +1260,121 @@ async def run_agent(
                 )
             return goal_evaluator_model
 
+        # Built once per run, not per _stream_once call: goal continuations
+        # re-enter the stream and would otherwise discard the resolved seqs.
+        seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            if len(lg_modes) == 1 and not stream_subgraphs:
-                # Single mode, no subgraphs: astream yields raw chunks
-                single_mode = lg_modes[0]
-                async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
-                    if record.abort_event.is_set():
-                        logger.info("Run %s abort requested — stopping", run_id)
-                        break
-                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                    sse_event = _lg_mode_to_sse_event(single_mode)
-                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                    if single_mode == "custom":
-                        await subagent_events.add(chunk)
-                return
-            # Multiple modes or subgraphs: astream yields tuples
-            async for item in agent.astream(
-                input_payload,
-                config=stream_config,
-                stream_mode=lg_modes,
-                subgraphs=stream_subgraphs,
-            ):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
+            try:
+                async with _checkpoint_thread_lock(thread_id):
+                    if len(lg_modes) == 1 and not stream_subgraphs:
+                        # Single mode, no subgraphs: astream yields raw chunks
+                        single_mode = lg_modes[0]
+                        stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
+                        broke_on_abort = False
+                        try:
+                            async for chunk in stream:
+                                if record.abort_event.is_set():
+                                    broke_on_abort = True
+                                    logger.info("Run %s abort requested — stopping", run_id)
+                                    break
+                                if single_mode != "custom":
+                                    # Custom frames carry task_* events whose payload can hold a delegated
+                                    # subagent's messages; see the multi-mode branch below.
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                sse_event = _lg_mode_to_sse_event(single_mode)
+                                single_payload = serialize(chunk, mode=single_mode)
+                                if single_mode == "values" and seq_stamper is not None:
+                                    single_payload = await seq_stamper.stamp(single_payload)
+                                await bridge.publish(run_id, sse_event, single_payload)
+                                if single_mode == "custom":
+                                    await subagent_events.add(chunk)
+                        finally:
+                            close_error = sys.exception()
+                            try:
+                                await close_agent_stream(stream)
+                            except Exception:
+                                abort_requested = broke_on_abort or record.abort_event.is_set()
+                                if close_error is None and not abort_requested:
+                                    raise
+                                if abort_requested:
+                                    logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                                else:
+                                    logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
+                        return
+                    # Multiple modes or subgraphs: astream yields tuples
+                    stream = agent.astream(
+                        input_payload,
+                        config=stream_config,
+                        stream_mode=lg_modes,
+                        subgraphs=stream_subgraphs,
+                    )
+                    broke_on_abort = False
+                    try:
+                        async for item in stream:
+                            if record.abort_event.is_set():
+                                broke_on_abort = True
+                                logger.info("Run %s abort requested — stopping", run_id)
+                                break
 
-                mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                if mode is None:
-                    continue
+                            mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                            if mode is None:
+                                continue
 
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                sse_event = _lg_mode_to_sse_event(mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
-                if mode == "custom":
-                    await subagent_events.add(chunk)
+                            if not namespace and mode != "custom":
+                                # Only root-graph frames may decide the parent run's error
+                                # fallback: a delegated subagent's marked fallback is the
+                                # executor's to map (task_failed), not this run's. That
+                                # includes the child messages task_running custom events
+                                # carry, which are root frames too.
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            await _publish_stream_item(
+                                bridge=bridge,
+                                run_id=run_id,
+                                mode=mode,
+                                chunk=chunk,
+                                namespace=namespace,
+                                file_tool_chunk_batcher=file_tool_chunk_batcher,
+                                subagent_events=subagent_events,
+                                seq_stamper=seq_stamper,
+                            )
+                    finally:
+                        close_error = sys.exception()
+                        try:
+                            await close_agent_stream(stream)
+                        except Exception:
+                            abort_requested = broke_on_abort or record.abort_event.is_set()
+                            if close_error is None and not abort_requested:
+                                raise
+                            if abort_requested:
+                                logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                            else:
+                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
+            finally:
+                stream_error = sys.exception()
+                if file_tool_chunk_batcher is not None:
+                    try:
+                        for publish_chunk in file_tool_chunk_batcher.finish():
+                            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                    except Exception:
+                        if stream_error is None:
+                            raise
+                        logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
+        # Clear any stale stop_reason before the first (user-visible) turn only.
+        # Continuation turns preserve a cap reason from the user turn: a run that
+        # hits a cap during the user turn IS capped even if hidden goal-evaluator
+        # turns complete cleanly afterward (#4176 review).
+        if isinstance(runtime.context, dict):
+            runtime.context.pop("stop_reason", None)
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
+                accessor=accessor,
                 checkpointer=checkpointer,
                 thread_id=thread_id,
                 run_id=run_id,
@@ -477,6 +1382,11 @@ async def run_agent(
                 app_config=ctx.app_config,
                 evaluator_model_factory=_get_goal_evaluator_model,
                 abort_event=record.abort_event,
+                user_id=resolve_runtime_user_id(runtime),
+                deerflow_trace_id=deerflow_trace_id,
+                task_store=task_store,
+                extensions=extensions,
+                run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -484,126 +1394,377 @@ async def run_agent(
 
         # 8. Final status
         if record.abort_event.is_set():
-            await run_manager.set_finalizing(run_id, True)
-            action = record.abort_action
-            if action == "rollback":
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
-                try:
-                    await _rollback_to_pre_run_checkpoint(
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        pre_run_checkpoint_id=pre_run_checkpoint_id,
-                        pre_run_snapshot=pre_run_snapshot,
-                        snapshot_capture_failed=snapshot_capture_failed,
-                    )
-                    logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                except Exception:
-                    logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
-            else:
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+            await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+            await _ensure_finalizing_before_edit_failure(run_manager, record)
+            cancel_action = await run_manager.set_status_if_not_cancelled(
+                run_id,
+                RunStatus.error,
+                error=error_msg,
+                **terminal_status_kwargs,
+            )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action)
         else:
-            await run_manager.set_status(run_id, RunStatus.success)
+            runtime_context = runtime.context if isinstance(runtime.context, dict) else None
+            # Guard middlewares that hard-stop a run by stripping tool_calls
+            # stamp stop_reason into runtime.context so the worker can surface
+            # it on the run record:
+            #   loop_detection      -> "loop_capped"
+            #   token_budget        -> "token_capped"
+            #   safety_finish_reason -> "safety_capped"
+            #   subagent_limit       -> "subagent_limit_capped"
+            #   model_length_finish_reason -> "model_length_capped"
+            #
+            # If more guards grow stop_reason semantics, consider a publish/
+            # collect pattern (e.g. each guard middleware publishes its cap
+            # reason to a dedicated runtime.context channel, and the worker
+            # collects the most severe / first / all reasons) instead of each
+            # guard writing directly to the same key.
+            stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            produced_output_paths = await _produced_output_paths(
+                pre_run_workspace_snapshot,
+                thread_id=thread_id,
+                user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
+            )
+            delivery_content = _delivery_content_with_outputs(
+                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                produced_output_paths,
+            )
+            delivery_error = _delivery_error(delivery_content)
+            cancel_action = await run_manager.set_status_if_not_cancelled(
+                run_id,
+                RunStatus.error if delivery_error else RunStatus.success,
+                error=delivery_error,
+                stop_reason=stop_reason,
+                **terminal_status_kwargs,
+            )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action)
 
     except asyncio.CancelledError:
-        await run_manager.set_finalizing(run_id, True)
-        action = record.abort_action
-        if action == "rollback":
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
-            try:
-                await _rollback_to_pre_run_checkpoint(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    pre_run_checkpoint_id=pre_run_checkpoint_id,
-                    pre_run_snapshot=pre_run_snapshot,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                )
-                logger.info("Run %s was cancelled and rolled back", run_id)
-            except Exception:
-                logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
-        else:
-            await run_manager.set_status(run_id, RunStatus.interrupted)
-            logger.info("Run %s was cancelled", run_id)
+        await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
-        await bridge.publish(
+        await _ensure_finalizing_before_edit_failure(run_manager, record)
+        cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
-            "error",
-            {
-                "message": error_msg,
-                "name": type(exc).__name__,
-            },
+            RunStatus.error,
+            error=error_msg,
+            **terminal_status_kwargs,
         )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": type(exc).__name__,
+                },
+            )
 
     finally:
-        # Persist any subagent step events still buffered (#3779) — including on
-        # abort/exception paths, where the stream loop broke before its own flush.
-        if subagent_events is not None:
-            await subagent_events.flush()
+        try:
+            if record.ownership_lost:
+                logger.warning(
+                    "Skipping durable finalization for run %s because this worker no longer owns its lease",
+                    run_id,
+                )
 
-        # Flush any buffered journal events and persist completion data
-        if journal is not None:
+            if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+                if not record.finalizing:
+                    await run_manager.set_finalizing(run_id, True)
+                try:
+                    if not checkpoint_rollback_completed:
+                        checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                            accessor=accessor,
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            rollback_point=rollback_point,
+                            snapshot_capture_failed=snapshot_capture_failed,
+                        )
+                    if checkpoint_rollback_completed:
+                        await _publish_restored_checkpoint_values(
+                            bridge=bridge,
+                            run_id=run_id,
+                            accessor=accessor,
+                            thread_id=thread_id,
+                        )
+                        logger.info("Run %s edit replay restored pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                except Exception:
+                    logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+
+            # Persist any subagent step events still buffered (#3779) — including on
+            # abort/exception paths, where the stream loop broke before its own flush.
+            if not record.ownership_lost and subagent_events is not None:
+                await subagent_events.flush()
+
+            if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
+                try:
+                    await record_workspace_changes(
+                        event_store,
+                        thread_id,
+                        run_id,
+                        pre_run_workspace_snapshot,
+                        user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                    )
+                except Exception:
+                    logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
+
+            # Flush buffered journal events before the terminal receipt. The
+            # receipt uses a run-scoped idempotent write shared with recovery, then
+            # the staged terminal status is persisted. This ordering closes the
+            # crash window where a terminal run could otherwise outlive its receipt.
+            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            if not record.ownership_lost and journal is not None:
+                try:
+                    await journal.flush()
+                except Exception:
+                    logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+
+                if delivery_content is None:
+                    if produced_output_paths is None:
+                        produced_output_paths = await _produced_output_paths(
+                            pre_run_workspace_snapshot,
+                            thread_id=thread_id,
+                            user_id=workspace_changes_user_id,
+                            extra_excluded_dir_names=workspace_excluded_dir_names,
+                        )
+                    delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                receipt_persisted = await _persist_delivery_receipt(
+                    event_store,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    content=delivery_content,
+                )
+                if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                        persist=False,
+                    )
+
+            if not record.ownership_lost and journal is not None and persist_completion:
+                try:
+                    # Advance the final completion fields and timestamp without
+                    # terminalizing the durable row. That active row continues to
+                    # fence peer checkpoint writers through the duration write.
+                    completion_data = journal.get_completion_data()
+                    await run_manager.update_finalizing_progress(run_id, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
+
+            # Keep the durable run row active through its final duration checkpoint
+            # write. A peer Gateway admits history migration from the durable row,
+            # not this worker's staged terminal status; terminalizing first would
+            # let that migration read an unfinished lifetime and race this write.
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+                try:
+                    created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                    updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                    # Match legacy history semantics: turn_duration is the whole
+                    # RunRecord lifetime in integer seconds, including admission
+                    # delay. Persist zero for sub-second successful turns.
+                    duration = max(0, int((updated - created).total_seconds()))
+                    await _persist_run_duration(
+                        checkpointer=checkpointer,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        duration_seconds=duration,
+                    )
+                except Exception:
+                    logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
+
+            if not record.ownership_lost and event_store is not None:
+                try:
+                    # Even after bounded receipt retries are exhausted, persist the
+                    # real worker outcome. Leaving a successful row inflight would
+                    # let lease recovery rewrite it as an error with a synthetic
+                    # zero receipt.
+                    if record.abort_event.is_set():
+                        await run_manager.persist_current_status(run_id)
+                    else:
+                        cancel_action = await run_manager.set_status_if_not_cancelled(
+                            run_id,
+                            record.status,
+                            error=record.error,
+                            stop_reason=record.stop_reason,
+                        )
+                        if cancel_action is not None:
+                            await _finish_cancellation(cancel_action)
+                            await run_manager.persist_current_status(run_id)
+                except Exception:
+                    logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+
+            if not record.ownership_lost and journal is not None and persist_completion:
+                try:
+                    # Persist token usage + convenience fields to RunStore
+                    completion_data = completion_data or journal.get_completion_data()
+                    await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                try:
+                    await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+                    if not await run_manager.has_later_started_run(thread_id, run_id):
+                        await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                except Exception:
+                    logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+
+            # Sync title from checkpoint to threads_meta.display_name
+            if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+                try:
+                    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                    ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                    if ckpt_tuple is not None:
+                        ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+                        title = ckpt.get("channel_values", {}).get("title")
+                        if title:
+                            await thread_store.update_display_name(thread_id, title)
+                except Exception:
+                    logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+            # Update threads_meta status based on run outcome
+            if started and not record.ownership_lost and thread_store is not None:
+                try:
+                    final_status = "idle" if record.status == RunStatus.success else record.status.value
+                    await thread_store.update_status(thread_id, final_status)
+                except Exception:
+                    logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+            if not record.ownership_lost and ctx.on_run_completed is not None:
+                try:
+                    await ctx.on_run_completed(record)
+                except Exception:
+                    logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A terminal hook must not leave replacement runs blocked or
+                    # stream consumers waiting indefinitely.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing finalization first",
+                        run_id,
+                    )
+
+            if task_info is not None and task_store is not None:
+                # Keep the finalizing barrier held until stop observers finish, so
+                # a same-thread replacement cannot overlap this task's lifecycle.
+                task_stop = asyncio.create_task(
+                    notify_task_stop(
+                        extensions,
+                        task_store,
+                        task_info,
+                        lead_task_outcome(
+                            aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
+                            succeeded=record.status == RunStatus.success,
+                        ),
+                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    ),
+                    name=f"extension-task-stop-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Extension task-stop notification failed for run %s (non-fatal)",
+                        run_id,
+                        exc_info=True,
+                    )
+                except BaseException as exc:
+                    # Cancellation here must not strand the finalizing barrier or
+                    # leave stream consumers waiting for the end frame.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Extension task-stop notification interrupted for run %s; completing cleanup first",
+                        run_id,
+                    )
+            if record.finalizing:
+                await run_manager.set_finalizing(run_id, False)
+
+            await bridge.publish_end(run_id)
+
+            if deferred_finalization_interrupt is not None:
+                raise deferred_finalization_interrupt
+        finally:
             try:
-                await journal.flush()
-            except Exception:
-                logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+                if journal is not None:
+                    try:
+                        await journal.close(flush=not record.ownership_lost)
+                    except Exception:
+                        logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
+            finally:
+                lease_cleanup_interrupt: BaseException | None = None
+                try:
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-            try:
-                # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
-            except Exception:
-                logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+                    await release_sandbox_execution_lease_async(runtime_ctx)
+                except Exception:
+                    logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
+                except BaseException as exc:
+                    # release_async completes the underlying cleanup before it
+                    # re-raises cancellation. Defer that interruption until the
+                    # worker has dropped all other run-scoped references too.
+                    lease_cleanup_interrupt = exc
+                    logger.warning(
+                        "Sandbox execution lease cleanup was interrupted for run %s; completing local cleanup first",
+                        run_id,
+                    )
+                finally:
+                    _release_run_scoped_references(
+                        runnable_configs,
+                        runtime_ctx,
+                        journal,
+                    )
+                # Drop graph and per-run payload references before the terminal
+                # worker task itself becomes collectable.
+                agent = None
+                accessor = None
+                runtime = None
+                runtime_ctx = None
+                rollback_point = None
+                subagent_events = None
+                goal_evaluator_model = None
+                task_store = None
+                task_info = None
+                pre_run_workspace_snapshot = None
+                delivery_content = None
+                produced_output_paths = None
+                graph_input = {}
 
-        if checkpointer is not None and record.status == RunStatus.interrupted:
-            try:
-                await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-                if not await run_manager.has_later_started_run(thread_id, run_id):
-                    await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
-            except Exception:
-                logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+                # Durable finalization and terminal publication may depend on
+                # external backends, but local housekeeping must always run.
+                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                # Preserve the existing five-minute grace period for local
+                # join/status paths, then release the terminal record, completed
+                # task, and request payload. Durable run history remains available
+                # through RunStore.
+                _create_contextless_task(run_manager.cleanup(run_id))
+                _schedule_terminal_cycle_collection()
 
-        # Sync title from checkpoint to threads_meta.display_name
-        if checkpointer is not None and thread_store is not None:
-            try:
-                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
-                if ckpt_tuple is not None:
-                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
-                    if title:
-                        await thread_store.update_display_name(thread_id, title)
-            except Exception:
-                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
-
-        # Update threads_meta status based on run outcome
-        if thread_store is not None:
-            try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await thread_store.update_status(thread_id, final_status)
-            except Exception:
-                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
-        if ctx.on_run_completed is not None:
-            try:
-                await ctx.on_run_completed(record)
-            except Exception:
-                logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
-        if record.finalizing:
-            await run_manager.set_finalizing(run_id, False)
-
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+                if lease_cleanup_interrupt is not None:
+                    raise lease_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -632,11 +1793,17 @@ def _goal_instance_matches(left: GoalState | None, right: GoalState | None) -> b
     return same_status and same_objective and same_created_at
 
 
-def _read_checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
-    return messages if isinstance(messages, list) else []
+async def _materialized_checkpoint_messages(accessor: CheckpointStateAccessor, thread_id: str) -> list[Any]:
+    """Read ``messages`` through the mode-matched accessor.
+
+    Raw ``channel_values`` reads see a sentinel in delta mode; only a
+    materialized read reconstructs the list.  Raw checkpoint tuples remain
+    valid for tuple-level metadata (checkpoint id, ``pending_writes``).
+    """
+    snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages") if isinstance(values, dict) else None
+    return list(messages) if isinstance(messages, list) else []
 
 
 def _read_checkpoint_goal(checkpoint_tuple: Any) -> GoalState | None:
@@ -664,6 +1831,23 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     if not visible_messages:
         return False
     return _message_type(visible_messages[-1]) == "ai"
+
+
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. The goal evaluator only reads human and AI text and never sees it.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
 
 
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
@@ -706,6 +1890,12 @@ async def _persist_goal_evaluation(
             current_goal = _read_checkpoint_goal(checkpoint_tuple)
             if current_goal is None or not _goal_instance_matches(goal, current_goal):
                 return None
+            # Defensive: compute continuation_count from the fresh current_goal
+            # inside the lock.  The caller computed it from a possibly-stale goal
+            # snapshot; a racing continuation may have already bumped the count.
+            if continuation_count is not None:
+                current_count = int(current_goal.get("continuation_count", 0))
+                continuation_count = max(continuation_count, current_count + 1)
             expected_checkpoint_id = _checkpoint_id(checkpoint_tuple)
             updated_goal = attach_goal_evaluation(
                 current_goal,
@@ -747,6 +1937,7 @@ async def _reread_goal_and_checkpoint(checkpointer: Any, thread_id: str) -> tupl
 async def _prepare_goal_continuation_input(
     *,
     bridge: StreamBridge,
+    accessor: CheckpointStateAccessor,
     checkpointer: Any,
     thread_id: str,
     run_id: str,
@@ -754,6 +1945,11 @@ async def _prepare_goal_continuation_input(
     app_config: AppConfig | None,
     evaluator_model_factory: Any | None = None,
     abort_event: asyncio.Event | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
+    run_stop_reason: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -807,9 +2003,22 @@ async def _prepare_goal_continuation_input(
         if checkpoint_tuple is None:
             return None
         checkpoint_id_before = _checkpoint_id(checkpoint_tuple)
-        messages = _read_checkpoint_messages(checkpoint_tuple)
+        messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
+
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(
@@ -831,6 +2040,11 @@ async def _prepare_goal_continuation_input(
             model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
+            thread_id=thread_id,
+            user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
+            task_store=task_store,
+            extensions=extensions,
         )
         if abort_event is not None and abort_event.is_set():
             return None
@@ -852,7 +2066,7 @@ async def _prepare_goal_continuation_input(
         return None
 
     checkpoint_changed = _checkpoint_id(current_checkpoint_tuple) != checkpoint_id_before
-    messages_changed = visible_conversation_signature(_read_checkpoint_messages(current_checkpoint_tuple)) != conversation_signature_before
+    messages_changed = visible_conversation_signature(await _materialized_checkpoint_messages(accessor, thread_id)) != conversation_signature_before
     if checkpoint_changed or messages_changed:
         await _persist(current_goal, evaluation, no_progress_count, stand_down_reason="thread_changed_after_evaluation")
         return None
@@ -886,6 +2100,11 @@ async def _prepare_goal_continuation_input(
         return None
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
+    if stand_down_reason is None and run_stop_reason == "token_capped":
+        # The run already used up its token budget, and continuations share that
+        # budget, so another hidden turn would spend one more model call only to
+        # have its tool calls stripped.
+        stand_down_reason = "token_capped"
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
@@ -904,12 +2123,19 @@ async def _prepare_goal_continuation_input(
         return None
     if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
-    if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
+    if visible_conversation_signature(await _materialized_checkpoint_messages(accessor, thread_id)) != conversation_signature_before:
+        # Do not pass continuation_count here: the persist above already
+        # committed it (as next_count). Re-passing next_count would make
+        # _persist_goal_evaluation's race guard (#4088) see that same write as
+        # a "current_count" bump and add another +1 on top of it, silently
+        # double-counting this single continuation attempt against the
+        # continuation budget even though it is being stood down, not
+        # delivered. Omitting it leaves the already-committed count untouched,
+        # matching every other stand-down call site in this function.
         await _persist(
             latest_goal,
             evaluation,
             no_progress_count,
-            continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
         )
         return None
@@ -924,65 +2150,279 @@ async def _prepare_goal_continuation_input(
     return {"messages": [make_goal_continuation_message(updated_goal, evaluation)]}
 
 
+def _is_edit_replay_run(record: RunRecord) -> bool:
+    metadata = record.metadata or {}
+    return metadata.get("replay_kind") == "edit"
+
+
+async def _ensure_finalizing_before_edit_failure(run_manager: RunManager, record: RunRecord) -> None:
+    if _is_edit_replay_run(record) and not record.finalizing:
+        await run_manager.set_finalizing(record.run_id, True)
+
+
+async def _publish_restored_checkpoint_values(
+    *,
+    bridge: StreamBridge,
+    run_id: str,
+    accessor: CheckpointStateAccessor | None,
+    thread_id: str,
+) -> None:
+    if accessor is None:
+        return
+    snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+    values = getattr(snapshot, "values", None)
+    if isinstance(values, dict):
+        await bridge.publish(run_id, "values", serialize(values, mode="values"))
+
+
+@dataclass(frozen=True)
+class RollbackPoint:
+    """Materialized pre-run state used to restore the thread after cancellation.
+
+    Raw checkpoint blobs cannot reconstruct Delta-channel messages (their
+    checkpoints omit the materialized value), so rollback preserves those
+    messages plus delta mode's materialized non-message state in addition to
+    the raw pending writes.
+    """
+
+    config: dict[str, Any]
+    state_values: dict[str, Any]
+    messages: tuple[Any, ...]
+    metadata: dict[str, Any]
+    pending_writes: tuple[tuple[str, str, Any], ...]
+
+
+async def _capture_rollback_point(
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+    read_config: dict[str, Any],
+) -> RollbackPoint | None:
+    """Materialize the pre-run checkpoint state and its raw pending writes.
+
+    Returns ``None`` when the thread has no checkpoint yet; the caller keeps
+    the existing delete/reset rollback contract for that case.
+    """
+    snapshot = await accessor.aget(read_config)
+    snapshot_config = getattr(snapshot, "config", None) or {}
+    configurable = snapshot_config.get("configurable") or {}
+    if not configurable.get("checkpoint_id"):
+        return None
+    checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", snapshot_config)
+    raw_values = getattr(snapshot, "values", None) or {}
+    messages = raw_values.get("messages") if isinstance(raw_values, dict) else None
+    state_values = copy.deepcopy({key: value for key, value in raw_values.items() if key != "messages"}) if accessor.mode == "delta" and isinstance(raw_values, dict) else {}
+    return RollbackPoint(
+        config={
+            "configurable": {
+                "thread_id": configurable.get("thread_id"),
+                "checkpoint_ns": configurable.get("checkpoint_ns") or "",
+                "checkpoint_id": configurable.get("checkpoint_id"),
+            }
+        },
+        state_values=state_values,
+        messages=tuple(messages or ()),
+        metadata=dict(getattr(snapshot, "metadata", None) or {}),
+        pending_writes=tuple(getattr(checkpoint_tuple, "pending_writes", ()) or ()),
+    )
+
+
+def _complete_state_replacement_values(
+    *,
+    mutation_graph: Any,
+    selected_values: dict[str, Any],
+    current_values: dict[str, Any],
+    run_id: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Build a whole-state replacement through the graph's effective schema."""
+    writable_fields = graph_writable_channels(mutation_graph)
+    reducer_fields = graph_reducer_channels(mutation_graph)
+    if writable_fields is None or reducer_fields is None:
+        raise RuntimeError(f"Run {run_id} could not inspect the state schema for {operation}")
+
+    replacement_values: dict[str, Any] = {}
+    for field_name in writable_fields:
+        if field_name in selected_values:
+            replacement = copy.deepcopy(selected_values[field_name])
+        elif field_name in current_values:
+            # LangGraph has no public "unset channel" update. A fresh channel
+            # exposes its schema default when one exists (for example [] / {});
+            # optional and otherwise-unconstructible channels reset to None.
+            channel = mutation_graph.channels.get(field_name)
+            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
+        else:
+            continue
+        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
+    return replacement_values
+
+
+async def _linearize_delta_checkpoint_resume(
+    *,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+    config: dict[str, Any],
+    thread_id: str,
+    run_id: str,
+) -> list[Any] | None:
+    """Replace a delta-mode checkpoint fork with an equivalent linear write.
+
+    Resuming from an older checkpoint forks the lineage, and in ``delta`` mode
+    the fork's state cannot be materialized correctly: the delta history walk
+    collects **every** ``pending_writes`` entry stored on each on-path
+    ancestor, but a shared parent also carries the writes of the sibling child
+    that was abandoned. Those writes are replayed into the fork, so the run
+    starts from a message list that still contains the answer it was supposed
+    to replace — regenerating in a branched thread surfaced this as the old
+    assistant message reappearing beside the new one after a reload (#4458).
+    Reproduced on postgres, sqlite, and the in-memory saver; ``full`` mode is
+    unaffected because its checkpoints carry complete ``channel_values`` and
+    need no replay.
+
+    The upstream contract (`BaseCheckpointSaver.get_delta_channel_history` and
+    the savers overriding it) is where write-to-child ownership belongs, so
+    this does not reimplement it. Instead the fork is expressed as what it
+    means: materialize the requested checkpoint's state and write it with
+    replace semantics on the **current head**, which has no other children,
+    then run linearly. Every materialized channel is restored; channels that
+    exist only on the newer head are reset to their schema default (or
+    ``None`` when the channel has no constructible default). The abandoned
+    turn stays in checkpoint history as the rewritten head's ancestry.
+
+    Returns the materialized messages when the resume was linearized, or
+    ``None`` when there was nothing to do (full mode, no checkpoint selector,
+    a non-root namespace, or a selector that already names the head). Failures
+    propagate: silently falling back to the fork would persist the corrupted
+    history this exists to prevent. The worker call site holds
+    ``_checkpoint_thread_lock`` across rollback capture and this rewrite; do
+    not reacquire that non-reentrant lock inside this helper.
+    """
+    if checkpointer is None or accessor.mode != "delta":
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        return None
+    if configurable.get("checkpoint_ns"):
+        # Subgraph namespaces have their own lineage; the Gateway only selects
+        # root checkpoints, so leave anything else untouched.
+        return None
+
+    head_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    head = await accessor.aget(head_config)
+    if _checkpoint_id(head) == checkpoint_id:
+        # Selecting the head is already linear — no sibling can exist yet.
+        return None
+
+    source_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}}
+    snapshot = await accessor.aget(source_config)
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages") if isinstance(values, dict) else None
+    if not isinstance(messages, list):
+        raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
+
+    # Write through the thread's effective schema so every application and
+    # middleware channel can be restored. Reducer channels need Overwrite to
+    # replace their already-aggregated value instead of merging it again.
+    mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
+    selected_values = dict(values)
+    head_values = getattr(head, "values", None) or {}
+    head_values = dict(head_values) if isinstance(head_values, dict) else {}
+    replacement_values = _complete_state_replacement_values(
+        mutation_graph=mutation_graph,
+        selected_values=selected_values,
+        current_values=head_values,
+        run_id=run_id,
+        operation="checkpoint resume",
+    )
+
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
+    configurable.pop("checkpoint_id", None)
+    configurable.pop("checkpoint_map", None)
+    logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)
+    return list(messages)
+
+
 async def _rollback_to_pre_run_checkpoint(
     *,
+    accessor: CheckpointStateAccessor | None,
     checkpointer: Any,
     thread_id: str,
     run_id: str,
-    pre_run_checkpoint_id: str | None,
-    pre_run_snapshot: dict[str, Any] | None,
+    rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
-) -> None:
-    """Restore thread state to the checkpoint snapshot captured before run start."""
+) -> bool:
+    """Restore the complete pre-run state and report whether it completed.
+
+    Full mode forks the captured pre-run checkpoint and overwrites messages;
+    all other channels inherit from that parent. Delta mode cannot safely fork
+    once the cancelled path has attached writes to the same parent, so it
+    replaces every captured channel on the current head instead. Both writes
+    use a state-only mutation graph whose synthetic ``rollback_restore`` node
+    finishes immediately and schedules no agent work.
+    """
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
-        return
+        return False
 
     if snapshot_capture_failed:
-        logger.warning("Run %s rollback skipped: pre-run checkpoint snapshot capture failed", run_id)
-        return
+        logger.warning("Run %s rollback skipped: pre-run checkpoint capture failed", run_id)
+        return False
 
-    if pre_run_snapshot is None:
+    if rollback_point is None:
         await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
-        return
+        return True
 
-    checkpoint_to_restore = None
-    metadata_to_restore: dict[str, Any] = {}
-    checkpoint_ns = ""
-    checkpoint = pre_run_snapshot.get("checkpoint")
-    if not isinstance(checkpoint, dict):
-        logger.warning("Run %s rollback skipped: invalid pre-run checkpoint snapshot", run_id)
-        return
-    checkpoint_to_restore = checkpoint
-    if checkpoint_to_restore.get("id") is None and pre_run_checkpoint_id is not None:
-        checkpoint_to_restore = {**checkpoint_to_restore, "id": pre_run_checkpoint_id}
-    if checkpoint_to_restore.get("id") is None:
+    configurable = rollback_point.config.get("configurable", {})
+    if not configurable.get("checkpoint_id"):
         logger.warning("Run %s rollback skipped: pre-run checkpoint has no checkpoint id", run_id)
-        return
-    restore_marker = _new_checkpoint_marker()
-    checkpoint_to_restore = {
-        **checkpoint_to_restore,
-        "id": restore_marker["id"],
-        "ts": restore_marker["ts"],
-    }
-    metadata = pre_run_snapshot.get("metadata", {})
-    metadata_to_restore = metadata if isinstance(metadata, dict) else {}
-    raw_checkpoint_ns = pre_run_snapshot.get("checkpoint_ns")
-    checkpoint_ns = raw_checkpoint_ns if isinstance(raw_checkpoint_ns, str) else ""
+        return False
 
-    channel_versions = checkpoint_to_restore.get("channel_versions")
-    new_versions = dict(channel_versions) if isinstance(channel_versions, dict) else {}
+    if accessor is None:
+        # Unreachable in practice: a rollback point can only be captured
+        # through the bound accessor. Stay fail-closed.
+        logger.warning("Run %s rollback skipped: agent accessor unavailable", run_id)
+        return False
 
-    restore_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
-    restored_config = await _call_checkpointer_method(
-        checkpointer,
-        "aput",
-        "put",
+    # Compile with the thread's effective schema so middleware-contributed
+    # channels survive (the base ThreadState fallback would silently drop
+    # them).
+    mutation_graph = build_state_mutation_graph("rollback_restore", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    if accessor.mode == "delta":
+        # A delta rollback fork has the same write-ownership problem as a
+        # checkpoint resume: the captured parent now carries writes from the
+        # cancelled sibling. Restore linearly on the current head instead.
+        restore_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        current = await accessor.aget(restore_config)
+        raw_current_values = getattr(current, "values", None) or {}
+        current_values = dict(raw_current_values) if isinstance(raw_current_values, dict) else {}
+        selected_values = copy.deepcopy(rollback_point.state_values)
+        selected_values["messages"] = list(rollback_point.messages)
+        replacement_values = _complete_state_replacement_values(
+            mutation_graph=mutation_graph,
+            selected_values=selected_values,
+            current_values=current_values,
+            run_id=run_id,
+            operation="rollback",
+        )
+    else:
+        restore_config = {
+            **rollback_point.config,
+            "configurable": dict(rollback_point.config.get("configurable", {})),
+        }
+        replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
+    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
+
+    restored_config = await mutation_accessor.aupdate(
         restore_config,
-        checkpoint_to_restore,
-        metadata_to_restore if isinstance(metadata_to_restore, dict) else {},
-        new_versions,
+        replacement_values,
+        as_node="rollback_restore",
     )
     if not isinstance(restored_config, dict):
         raise RuntimeError(f"Run {run_id} rollback restore returned invalid config: expected dict")
@@ -993,9 +2433,9 @@ async def _rollback_to_pre_run_checkpoint(
     if not restored_checkpoint_id:
         raise RuntimeError(f"Run {run_id} rollback restore did not return checkpoint_id")
 
-    pending_writes = pre_run_snapshot.get("pending_writes", [])
+    pending_writes = rollback_point.pending_writes
     if not pending_writes:
-        return
+        return True
 
     writes_by_task: dict[str, list[tuple[str, Any]]] = {}
     for item in pending_writes:
@@ -1015,6 +2455,7 @@ async def _rollback_to_pre_run_checkpoint(
             writes,
             task_id=task_id,
         )
+    return True
 
 
 def _new_checkpoint_marker() -> dict[str, str]:
@@ -1101,6 +2542,135 @@ def _title_generation_state(channel_values: dict[str, Any], graph_input: Any | N
     return state
 
 
+def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
+    """Check that (run_id, duration_seconds) is a well-formed duration entry."""
+    return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
+
+
+RUN_MESSAGE_IDS_METADATA_KEY = "run_message_ids"
+
+
+def valid_run_message_id_entry(message_id: Any, run_id: Any) -> bool:
+    """Check that a persisted legacy message-to-run attribution is well formed."""
+    return isinstance(message_id, str) and bool(message_id) and isinstance(run_id, str) and bool(run_id)
+
+
+async def persist_run_history_metadata(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int] | None = None,
+    message_run_ids: dict[str, str] | None = None,
+) -> bool:
+    """Merge validated run history indexes into a metadata-only checkpoint.
+
+    Durations accumulate so the history fast path can serve every known turn
+    from the latest checkpoint. Legacy AI-message attributions are persisted
+    alongside them for every audited AI ID, including boundary fallbacks whose
+    event lookup was exhaustively empty. The full mapping is deliberate: it is
+    both the exact-attribution cache and the negative-result coverage proof.
+    While the materialized message set at the head remains unchanged, later
+    reads query only uncached IDs. This metadata-only merge retains existing
+    entries, so compaction timing or historical migration may leave stale IDs;
+    reads ignore them because they only consult IDs in the materialized history.
+    """
+    duration_updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in (durations or {}).items() if valid_duration_entry(run_id, duration_seconds)}
+    message_run_id_updates = {message_id: run_id for message_id, run_id in (message_run_ids or {}).items() if valid_run_message_id_entry(message_id, run_id)}
+    if not duration_updates and not message_run_id_updates:
+        return False
+
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with _checkpoint_thread_lock(thread_id):
+        for _attempt in range(3):
+            ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            if ckpt_tuple is None:
+                return False
+
+            checkpoint = dict(getattr(ckpt_tuple, "checkpoint", {}) or {})
+            metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
+            raw_run_durations = metadata.get("run_durations")
+            run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
+            raw_message_run_ids = metadata.get(RUN_MESSAGE_IDS_METADATA_KEY)
+            run_message_ids = {message_id: run_id for message_id, run_id in raw_message_run_ids.items() if valid_run_message_id_entry(message_id, run_id)} if isinstance(raw_message_run_ids, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in duration_updates.items() if run_durations.get(run_id) != duration}
+            changed_message_run_ids = {message_id: run_id for message_id, run_id in message_run_id_updates.items() if run_message_ids.get(message_id) != run_id}
+            if not changed_durations and not changed_message_run_ids:
+                return False
+
+            run_durations.update(changed_durations)
+            run_message_ids.update(changed_message_run_ids)
+            parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
+            latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
+            if _checkpoint_identity(latest_tuple, latest_checkpoint) != parent_checkpoint_id:
+                continue
+
+            checkpoint.update(_new_checkpoint_marker())
+            metadata["source"] = "update"
+            prev_step = metadata.get("step")
+            metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
+            metadata["run_durations"] = run_durations
+            if run_message_ids:
+                metadata[RUN_MESSAGE_IDS_METADATA_KEY] = run_message_ids
+            else:
+                metadata.pop(RUN_MESSAGE_IDS_METADATA_KEY, None)
+            metadata["writes"] = {
+                "runtime_run_duration": {
+                    "run_ids": sorted(changed_durations),
+                    "message_ids": sorted(changed_message_run_ids),
+                }
+            }
+
+            checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
+            write_config = {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": parent_checkpoint_id,
+                }
+            }
+            await _call_checkpointer_method(
+                checkpointer,
+                "aput",
+                "put",
+                write_config,
+                checkpoint,
+                metadata,
+                {},
+            )
+            return True
+    return False
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint."""
+    return await persist_run_history_metadata(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations=durations,
+    )
+
+
+async def _persist_run_duration(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    duration_seconds: int,
+) -> None:
+    """Persist one completed run duration in the thread checkpoint metadata."""
+    await persist_run_durations(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations={run_id: duration_seconds},
+    )
+
+
 async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
     """Persist a local fallback title for interrupted first-turn runs.
 
@@ -1168,7 +2738,10 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         metadata["writes"] = {"runtime_interrupt_title": {"title": title}}
 
         checkpoint_ns = _checkpoint_namespace(latest_tuple)
-        write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+        # Parent to the checkpoint this write was derived from - a parentless
+        # raw write would sever Delta-channel replay ancestry (and truncate
+        # full-mode history walks).
+        write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns, "checkpoint_id": latest_identity}}
         await _call_checkpointer_method(
             checkpointer,
             "aput",
@@ -1304,54 +2877,198 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
     return walk(value)
 
 
-def _collect_pre_existing_message_ids(snapshot: dict[str, Any] | None) -> set[str]:
-    """Pull stable message ids out of a pre-run checkpoint snapshot.
-
-    Used by :func:`run_agent` to mask stale ``deerflow_error_fallback`` markers
-    on history messages so they don't trip the current run's failure path. A
-    missing or malformed snapshot yields an empty set (best-effort — we
-    intentionally never raise from this helper).
-    """
-    if not isinstance(snapshot, dict):
+def _collect_pre_existing_message_ids(values: Any) -> set[str]:
+    """Collect stable message IDs from graph-materialized channel values."""
+    if not isinstance(values, dict):
         return set()
-    checkpoint = snapshot.get("checkpoint")
-    if not isinstance(checkpoint, dict):
-        return set()
-    channel_values = checkpoint.get("channel_values")
-    if not isinstance(channel_values, dict):
-        return set()
-    messages = channel_values.get("messages")
+    messages = values.get("messages")
     if not isinstance(messages, (list, tuple)):
         return set()
-    ids: set[str] = set()
-    for msg in messages:
-        msg_id = _message_id(msg)
-        if msg_id is not None:
-            ids.add(msg_id)
-    return ids
+    return {message_id for message in messages if (message_id := _message_id(message)) is not None}
 
 
 def _unpack_stream_item(
     item: Any,
     lg_modes: list[str],
     stream_subgraphs: bool,
-) -> tuple[str | None, Any]:
-    """Unpack a multi-mode or subgraph stream item into (mode, chunk).
+) -> tuple[str | None, Any, tuple[str, ...]]:
+    """Unpack a multi-mode or subgraph stream item into (mode, chunk, namespace).
 
-    Returns ``(None, None)`` if the item cannot be parsed.
+    ``namespace`` is the subgraph namespace tuple LangGraph prefixes onto each
+    frame when ``subgraphs=True``; it is empty for root-graph frames. Delegated
+    subagent graphs inherit the parent's checkpoint namespace (see
+    ``subagents/executor.py``), so their frames arrive here with a non-empty
+    namespace and must not be mistaken for root frames.
+
+    Returns ``(None, None, ())`` if the item cannot be parsed.
     """
     if stream_subgraphs:
         if isinstance(item, tuple) and len(item) == 3:
-            _ns, mode, chunk = item
-            return str(mode), chunk
+            ns, mode, chunk = item
+            namespace = tuple(str(part) for part in ns) if isinstance(ns, (list, tuple)) else (str(ns),)
+            return str(mode), chunk, namespace
         if isinstance(item, tuple) and len(item) == 2:
             mode, chunk = item
-            return str(mode), chunk
-        return None, None
+            return str(mode), chunk, ()
+        return None, None, ()
 
     if isinstance(item, tuple) and len(item) == 2:
         mode, chunk = item
-        return str(mode), chunk
+        return str(mode), chunk, ()
 
     # Fallback: single-element output from first mode
-    return lg_modes[0] if lg_modes else None, item
+    return lg_modes[0] if lg_modes else None, item, ()
+
+
+def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
+    """Namespace-qualified SSE event name, LangGraph Platform style.
+
+    Root frames keep the bare event name; subgraph frames become
+    ``mode|ns1|ns2`` so clients can tell them apart. The LangGraph SDK parses
+    exactly this shape (``event.split("|").slice(1)``) and routes
+    subagent-namespaced values away from the thread view.
+    """
+    if not namespace:
+        return sse_event
+    return "|".join((sse_event, *namespace))
+
+
+#: Sentinel generation for an identity no lookup has missed at yet. Below every
+#: real generation, so it never reads as "already asked at this generation".
+_NEVER_LOOKED_UP = -1
+
+
+def _NO_FEED_WRITES() -> int:  # noqa: N802 — a callable constant, not a class
+    """Generation source for a path with no journal: the feed never moves."""
+    return 0
+
+
+class _MessageSeqStamper:
+    """Attach each already-persisted message's feed seq to a ``values`` frame.
+
+    A checkpoint carries no seq of its own and loses messages to summarization,
+    so a client merging it with the seq-ordered thread feed cannot place a
+    surviving old message once the feed's loaded page window no longer reaches
+    back to it (#4666). The seq exists in the event store keyed by message
+    identity; this carries it to the client and writes nothing back to the
+    checkpoint.
+
+    Cost is bounded to frames that introduce identities it has not resolved
+    yet: a resolved seq is final (the feed's earliest-seq-wins rule), so it is
+    never looked up twice, and in a real run the only frame that pays for a
+    query is the one where compaction brings older messages back into view.
+
+    A miss, unlike a hit, is only provisional. A message this run produces
+    reaches a frame before ``RunJournal`` flushes it, so it legitimately misses
+    and would stay unstamped for the whole run if that answer were kept — the
+    long run that then rolls past the history page and compacts is exactly the
+    case this stamper exists for. Misses are therefore re-asked, but only once
+    the feed has actually gained rows, which *feed_generation* reports; frames
+    alone never trigger a retry. A failed lookup is a miss under the same rule,
+    so a transient store error costs one generation, not the run.
+
+    An unstamped message needs no seq while it is still streaming: appending it
+    at the tail is already its correct position.
+    """
+
+    __slots__ = ("_store", "_thread_id", "_user_id", "_seqs", "_missing", "_feed_generation")
+
+    def __init__(self, event_store: Any, thread_id: str, *, feed_generation: Callable[[], int] | None = None) -> None:
+        self._store = event_store
+        self._thread_id = thread_id
+        # Without a generation source (no journal on this path) nothing can
+        # report a feed write, so a miss stays cached rather than being re-asked
+        # on every frame: a constant reads as "the feed has not moved".
+        self._feed_generation = feed_generation if feed_generation is not None else _NO_FEED_WRITES
+        # Soft-resolved once at build time, like the worker's write paths: a
+        # launch path that never inherits the auth contextvar (e.g. a
+        # null-owner scheduled task) writes rows with no user_id, so the
+        # lookup filters by the same id the writes stamped — or not at all —
+        # instead of the db store's strict AUTO default raising per frame.
+        user = get_current_user()
+        self._user_id: str | None = str(user.id) if user is not None else None
+        self._seqs: dict[str, int] = {}
+        # identity -> the feed generation its last lookup missed at.
+        self._missing: dict[str, int] = {}
+
+    async def stamp(self, payload: Any) -> Any:
+        if self._store is None or not isinstance(payload, Mapping):
+            return payload
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return payload
+
+        identities = [message_identity(m) if isinstance(m, Mapping) else None for m in messages]
+        # Read before the lookup, never after: a write landing mid-query then
+        # advances past the generation the miss is recorded under, so the next
+        # frame re-asks. The reverse order could bury such a write.
+        generation = self._feed_generation()
+        unresolved = {i for i in identities if i is not None and i not in self._seqs and self._missing.get(i, _NEVER_LOOKED_UP) != generation}
+        if unresolved:
+            try:
+                found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved), user_id=self._user_id)
+            except Exception:
+                # Placement is an enhancement: a client without seq falls back
+                # to its own ordering rule. Never fail the frame over it.
+                logger.warning("Failed to resolve message seqs for thread %s", self._thread_id, exc_info=True)
+                found = {}
+            self._seqs.update(found)
+            self._missing.update(dict.fromkeys(unresolved - found.keys(), generation))
+
+        stamped = [attach_message_seq(message, seq) if identity is not None and (seq := self._seqs.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]
+        return {**payload, "messages": stamped}
+
+
+def _build_seq_stamper(event_store: Any, thread_id: str, journal: Any) -> _MessageSeqStamper:
+    """Build the run's stamper, reading feed writes from *journal*.
+
+    The journal owns the writes that turn a lookup miss into a hit, so it is
+    also what can tell the stamper that a cached miss is worth re-asking. A run
+    without one has no writer to report, and the stamper falls back to keeping
+    its misses.
+    """
+    return _MessageSeqStamper(
+        event_store,
+        thread_id,
+        feed_generation=(lambda: journal.feed_generation) if journal is not None else None,
+    )
+
+
+async def _publish_stream_item(
+    *,
+    bridge: Any,
+    run_id: str,
+    mode: str,
+    chunk: Any,
+    namespace: tuple[str, ...],
+    file_tool_chunk_batcher: Any,
+    subagent_events: Any,
+    seq_stamper: Any = None,
+) -> None:
+    """Publish one stream frame, preserving the subgraph namespace.
+
+    A subgraph frame published under a bare event name impersonates the root
+    graph: a delegated subagent's ``values`` snapshot then replaces the whole
+    thread view in SDK clients and its token chunks flood the parent message
+    stream (#4399). Subgraph frames therefore keep their namespace in the event
+    name and bypass the root-only consumers (file-tool chunk batcher, subagent
+    event persistence — task_* lifecycle events are root frames already).
+    """
+    sse_event = _compose_sse_event(_lg_mode_to_sse_event(mode), namespace)
+    if namespace:
+        await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+        return
+    if file_tool_chunk_batcher is not None and mode != "messages":
+        pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+        for publish_chunk in pending_chunks:
+            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+    chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
+    for publish_chunk in chunks_to_publish:
+        payload = serialize(publish_chunk, mode=mode)
+        if mode == "values" and seq_stamper is not None:
+            # Root frames only: a subagent's snapshot is not part of this
+            # thread's feed ordering (the namespaced branch returned above).
+            payload = await seq_stamper.stamp(payload)
+        await bridge.publish(run_id, sse_event, payload)
+    if mode == "custom":
+        await subagent_events.add(chunk)

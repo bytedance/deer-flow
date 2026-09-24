@@ -1,4 +1,17 @@
 /**
+ * Raised after the shared fetcher has started a login redirect for a 401.
+ *
+ * Callers may use this type to avoid showing a second, misleading API error
+ * while the browser is already navigating to the authentication flow.
+ */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Unauthorized");
+    this.name = "UnauthorizedError";
+  }
+}
+
+/**
  * Throw an Error from a failed Gateway REST response.
  *
  * Parses the FastAPI error envelope (`{ detail: string }`) and falls back to

@@ -28,6 +28,9 @@ def clear_tracing_env(monkeypatch):
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
         "LANGFUSE_BASE_URL",
+        "MONOCLE_TRACING",
+        "MONOCLE_EXPORTERS",
+        "OKAHU_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
     _reset_tracing_cache()

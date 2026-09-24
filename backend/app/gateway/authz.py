@@ -25,23 +25,38 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- memory:read   - View memory data/config
+- memory:write  - Modify memory data (create/update/delete facts, import, clear)
+- agents:read   - View custom agents and the user profile
+- agents:write  - Create/update/delete custom agents and the user profile
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
+import logging
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException, Request
 
+from deerflow.authz.principal import build_principal_from_context
+from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
+from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.config.authorization_config import AuthorizationConfig
+
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
+    from deerflow.config.app_config import AppConfig
 
 P = ParamSpec("P")
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 # Permission constants
@@ -57,6 +72,18 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
+
+    # Memory (per-user memory data surfaced by /api/memory*)
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+
+    # Custom agents and the per-user USER.md profile (/api/agents*, /api/user-profile)
+    AGENTS_READ = "agents:read"
+    AGENTS_WRITE = "agents:write"
 
 
 class AuthContext:
@@ -109,6 +136,28 @@ def get_auth_context(request: Request) -> AuthContext | None:
     return getattr(request.state, "auth", None)
 
 
+def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
+    """Require ``runs:cancel`` when a request carries cancel capability.
+
+    Cancel capability reaches the run lifecycle through more than the dedicated
+    cancel route: ``?action=interrupt|rollback`` on the join-stream entry and
+    ``multitask_strategy=interrupt|rollback`` on run creation both terminate an
+    already-active run. A credential whose scopes omit ``runs:cancel`` (e.g. a
+    create- or read-only PAT) must not reach any of those paths, and
+    decorators cannot express query- or body-parameter-conditional
+    permissions, so callers apply this check where the capability is known.
+
+    ``request.state.auth`` may be absent in middleware-less compositions
+    (unit-test stubs, auth-disabled startup); the shipped Gateway always
+    stamps it via ``AuthMiddleware`` before handlers run.
+    """
+    if not can_cancel:
+        return
+    auth = getattr(request.state, "auth", None)
+    if auth is not None and not auth.has_permission("runs", "cancel"):
+        raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+
+
 _ALL_PERMISSIONS: list[str] = [
     Permissions.THREADS_READ,
     Permissions.THREADS_WRITE,
@@ -116,6 +165,13 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -126,6 +182,363 @@ def _make_test_request_stub() -> Any:
     request injection. Includes fields accessed by auth helpers.
     """
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
+
+
+def _get_route_authorization_config() -> AuthorizationConfig:
+    """Return the hot-reloaded authorization config for this request.
+
+    Falls back to a disabled config when AppConfig is not available (e.g. test
+    environments without a config.yaml), preserving legacy all-permissions behavior.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config().authorization
+    except (FileNotFoundError, RuntimeError):
+        return AuthorizationConfig()
+
+
+# --- Provider cache (W1/F1) ---
+# Keyed by config object identity (id) so the expensive model_dump() signature
+# is only recomputed when get_app_config() returns a new object (hot-reload).
+_route_provider_cache: dict[str, AuthorizationProvider] = {}
+_route_provider_config_id: int | None = None
+_route_provider_config_sig: str | None = None
+
+
+def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProvider | None:
+    """Resolve (or reuse) the authorization provider for route permissions.
+
+    The provider is cached per config object identity. When ``get_app_config()``
+    returns a new object (hot-reload), the signature is recomputed and compared;
+    only an actual content change triggers re-resolution. This avoids calling
+    ``model_dump()`` on every request — the fast path is a single ``id()`` check.
+    """
+    global _route_provider_config_id, _route_provider_config_sig, _route_provider_cache
+
+    config_id = id(config)
+
+    # Fast path: same config object as last time → return cached provider.
+    if config_id == _route_provider_config_id and _route_provider_cache:
+        return _route_provider_cache.get("provider")
+
+    # Config object changed (hot-reload): compute signature to check if
+    # content actually changed or just the wrapper object identity.
+    sig = repr(sorted(config.model_dump().items()))
+    if sig == _route_provider_config_sig and _route_provider_cache:
+        # Same content, different object — update id, reuse provider.
+        _route_provider_config_id = config_id
+        return _route_provider_cache.get("provider")
+
+    # Content changed (or first call): re-resolve into a local first,
+    # then publish id + sig + provider together to avoid a race window.
+    _route_provider_cache.clear()
+
+    provider = resolve_authorization_provider(config)
+    if provider is not None:
+        _route_provider_cache["provider"] = provider
+    _route_provider_config_id = config_id
+    _route_provider_config_sig = sig
+    return provider
+
+
+async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
+    """Return the route permissions granted to an authenticated user.
+
+    Disabled authorization preserves the legacy all-permissions behavior.
+    When enabled, every registered ``resource:action`` permission is evaluated
+    independently so a provider failure affects only the route being checked.
+    Provider instances are cached per config signature (hot-reload safe).
+    """
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return list(_ALL_PERMISSIONS)
+
+    try:
+        provider = _get_cached_route_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
+        return [] if config.fail_closed else list(_ALL_PERMISSIONS)
+
+    # Align with Phase 1B's tool path: internal callers (IM channel workers,
+    # scheduler) have system_role="internal", which is not a real RBAC role.
+    # Omit it so default_role applies, mirroring inject_authenticated_user_context
+    # which pops user_role for internal callers without a resolved owner.
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    user_role = getattr(user, "system_role", None)
+    if user_role == INTERNAL_SYSTEM_ROLE:
+        user_role = None
+
+    principal = build_principal_from_context(
+        {
+            "user_id": str(user.id),
+            "user_role": user_role,
+            "oauth_provider": getattr(user, "oauth_provider", None),
+            "oauth_id": getattr(user, "oauth_id", None),
+            "is_internal": is_internal,
+        },
+        default_role=config.default_role,
+    )
+
+    # Evaluate all permissions in parallel (W2).
+    async def _evaluate(permission: str) -> str | None:
+        _, action = permission.split(":", maxsplit=1)
+        request = AuthzRequest(
+            principal=principal,
+            resource="route",
+            action=action,
+            target=permission,
+        )
+        try:
+            decision = await provider.aauthorize(request)
+            if not isinstance(decision, AuthzDecision):
+                raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Authorization provider failed while evaluating route permission %s",
+                permission,
+                exc_info=True,
+            )
+            return permission if not config.fail_closed else None
+        return permission if decision.allow else None
+
+    results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
+    return [p for p in results if p is not None]
+
+
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
+
+
+class _AuthorizationUnavailable(Exception):
+    """Raised internally when the provider cannot be resolved for a route check.
+
+    Carries the ``fail_closed`` flag so the caller can decide between deny-all
+    and legacy allow-all without re-reading config.
+    """
+
+    def __init__(self, *, fail_closed: bool) -> None:
+        self.fail_closed = fail_closed
+
+
+def _resolve_route_scoped_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for route-level resource authorization.
+
+    When authorization is disabled, returns ``(None, None)`` so callers can
+    short-circuit to legacy behavior (resource visible). When enabled,
+    resolves the cached provider and builds a Principal identical to
+    ``resolve_route_permissions`` (including the ``INTERNAL_SYSTEM_ROLE``
+    → ``None`` pop so internal callers fall under ``default_role``).
+
+    Raises ``_AuthorizationUnavailable`` (carrying the ``fail_closed`` flag)
+    when the provider cannot be resolved; callers translate that into the
+    appropriate deny response (empty list / 403).
+    """
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return None, None
+
+    try:
+        provider = _get_cached_route_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for route-level resources", exc_info=True)
+        raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
+
+    principal = build_principal_from_context(
+        _route_authz_context(user, is_internal=is_internal),
+        default_role=config.default_role,
+    )
+    return provider, principal
+
+
+def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for model-route authorization.
+
+    Delegates to ``_resolve_route_scoped_authorization``: disabled →
+    ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` (carrying ``fail_closed``).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for skill-route authorization.
+
+    Same resolution and Principal construction as ``resolve_model_authorization``
+    (disabled → ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` carrying ``fail_closed``). Consumers translate
+    that into the appropriate deny response (empty skill listing).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def _route_authz_context(user: User, *, is_internal: bool) -> dict:
+    """Build the shared Principal context dict for a request-scoped user.
+
+    Applies the ``INTERNAL_SYSTEM_ROLE → None`` pop so internal callers fall
+    under ``default_role`` (mirrors ``inject_authenticated_user_context``).
+    Used by ``_resolve_route_scoped_authorization`` (model/skill routes) and
+    ``authorize_sandbox_for_request`` so every route-level authorization path
+    builds the identity the same way.
+    """
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    user_role = getattr(user, "system_role", None)
+    if user_role == INTERNAL_SYSTEM_ROLE:
+        user_role = None
+    return {
+        "user_id": str(user.id),
+        "user_role": user_role,
+        "oauth_provider": getattr(user, "oauth_provider", None),
+        "oauth_id": getattr(user, "oauth_id", None),
+        "is_internal": is_internal,
+    }
+
+
+def authorize_sandbox_for_request(
+    user: User,
+    *,
+    is_internal: bool,
+    app_config: AppConfig | None,
+) -> None:
+    """Check ``sandbox:execute`` for a Gateway request before sandbox acquisition.
+
+    Thin wrapper over the harness-level ``authorize_sandbox_execution`` that
+    builds the Principal from the request-scoped ``user`` — the same identity
+    construction as ``resolve_model_authorization`` (including the
+    ``INTERNAL_SYSTEM_ROLE → None`` pop). Raises
+    :class:`~deerflow.sandbox.exceptions.SandboxAuthorizationError` on deny or
+    on provider-resolution failure under ``fail_closed``; callers translate
+    that into skipping the sandbox sync (not an HTTP error, since the primary
+    operation — e.g. file upload — can proceed without it).
+
+    No-op when ``authorization.enabled`` is false.
+    """
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return
+
+    context = _route_authz_context(user, is_internal=is_internal)
+
+    try:
+        authorize_sandbox_execution(
+            context=context,
+            app_config=app_config,
+        )
+    except SandboxAuthorizationError:
+        raise
+    except Exception:
+        # Defense-in-depth: provider resolution and authorize() errors are
+        # already converted to SandboxAuthorizationError (or allowed under
+        # fail-open) one layer down inside authorize_sandbox_execution, so this
+        # normally only catches config-read failures here (e.g. get_config()
+        # raising in a config-less environment). Those must not 500 the
+        # upload/artifact route — degrade per fail_closed instead.
+        logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
+        if config.fail_closed:
+            raise SandboxAuthorizationError(role=context.get("user_role")) from None
+
+
+@dataclass(slots=True)
+class SandboxRequestLease:
+    """One Gateway request's process-local use of a sandbox client."""
+
+    sandbox: object | None
+    sandbox_id: str | None
+    denied: bool
+    owner_id: str | None
+    provider: object | None
+
+    async def release(self) -> None:
+        """Drop the request holder without bypassing concurrent executions."""
+        if self.owner_id is None or self.provider is None:
+            return
+        from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+        owner_id = self.owner_id
+        self.owner_id = None
+        await get_sandbox_lease_manager(self.provider).release_async(owner_id)
+
+
+async def try_acquire_sandbox_for_request(
+    request: Request,
+    sandbox_provider,
+    thread_id: str,
+    *,
+    user_id: str,
+    app_config: AppConfig | None,
+    owner_prefix: str = "gateway",
+    release_on_last: bool = True,
+) -> SandboxRequestLease:
+    """Gate + acquire the thread sandbox for a Gateway sync path.
+
+    Single entry point for the uploads/artifacts sandbox-sync paths so the
+    deny/skip semantics live in one place: runs the ``sandbox:execute`` gate
+    for the request's user, then acquires the sandbox under a unique request
+    holder. Callers must await :meth:`SandboxRequestLease.release` after their
+    last client operation.
+
+    - denied role → no sandbox/owner and ``denied=True``: acquisition was skipped by policy;
+      the primary operation (upload / artifact edit) proceeds without the
+      sandbox copy.
+    - allowed → ``sandbox`` is the acquired instance, or ``sandbox is None`` when
+      the provider lost it right after acquiring (infrastructure error —
+      callers surface it as 500 / RuntimeError respectively, since that is
+      not a policy decision).
+    - ``request is None`` (direct-call tests) and unresolvable users skip the
+      gate — same fail-open semantics as the models routes' anonymous bypass.
+    """
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    try:
+        from app.gateway.deps import get_optional_user_from_request
+
+        user = await get_optional_user_from_request(request) if request is not None else None
+        if user is not None:
+            authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
+    except SandboxAuthorizationError:
+        logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
+        return SandboxRequestLease(
+            sandbox=None,
+            sandbox_id=None,
+            denied=True,
+            owner_id=None,
+            provider=None,
+        )
+
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    owner_id = f"{owner_prefix}:{uuid.uuid4()}"
+    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+        owner_id,
+        thread_id,
+        user_id=user_id,
+        release_on_last=release_on_last,
+    )
+    return SandboxRequestLease(
+        sandbox=sandbox_provider.get(sandbox_id),
+        sandbox_id=sandbox_id,
+        denied=False,
+        owner_id=owner_id,
+        provider=sandbox_provider,
+    )
 
 
 async def _authenticate(request: Request) -> AuthContext:
@@ -140,8 +553,31 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    # In future, permissions could be stored in user record
-    return AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+    permissions = await resolve_route_permissions_for_request(request, user)
+    return AuthContext(user=user, permissions=permissions)
+
+
+def _is_internal_caller(request: Request, user: Any) -> bool:
+    """Determine if the request originates from a trusted internal caller.
+
+    Checks three signals (any one suffices):
+    1. ``request.state.auth_source == AUTH_SOURCE_INTERNAL`` (set by AuthMiddleware).
+    2. ``user.system_role == INTERNAL_SYSTEM_ROLE`` (synthetic internal user).
+    3. The request carries a valid internal auth token header (decorator-only path
+       where AuthMiddleware may not have stamped ``auth_source`` yet).
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, INTERNAL_SYSTEM_ROLE, is_valid_internal_auth_token
+
+    if getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL:
+        return True
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return True
+    # Decorator-only path: check the internal token header directly.
+    internal_token = request.headers.get(INTERNAL_AUTH_HEADER_NAME) if hasattr(request, "headers") else None
+    if internal_token and is_valid_internal_auth_token(internal_token):
+        return True
+    return False
 
 
 def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
@@ -237,16 +673,29 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Bind the wrapped signature so a request passed positionally
+            # (direct calls in unit tests, non-FastAPI callers) is honored
+            # instead of colliding with an injected keyword stub.
+            signature = inspect.signature(func)
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
             request = kwargs.get("request")
+            if request is None and bound is not None:
+                request = bound.arguments.get("request")
             if request is None:
-                # Unit tests may call decorated route handlers directly without
-                # constructing a FastAPI Request object. Inject a minimal stub
-                # when the wrapped function declares `request`.
-                if "request" in inspect.signature(func).parameters:
+                # Unit tests may call decorated route handlers directly — with
+                # or without constructing a FastAPI Request object — and may
+                # pass ``request`` positionally. The full-signature bind at
+                # the top of this wrapper already recovered a positional
+                # request, so only the stub injection for handlers that
+                # declare ``request`` but received none remains here.
+                if "request" in signature.parameters:
                     kwargs["request"] = _make_test_request_stub()
+                    request = kwargs["request"]
                 else:
                     return await func(*args, **kwargs)
-                request = kwargs["request"]
 
             if getattr(request, "_deerflow_test_bypass_auth", False):
                 return await func(*args, **kwargs)
@@ -279,6 +728,8 @@ def require_permission(
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
                 thread_id = kwargs.get("thread_id")
+                if thread_id is None and bound is not None:
+                    thread_id = bound.arguments.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 

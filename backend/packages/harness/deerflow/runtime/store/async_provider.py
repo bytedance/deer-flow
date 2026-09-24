@@ -25,6 +25,8 @@ from collections.abc import AsyncIterator
 from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async
+from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.store.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_STORE_INSTALL,
@@ -35,6 +37,12 @@ from deerflow.runtime.store.provider import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _ensure_postgres_schema(conn_string: str, schema: str) -> None:
+    """Create the configured schema before LangGraph creates its store tables."""
+    await ensure_postgres_schema_async(conn_string, schema, install_hint=POSTGRES_STORE_INSTALL)
+
 
 # ---------------------------------------------------------------------------
 # Internal backend factory
@@ -64,7 +72,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
         await asyncio.to_thread(ensure_sqlite_parent_dir, conn_str)
 
-        async with AsyncSqliteStore.from_conn_string(conn_str) as store:
+        async with drained_async_context(AsyncSqliteStore.from_conn_string(conn_str)) as store:
             await store.setup()
             logger.info("Store: using AsyncSqliteStore (%s)", conn_str)
             yield store
@@ -79,7 +87,9 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresStore.from_conn_string(config.connection_string) as store:
+        await _ensure_postgres_schema(config.connection_string, config.postgres_schema)
+        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
+        async with drained_async_context(AsyncPostgresStore.from_conn_string(conn_string)) as store:
             await store.setup()
             logger.info("Store: using AsyncPostgresStore")
             yield store

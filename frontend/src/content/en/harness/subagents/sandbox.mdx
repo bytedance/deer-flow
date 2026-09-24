@@ -1,0 +1,78 @@
+---
+title: Sandbox and Isolation
+description: How the Lead Agent and concurrent subagents share one thread sandbox without interfering, which parts of a subagent's middleware chain and execution environment are isolated, and the session limit operators must match.
+---
+
+import { Callout } from "nextra/components";
+
+# Sandbox and Isolation
+
+## One shared thread sandbox
+
+The Lead Agent and every subagent it dispatches use the **same thread sandbox**: the same filesystem, the same `/mnt/user-data/workspace` and `/mnt/user-data/outputs`. A file a subagent writes is immediately readable by the Lead Agent, and vice versa.
+
+Sharing raises two problems, which the runtime solves with two mechanisms:
+
+### Execution leases
+
+Every run (Lead Agent or subagent) holds a process-local execution lease while it uses the sandbox; a subagent's lease owner id looks like `subagent:<task_id>`. The sandbox provider's `release()` runs only when the **last lease** is released, so one subagent finishing early does not park the sandbox its siblings are still using. Lease release is shielded and drained on cancellation, so it never stops halfway.
+
+### Independent shell sessions
+
+Inside an AIO sandbox each lease owner gets its own **persistent shell session**, created lazily per scope id with a UUID name. Concurrent subagents no longer share the image's implicit session, so their `cd`, environment variables, and background processes stay separate. Commands with explicit environment variables use a one-off `bash.exec` and bypass the persistent session.
+
+Recovery when a session goes wrong:
+
+- The server reports `session not found` (404): the session is recreated once and the command retried.
+- The server returns `ErrorObservation`: the command is retried on a fresh session and the old one is abandoned.
+- Releasing the lease cleans up the scope and its session.
+
+## Matching the AIO session limit
+
+The AIO image allows at most 10 shell sessions by default (`MAX_SHELL_SESSIONS`) and evicts the oldest idle session beyond that; an evicted subagent's next command gets `404 Session not found`. DeerFlow needs `subagent_runtime.max_running + 1` sessions, the extra one for the Lead Agent's own shell.
+
+- Without an explicit `sandbox.environment.MAX_SHELL_SESSIONS`, local containers receive the required value automatically whenever it exceeds 10.
+- An explicit value below the requirement fails Gateway startup: `sandbox.environment.MAX_SHELL_SESSIONS must be at least subagent_runtime.max_running + 1`.
+- In provisioner mode the Gateway forwards `max_shell_sessions` to the sandbox Pod. An older provisioner does not report the field back, and the Gateway raises a version-skew error; upgrade the provisioner together with the Gateway.
+
+## When the bash subagent is available
+
+The `bash` subagent enters the catalog only when `is_host_bash_allowed()` is true:
+
+| Sandbox configuration       | Result                                                    |
+| --------------------------- | --------------------------------------------------------- |
+| No `sandbox` section        | Not available                                             |
+| Container or remote provider | Available                                                |
+| `LocalSandboxProvider`      | Depends on `sandbox.allow_host_bash`, default `false`     |
+
+Delegating to `bash` under the local sandbox returns an explicit failure explaining that the subagent is disabled and that `allow_host_bash` belongs only in a fully trusted local environment.
+
+## Identity propagation into commands
+
+Conversations triggered through an IM channel carry the sender identity in the runtime context as `channel_user_id`. The `task` tool forwards it to the subagent, and every bash command the subagent runs is prefixed with `export DEERFLOW_CHANNEL_USER_ID=<value>;` (or `unset DEERFLOW_CHANNEL_USER_ID;` when the IM id is present but empty or invalid; runs without an IM identity get no prefix). The value is at most 256 characters and shell-quoted, so delegated scripts still know who is acting.
+
+## The subagent middleware chain
+
+`build_subagent_runtime_middlewares` assembles the chain. It shares a base with the Lead Agent and then appends subagent-specific middlewares. Roughly, from outermost to innermost:
+
+1. The shared base: input sanitization, knowledge scope, tool-output budget, remote-content sanitization, optional PII redaction, thread data, sandbox (without owning the skill projection), dangling tool-call patching, LLM error handling, tool receipts (always rendered on the subagent chain), optional authorization and guardrails, sandbox audit, read-before-write, tool progress, and tool error handling.
+2. Skill activation (with a fresh slash-source owner token per build), deferred-tool promotion audit, skill tool policy, the optional image viewer, MCP routing, and deferred-tool filtering.
+3. Loop detection, token budget, extension-contributed middlewares, and safety finish-reason handling.
+4. `DurableContextMiddleware`, summarization, and `SubagentDateContextMiddleware`.
+5. System-message coalescing as the innermost layer.
+
+Lead-only middlewares that are **not** on the subagent chain: dynamic context (user memory, midnight updates), memory, todo, token usage, title generation, delegation limits, terminal response, model-length finish-reason handling, clarification, and uploads. The subagent receives one `current_date` reminder from `SubagentDateContextMiddleware`, which depends on no configuration and reads no user memory.
+
+## Execution isolation
+
+- **No checkpointing**: the subgraph compiles with `checkpointer=False`, and the runtime passes no checkpoint coordinates such as `thread_id` to it; LangGraph inherits the parent namespace naturally. Subagent messages therefore do not leak into the parent stream, and a parent's synchronous checkpointer cannot trip the child.
+- **A dedicated event loop**: all subagents share one process-wide event loop on a daemon thread named `subagent-persistent-loop`, separate from the Gateway request loop. Crossing that boundary strips the parent callbacks bound to the original loop (such as the billing journal); token usage and audit events reach the parent through dedicated proxies.
+- **A resident system prompt**: the subagent's system prompt is the first system message in state. Summarization trims by index but explicitly preserves system messages and the latest user message, so the role prompt, report contract, acceptance note, and skill index survive compaction.
+- **Skill projection**: a subagent does not re-project `/mnt/skills`; the Lead Agent's run owns the projection. The subagent's skill allowlist scopes discovery and activation, not filesystem isolation.
+
+<Callout type="info">
+  A subagent shares the parent thread's `thread_id`. Every per-thread resource
+  (sandbox, upload directory, skill projection) is identical for both; every
+  per-run resource (run journal, checkpoint, ledger run id) refers to the
+  parent run.
+</Callout>

@@ -1,9 +1,7 @@
 import asyncio
-import ipaddress
 import logging
 import os
 import re
-import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -13,12 +11,14 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
+from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 from deerflow.utils.readability import ReadabilityExtractor
 
-from .browserless_client import BrowserlessClient, BrowserlessScreenshotResult
+from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,6 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
     "webp": "webp",
 }
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-# Hostnames that always resolve to a loopback/link-local/cloud-metadata target.
-_BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 # Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
 _MAX_FILENAME_COLLISION_PROBES = 1000
 
@@ -46,6 +44,41 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
+def _coerce_timeout(value: object, default: float) -> float:
+    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+
+    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
+    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
+    does not become ``0.0`` and time out every request against a healthy server, and a
+    typo'd value does not raise out of tool construction.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+    return default
+
+
+def _resolve_timeout(cfg: dict, default: float) -> float:
+    """Read the timeout, accepting this provider's key and the sibling providers' key.
+
+    ``browserless`` documents ``timeout_s`` while ``crawl4ai`` and ``jina_ai`` read
+    ``timeout``. An unrecognised key is dropped silently by the extra-fields tool config,
+    so someone adapting another provider's snippet got the default with no diagnostic.
+    Accept both, preferring the documented ``timeout_s`` when both are present.
+    """
+    if "timeout_s" in cfg:
+        return _coerce_timeout(cfg["timeout_s"], default)
+    if "timeout" in cfg:
+        return _coerce_timeout(cfg["timeout"], default)
+    return default
+
+
 def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
     cfg = _get_tool_config(tool_name)
     base_url = "http://localhost:3032"
@@ -54,8 +87,7 @@ def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
         token = cfg.get("token", token)
-        raw = cfg.get("timeout_s", timeout_s)
-        timeout_s = float(raw) if not isinstance(raw, float) else raw
+        timeout_s = _resolve_timeout(cfg, timeout_s)
     return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
@@ -94,31 +126,6 @@ def _normalize_output_format(value: object) -> str:
     return output_format if output_format in _OUTPUT_FORMAT_TO_EXTENSION else "png"
 
 
-def _resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
-    """Resolve a hostname to all of its IP addresses for SSRF screening.
-
-    Returns an empty list when resolution fails so callers can decide how to
-    treat an unresolvable host.
-    """
-    addresses: list[ipaddress._BaseAddress] = []
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except (socket.gaierror, UnicodeError):
-        return addresses
-    for info in infos:
-        sockaddr = info[4]
-        try:
-            addresses.append(ipaddress.ip_address(sockaddr[0]))
-        except ValueError:
-            continue
-    return addresses
-
-
-def _is_blocked_address(address: ipaddress._BaseAddress) -> bool:
-    """Return True for addresses that must never be reachable via this tool."""
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified
-
-
 def _validate_capture_url(url: str, allow_private_addresses: bool = False) -> str | None:
     """Validate a capture URL for scheme and (unless opted out) SSRF safety.
 
@@ -127,39 +134,12 @@ def _validate_capture_url(url: str, allow_private_addresses: bool = False) -> st
     unspecified addresses. Operators who intentionally point the tool at an
     internal Browserless target can opt out via ``allow_private_addresses``.
     """
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return "Error: Only http:// and https:// URLs are supported"
-
-    if allow_private_addresses:
-        return None
-
-    hostname = parsed.hostname
-    if not hostname:
-        return "Error: URL host could not be parsed"
-
-    normalized_host = hostname.strip().rstrip(".").lower()
-    if normalized_host in _BLOCKED_HOSTNAMES:
-        return "Error: Refusing to capture a private or loopback address"
-
-    # A literal IP host is screened directly; a name is screened across every
-    # address it resolves to, so a DNS record pointing at an internal IP is
-    # rejected rather than blindly fetched.
-    try:
-        literal_ip = ipaddress.ip_address(normalized_host)
-    except ValueError:
-        literal_ip = None
-
-    if literal_ip is not None:
-        candidates = [literal_ip]
-    else:
-        candidates = _resolve_host_addresses(hostname)
-        if not candidates:
-            return "Error: URL host could not be resolved"
-
-    if any(_is_blocked_address(addr) for addr in candidates):
-        return "Error: Refusing to capture a private, loopback, or metadata address"
-    return None
+    return validate_public_http_url(
+        url,
+        allow_private_addresses=allow_private_addresses,
+        action="capture",
+        resolver=_resolve_host_addresses,
+    )
 
 
 def _default_capture_stem(url: str) -> str:
@@ -227,13 +207,13 @@ def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) 
     return final_name
 
 
-def _target_status_warning(result: BrowserlessScreenshotResult) -> str:
-    """Return a human-readable warning when the captured page itself errored.
+def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetchResult) -> str:
+    """Return a human-readable warning when the fetched/captured page itself errored.
 
     Browserless returns HTTP 200 for the render request even when the target
     page responded with a 4xx/5xx (or was an error/anti-bot page), so the raw
-    image alone cannot be trusted as valid visual evidence. The target's real
-    status is surfaced via the X-Response-Code header.
+    content alone cannot be trusted as a normal successful response. The
+    target's real status is surfaced via the X-Response-Code header.
     """
     code = result.target_status_code.strip()
     if not code or code.startswith(("2", "3")):
@@ -255,7 +235,15 @@ async def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        cfg = _get_tool_config("web_fetch")
+        cfg = _get_tool_config("web_fetch") or {}
+        allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
+        url_error = validate_public_http_url(
+            url,
+            allow_private_addresses=allow_private_addresses,
+            resolver=_resolve_host_addresses,
+        )
+        if url_error:
+            return url_error
 
         wait_for_event = ""
         wait_for_timeout_ms = 0
@@ -264,14 +252,13 @@ async def web_fetch_tool(url: str) -> str:
         reject_resource_types: list[str] | None = None
         reject_request_pattern: list[str] | None = None
 
-        if cfg is not None:
-            wait_for_event = cfg.get("wait_for_event", wait_for_event)
-            raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
-            wait_for_timeout_ms = int(raw_wait) if not isinstance(raw_wait, int) else raw_wait
-            wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+        wait_for_event = cfg.get("wait_for_event", wait_for_event)
+        wait_for_timeout_ms = _as_int(cfg.get("wait_for_timeout_ms"), wait_for_timeout_ms)
+        wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+        wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
         client = _get_browserless_client("web_fetch")
-        html = await client.fetch_html(
+        result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
             wait_for_timeout_ms=wait_for_timeout_ms,
@@ -281,11 +268,11 @@ async def web_fetch_tool(url: str) -> str:
             reject_request_pattern=reject_request_pattern,
         )
 
-        if html.startswith("Error:"):
-            return html
+        if isinstance(result, str):
+            return result
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, html)
-        return article.to_markdown()[:4096]
+        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")

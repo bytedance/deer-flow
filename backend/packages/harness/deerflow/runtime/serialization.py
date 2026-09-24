@@ -75,9 +75,11 @@ def strip_data_url_image_blocks(messages: list[dict[str, Any]]) -> list[dict[str
     """Remove ``data:``-scheme ``image_url`` blocks from *hide_from_ui* messages.
 
     The history and run-wait endpoints return checkpoint-persisted messages to
-    the frontend.  ``ViewImageMiddleware`` stores full base64 image payloads in
-    ``hide_from_ui`` human messages — these are internal model context and must
-    not be sent over the wire (huge response bodies, no UI value).
+    the frontend.  ``ViewImageMiddleware`` now keeps its base64 image payloads
+    inside the model request, but threads checkpointed by earlier versions still
+    hold them in ``hide_from_ui`` human messages — these are internal model
+    context and must not be sent over the wire (huge response bodies, no UI
+    value).
 
     Only content blocks of type ``image_url`` whose URL starts with ``data:``
     are stripped.  Text blocks, ``https://`` image URLs, and non-hidden

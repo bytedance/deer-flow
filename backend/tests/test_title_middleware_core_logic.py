@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.constants import TAG_NOSTREAM
 
@@ -11,6 +12,7 @@ from deerflow.agents.middlewares import title_middleware as title_middleware_mod
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
@@ -61,6 +63,288 @@ class TestTitleMiddlewareCoreLogic:
         }
 
         assert middleware._should_generate_title(state) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            HumanMessage(
+                content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n分析这份报告",
+                additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "分析这份报告"},
+            ),
+            {
+                "type": "human",
+                "content": "<current_uploads>\n...\n</current_uploads>\n\n分析这份报告",
+                "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "分析这份报告"},
+            },
+        ],
+        ids=["langchain-message", "checkpoint-dict"],
+    )
+    def test_title_uses_original_user_content_when_upload_context_is_injected(self, message):
+        middleware = TitleMiddleware()
+
+        state = {
+            "messages": [message, AIMessage(content="好的，我来分析报告")],
+        }
+
+        assert middleware._get_title_user_message(state) == "分析这份报告"
+
+    def test_attachment_only_single_file_uses_filename_as_local_title(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "report.pdf"}],
+                    },
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ],
+            "uploaded_files": [{"filename": "report.pdf"}],
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "report.pdf"}
+
+    def test_interrupted_attachment_only_title_uses_filename(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                ),
+            ],
+            "uploaded_files": [{"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"}],
+        }
+
+        assert middleware._generate_title_result(state, allow_partial_exchange=True) == {"title": "report.pdf"}
+
+    @pytest.mark.parametrize("original_user_content", ["", " \t\n"], ids=["empty", "whitespace-only"])
+    def test_attachment_only_title_skips_configured_title_model(self, monkeypatch, original_user_content):
+        _set_test_title_config(enabled=True, model_name="title-model")
+        middleware = TitleMiddleware()
+        create_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_model)
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: original_user_content,
+                        "files": [{"filename": "report.pdf"}],
+                    },
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ],
+            "uploaded_files": [{"filename": "report.pdf"}],
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "report.pdf"}
+        create_model.assert_not_called()
+
+    def test_attachment_only_multiple_files_uses_count_title(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "report.pdf"}, {"filename": "data.csv"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "report.pdf"}, {"filename": "data.csv"}],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "2 files uploaded"}
+
+    @pytest.mark.parametrize("generate_async", [False, True], ids=["sync", "async"])
+    def test_attachment_only_multiple_files_respects_title_max_chars(self, generate_async):
+        config = _set_test_title_config(enabled=True, model_name=None, max_chars=10)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+                {"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"},
+            ],
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state)) if generate_async else middleware._generate_title_result(state)
+
+        assert result == {"title": "2 files"}
+        assert len(result["title"]) <= config.max_chars
+
+    def test_attachment_only_duplicate_paths_are_counted_once_before_name_cleanup(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+            ],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "report.pdf"}
+
+    def test_attachment_only_distinct_paths_with_same_cleaned_name_are_not_deduplicated(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "a\tb.pdf", "path": "/mnt/user-data/uploads/a\tb.pdf"},
+                {"filename": "a b.pdf", "path": "/mnt/user-data/uploads/a b.pdf"},
+            ],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "2 files uploaded"}
+
+    def test_attachment_only_without_valid_filename_falls_back_to_new_conversation(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "../not-an-upload.txt"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "New Conversation"}
+
+    def test_attachment_filename_title_cleans_controls_and_preserves_extension_when_truncated(self):
+        config = _set_test_title_config(enabled=True, model_name=None, max_chars=20)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "quarterly\nreport\twith-extra-details.xlsx"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "quarterly\nreport\twith-extra-details.xlsx"}],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "quarterly rep...xlsx"}
+        assert len(middleware._attachment_only_title(state) or "") <= config.max_chars
+
+    def test_attachment_filename_without_suffix_respects_configured_max_chars(self):
+        config = _set_test_title_config(enabled=True, model_name=None, max_chars=60)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "x" * 70}],
+        }
+
+        result = middleware._generate_title_result(state)
+
+        assert result == {"title": "x" * 57 + "..."}
+        assert len(result["title"]) == config.max_chars
+
+    def test_attachment_filename_title_preserves_percent_and_unicode(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "2026%预算报告（最终版）.xlsx"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "2026%预算报告（最终版）.xlsx"}],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "2026%预算报告（最终版）.xlsx"}
+
+    def test_user_text_title_takes_precedence_over_attachment_filename(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\n...\n</current_uploads>\n\nAnalyze this report",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "Analyze this report",
+                        "files": [{"filename": "report.pdf"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "report.pdf"}],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "Analyze this report"}
+
+    def test_attachment_filename_metadata_is_ignored_without_validated_upload_state(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "",
+                        "files": [{"filename": "unverified.pdf"}],
+                    },
+                ),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "New Conversation"}
+
+    def test_title_preserves_structured_content_without_original_user_content(self):
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "content": "嵌套的用户请求"}],
+                },
+                {"type": "ai", "content": "好的"},
+            ]
+        }
+
+        assert middleware._get_title_user_message(state) == "嵌套的用户请求"
 
     def test_should_not_generate_title_when_disabled_or_already_set(self):
         middleware = TitleMiddleware()
@@ -319,6 +603,51 @@ class TestTitleMiddlewareCoreLogic:
         result = middleware._generate_title_result(state)
         assert result["title"].endswith("...")
         assert result["title"].startswith("这是一个非常长的问题描述")
+        assert len(result["title"]) <= 50
+
+    @pytest.mark.parametrize("max_chars", [10, 20, 40, 49, 50, 52, 53, 60, 200])
+    def test_fallback_title_never_exceeds_max_chars(self, max_chars):
+        """``max_chars`` bounds the fallback title, not just its body.
+
+        The ellipsis is part of the returned title, so a body of exactly
+        ``min(max_chars, 50)`` characters overshot the configured cap by three.
+        ``model_name: null`` is the shipped default, so this is the path every
+        title takes out of the box -- not an error branch.
+        """
+        _set_test_title_config(max_chars=max_chars, model_name=None)
+        middleware = TitleMiddleware()
+
+        title = middleware._fallback_title("x" * 200)
+
+        assert len(title) <= max_chars
+        assert title.endswith("...")
+
+    @pytest.mark.parametrize("max_chars", [10, 20, 50])
+    def test_fallback_title_honours_the_same_cap_as_the_model_path(self, max_chars):
+        """Both title paths read ``config.max_chars``; both must respect it.
+
+        ``_parse_title`` slices the model's answer to ``max_chars`` exactly. The
+        local path is the other half of the same contract.
+        """
+        _set_test_title_config(max_chars=max_chars, model_name=None)
+        middleware = TitleMiddleware()
+        long_text = "x" * 200
+
+        assert len(middleware._parse_title(long_text)) <= max_chars
+        assert len(middleware._fallback_title(long_text)) <= max_chars
+
+    def test_fallback_title_keeps_default_config_output_unchanged(self):
+        """The default ``max_chars=60`` leaves room for the ellipsis already.
+
+        Reserving that room must not shorten titles that were never over the
+        cap, so the shipped configuration keeps emitting a 50-character body.
+        """
+        _set_test_title_config(max_chars=60, model_name=None)
+        middleware = TitleMiddleware()
+
+        title = middleware._fallback_title("x" * 200)
+
+        assert title == "x" * 50 + "..."
 
     def test_parse_title_strips_think_tags(self):
         """Title model responses with <think>...</think> blocks are stripped before use."""

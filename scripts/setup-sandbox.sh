@@ -10,13 +10,20 @@ echo ""
 
 # Try to extract image from config.yaml (handles both commented and uncommented sandbox sections)
 IMAGE=""
+CONFIGURED=1
 if [ -f "config.yaml" ]; then
-    # Look for uncommented image: field under the sandbox section
-    IMAGE=$(grep -A 20 "^sandbox:" config.yaml 2>/dev/null | grep "^  image:" | awk '{print $2}' | head -1 || true)
+    # Strip a leading UTF-8 BOM and CRLF line endings before matching.
+    # Bash expands the bytes so this works with both GNU and BSD sed.
+    IMAGE=$(sed $'1s/^\xef\xbb\xbf//;s/\r$//' config.yaml 2>/dev/null | grep -A 20 "^sandbox:" | grep "^  image:" | awk '{print $2}' | head -1 || true)
 fi
 
 if [ -z "$IMAGE" ]; then
-    IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+    # NOTE: not ":latest". The mirror's `:latest` tag is frozen on an old
+    # pre-1.9.3 digest that lacks the /v1/bash/* routes required-secrets
+    # skills need (see #3921/#3922) — pulling it here would defeat the whole
+    # point of this pre-pull helper. Keep this pinned to a version >= 1.9.3.
+    IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
+    CONFIGURED=0
     echo "Using default image: $IMAGE"
 else
     echo "Using configured image: $IMAGE"
@@ -42,4 +49,16 @@ else
     echo "✗ Neither Docker nor Apple Container is available"
     echo "  Please install Docker: https://docs.docker.com/get-docker/"
     exit 1
+fi
+
+if [ "$CONFIGURED" -eq 0 ]; then
+    echo ""
+    echo "⚠ NOTE: pulling this image does not make the sandbox use it."
+    echo "  config.yaml has no uncommented 'sandbox.image', so AioSandboxProvider"
+    echo "  falls back to its own built-in default at runtime, which is still"
+    echo "  pinned to ':latest' (frozen on an old pre-1.9.3 digest — see #3921)."
+    echo "  To actually run on $IMAGE, add it explicitly:"
+    echo ""
+    echo "    sandbox:"
+    echo "      image: $IMAGE"
 fi

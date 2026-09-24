@@ -9,7 +9,7 @@ import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
@@ -31,8 +31,11 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
+from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
-from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
+from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
 from deerflow.config.auth_config import OIDCProviderConfig
 
@@ -126,6 +129,7 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -136,6 +140,7 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     new_email: EmailStr | None = None
+    remember_me: bool | None = None
 
     _strong_password = field_validator("new_password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -149,18 +154,9 @@ class MessageResponse(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, request: Request) -> None:
+def _set_session_cookie(response: Response, token: str, request: Request, *, remember_me: bool | None = None) -> None:
     """Set the access_token HttpOnly cookie on the response."""
-    config = get_auth_config()
-    is_https = is_secure_request(request)
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
-    )
+    set_session_cookie(response, request, token, remember_me=remember_me)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -168,15 +164,47 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
 #
 # **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
 # worker maintains its own lockout table, so an attacker effectively gets
-# N × _MAX_LOGIN_ATTEMPTS guesses before being locked out everywhere. For
+# N × max_login_attempts guesses before being locked out everywhere. For
 # production multi-worker setups, replace this with a shared store (Redis,
 # database-backed counter) to enforce a true per-IP limit.
+#
+# The policy values are operator-configurable via auth.local.max_login_attempts /
+# auth.local.lockout_seconds (read live per call, matching _local_registration_enabled,
+# so a config reload applies to the next login without a Gateway restart). The
+# no-config.yaml fallback is the LocalAuthConfig model defaults — a single source
+# of truth, not a second copy of the numbers.
 
-_MAX_LOGIN_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 300  # 5 minutes
+# ip → (fail_count, locked_at, locked_duration). The stored duration always
+# matches the policy the lock was last evaluated under (its creation counts
+# as an evaluation, and every check that leaves the lock active commits the
+# then-current duration, decreases included): a lowered lockout_seconds
+# releases an active lock early, a raised one extends it — and a sentence
+# that already served the last-evaluated duration is never resurrected.
+_login_attempts: dict[str, tuple[int, float, float]] = {}
 
-# ip → (fail_count, lock_until_timestamp)
-_login_attempts: dict[str, tuple[int, float]] = {}
+
+def _login_throttle_policy() -> tuple[int, float]:
+    """(max_login_attempts, lockout_seconds) from auth.local config, read live.
+
+    Only ``FileNotFoundError`` falls back to the model defaults, matching
+    ``_local_registration_enabled``: ``config.yaml`` is absent in bare-app
+    contexts that never load it (tests build the gateway without one), and the
+    throttle must keep its pre-config-era behavior there. A malformed config
+    propagates instead — like every other config consumer, and so an operator
+    who tightened the policy never silently gets the more permissive defaults.
+
+    Callers on request paths resolve this at most once per helper invocation;
+    ``get_app_config`` re-hashes the config file on every call, and the login
+    endpoint is unauthenticated.
+    """
+    from deerflow.config.app_config import get_app_config
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    try:
+        local = get_app_config().auth.local
+    except FileNotFoundError:
+        local = LocalAuthConfig()
+    return local.max_login_attempts, local.lockout_seconds
 
 
 def _trusted_proxies() -> list:
@@ -240,46 +268,127 @@ def _get_client_ip(request: Request) -> str:
     return peer_host or "unknown"
 
 
-def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if the IP is currently locked out."""
+async def _check_rate_limit(ip: str) -> None:
+    """Raise 429 if the IP is currently locked out.
+
+    The record lookup comes before policy resolution on purpose: a clean IP
+    (no failed attempts recorded — the overwhelming majority of logins) must
+    not pay a config read, and ``get_app_config`` re-hashes config.yaml on
+    every call while this endpoint is unauthenticated. When a record exists
+    the policy is resolved off the event loop via ``asyncio.to_thread``:
+    every request from a recorded IP — including an already-locked attacker
+    flooding the endpoint — pays that read on the way to its answer, and the
+    stat + hash must not block the loop.
+    """
     record = _login_attempts.get(ip)
     if record is None:
         return
-    fail_count, lock_until = record
-    if fail_count >= _MAX_LOGIN_ATTEMPTS:
-        if time.time() < lock_until:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many login attempts. Try again later.",
-            )
+    max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
+    # The await above is a yield point: while this coroutine was suspended,
+    # another request for the same IP may have deleted or replaced the record
+    # (the pre-async version was atomic on the loop). The pre-read served only
+    # as the cheap clean-IP skip; decide on a fresh snapshot from here on —
+    # everything below is synchronous, and every mutation is guarded by
+    # re-comparing against that snapshot so a record replaced mid-flight
+    # (e.g. a successful login followed by a new failure) is never clobbered.
+    record = _login_attempts.get(ip)
+    if record is None:
+        return
+    fail_count, locked_at, locked_duration = record
+    if fail_count < max_attempts:
+        return
+    if locked_at == 0.0:
+        # Over the *current* threshold but the lock never started under the
+        # threshold these failures accumulated under (the operator tightened
+        # max_login_attempts mid-count). Keep the record: the next failure
+        # starts the lock and a successful login clears it — deleting here
+        # would hand the IP a fresh budget under a stricter policy.
+        return
+    now = time.time()
+    if now >= locked_at + locked_duration:
+        # The lock served the full sentence of the duration in force when it
+        # started — a later duration increase must not resurrect it.
+        if _login_attempts.get(ip) == record:
+            del _login_attempts[ip]
+        return
+    if now < locked_at + lockout_seconds:
+        # Still locked. The sentence now follows the current duration, and
+        # that evaluation is committed — including decreases — so the stored
+        # sentence always matches the policy the lock was last evaluated
+        # under; a later raise can never resurrect time the lock already
+        # served under a shorter policy.
+        if lockout_seconds != locked_duration and _login_attempts.get(ip) == record:
+            _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again later.",
+        )
+    # Original sentence still running, but the current (lowered) duration has
+    # already elapsed — release early.
+    if _login_attempts.get(ip) == record:
         del _login_attempts[ip]
 
 
 _MAX_TRACKED_IPS = 10000
 
 
-def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP."""
-    # Evict expired lockouts when dict grows too large
+def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: float) -> None:
+    """Apply one failed login to the counter under an explicit policy."""
+    # Evict expired lockouts when dict grows too large. Expiry is a property
+    # of each record's own committed sentence — `t > 0 and now >= t + d` —
+    # independent of the live threshold: a record locked under an old, lower
+    # threshold must still be swept once its sentence is served, even if the
+    # current max has moved past its count. Gating on the current threshold
+    # here would retain expired records while the capacity fallback below
+    # evicts live counters (they sort first), granting active offenders
+    # fresh budgets.
     if len(_login_attempts) >= _MAX_TRACKED_IPS:
         now = time.time()
-        expired = [k for k, (c, t) in _login_attempts.items() if c >= _MAX_LOGIN_ATTEMPTS and now >= t]
+        expired = [k for k, (c, t, d) in _login_attempts.items() if t > 0.0 and now >= t + d]
         for k in expired:
             del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half: below-threshold
-        # IPs (lock_until=0.0) sort first, then earliest-expiring lockouts.
+        # If still too large, evict cheapest-to-lose half ordered by each
+        # record's own expiry: never-locked counters (t + d == 0.0) first,
+        # then locked records whose committed sentence expires earliest.
         if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
+            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1] + kv[1][2])
             for k, _ in by_time[: len(by_time) // 2]:
                 del _login_attempts[k]
 
     record = _login_attempts.get(ip)
     if record is None:
-        _login_attempts[ip] = (1, 0.0)
+        _login_attempts[ip] = (1, 0.0, 0.0)
     else:
         new_count = record[0] + 1
-        lock_until = time.time() + _LOCKOUT_SECONDS if new_count >= _MAX_LOGIN_ATTEMPTS else 0.0
-        _login_attempts[ip] = (new_count, lock_until)
+        if new_count >= max_attempts:
+            _login_attempts[ip] = (new_count, time.time(), lockout_seconds)
+        else:
+            _login_attempts[ip] = (new_count, 0.0, 0.0)
+
+
+async def _record_login_failure(ip: str) -> None:
+    """Record a failed login attempt for the given IP.
+
+    Policy resolution runs off the event loop (see ``_check_rate_limit``):
+    this is the first config read for a previously clean IP, and the login
+    endpoint is unauthenticated.
+    """
+    try:
+        max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
+    except Exception:
+        # A malformed config keeps failing loudly, but dropping the failure
+        # here would leave the IP clean — and a clean IP skips the config
+        # read in _check_rate_limit, so every subsequent wrong password would
+        # reach authenticate() again: unlimited password verification for as
+        # long as the file stays broken. Count under the model defaults so
+        # the throttle fails closed (the next check reads the broken config
+        # before authenticate), then re-raise.
+        from deerflow.config.auth_config import LocalAuthConfig
+
+        fallback = LocalAuthConfig()
+        _record_failure_under_policy(ip, fallback.max_login_attempts, fallback.lockout_seconds)
+        raise
+    _record_failure_under_policy(ip, max_attempts, lockout_seconds)
 
 
 def _record_login_success(ip: str) -> None:
@@ -295,15 +404,16 @@ async def login_local(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
+    remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
     client_ip = _get_client_ip(request)
-    _check_rate_limit(client_ip)
+    await _check_rate_limit(client_ip)
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
 
     if user is None:
-        _record_login_failure(client_ip)
+        await _record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
@@ -311,12 +421,37 @@ async def login_local(
 
     _record_login_success(client_ip)
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=remember_me)
 
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
         needs_setup=user.needs_setup,
     )
+
+
+def _local_registration_enabled() -> bool:
+    """Whether visitors may self-register a local account.
+
+    Local registration bypasses the OIDC provisioning policy entirely
+    (allowed_email_domains, require_verified_email, auto_create_users are only
+    enforced in the SSO callback), so SSO-provisioned deployments need a way to
+    close this path.
+
+    ``config.yaml`` is absent in bare-app contexts that never load it (tests build the
+    gateway without one). Registration was unconditionally open before this gate existed,
+    so an absent config file falls back to that same default rather than turning these two
+    endpoints into a hard dependency on the file. Only ``FileNotFoundError`` is caught:
+    a malformed config must not silently re-open a closed deployment, so it propagates.
+
+    ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
+    change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config().auth.local.allow_registration
+    except FileNotFoundError:
+        return True
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -325,7 +460,15 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
+
+    Returns 403 when ``auth.local.allow_registration`` is false.
     """
+    if not _local_registration_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=AuthErrorResponse(code=AuthErrorCode.REGISTRATION_DISABLED, message="Self-registration is disabled on this deployment").model_dump(),
+        )
+
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
@@ -335,7 +478,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -343,7 +486,11 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
     """Logout current user by clearing the cookie."""
-    response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
+    is_https = is_secure_request(request)
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, secure=is_https, samesite="lax")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, secure=is_https, samesite="strict")
+    response.delete_cookie(key=SESSION_PERSISTENCE_COOKIE_NAME, secure=is_https, samesite="lax")
+    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -358,11 +505,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
     - Re-issues session cookie with new token_version
     """
     from app.gateway.auth.password import hash_password_async, verify_password_async
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_PAT
 
     user = await get_current_user_from_request(request)
 
-    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_AUTH_DISABLED:
+    if getattr(request.state, "auth_source", None) in {AUTH_SOURCE_PAT, AUTH_SOURCE_AUTH_DISABLED}:
+        # PAT-authenticated callers must not alter auth state (#4849 point 6);
+        # auth-disabled mode has no passwords to change.
+        if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Password changes require interactive session authentication",
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(
@@ -398,22 +552,159 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
     # Re-issue cookie with new token_version
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
+    _set_csrf_cookie(response, request)
 
     return MessageResponse(message="Password changed successfully")
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request):
-    """Get current authenticated user info."""
+    """Get current authenticated user info, including effective permissions."""
     user = await get_current_user_from_request(request)
+    auth = getattr(getattr(request, "state", None), "auth", None)
+    if auth is not None:
+        # AuthMiddleware already resolved the per-request permission set (with
+        # PAT-scope intersection and internal-caller semantics applied) — reuse
+        # it instead of evaluating the provider a second time.
+        permissions: list[str] = list(auth.permissions)
+    else:
+        # Middleware-less composition: resolve exactly as _authenticate does.
+        from app.gateway.authz import resolve_route_permissions_for_request
+
+        permissions = await resolve_route_permissions_for_request(request, user)
     return UserResponse(
         id=str(user.id),
         email=user.email,
         system_role=user.system_role,
         needs_setup=user.needs_setup,
         oauth_provider=user.oauth_provider,
+        permissions=permissions,
     )
+
+
+# ── Personal Access Tokens (#4849) ────────────────────────────────────────
+
+
+def require_session_source(request: Request) -> None:
+    """Reject non-session credentials from auth-state-altering routes.
+
+    PAT-authenticated callers must not manage PATs or change passwords
+    (#4849 point 6): a leaked automation token could otherwise mint fresh
+    long-lived credentials or lock out the human owner.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+
+    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint requires interactive session authentication")
+
+
+class PATCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=PAT_MAX_NAME_LENGTH)
+    scopes: list[str] = Field(min_length=1)
+    expires_in_days: int | None = Field(default=None, ge=1, le=365)  # None = never expires
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_non_empty_name(cls, value: str) -> str:
+        # A whitespace-only name passes min_length but would persist as an
+        # empty label; the trimmed value is what gets stored and shown.
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("PAT name must contain at least one non-whitespace character")
+        return stripped
+
+
+class PATCreatedResponse(BaseModel):
+    """Create response — ``token`` is the raw show-once credential."""
+
+    id: str
+    name: str
+    scopes: list[str]
+    expires_at: str | None
+    created_at: str
+    token: str
+
+
+class PATSummaryResponse(BaseModel):
+    id: str
+    name: str
+    scopes: list[str]
+    expires_at: str | None
+    last_used_at: str | None
+    created_at: str
+    revoked_at: str | None
+
+
+def _pat_summary(record: dict) -> PATSummaryResponse:
+    return PATSummaryResponse(
+        id=str(record["id"]),
+        name=str(record["name"]),
+        scopes=list(record.get("scopes") or []),
+        expires_at=str(record["expires_at"]) if record.get("expires_at") else None,
+        last_used_at=str(record["last_used_at"]) if record.get("last_used_at") else None,
+        created_at=str(record["created_at"]),
+        revoked_at=str(record["revoked_at"]) if record.get("revoked_at") else None,
+    )
+
+
+@router.post("/pats", status_code=status.HTTP_201_CREATED, response_model=PATCreatedResponse, dependencies=[Depends(require_session_source)])
+async def create_pat(request: Request, body: PATCreateRequest):
+    """Create a personal access token for the session user.
+
+    The raw token is returned exactly once and cannot be retrieved again;
+    only its SHA-256 digest is persisted.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.gateway.auth.pat import generate_pat_token, pat_token_digest, validate_scopes
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    try:
+        scopes = validate_scopes(body.scopes)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    token = generate_pat_token()
+    expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None
+    record = await get_pat_repo(request).create(
+        user_id=str(user.id),
+        name=body.name.strip(),
+        scopes=scopes,
+        token_digest=pat_token_digest(token),
+        expires_at=expires_at,
+    )
+    return PATCreatedResponse(
+        id=str(record["id"]),
+        name=str(record["name"]),
+        scopes=list(record.get("scopes") or []),
+        expires_at=str(record["expires_at"]) if record.get("expires_at") else None,
+        created_at=str(record["created_at"]),
+        token=token,
+    )
+
+
+@router.get("/pats", response_model=list[PATSummaryResponse], dependencies=[Depends(require_session_source)])
+async def list_pats(request: Request):
+    """List the session user's tokens. Never returns digests or raw tokens."""
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    records = await get_pat_repo(request).list_for_user(str(user.id))
+    return [_pat_summary(record) for record in records]
+
+
+@router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source)])
+async def revoke_pat(request: Request, pat_id: str):
+    """Revoke one of the session user's tokens. Revocation is immediate."""
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
+    if not revoked:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
+    return MessageResponse(message="Token revoked")
 
 
 # Per-IP cache: ip → (timestamp, result_dict).
@@ -464,7 +755,7 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0}
+                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled()}
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
@@ -489,6 +780,7 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -525,7 +817,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -552,17 +844,17 @@ async def close_oidc_service() -> None:
 def _set_csrf_cookie(response: Response, request: Request) -> None:
     """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
     csrf_token = generate_csrf_token()
-    is_https = is_secure_request(request)
+    secure, max_age = auth_csrf_cookie_settings(request)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
-        secure=is_https,
+        secure=secure,
         samesite="strict",
         # Persist for the same lifetime as the access_token (see _set_session_cookie)
         # so the double-submit pair is evicted together, never leaving a logged-in
         # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
-        max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
+        max_age=max_age,
     )
 
 
@@ -617,6 +909,7 @@ async def oauth_login(
     request: Request,
     provider: str,
     next: str | None = None,  # noqa: A002 (shadowing built-in is intentional — this is the query param name)
+    remember_me: bool = True,
 ):
     """Initiate OIDC login flow.
 
@@ -682,6 +975,7 @@ async def oauth_login(
         nonce=nonce_value,
         code_verifier=code_verifier,
         next_path=redirect_path,
+        remember_me=remember_me,
     )
     redirect_response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
     set_state_cookie(redirect_response, request, state_payload)
@@ -790,14 +1084,15 @@ async def oauth_callback(
     # ── Issue DeerFlow session ───────────────────────────────────────
     token = create_access_token(str(user.id), token_version=user.token_version)
 
-    redirect_target = state_payload.next_path or "/workspace"
+    # Revalidate as defense-in-depth if future state writers populate this target.
+    redirect_target = validate_next_param(state_payload.next_path) or "/workspace"
     frontend_base = oidc_config.frontend_base_url or ""
     callback_redirect = f"{frontend_base}/auth/callback?next={urllib.parse.quote(redirect_target)}"
 
     redirect_response = RedirectResponse(url=callback_redirect, status_code=status.HTTP_302_FOUND)
 
     # Set session cookie (reuse existing helper)
-    _set_session_cookie(redirect_response, token, request)
+    _set_session_cookie(redirect_response, token, request, remember_me=state_payload.remember_me)
 
     # Set CSRF cookie (callback is a GET, so CSRF middleware won't set it)
     _set_csrf_cookie(redirect_response, request)
@@ -818,13 +1113,16 @@ def validate_next_param(next_param: str | None) -> str | None:
     """Validate and sanitize the ``next`` redirect parameter.
 
     Only allows relative paths starting with ``/``. Rejects protocol-relative
-    URLs (``//``), absolute URLs, and URLs with embedded protocols.
+    URLs (``//``), absolute URLs, URLs with embedded protocols, and backslashes
+    that URL parsers may reinterpret as forward slashes.
     """
     if not next_param:
         return None
     if not next_param.startswith("/"):
         return None
     if next_param.startswith("//") or next_param.startswith("http://") or next_param.startswith("https://"):
+        return None
+    if "\\" in next_param:
         return None
     if ":" in next_param:
         return None

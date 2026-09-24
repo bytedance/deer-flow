@@ -32,6 +32,7 @@ class OIDCStatePayload(BaseModel):
     nonce: str | None = Field(default=None, description="OIDC nonce, verified against the ID token nonce claim")
     code_verifier: str | None = Field(default=None, description="PKCE code verifier, sent during token exchange")
     next_path: str = Field(default="/workspace", description="Redirect target after successful auth")
+    remember_me: bool = Field(default=True, description="Whether the resulting DeerFlow session should be persistent")
     issued_at: float = Field(default_factory=time.time, description="Unix timestamp of cookie creation")
 
 

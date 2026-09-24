@@ -67,7 +67,42 @@ class OIDCAuthConfig(BaseModel):
     )
 
 
+class LocalAuthConfig(BaseModel):
+    """Configuration for the built-in email/password authentication provider."""
+
+    allow_registration: bool = Field(
+        default=True,
+        description=(
+            "Allow visitors to self-register a local account via POST /api/v1/auth/register. "
+            "Set to false when accounts are provisioned exclusively through SSO — the OIDC "
+            "provisioning policy (allowed_email_domains, require_verified_email, auto_create_users) "
+            "does not apply to local registration."
+        ),
+    )
+    max_login_attempts: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Failed login attempts allowed from one client IP before it is locked out of "
+            "POST /api/v1/auth/login/local. Defaults preserve the historical hardcoded policy. "
+            "Raise it when many users share an egress IP (corporate proxy / NAT); lower it for "
+            "a stricter posture. Minimum 2: one failed attempt must never lock an IP, or a "
+            "single typo would block everyone behind a shared egress — the strictest legal "
+            "value locks after the second failure. The counter is per-Gateway-worker "
+            "(in-process), so effective attempts in multi-worker deployments scale with "
+            "worker count."
+        ),
+    )
+    lockout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Seconds an IP stays locked out after reaching auth.local.max_login_attempts. Defaults preserve the historical hardcoded policy (5 minutes)."),
+    )
+
+
 class AuthAppConfig(BaseModel):
     """Authentication configuration section for the DeerFlow app config."""
 
     oidc: OIDCAuthConfig = Field(default_factory=OIDCAuthConfig, description="OIDC SSO authentication settings")
+    local: LocalAuthConfig = Field(default_factory=LocalAuthConfig, description="Built-in email/password authentication settings")

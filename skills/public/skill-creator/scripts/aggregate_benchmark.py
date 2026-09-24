@@ -195,12 +195,12 @@ def aggregate_results(results: dict) -> dict:
 
         pass_rates = [r["pass_rate"] for r in runs]
         times = [r["time_seconds"] for r in runs]
-        tokens = [r.get("tokens", 0) for r in runs]
+        token_counts = [r.get("tokens", 0) for r in runs]
 
         run_summary[config] = {
             "pass_rate": calculate_stats(pass_rates),
             "time_seconds": calculate_stats(times),
-            "tokens": calculate_stats(tokens)
+            "tokens": calculate_stats(token_counts)
         }
 
     # Calculate delta between the first two configs (if two exist)

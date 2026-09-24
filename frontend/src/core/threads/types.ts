@@ -53,13 +53,19 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
-  seq?: number;
+  seq: number;
   content: Message;
   metadata: {
     caller: string;
     [key: string]: unknown;
   };
   created_at: string;
+}
+
+export interface ThreadContextUsage {
+  token_count: number;
+  max_context_tokens: number | null;
+  percentage: number | null;
 }
 
 export interface ThreadTokenUsageResponse {
@@ -74,4 +80,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage?: ThreadContextUsage | null;
 }

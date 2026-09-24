@@ -175,7 +175,7 @@ USERDATA_PVC_NAME=deer-flow-userdata-pvc
 SKILLS_PVC_NAME=deer-flow-skills-pvc
 ```
 
-当设置 `USERDATA_PVC_NAME` 时，Provisioner 自动使用子路径（`threads/{thread_id}/user-data`），每个线程在 PVC 中获得自己的目录。
+当设置 `USERDATA_PVC_NAME` 时，Provisioner 自动使用子路径（`deer-flow/users/{user_id}/threads/{thread_id}/user-data`），每个用户的每个线程在 PVC 中获得自己的目录。
 
 </Steps>
 

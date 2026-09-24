@@ -293,6 +293,32 @@ def dotted_name(node: ast.AST | None) -> str | None:
     return None
 
 
+def _simple_receiver_name(node: ast.AST | None) -> str | None:
+    """Like `dotted_name`, but only for Name/Attribute chains.
+
+    `dotted_name` intentionally unwraps `ast.Call` and `ast.Subscript` to build a
+    symbolic name for blocking-call pattern matching (`visit_Call` /
+    `_blocking_rule` / `_sync_http_client_factory_base`). Reusing that for
+    receiver/alias tracking is wrong: it would make a Call or Subscript result
+    inherit its base's alias-worthiness (e.g. treating `factory()` as if it
+    were the traced name `factory`), which this restricted extractor refuses
+    to do by simply not recognizing those node shapes at all -- including when
+    one is buried further down the chain (`factory().client`,
+    `clients[0].client`): an unsupported node anywhere in the chain makes the
+    whole receiver None, it never falls back to just the trailing attribute
+    name, or that trailing name alone could still collide with an unrelated
+    traced parameter or local alias of the same name.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _simple_receiver_name(node.value)
+        if parent is None:
+            return None
+        return f"{parent}.{node.attr}"
+    return None
+
+
 def relative_to_repo(path: Path, repo_root: Path = REPO_ROOT) -> str:
     try:
         return path.resolve().relative_to(repo_root.resolve()).as_posix()
@@ -314,6 +340,7 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.relative_path = relative_path
         self.source_lines = source_lines
         self.import_aliases: dict[str, str] = {}
+        self.postponed_annotations = False
         self.class_stack: list[str] = []
         self.function_stack: list[_FunctionContext] = []
         self.module_context = _FunctionContext("<module>", None, False)
@@ -325,7 +352,19 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.functions_by_name: dict[str, list[str]] = defaultdict(list)
         self.call_refs: dict[str, list[_CallRef]] = defaultdict(list)
         self.path_like_name_stack: list[set[str]] = []
+        self.local_receiver_alias_stack: list[set[str]] = []
         self.potential_findings: list[_PotentialFinding] = []
+        # True only while walking ANOTHER function's own decorators,
+        # parameter defaults/annotations, or return annotation (see
+        # `_visit_function`) -- expressions that run at definition time, in
+        # the enclosing scope, before the function being defined has ever
+        # been called. `visit_Lambda`/`visit_GeneratorExp` apply their
+        # defaults-only/outermost-iterable-only lazy traversal only while
+        # this is set; it is always restored to `False` before `_visit_function`
+        # returns, and no definition-time expression can itself contain a
+        # nested `def`/`class` statement (only expressions), so this never
+        # needs to be a stack.
+        self._in_definition_time_expression = False
 
     @property
     def current_function(self) -> _FunctionContext | None:
@@ -348,6 +387,15 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is None:
             return
+        if node.module == "__future__" and any(alias.name == "annotations" for alias in node.names):
+            # `from __future__ import annotations` (PEP 563) makes CPython skip
+            # evaluating parameter/return annotations at runtime entirely --
+            # they are kept as unevaluated strings -- so a call written in one
+            # never actually runs at definition time in this module, in either
+            # scope. This is always visited before any function def that could
+            # use it: the statement is required to appear before any other
+            # code in the file (`ast.parse` itself rejects it elsewhere).
+            self.postponed_annotations = True
         for alias in node.names:
             local_name = alias.asname or alias.name
             self.import_aliases[local_name] = f"{node.module}.{alias.name}"
@@ -366,14 +414,28 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self._visit_function(node, is_async=True)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        # Visit the RHS before recording anything about the assignment's own
+        # target(s): Python evaluates the value before binding it, so a call
+        # in the RHS (e.g. `client = client.flush()`) must see the receiver-
+        # alias state as it stood immediately BEFORE this assignment, not
+        # after. Updating/killing the target's alias first would make the
+        # target's own old alias disappear before the RHS that still runs
+        # under it gets a chance to be resolved.
+        self.visit(node.value)
         self._record_sync_http_client_targets(node.value, node.targets)
-        self.generic_visit(node)
+        self._record_local_receiver_alias_targets(node.value, node.targets)
+        for target in node.targets:
+            self.visit(target)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self._record_path_like_annotation(node.annotation, [node.target])
         if node.value is not None:
+            # Same RHS-before-target-update ordering as visit_Assign above.
+            self.visit(node.value)
             self._record_sync_http_client_targets(node.value, [node.target])
-        self.generic_visit(node)
+            self._record_local_receiver_alias_targets(node.value, [node.target])
+        self.visit(node.target)
+        self.visit(node.annotation)
 
     def visit_With(self, node: ast.With) -> None:
         temporary_clients: dict[str, str | None] = {}
@@ -397,6 +459,33 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
                 else:
                     current_clients[name] = previous
 
+    def visit_If(self, node: ast.If) -> None:
+        # `ast.If` is the only branching construct given isolated, merged alias
+        # state: `body` and `orelse` are mutually exclusive at runtime, so an
+        # alias added in one must not leak into the other, but a name aliased in
+        # either branch might still be aliased after the `if` (a conservative
+        # may-alias join) -- and the result must not depend on which branch is
+        # textually `body` vs `orelse`. `ast.Try`/`ast.Match` have different,
+        # more complex control-flow semantics (exception edges, multiple
+        # mutually exclusive case bodies) and are deliberately out of scope
+        # here; they keep the prior unisolated `generic_visit` behavior.
+        self.visit(node.test)
+        if not self.local_receiver_alias_stack:
+            for statement in node.body:
+                self.visit(statement)
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        before = set(self.current_local_receiver_aliases)
+        for statement in node.body:
+            self.visit(statement)
+        after_body = set(self.current_local_receiver_aliases)
+        self.local_receiver_alias_stack[-1] = set(before)
+        for statement in node.orelse:
+            self.visit(statement)
+        after_orelse = self.current_local_receiver_aliases
+        self.local_receiver_alias_stack[-1] = after_body | after_orelse
+
     def visit_Call(self, node: ast.Call) -> None:
         current = self.current_context
         call_name = self._canonical_name(dotted_name(node.func))
@@ -404,6 +493,58 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
             self._record_call_ref(node, call_name, current)
             self._record_blocking_candidate(node, call_name, current)
         self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # A lambda's parameter defaults run eagerly when the lambda object
+        # itself is created (same timing as a regular function's defaults),
+        # but its body only runs later, whenever/if the lambda is actually
+        # called -- possibly in a completely different scope, possibly
+        # never. That distinction is only meaningful while walking ANOTHER
+        # function's definition-time expressions (see `_visit_function`):
+        # there, we know structurally that the enclosing `def` statement is
+        # executing right now, and a nested lambda's body is categorically
+        # not part of that execution, no matter how (or whether) the lambda
+        # is later used. Everywhere else -- module level, class bodies, and
+        # ordinary function-body statements -- a lambda is scanned
+        # unconditionally, like any other expression: this file does not
+        # attempt to prove whether/when a lambda sitting in a variable,
+        # passed as a callback, invoked immediately, or invoked later through
+        # a stored name is actually called. That is the same conservative,
+        # over-report-rather-than-infer stance this file already takes for
+        # reachability elsewhere (e.g. `visit_If`'s may-alias union, or the
+        # bare-name call-graph resolution in `_record_call_ref`).
+        if not self._in_definition_time_expression:
+            self.generic_visit(node)
+            return
+        for default in node.args.defaults:
+            self.visit(default)
+        for default in node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        # Same principle as `visit_Lambda` above: only the outermost `for`'s
+        # iterable is evaluated eagerly, to build the generator object; the
+        # element expression, any `if` filters, and any additional `for`
+        # clauses live inside the generator's own frame and only run once/if
+        # it is iterated -- which may never happen. This is only meaningful
+        # while walking another function's definition-time expressions;
+        # everywhere else a generator expression is scanned unconditionally,
+        # regardless of what (if anything) it is later passed to. This file
+        # does not distinguish a builtin that consumes its argument eagerly
+        # (`list(...)`, `sum(...)`) from one that wraps it in another lazy
+        # iterator (`map(...)`) or leaves it unconsumed in a variable --
+        # telling those apart in general means inferring evaluation order
+        # across arbitrary code, not reading a fixed, structural fact. List/
+        # set/dict comprehensions always run their implicit scope immediately
+        # as part of building the result, regardless of context, so they are
+        # left fully eager unconditionally and are not given a matching
+        # override.
+        if not self._in_definition_time_expression:
+            self.generic_visit(node)
+            return
+        if node.generators:
+            self.visit(node.generators[0].iter)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, *, is_async: bool) -> None:
         qualname = ".".join((*self.class_stack, node.name)) if self.class_stack else node.name
@@ -413,13 +554,56 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.functions_by_name[node.name].append(qualname)
         if class_name is not None:
             self.class_methods[class_name].add(node.name)
+
+        # Decorators and parameter defaults run at definition time in the
+        # ENCLOSING scope, not inside the function body -- visit them before
+        # pushing this function's own context. Otherwise a call/receiver there
+        # (e.g. a default value referencing an outer variable that happens to
+        # share a parameter's name) gets misattributed to the function being
+        # defined instead of to whatever actually executes it. Parameter and
+        # return annotations get the same enclosing-scope treatment unless
+        # this module postpones annotation evaluation (`from __future__
+        # import annotations`), in which case they never execute at runtime at
+        # all, in either scope, so they are skipped entirely. PEP 695
+        # type-parameter bounds (`node.type_params`) are not visited at all,
+        # in either scope: CPython evaluates each one lazily, in its own
+        # hidden function, only when something like `T.__bound__` is actually
+        # accessed -- never as part of running this `def` statement.
+        # `_in_definition_time_expression` marks this whole traversal so
+        # `visit_Lambda`/`visit_GeneratorExp` know a lambda body or generator
+        # element reached here is not eager either -- purely because of
+        # where it sits, not because of its own shape. It is always restored
+        # to `False` below before this function's own body is visited.
+        self._in_definition_time_expression = True
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_definition_time_arguments(node.args)
+        if node.returns is not None and not self.postponed_annotations:
+            self.visit(node.returns)
+        self._in_definition_time_expression = False
+
         self.function_stack.append(context)
         self.sync_http_client_stack.append({})
         self.path_like_name_stack.append(set(_path_like_argument_names(node.args, self._canonical_name)))
-        self.generic_visit(node)
+        self.local_receiver_alias_stack.append(set(_all_argument_names(node.args)))
+        for statement in node.body:
+            self.visit(statement)
+        self.local_receiver_alias_stack.pop()
         self.path_like_name_stack.pop()
         self.sync_http_client_stack.pop()
         self.function_stack.pop()
+
+    def _visit_definition_time_arguments(self, arguments: ast.arguments) -> None:
+        for default in arguments.defaults:
+            self.visit(default)
+        for default in arguments.kw_defaults:
+            if default is not None:
+                self.visit(default)
+        if self.postponed_annotations:
+            return
+        for argument in _iter_arguments(arguments):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
 
     def _canonical_name(self, name: str | None) -> str | None:
         if name is None:
@@ -437,14 +621,35 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
             return
         if not isinstance(node.func, ast.Attribute):
             return
-        receiver = dotted_name(node.func.value)
+        receiver = _simple_receiver_name(node.func.value)
         if receiver in {"self", "cls"}:
             self.call_refs[current.qualname].append(_CallRef(node.func.attr, current.class_name, self_method=True))
+            return
+        if self._is_traceable_same_function_receiver(receiver):
+            # Multi-hop self./cls. attribute chains (self.store.flush()) and local
+            # variables/parameters traced back -- within this same function only --
+            # to a self./cls. attribute or a parameter (store = self.store;
+            # store.flush()) cannot be resolved to a specific class without full
+            # type inference. Fall back to the same conservative same-file,
+            # bare-method-name resolution already used below for receivers that
+            # cannot be resolved to a name at all, rather than dropping the edge.
+            self.call_refs[current.qualname].append(_CallRef(node.func.attr, current.class_name, self_method=False))
             return
         # Keep same-module direct calls through canonical aliases out of the call graph.
         # External calls are handled as blocking candidates instead.
         if "." not in call_name:
             self.call_refs[current.qualname].append(_CallRef(call_name, current.class_name, self_method=False))
+
+    def _is_traceable_same_function_receiver(self, receiver: str | None) -> bool:
+        # True when `receiver` is a self./cls.-rooted attribute chain, or a name
+        # traced -- within the current function only -- back to one of those or
+        # to a parameter. Deliberately no cross-function/cross-module alias or
+        # type inference; see `local_receiver_alias_stack` and
+        # `_record_local_receiver_alias_targets`.
+        if receiver is None:
+            return False
+        root = receiver.split(".", 1)[0]
+        return root in {"self", "cls"} or root in self.current_local_receiver_aliases
 
     def _record_blocking_candidate(self, node: ast.Call, call_name: str, current: _FunctionContext) -> None:
         rule = self._blocking_rule(node, call_name)
@@ -512,6 +717,10 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
     def current_path_like_names(self) -> set[str]:
         return self.path_like_name_stack[-1] if self.path_like_name_stack else set()
 
+    @property
+    def current_local_receiver_aliases(self) -> set[str]:
+        return self.local_receiver_alias_stack[-1] if self.local_receiver_alias_stack else set()
+
     def _record_path_like_annotation(self, annotation: ast.AST, targets: Iterable[ast.AST]) -> None:
         if not self.path_like_name_stack or not _is_path_annotation(annotation, self._canonical_name):
             return
@@ -525,6 +734,29 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         for target in targets:
             for name in _iter_assigned_names(target):
                 current_clients[name] = client_base
+
+    def _record_local_receiver_alias_targets(self, value: ast.AST, targets: Iterable[ast.AST]) -> None:
+        # Every assignment to a name previously in `current_local_receiver_aliases`
+        # must resolve that name's traceability from scratch -- not only add new
+        # traceable names -- or a stale alias from an earlier, unrelated value
+        # would keep exposing same-named blocking methods (dead code below this
+        # point) forever. A non-traceable value (an unrecognized shape, or a
+        # Call/Subscript result -- see `_simple_receiver_name`) therefore kills
+        # the name instead of leaving it untouched.
+        if not self.local_receiver_alias_stack:
+            return
+        current_aliases = self.current_local_receiver_aliases
+        assigned_names = [name for target in targets for name in _iter_assigned_names(target)]
+        if not assigned_names:
+            return
+        dotted = _simple_receiver_name(value)
+        root = dotted.split(".", 1)[0] if dotted is not None else None
+        is_traceable = root is not None and (root in {"self", "cls"} or root in current_aliases)
+        for name in assigned_names:
+            if is_traceable:
+                current_aliases.add(name)
+            else:
+                current_aliases.discard(name)
 
     def _sync_http_client_factory_base(self, node: ast.AST) -> str | None:
         if not isinstance(node, ast.Call):
@@ -573,15 +805,28 @@ def _is_path_annotation(annotation: ast.AST | None, canonical_name: Callable[[st
     return False
 
 
-def _path_like_argument_names(arguments: ast.arguments, canonical_name: Callable[[str | None], str | None]) -> Iterable[str]:
+def _iter_arguments(arguments: ast.arguments) -> Iterable[ast.arg]:
     candidates = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
     if arguments.vararg is not None:
         candidates.append(arguments.vararg)
     if arguments.kwarg is not None:
         candidates.append(arguments.kwarg)
-    for argument in candidates:
+    yield from candidates
+
+
+def _path_like_argument_names(arguments: ast.arguments, canonical_name: Callable[[str | None], str | None]) -> Iterable[str]:
+    for argument in _iter_arguments(arguments):
         if _is_path_annotation(argument.annotation, canonical_name):
             yield argument.arg
+
+
+def _all_argument_names(arguments: ast.arguments) -> Iterable[str]:
+    # Every parameter name of a function, unfiltered by annotation -- used to
+    # seed same-function receiver-alias tracing (see
+    # `local_receiver_alias_stack`) so a parameter used directly as a call
+    # receiver (e.g. a constructor-injected dependency) is traceable too.
+    for argument in _iter_arguments(arguments):
+        yield argument.arg
 
 
 def _iter_assigned_names(target: ast.AST) -> Iterable[str]:

@@ -16,10 +16,39 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from deerflow.utils.file_io import await_drained
+
+# Recycle pooled Postgres connections before stale idle sockets can hang
+# pool_pre_ping. The command timeout bounds stalled ORM queries independently.
+POSTGRES_POOL_RECYCLE_SECONDS = 300
+POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
+
 
 def _json_serializer(obj: object) -> str:
     """JSON serializer with ensure_ascii=False for Chinese character support."""
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _postgres_engine_kwargs(
+    *,
+    echo: bool,
+    pool_size: int,
+    pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
+    command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    connect_args: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the shared SQLAlchemy engine options for PostgreSQL."""
+    merged_connect_args = dict(connect_args or {})
+    if command_timeout is not None:
+        merged_connect_args["command_timeout"] = command_timeout
+    return {
+        "echo": echo,
+        "pool_size": pool_size,
+        "pool_pre_ping": True,
+        "pool_recycle": pool_recycle,
+        "connect_args": merged_connect_args,
+        "json_serializer": _json_serializer,
+    }
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +81,11 @@ async def _auto_create_postgres_db(url: str) -> None:
             await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
         logger.info("Auto-created PostgreSQL database: %s", db_name)
     finally:
-        await maint_engine.dispose()
+        # Drain: the maintenance engine is local to this helper, so an
+        # abandoned dispose leaves its pool to the ``postgres`` database with
+        # nothing left to close it. Host cancellation must therefore be
+        # delivered only after disposal actually finishes.
+        await await_drained(maint_engine.dispose())
 
 
 async def init_engine(
@@ -61,7 +94,10 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
+    pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
+    command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
+    postgres_schema: str = "",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -70,7 +106,13 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
+        pool_recycle: Seconds before Postgres connections are recycled.
+        command_timeout: Timeout in seconds for app ORM Postgres commands, or None to disable.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
+        postgres_schema: Target PostgreSQL schema. When set, the engine
+            pins the connection ``search_path`` to it via asyncpg
+            ``server_settings`` and the schema is created (if missing)
+            before tables are auto-created. Ignored for non-postgres.
     """
     global _engine, _session_factory
 
@@ -131,12 +173,18 @@ async def init_engine(
             finally:
                 cursor.close()
     elif backend == "postgres":
+        from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+        pg_connect_args = build_asyncpg_connect_args(postgres_schema)
         _engine = create_async_engine(
             url,
-            echo=echo,
-            pool_size=pool_size,
-            pool_pre_ping=True,
-            json_serializer=_json_serializer,
+            **_postgres_engine_kwargs(
+                echo=echo,
+                pool_size=pool_size,
+                pool_recycle=pool_recycle,
+                command_timeout=command_timeout,
+                connect_args=pg_connect_args,
+            ),
         )
     else:
         raise ValueError(f"Unknown persistence backend: {backend!r}")
@@ -154,17 +202,42 @@ async def init_engine(
     # See deerflow.persistence.bootstrap for the full state machine.
     from deerflow.persistence.bootstrap import bootstrap_schema
 
+    async def _ensure_postgres_schema() -> None:
+        # CREATE SCHEMA is DDL and is unaffected by search_path, so it is
+        # safe even though the connection's search_path already points at
+        # the (not-yet-existing) target schema. It must run before
+        # ``bootstrap_schema`` so the subsequent ``create_all`` / alembic
+        # DDL lands in the target schema instead of failing on a missing one.
+        if backend == "postgres" and postgres_schema:
+            from sqlalchemy.schema import CreateSchema
+
+            async with _engine.begin() as conn:
+                await conn.execute(CreateSchema(postgres_schema, if_not_exists=True))
+
     try:
-        await bootstrap_schema(_engine, backend=backend)
+        await _ensure_postgres_schema()
+        await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
     except Exception as exc:
         if backend == "postgres" and "does not exist" in str(exc):
             # Database not yet created -- attempt to auto-create it, then retry.
             await _auto_create_postgres_db(url)
-            # Rebuild engine against the now-existing database
+            # Rebuild engine against the now-existing database. The rebuilt
+            # engine MUST keep the same connect_args so the retried bootstrap
+            # lands in the target schema, not the default one.
             await _engine.dispose()
-            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, pool_pre_ping=True, json_serializer=_json_serializer)
+            _engine = create_async_engine(
+                url,
+                **_postgres_engine_kwargs(
+                    echo=echo,
+                    pool_size=pool_size,
+                    pool_recycle=pool_recycle,
+                    command_timeout=command_timeout,
+                    connect_args=pg_connect_args,
+                ),
+            )
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
-            await bootstrap_schema(_engine, backend=backend)
+            await _ensure_postgres_schema()
+            await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
         else:
             raise
 
@@ -181,7 +254,10 @@ async def init_engine_from_config(config) -> None:
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
+        pool_recycle=config.pool_recycle,
+        command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
+        postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
     )
 
 
@@ -196,10 +272,21 @@ def get_engine() -> AsyncEngine | None:
 
 
 async def close_engine() -> None:
-    """Dispose the engine, release all connections."""
+    """Dispose the engine before releasing the process-global ownership."""
     global _engine, _session_factory
-    if _engine is not None:
-        await _engine.dispose()
+
+    engine = _engine
+    if engine is None:
+        _session_factory = None
+        return
+
+    async def dispose_and_clear() -> None:
+        global _engine, _session_factory
+
+        await engine.dispose()
         logger.info("Persistence engine closed")
-    _engine = None
-    _session_factory = None
+        if _engine is engine:
+            _engine = None
+            _session_factory = None
+
+    await await_drained(dispose_and_clear())

@@ -1,0 +1,42 @@
+# Optional OpenViking memory service overlay.
+#
+# First-time initialization:
+#   docker compose -f docker/docker-compose.yaml \
+#     -f docker/docker-compose.openviking.yaml up -d openviking
+#   docker exec -it deer-flow-openviking openviking-server init
+#
+# Full stack:
+#   docker compose -f docker/docker-compose.yaml \
+#     -f docker/docker-compose.openviking.yaml up -d --build
+
+services:
+  openviking:
+    image: ${OPENVIKING_IMAGE:-ghcr.io/volcengine/openviking:latest}
+    container_name: deer-flow-openviking
+    command: ["--without-bot"]
+    ports:
+      - "${OPENVIKING_PORT:-1933}:1933"
+    volumes:
+      - openviking-data:/app/.openviking
+    networks:
+      - deer-flow
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:1933/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  gateway:
+    depends_on:
+      openviking:
+        condition: service_healthy
+
+volumes:
+  openviking-data:

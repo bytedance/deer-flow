@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES, parse_slash_skill_reference
+
 
 @dataclass(frozen=True)
 class Command:
@@ -36,6 +38,7 @@ class Resolution:
 BUILTIN_COMMANDS: tuple[Command, ...] = (
     Command("help", "Show commands and keybindings"),
     Command("new", "Start a fresh thread"),
+    Command("clear", "Clear the transcript display"),
     Command("threads", "Open the thread switcher"),
     Command("switch", "Open the thread switcher"),
     Command("resume", "Resume a thread by id or title"),
@@ -56,6 +59,17 @@ BUILTIN_COMMANDS: tuple[Command, ...] = (
 _BUILTIN_NAMES = frozenset(c.name for c in BUILTIN_COMMANDS)
 
 
+def format_command_help() -> str:
+    """One-line summary of every built-in slash command, for ``/help``.
+
+    Derived from :data:`BUILTIN_COMMANDS` so the help text can never drift out
+    of sync with the registry (and, therefore, the picker). Adding a built-in
+    surfaces it in ``/help`` automatically.
+    """
+    names = "  ".join(f"/{command.name}" for command in BUILTIN_COMMANDS)
+    return f"Commands:  {names}"
+
+
 def build_registry(skills: list[dict]) -> list[Command]:
     """Merge built-ins with one command per enabled skill."""
     commands = list(BUILTIN_COMMANDS)
@@ -63,7 +77,7 @@ def build_registry(skills: list[dict]) -> list[Command]:
         if not skill.get("enabled", False):
             continue
         name = skill.get("name")
-        if not name or name in _BUILTIN_NAMES:
+        if not name or name in _BUILTIN_NAMES or (name in RESERVED_SLASH_SKILL_NAMES and name != "context"):
             continue
         commands.append(Command(name=name, description=skill.get("description", "") or "", category="skill"))
     return commands
@@ -111,6 +125,8 @@ def resolve(text: str, skills: list[str] | None = None) -> Resolution:
         return Resolution(kind="builtin", name=name, args=args)
 
     if skills and name in skills:
-        return Resolution(kind="skill", name=name, args=args)
+        reference = parse_slash_skill_reference(f"/{name} {args}".rstrip())
+        if reference is not None:
+            return Resolution(kind="skill", name=name, args=args)
 
     return Resolution(kind="unknown", name=name, args=args)

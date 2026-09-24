@@ -11,8 +11,13 @@ Order of resolution:
    - database.backend == postgres        -> postgres
    - checkpointer.type == postgres       -> postgres
    - stream_bridge.type == redis         -> redis
+   - tools[].name == browser_navigate    -> browser
+   - sandbox.ownership.type == redis     -> redis
+   - channels.buzz.enabled == true       -> buzz
+   - models[].use == langchain_ollama:*  -> ollama
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
+   - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
 
 Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
 shape uv enforces for `[project.optional-dependencies]` keys). Anything else
@@ -74,6 +79,22 @@ def find_config_file() -> Path | None:
 _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
+_LIST_ITEM_KEY_RE = re.compile(r"^(\s*)-\s+([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$")
+# `use:` on a models list item, whether it is the first key (`- use: X`) or a
+# later one (`  use: X`). Leading whitespace is optional because
+# `yaml.safe_dump` (the setup wizard, config-upgrade.sh) writes list items
+# unindented. The caller pins matching to the model's own key indent, so a
+# `use` nested in a sub-mapping (e.g. `when_thinking_enabled`) is not mistaken
+# for the model's provider.
+_MODEL_USE_RE = re.compile(r"^\s*(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
+# A sequence item: group 1 is the dash's indent, group 2 the dash plus the
+# spaces before the item's first key, so their combined length is where that
+# item's keys sit.
+_LIST_ITEM_RE = re.compile(r"^(\s*)(-\s+)\S")
+
+# Provider module (the part before `:` in `models[].use`) -> uv extra that
+# ships it. Mirrors `[project.optional-dependencies]` in the harness package.
+_PROVIDER_EXTRAS = {"langchain_ollama": "ollama"}
 
 
 def _strip_comment(line: str) -> str:
@@ -220,9 +241,111 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
     return None
 
 
+def tools_include_name(lines: list[str], tool_name: str) -> bool:
+    """Return True when the top-level tools list has an active item name.
+
+    The first list item fixes the list indent, and each item's first key column
+    identifies its direct fields. The name may appear anywhere in the mapping;
+    deeper-nested names are ignored in both indented and indentless lists.
+    """
+    inside = False
+    list_indent: int | None = None
+    field_indent: int | None = None
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "tools"
+            list_indent = None
+            field_indent = None
+            continue
+        if not inside:
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        item_match = _LIST_ITEM_KEY_RE.match(line)
+        if item_match:
+            indent = item_match.end(1)
+            if list_indent is None:
+                list_indent = indent
+            if indent != list_indent:
+                continue
+            # The first mapping key need not be name. Its column determines
+            # which continuation keys belong to the tool rather than options.
+            field_indent = item_match.start(2)
+            key, value = item_match.group(2, 3)
+        elif indent == 0:
+            inside = False
+            continue
+        else:
+            key_match = _KEY_RE.match(line)
+            if indent != field_indent or key_match is None:
+                continue
+            key, value = key_match.group(1, 2)
+        if key == "name" and _unquote(value.strip()) == tool_name:
+            return True
+    return False
+
+
+def models_use_providers(lines: list[str]) -> set[str]:
+    """Return provider modules referenced by `models[].use`.
+
+    Only each model's own `use` counts. The first sequence item under `models:`
+    fixes the indent of the model list; later items at that indent start a new
+    model and set where its keys sit. That handles both the indented layout in
+    config.example.yaml and the unindented one `yaml.safe_dump` emits. Deeper
+    content — a sub-mapping such as `when_thinking_enabled`, or a sequence
+    inside a model option such as `stop:` — is skipped and never moves the key
+    indent, so key order within a model does not change the result.
+
+    Commented-out example blocks are dropped by ``_strip_comment`` before
+    matching, which keeps the fully-commented `models:` section shipped in
+    config.example.yaml from enabling an extra.
+    """
+    inside = False
+    item_indent: int | None = None
+    key_indent: int | None = None
+    providers: set[str] = set()
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "models"
+            item_indent = key_indent = None
+            continue
+        if not inside:
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        item_match = _LIST_ITEM_RE.match(line)
+        if item_match and (item_indent is None or len(item_match.group(1)) == item_indent):
+            # A model entry. Checked before the section-end test below because
+            # `yaml.safe_dump` puts these at column 0.
+            item_indent = len(item_match.group(1))
+            key_indent = item_indent + len(item_match.group(2))
+        elif indent == 0 or (item_indent is not None and indent <= item_indent):
+            # A new top-level key, or a dedent past the model list.
+            inside = False
+            item_indent = key_indent = None
+            continue
+        elif item_match or indent != key_indent:
+            # A sequence item inside a model option, or content nested deeper
+            # than the model's own keys. Neither is the model's provider.
+            continue
+        use_match = _MODEL_USE_RE.match(line)
+        if use_match:
+            target = _unquote(use_match.group(1).strip())
+            providers.add(target.split(":", 1)[0].split(".", 1)[0])
+    return providers
+
+
 def detect_from_config(path: Path) -> list[str]:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     lines = text.splitlines()
@@ -233,14 +356,26 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("postgres")
     if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
         extras.add("redis")
+    if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
+        extras.add("redis")
     if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
         extras.add("discord")
+    if (nested_section_value(lines, "channels.buzz", "enabled") or "").lower() == "true":
+        extras.add("buzz")
+    if tools_include_name(lines, "browser_navigate"):
+        extras.add("browser")
+    for provider in models_use_providers(lines):
+        extra = _PROVIDER_EXTRAS.get(provider)
+        if extra is not None:
+            extras.add(extra)
     return sorted(extras)
 
 
 def detect_from_runtime_env() -> list[str]:
     extras: set[str] = set()
     if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
+        extras.add("redis")
+    if os.environ.get("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "").strip():
         extras.add("redis")
     return sorted(extras)
 

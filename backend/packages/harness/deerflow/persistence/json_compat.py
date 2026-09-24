@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,36 @@ def validate_metadata_filter_value(value: object) -> bool:
     return True
 
 
+def json_value_matches(values: Mapping[str, Any], key: str, expected: object) -> bool:
+    """Match one JSON object field with the same type semantics as :class:`JsonMatch`.
+
+    Missing keys differ from explicit JSON null, booleans differ from integers,
+    integer filters accept only JSON integers, and float filters accept either
+    JSON integer or real values. Callers validate filter keys and values at
+    their API boundary; unsupported expected values never match.
+    """
+    if key not in values:
+        return False
+
+    actual = values[key]
+    if expected is None:
+        return actual is None
+    if isinstance(expected, bool):
+        return isinstance(actual, bool) and actual is expected
+    if isinstance(expected, int):
+        return isinstance(actual, int) and not isinstance(actual, bool) and actual == expected
+    if isinstance(expected, float):
+        if not isinstance(actual, (int, float)) or isinstance(actual, bool):
+            return False
+        try:
+            return float(actual) == expected
+        except OverflowError:
+            return False
+    if isinstance(expected, str):
+        return isinstance(actual, str) and actual == expected
+    return False
+
+
 class JsonMatch(ColumnElement):
     """Dialect-portable ``column[key] == value`` for JSON columns.
 
@@ -75,6 +106,7 @@ class JsonMatch(ColumnElement):
     _traverse_internals = [
         ("column", InternalTraversal.dp_clauseelement),
         ("key", InternalTraversal.dp_string),
+        ("value_type", InternalTraversal.dp_string),
         ("value", InternalTraversal.dp_plain_obj),
     ]
 
@@ -87,6 +119,10 @@ class JsonMatch(ColumnElement):
             raise TypeError(f"JsonMatch value must be None, bool, int, float, or str; got: {type(value).__name__!r}")
         self.column = column
         self.key = key
+        # Python considers True == 1 == 1.0 and gives them the same hash.
+        # Include the JSON filter type in SQLAlchemy's cache key so a compiled
+        # boolean predicate can never be reused for a numeric query (or vice versa).
+        self.value_type = type(value).__name__
         self.value = value
         super().__init__()
 

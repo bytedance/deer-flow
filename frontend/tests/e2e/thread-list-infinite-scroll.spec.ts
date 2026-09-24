@@ -11,14 +11,16 @@ const TOTAL_THREADS = 120;
 const PAGE_SIZE = 50;
 
 const THREADS = Array.from({ length: TOTAL_THREADS }, (_, i) => {
-  // Pad index so titles sort deterministically as strings. The thread-search
-  // mock returns threads in the order provided, so paging boundaries are
-  // stable across runs.
+  // Pad index so titles sort deterministically as strings. Keep updated_at
+  // monotonically descending to match the backend's updated_at-desc search
+  // order, so paging boundaries are stable across runs.
   const index = String(i + 1).padStart(3, "0");
   return {
     thread_id: `00000000-0000-0000-0000-0000000${index.padStart(5, "0")}`,
     title: `Conversation ${index}`,
-    updated_at: `2025-06-${String((i % 28) + 1).padStart(2, "0")}T12:00:00Z`,
+    updated_at: new Date(
+      Date.UTC(2025, 5, 30, 12, 0, 0) - i * 60_000,
+    ).toISOString(),
   };
 });
 
@@ -84,7 +86,14 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     // observer and never interferes with routing.
     let searchRequestCount = 0;
     page.on("request", (request) => {
-      if (request.url().includes("/api/langgraph/threads/search")) {
+      // Archive-filtered lists use the Gateway directly; SDK callers keep
+      // the LangGraph proxy path. Observe both search transports.
+      if (
+        request.method() === "POST" &&
+        /^\/api\/(?:langgraph\/)?threads\/search$/.test(
+          new URL(request.url()).pathname,
+        )
+      ) {
         searchRequestCount += 1;
       }
     });
@@ -98,6 +107,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
       timeout: 15_000,
     });
     const baselineRequests = searchRequestCount;
+    expect(baselineRequests).toBeGreaterThan(0);
 
     // Type a query that matches nothing in the first page (and nothing at
     // all, since titles are deterministic).

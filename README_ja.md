@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 **実際のデモ**は[**公式ウェブサイト**](https://deerflow.tech)でご覧いただけます。
 
+## 姉妹プロジェクト
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - DeerFlow の秘密兵器をご紹介 — agent のアイデアをプロトタイピングし、ハーネスの各ステップを検査し、失敗を再生し、パフォーマンスをベンチマークするためのデスクトップツールです。
+
 ## ByteDance Volcengine のコーディングプラン
 
 - DeerFlowの実行には、Doubao-Seed-2.0-Code、DeepSeek v3.2、Kimi 2.5の使用を強く推奨します
@@ -56,16 +62,21 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
       - [MCPサーバー](#mcpサーバー)
       - [IMチャネル](#imチャネル)
       - [LangSmithトレーシング](#langsmithトレーシング)
+      - [Langfuseトレーシング](#langfuseトレーシング)
+      - [両方のプロバイダーを使用する](#両方のプロバイダーを使用する)
   - [Deep Researchからスーパーエージェントハーネスへ](#deep-researchからスーパーエージェントハーネスへ)
   - [コア機能](#コア機能)
     - [スキルとツール](#スキルとツール)
       - [Claude Code連携](#claude-code連携)
+    - [セッションゴール (Session Goals)](#セッションゴール-session-goals)
     - [サブエージェント](#サブエージェント)
     - [サンドボックスとファイルシステム](#サンドボックスとファイルシステム)
     - [コンテキストエンジニアリング](#コンテキストエンジニアリング)
     - [長期メモリ](#長期メモリ)
   - [推奨モデル](#推奨モデル)
   - [組み込みPythonクライアント](#組み込みpythonクライアント)
+  - [スケジュールタスク (Scheduled Tasks)](#スケジュールタスク-scheduled-tasks)
+  - [ターミナルワークベンチ (TUI)](#ターミナルワークベンチ-tui)
   - [ドキュメント](#ドキュメント)
   - [⚠️ セキュリティに関する注意](#️-セキュリティに関する注意)
   - [コントリビュート](#コントリビュート)
@@ -271,11 +282,15 @@ HTTP/SSE MCPサーバーでは、OAuthトークンフロー（`client_credential
 
 DeerFlowはメッセージングアプリからのタスク受信をサポートしています。チャネルは設定時に自動的に開始されます。いずれもパブリックIPは不要です。
 
+DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeComをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
+
 | チャネル | トランスポート | 難易度 |
 |---------|-----------|------------|
 | Telegram | Bot API（ロングポーリング） | 簡単 |
 | Slack | Socket Mode | 中程度 |
 | Feishu / Lark | WebSocket | 中程度 |
+| WeChat | Tencent iLink（ロングポーリング） | 中程度 |
+| WeCom | WebSocket | 中程度 |
 | DingTalk | Stream Push（WebSocket） | 中程度 |
 
 **`config.yaml`での設定：**
@@ -304,6 +319,11 @@ channels:
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
 
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
+
   slack:
     enabled: true
     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
@@ -329,6 +349,19 @@ channels:
             thinking_enabled: true
             subagent_enabled: true
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # オプション：bot_tokenがない場合に初回のQRブートストラップを許可
+    allowed_users: []               # 空 = 全員許可
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # DingTalk Open PlatformのClientId
@@ -350,6 +383,14 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
+# WeCom
+WECOM_BOT_ID=your_bot_id
+WECOM_BOT_SECRET=your_bot_secret
 
 # DingTalk
 DINGTALK_CLIENT_ID=your_client_id
@@ -375,6 +416,22 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. 権限を追加：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. **イベント**で`im.message.receive_v1`を購読し、**ロングコネクション**モードを選択。
 4. App IDとApp Secretをコピー。`.env`に`FEISHU_APP_ID`と`FEISHU_APP_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
+
+**WeChatのセットアップ**
+
+1. `config.yaml`で`wechat`チャネルを有効にします。
+2. `.env`に`WECHAT_BOT_TOKEN`を設定するか、初回のQRブートストラップのために`qrcode_login_enabled: true`を設定します。
+3. `bot_token`がなくQRブートストラップが有効な場合は、バックエンドログでiLinkが返したQRコンテンツを監視し、バインドフローを完了します。
+4. QRフローが成功した後、DeerFlowは取得したトークンを`state_dir`に永続化し、以降の再起動で再利用します。
+5. Docker Composeデプロイでは、`state_dir`を永続ボリュームに置き、`get_updates_buf`カーソルと保存済みの認証ステートが再起動後も保持されるようにしてください。
+
+**WeComのセットアップ**
+
+1. WeCom AI Botプラットフォームでボットを作成し、`bot_id`と`bot_secret`を取得します。
+2. `config.yaml`で`channels.wecom`を有効にし、`bot_id` / `bot_secret`を入力します。
+3. `.env`に`WECOM_BOT_ID`と`WECOM_BOT_SECRET`を設定します。
+4. バックエンドの依存関係に`wecom-aibot-python-sdk`が含まれていることを確認してください。このチャネルはWebSocketロングコネクションを使用し、パブリックなコールバックURLは不要です。
+5. 現在の統合では、受信テキスト、画像、ファイルメッセージをサポートしています。エージェントが生成した最終的な画像/ファイルもWeComの会話に送り返されます。
 
 **DingTalkのセットアップ**
 
@@ -409,6 +466,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Langfuseトレーシング
+
+DeerFlowは、LangChain互換の実行に対して[Langfuse](https://langfuse.com)による可観測性もサポートしています。
+
+`.env`ファイルに以下を追加します：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+セルフホストのLangfuseインスタンスを使用している場合は、`LANGFUSE_BASE_URL`をデプロイ先のURLに設定します。
+
+**トレース関連付けフィールド。** 各エージェント実行には、Langfuseの予約済みトレース属性が付与されるため、SessionsページとUsersページが自動的に表示されます：
+
+- `session_id` = LangGraphの`thread_id`——同一会話のすべてのトレースをグループ化します
+- `user_id` = `get_effective_user_id()`から取得した有効なユーザー（認証なしモードでは`default`にフォールバック）
+- `trace_name` = assistant id（デフォルトは`lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未設定の場合は省略）
+- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。常に同じリクエストが返す`X-Trace-Id`レスポンスヘッダーと一致します（`logging.enhance.enabled`はこのidをログに出力するかどうかのみを制御します）
+
+これらは、gatewayパス（`runtime/runs/worker.py::run_agent`）と埋め込みパス（`client.py::DeerFlowClient.stream`）の両方で、グラフ呼び出しのルートで`RunnableConfig.metadata`に注入されるため、LangChain互換の任意のcallbackから読み取れます。`DEER_FLOW_ENV`（または`ENVIRONMENT`）を設定すると、デプロイ環境ごとにトレースにタグを付けられます。
+
+#### 両方のプロバイダーを使用する
+
+LangSmithとLangfuseの両方を有効にすると、DeerFlowは両方のトレーシングcallbackを取り付け、同じモデルアクティビティを両方のシステムに報告します。
+
+あるプロバイダーが明示的に有効化されているにもかかわらず必要な認証情報が欠けている場合、またはそのcallbackの初期化に失敗した場合、DeerFlowはモデル作成時のトレーシング初期化中に早期に失敗（fail fast）し、エラーメッセージには失敗の原因となったプロバイダー名が示されます。
 
 Dockerデプロイでは、トレーシングはデフォルトで無効です。`.env`で`LANGSMITH_TRACING=true`と`LANGSMITH_API_KEY`を設定して有効にします。
 
@@ -482,6 +570,22 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 完全なAPIリファレンスは[`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)をご覧ください。
 
+### セッションゴール (Session Goals)
+
+`/goal <完了条件>`を使うと、現在のスレッドに1つのアクティブな完了条件を紐付けられます。このゴールはスレッドスコープのステートであり、スキルの有効化ではないため、DeerFlowが満たされたと判定するか、あなたがクリアするまでターンをまたいで有効なまま維持されます。
+
+対応するコマンド：
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # アクティブなゴールを表示
+/goal clear        # クリアする
+```
+
+各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話をアクティブなゴールと照らし合わせます。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
+
+Web UIは入力欄の上にアクティブなゴールを表示します。同じコマンドはTUIとサポート対象のIMチャネルからも利用できます。Web UIとサポート対象のIMチャネルでは、`/goal <完了条件>`を設定するとその条件をタスクとしてrunを開始します。ステータス確認やクリアのコマンドはゴールステートの管理のみを行います。
+
 ### サブエージェント
 
 複雑なタスクは単一のパスに収まりません。DeerFlowはそれを分解します。
@@ -531,7 +635,7 @@ DeerFlowはモデルに依存しません——OpenAI互換APIを実装する任
 
 ## 組み込みPythonクライアント
 
-DeerFlowは、完全なHTTPサービスを実行せずに組み込みPythonライブラリとして使用できます。`DeerFlowClient`は、すべてのエージェントとGateway機能へのプロセス内直接アクセスを提供し、HTTP Gateway APIと同じレスポンススキーマを返します：
+DeerFlowは、完全なHTTPサービスを実行せずに組み込みPythonライブラリとして使用できます。`DeerFlowClient`は、すべてのエージェントとGateway機能へのプロセス内直接アクセスを提供し、HTTP Gateway APIと同じレスポンススキーマを返します。HTTP Gatewayは、LangGraphスレッド自体が削除された後にDeerFlow管理下のローカルスレッドデータを削除するための`DELETE /api/threads/{thread_id}`も公開しています：
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -551,9 +655,54 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
 
 すべてのdict返却メソッドはCIでGateway Pydanticレスポンスモデルに対して検証されており（`TestGatewayConformance`）、組み込みクライアントがHTTP APIスキーマと同期していることを保証します。完全なAPIドキュメントは`backend/packages/harness/deerflow/client.py`をご覧ください。
+
+## スケジュールタスク (Scheduled Tasks)
+
+DeerFlowには現在、ワークスペース内でファーストクラスのスケジュールタスクMVPが組み込まれています。
+
+現在のMVPの機能：
+
+- `/workspace/scheduled-tasks`でタスクを管理
+- 各スケジュールタスクがスレッドを再利用するか、実行ごとに新しいスレッドを作成するかを選択可能
+- `once`、`cron`、`interval`のスケジュールをサポート
+- バックグラウンドのスケジュール実行を非対話型のDeerFlow runとして実行（`ask_clarification`はここでは公開されません）
+- 再利用された同じスレッド上でアクティブなrunと衝突する期限到来のcron実行に対して`skip`オーバーラップ挙動を使用
+- タスクの一時停止、再開、トリガー、履歴確認、削除
+- スケジュールされた作業を通常のDeerFlow runライフサイクルを通じて実行
+
+現在のMVPの制限：
+
+- 会話で`schedule_task`ツールを作成する機能はまだありません
+- テキストのみの通知ジョブはありません
+- チャネルやGitHubのディスパッチターゲットはありません
+
+`config.yaml -> scheduler.enabled`でバックグラウンドポーリングを有効にします。手動トリガーは同じスケジュールタスクリソースと実行パスを使用します。
+
+## ターミナルワークベンチ (TUI)
+
+`deerflow`は、シェルに暮らす人々のためのターミナルネイティブなワークベンチです。**組み込み**で`DeerFlowClient`上で実行され、Gateway、フロントエンド、nginx、Dockerは不要ですが、DeerFlowの他の部分と同じ`config.yaml`、checkpointer、スキル、メモリ、MCP、サンドボックス設定を尊重します。
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # オプションの'textual'依存関係
+
+deerflow                                      # ターミナルUIを起動（TTYが必要）
+deerflow --continue                           # 直近のスレッドを再開
+deerflow --resume THREAD                      # IDでスレッドを再開
+deerflow --print "summarize this repo"        # ヘッドレスでstdoutにワンショットの回答を出力
+deerflow --json  "hello"                       # ヘッドレスで改行区切りのStreamEventを出力
+```
+
+ストリーミング文字起こし（Markdownでレンダリングされた回答）、コンパクトなツールアクティビティカード、`/`スラッシュコマンドパレット、`/goal`ゴール管理、`/model`と`/threads`ピッカー、入力履歴、`Esc` / `Ctrl+C`割り込みを備えた、キーボード駆動のチャット画面。TUIで開いたセッションはWeb UIのサイドバーにも表示されます。ローカルのデフォルトユーザーの下で共有スレッドストアに書き込むため、**Gatewayを実行せずに**ターミナルとウェブが同期します。
+
+完全なガイドは[backend/docs/TUI.md](backend/docs/TUI.md)をご覧ください。
 
 ## ドキュメント
 
@@ -612,4 +761,4 @@ DeerFlowはオープンソースコミュニティの素晴らしい成果の上
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)

@@ -1,9 +1,11 @@
 """Tests for the slash-command registry (pure)."""
 
+from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES
 from deerflow.tui.command_registry import (
     BUILTIN_COMMANDS,
     build_registry,
     filter_commands,
+    format_command_help,
     resolve,
 )
 
@@ -102,8 +104,75 @@ def test_goal_is_builtin_command():
     assert resolved.args == "finish the implementation"
 
 
+def test_clear_is_builtin_command():
+    resolved = resolve("/clear")
+
+    assert resolved.kind == "builtin"
+    assert resolved.name == "clear"
+    assert resolved.args == ""
+
+
 def test_goal_builtin_takes_precedence_over_skill():
     registry = build_registry([{"name": "goal", "description": "skill", "enabled": True}])
 
     assert [command.name for command in registry].count("goal") == 1
     assert resolve("/goal finish", skills=["goal"]).kind == "builtin"
+
+
+def test_build_registry_never_exposes_reserved_commands_as_skills():
+    registry = build_registry([{"name": name, "description": "reserved", "enabled": True} for name in RESERVED_SLASH_SKILL_NAMES])
+
+    skill_names = {command.name for command in registry if command.category == "skill"}
+    assert skill_names == {"context"}
+
+
+def test_resolve_never_classifies_reserved_commands_as_skills():
+    reserved_names = sorted(RESERVED_SLASH_SKILL_NAMES)
+
+    for name in reserved_names:
+        resolved = resolve(f"/{name} task", skills=reserved_names)
+        if name == "context":
+            assert resolved.kind == "skill"
+        else:
+            assert resolved.kind != "skill", name
+
+
+def test_context_compact_alias_is_not_a_tui_skill():
+    resolved = resolve("/context compact", skills=["context"])
+
+    assert resolved.kind == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# /help text <-> registry parity
+# --------------------------------------------------------------------------- #
+
+
+def test_help_lists_every_builtin_command():
+    help_line = format_command_help()
+    # Every registered built-in must be advertised in /help; this is the guard
+    # against the help text silently drifting from BUILTIN_COMMANDS.
+    for command in BUILTIN_COMMANDS:
+        assert f"/{command.name}" in help_line
+
+
+def test_help_lists_only_builtin_commands():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert set(slugs) == {command.name for command in BUILTIN_COMMANDS}
+
+
+def test_help_preserves_registry_order():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert slugs == [command.name for command in BUILTIN_COMMANDS]
+
+
+def test_help_has_no_duplicate_commands():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert len(slugs) == len(set(slugs))
+
+
+def test_help_starts_with_commands_label():
+    assert format_command_help().startswith("Commands:  /")

@@ -12,6 +12,7 @@ and serving TestClient requests in another never share a connection).
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -27,7 +28,30 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
-NOW = datetime.now(UTC)
+# Pinned to noon UTC so hour-level seed offsets (NOW - 1h, NOW - 2h) never cross
+# the midnight boundary into the previous calendar day, which would otherwise
+# make "today" rows bucket into yesterday whenever the suite runs within a few
+# hours of UTC midnight. The client fixture freezes the console router's
+# `datetime.now` to this same instant, keeping the router's view of "today"
+# (and active-run durations) aligned with these seed timestamps.
+NOW = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
+class _FrozenDatetime(datetime):
+    """``datetime`` subclass whose ``now()`` returns a fixed instant.
+
+    Everything else (``combine``, ``replace``, arithmetic, ``isinstance``) is
+    inherited unchanged from ``datetime``; only ``now`` is redirected so the
+    router derives its day-bucket window and live durations from ``NOW``.
+    """
+
+    _frozen: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if cls._frozen is None:  # pragma: no cover - defensive fallback
+            return super().now(tz)
+        return cls._frozen if tz is None else cls._frozen.astimezone(tz)
 
 
 def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
@@ -103,6 +127,15 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
             created_at=NOW - timedelta(hours=2),
             updated_at=NOW - timedelta(hours=2) + timedelta(seconds=8),
         ),
+        RunRow(
+            run_id="checkpoint-write-1",
+            thread_id="t1",
+            user_id="user-a",
+            operation_kind="checkpoint_write",
+            status="error",
+            created_at=NOW - timedelta(minutes=30),
+            updated_at=NOW - timedelta(minutes=29),
+        ),
     ]
     return threads, runs
 
@@ -133,6 +166,10 @@ def client(session_factory, monkeypatch):
     monkeypatch.setattr(console, "list_custom_agents", lambda: [object(), object()])
     # No pricing configured by default; TestPricing patches its own config.
     monkeypatch.setattr(console, "get_app_config", lambda: SimpleNamespace(models=[]))
+    # Pin the router's wall-clock to NOW so day-bucketing and durations are
+    # independent of when the suite runs (see NOW's docstring).
+    _FrozenDatetime._frozen = NOW
+    monkeypatch.setattr(console, "datetime", _FrozenDatetime)
     app = make_authed_test_app()
     app.include_router(console.router)
     return TestClient(app)
@@ -226,6 +263,74 @@ _R4_COST = 600 * 8e-6 + 399 * 32e-6  # 0.017568
 
 
 class TestPricing:
+    def test_mixed_currencies_disable_cost_reporting(self, client, monkeypatch, caplog):
+        monkeypatch.setattr(
+            console,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                models=[
+                    SimpleNamespace(
+                        name="minimax-m2",
+                        model="MiniMax-M2",
+                        pricing={"currency": "CNY", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                    SimpleNamespace(
+                        name="gpt-x",
+                        model="gpt-x-1",
+                        pricing={"currency": "USD", "input_per_million": 1, "output_per_million": 4},
+                    ),
+                ]
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=console.logger.name):
+            stats = client.get("/api/console/stats").json()
+        assert stats["currency"] is None
+        assert stats["total_cost"] is None
+        # The warning names both offending models so operators can locate the misconfiguration.
+        assert any("minimax-m2" in rec.getMessage() and "gpt-x" in rec.getMessage() for rec in caplog.records)
+
+        usage = client.get("/api/console/usage").json()
+        assert usage["currency"] is None
+        assert usage["total_cost"] is None
+        assert all(day["cost"] == 0 for day in usage["days"])
+        assert all(model["cost"] is None for model in usage["by_model"].values())
+
+        runs = client.get("/api/console/runs", params={"limit": 50}).json()
+        assert all(run["cost"] is None for run in runs["runs"])
+
+    def test_shared_currency_across_models_prices_normally(self, client, monkeypatch):
+        """Multiple priced models on one currency (incl. case variants) must not trip the guard."""
+        monkeypatch.setattr(
+            console,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                models=[
+                    SimpleNamespace(
+                        name="minimax-m2",
+                        model="MiniMax-M2",
+                        pricing={"currency": "CNY", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                    SimpleNamespace(
+                        name="qwen",
+                        model="qwen",
+                        pricing={"currency": "cny", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                ]
+            ),
+        )
+        # qwen's only run (r5) is now priced alongside the minimax runs.
+        qwen_cost = 40 * 8e-6 + 30 * 32e-6
+
+        stats = client.get("/api/console/stats").json()
+        assert stats["currency"] == "CNY"
+        # No cache-hit price configured → r1 billed at the miss price.
+        assert stats["total_cost"] == pytest.approx(_R1_COST_UNCACHED + _R2_COST + _R4_COST + qwen_cost)
+
+        usage = client.get("/api/console/usage").json()
+        assert usage["currency"] == "CNY"
+        assert usage["by_model"]["qwen"]["cost"] == pytest.approx(qwen_cost)
+
     def test_costs_use_cache_hit_price(self, client, monkeypatch):
         monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
         stats = client.get("/api/console/stats").json()

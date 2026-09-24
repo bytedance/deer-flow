@@ -18,15 +18,114 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import posixpath
+from pathlib import PurePosixPath
 
 import requests
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+_PROVISIONER_EXTRA_MOUNT_PATHS = {
+    "/mnt/acp-workspace",
+    "/mnt/integrations/lark-cli/config",
+    "/mnt/integrations/lark-cli/config/locks",
+    "/mnt/integrations/lark-cli/data",
+    "/mnt/integrations/lark-cli/runtime",
+}
+_MANAGED_SKILL_CATEGORY_NAMES = (
+    "public",
+    "custom",
+    "legacy",
+    "integrations",
+)
+_RESERVED_SANDBOX_MOUNT_PATHS = (
+    "/mnt/user-data",
+    "/mnt/acp-workspace",
+    "/mnt/integrations/lark-cli",
+)
+
+_LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
+_LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
+_LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
+_AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+
+
+def _normalize_skills_container_path(container_path: str) -> str:
+    """Return a canonical skills root that cannot overlap platform mounts."""
+    candidate = container_path
+    if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
+        raise ValueError("The skills container path must be an absolute non-root path")
+
+    normalized = posixpath.normpath(candidate)
+    if normalized != candidate:
+        raise ValueError("The skills container path must not contain redundant separators, '.' or '..'")
+
+    root = PurePosixPath(normalized)
+    for reserved_path in _RESERVED_SANDBOX_MOUNT_PATHS:
+        reserved = PurePosixPath(reserved_path)
+        if root == reserved or root.is_relative_to(reserved) or reserved.is_relative_to(root):
+            raise ValueError(f"The skills container path {normalized!r} overlaps reserved sandbox path {reserved_path!r}")
+    return normalized
+
+
+def _managed_skill_category_mount_paths(
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> set[str]:
+    root = _normalize_skills_container_path(skills_container_path)
+    return {posixpath.join(root, category) for category in _MANAGED_SKILL_CATEGORY_NAMES}
+
+
+def _provisioner_extra_mounts_payload(
+    extra_mounts: list[tuple[str, str, bool]] | None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+    provision_lark_cli_runtime: bool = False,
+    provision_lark_cli_broker: bool = False,
+) -> list[dict[str, object]]:
+    """Return only extra mounts the provisioner knows how to recreate safely.
+
+    When ``provision_lark_cli_runtime`` is set, the provisioner supplies the
+    lark-cli runtime via an init container + emptyDir, so the runtime extra mount
+    is dropped here to avoid a colliding hostPath/PVC mount at the same path. The
+    per-user config/locks/data mounts are still forwarded (they are mounted into
+    the sandbox in Pattern A). The config root remains read-only while its
+    nested locks mount is writable for lark-cli's coordination files.
+
+    When ``provision_lark_cli_broker`` is set (Pattern B, issue #4338), the
+    provisioner runs a broker sidecar that holds the credentials, so the
+    config/locks/data mounts are **forwarded** (the provisioner wires them into
+    the sidecar, not the sandbox) while the runtime mount is dropped. Nothing
+    changes in this payload beyond keeping those credential-related mounts
+    available for the provisioner to place; the runtime entry is dropped in
+    both modes.
+    """
+    allowed_paths = _PROVISIONER_EXTRA_MOUNT_PATHS | _managed_skill_category_mount_paths(skills_container_path)
+    if not extra_mounts:
+        return []
+
+    drop_runtime = provision_lark_cli_runtime or provision_lark_cli_broker
+
+    payload: list[dict[str, object]] = []
+    for host_path, container_path, read_only in extra_mounts:
+        if container_path not in allowed_paths:
+            continue
+        if drop_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
+            continue
+        payload.append(
+            {
+                "host_path": host_path,
+                "container_path": container_path,
+                "read_only": read_only,
+            }
+        )
+    return payload
 
 
 class RemoteSandboxBackend(SandboxBackend):
@@ -40,20 +139,48 @@ class RemoteSandboxBackend(SandboxBackend):
         sandbox:
           use: deerflow.community.aio_sandbox:AioSandboxProvider
           provisioner_url: http://provisioner:8002
+          provisioner_api_key: $PROVISIONER_API_KEY
     """
 
-    def __init__(self, provisioner_url: str):
-        """Initialize with the provisioner service URL.
+    def __init__(
+        self,
+        provisioner_url: str,
+        api_key: str = "",
+        max_shell_sessions: int | None = None,
+        *,
+        required_shell_sessions: int = 0,
+    ):
+        """Initialize with the provisioner service URL and optional API key.
 
         Args:
             provisioner_url: URL of the provisioner service
                              (e.g., ``http://provisioner:8002``).
+            api_key: Value sent as ``X-API-Key`` header on every request.
+                     Leave empty to send no authentication header.
+            max_shell_sessions: Optional AIO shell-session capacity forwarded
+                                to each provisioned sandbox Pod.
+            required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
+        self._api_key = api_key
+        self._max_shell_sessions = max_shell_sessions
+        self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
 
     @property
     def provisioner_url(self) -> str:
         return self._provisioner_url
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"X-API-Key": self._api_key} if self._api_key else {}
+
+    def _requires_shell_capacity_replacement(self, payload: dict[str, object]) -> bool:
+        if self._required_shell_sessions == 0:
+            return False
+        reported = payload.get("max_shell_sessions", _AIO_DEFAULT_MAX_SHELL_SESSIONS)
+        try:
+            return int(reported) < self._required_shell_sessions
+        except (TypeError, ValueError):
+            return True
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -64,13 +191,24 @@ class RemoteSandboxBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        return self._provisioner_create(thread_id, sandbox_id, extra_mounts, user_id=user_id)
+        return self._provisioner_create(
+            thread_id,
+            sandbox_id,
+            extra_mounts,
+            user_id=user_id,
+            skills_container_path=skills_container_path,
+            provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
+        )
 
     def destroy(self, info: SandboxInfo) -> None:
         """Destroy a sandbox Pod + Service via the provisioner."""
@@ -105,7 +243,7 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_list(self) -> list[SandboxInfo]:
         """GET /api/sandboxes → list all running sandboxes."""
         try:
-            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10)
+            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", headers=self._auth_headers(), timeout=10)
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
@@ -126,7 +264,13 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_id = sandbox.get("sandbox_id")
                 sandbox_url = sandbox.get("sandbox_url")
                 if isinstance(sandbox_id, str) and sandbox_id and isinstance(sandbox_url, str) and sandbox_url:
-                    infos.append(SandboxInfo(sandbox_id=sandbox_id, sandbox_url=sandbox_url))
+                    infos.append(
+                        SandboxInfo(
+                            sandbox_id=sandbox_id,
+                            sandbox_url=sandbox_url,
+                            requires_replacement=self._requires_shell_capacity_replacement(sandbox),
+                        )
+                    )
 
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
@@ -141,22 +285,46 @@ class RemoteSandboxBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
-        del extra_mounts
         effective_user_id = user_id or get_effective_user_id()
+        include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
+        normalized_skills_container_path = _normalize_skills_container_path(skills_container_path)
+        payload = {
+            "sandbox_id": sandbox_id,
+            "thread_id": thread_id,
+            "user_id": effective_user_id,
+            "include_legacy_skills": include_legacy_skills,
+            "skills_container_path": normalized_skills_container_path,
+            "provision_lark_cli_runtime": provision_lark_cli_runtime,
+            "provision_lark_cli_broker": provision_lark_cli_broker,
+        }
+        if self._max_shell_sessions is not None:
+            payload["max_shell_sessions"] = self._max_shell_sessions
+        provisioner_extra_mounts = _provisioner_extra_mounts_payload(
+            extra_mounts,
+            skills_container_path=normalized_skills_container_path,
+            provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
+        )
+        if provisioner_extra_mounts:
+            payload["extra_mounts"] = provisioner_extra_mounts
         try:
             resp = requests.post(
                 f"{self._provisioner_url}/api/sandboxes",
-                json={
-                    "sandbox_id": sandbox_id,
-                    "thread_id": thread_id,
-                    "user_id": effective_user_id,
-                },
+                json=payload,
+                headers=self._auth_headers(),
                 timeout=30,
             )
             resp.raise_for_status()
             data = resp.json()
+            if self._max_shell_sessions is not None and "max_shell_sessions" not in data:
+                raise RuntimeError("Provisioner did not report max_shell_sessions; Gateway/provisioner version skew prevents shell-capacity validation")
+            if self._requires_shell_capacity_replacement(data):
+                raise RuntimeError(f"Provisioner returned sandbox {sandbox_id} with insufficient shell-session capacity")
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
                 sandbox_id=sandbox_id,
@@ -171,6 +339,7 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             resp = requests.delete(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=15,
             )
             if resp.ok:
@@ -185,6 +354,7 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=10,
             )
         except requests.RequestException as exc:
@@ -203,6 +373,7 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=10,
             )
             if resp.status_code == 404:
@@ -212,6 +383,7 @@ class RemoteSandboxBackend(SandboxBackend):
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                requires_replacement=self._requires_shell_capacity_replacement(data),
             )
         except requests.RequestException as exc:
             logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")

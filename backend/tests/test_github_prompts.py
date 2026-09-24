@@ -185,6 +185,43 @@ def test_pull_request_review_prompt_includes_state() -> None:
     assert "alice" in prompt
 
 
+def test_pull_request_review_prompt_instructs_fetching_inline_comments() -> None:
+    """PR #4131 review (Concern 1, zhfeng): the dispatcher's redundant
+    review-comment gate assumes the agent recovers inline comment content
+    from the parent `pull_request_review` event -- nothing enforced that
+    before this. The prompt must tell the agent how, with the exact
+    `gh api` path GitHub uses for a review's inline comments.
+    """
+    payload = {
+        "action": "submitted",
+        "pull_request": {"number": 5},
+        "review": {
+            "id": 999001,
+            "state": "changes_requested",
+            "user": {"login": "alice"},
+            "body": "Looks risky",
+        },
+        "repository": {"full_name": "a/b"},
+    }
+    prompt = build_prompt("pull_request_review", payload)
+    assert "gh api repos/a/b/pulls/5/reviews/999001/comments" in prompt
+
+
+def test_pull_request_review_prompt_omits_fetch_hint_without_review_id() -> None:
+    """Guard: never render a broken `.../reviews/None/comments` path when
+    the payload is missing `review.id` (or the PR number) -- omit the
+    instruction entirely rather than pointing the agent at a bad command.
+    """
+    payload = {
+        "action": "submitted",
+        "pull_request": {"number": 5},
+        "review": {"state": "approved", "user": {"login": "alice"}, "body": "LGTM"},
+        "repository": {"full_name": "a/b"},
+    }
+    prompt = build_prompt("pull_request_review", payload)
+    assert "gh api" not in prompt
+
+
 def test_issues_prompt() -> None:
     payload = {
         "action": "opened",

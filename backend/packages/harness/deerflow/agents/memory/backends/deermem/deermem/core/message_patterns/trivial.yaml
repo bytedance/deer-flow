@@ -1,0 +1,36 @@
+# Trivial pure-acknowledgment patterns for filter_trivial (message_processing).
+#
+# Each entry is a regex matched against the WHOLE (stripped) human message via
+# ``fullmatch`` -- a message is trivial only if it is nothing but an ack, so a
+# substantive turn that happens to contain "ok" is never dropped. Trailing
+# punctuation/whitespace is stripped before matching, so "ok." / "好的！" count.
+#
+# Each list entry is either:
+#   - a string                       -> compiled with no flags
+#   - a mapping {pattern, flags}     -> flags is a list of names: "ignorecase"
+#
+# Keep these narrow: a false positive silently drops a real user turn from
+# memory. Extend here without touching code.
+
+- pattern: '嗯+'
+- pattern: 'ok(?:ay)?'
+  flags: [ignorecase]
+- pattern: '好的[呢]?'
+- pattern: '好[的呀]?'
+- pattern: '谢谢'
+- pattern: '感谢'
+- pattern: '多谢'
+- pattern: '对'
+- pattern: '是的'
+- pattern: '收到'
+- pattern: '明白'
+- pattern: '了解'
+- pattern: '知道了'
+- pattern: 'got it'
+  flags: [ignorecase]
+- pattern: 'thanks'
+  flags: [ignorecase]
+- pattern: 'thank you'
+  flags: [ignorecase]
+- pattern: 'cheers'
+  flags: [ignorecase]

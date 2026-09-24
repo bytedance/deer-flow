@@ -4,8 +4,10 @@ Contains:
 - DeferredToolCatalog: immutable, searchable catalog of deferred tools.
 - build_tool_search_tool: builds the `tool_search` tool as a closure over a
   catalog; it records promotions into graph state via ``Command``.
-- build_deferred_tool_setup: assembles the catalog + tool from a
-  policy-filtered tool list (call AFTER tool-policy filtering).
+- build_deferred_tool_setup: assembles the catalog + tool from the tools
+  configured for this agent build.
+- build_mcp_routing_middleware: builds the PR2 auto-promote middleware from
+  serialized routing metadata on deferred tools available to the caller.
 
 The agent sees deferred tool names in <available-deferred-tools> but cannot
 call them until it fetches their full schema via the tool_search tool. The
@@ -15,12 +17,14 @@ when it carries the ``deerflow_mcp`` metadata tag.
 """
 
 import hashlib
+import html
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain.tools import BaseTool
 from langchain_core.messages import ToolMessage
@@ -28,7 +32,10 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langchain_core.utils.function_calling import convert_to_openai_function
 from langgraph.types import Command
 
-from deerflow.tools.mcp_metadata import is_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_routing, is_mcp_tool
+
+if TYPE_CHECKING:
+    from langchain.agents.middleware import AgentMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +82,12 @@ class DeferredToolCatalog:
             return []
 
         if query.startswith("select:"):
+            # No cap: ``select:`` names the tools explicitly, so returning a
+            # subset silently drops schemas the model asked for by name. Mirrors
+            # ``SkillCatalog.search`` (``skills/catalog.py``); the ranked modes
+            # below stay capped at ``MAX_RESULTS``.
             wanted = {n.strip() for n in query[7:].split(",")}
-            return [t for t in self.tools if t.name in wanted][:MAX_RESULTS]
+            return [t for t in self.tools if t.name in wanted]
 
         if query.startswith("+"):
             parts = query[1:].split(None, 1)
@@ -113,7 +124,8 @@ class DeferredToolSetup:
     The three fields move as a unit, so callers branch on ``tool_search_tool``:
 
     - **Empty** ``(None, frozenset(), None)``: deferral is disabled, or no MCP
-      tool survived policy filtering. Nothing is deferred — bind tools as-is.
+      tool is present in the candidate list. Nothing is deferred — bind tools
+      as-is.
     - **Populated**: ``tool_search_tool`` is appended to the agent's tools,
       ``deferred_names`` are withheld from the model until promoted, and
       ``catalog_hash`` scopes those promotions in graph state.
@@ -144,7 +156,7 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
           - "notebook jupyter" -- keyword search, up to max_results best matches
           - "+slack send" -- require "slack" in the name, rank by remaining terms
         """
-        matched = catalog.search(query)[:MAX_RESULTS]
+        matched = catalog.search(query)
         if not matched:
             content, names = f"No tools found matching: {query}", []
         else:
@@ -160,20 +172,24 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
     return tool_search
 
 
-def build_deferred_tool_setup(filtered_tools: list[BaseTool], *, enabled: bool) -> DeferredToolSetup:
-    """Build the deferred-tool setup from a POLICY-FILTERED tool list.
+def build_deferred_tool_setup(candidate_tools: list[BaseTool], *, enabled: bool) -> DeferredToolSetup:
+    """Build deferred-tool setup from one agent build's candidate tools.
 
-    Must be called after skill/agent tool-policy filtering so the catalog never
-    exposes a tool the current agent is not allowed to use.
+    Lead agents pass their full configured tool list; ``SkillToolPolicyMiddleware``
+    later filters model-visible schemas, execution, and ``tool_search`` results
+    for the active skill while keeping the discovery tool itself available.
+    Subagents may pass a statically policy-filtered list because their configured
+    skills are loaded at startup. The downstream deferred-schema middleware still
+    hides unpromoted MCP schemas in either case.
 
     Returns an empty setup (see :class:`DeferredToolSetup`) in two distinct
     cases: deferral is disabled, or it is enabled but no MCP tool survived
-    filtering.
+    the caller's build-time selection.
     """
     if not enabled:
         # Deferral disabled: defer nothing; the model binds every tool as before.
         return DeferredToolSetup(None, frozenset(), None)
-    deferred = [t for t in filtered_tools if is_mcp_tool(t)]
+    deferred = [t for t in candidate_tools if is_mcp_tool(t)]
     if not deferred:
         # Enabled, but no MCP tool to defer: same empty result, different reason.
         return DeferredToolSetup(None, frozenset(), None)
@@ -181,24 +197,83 @@ def build_deferred_tool_setup(filtered_tools: list[BaseTool], *, enabled: bool) 
     return DeferredToolSetup(build_tool_search_tool(catalog), catalog.names, catalog.hash)
 
 
-def assemble_deferred_tools(filtered_tools: list[BaseTool], *, enabled: bool) -> tuple[list[BaseTool], DeferredToolSetup]:
-    """Build the final tool list + deferred setup from a POLICY-FILTERED list.
+def assemble_deferred_tools(candidate_tools: list[BaseTool], *, enabled: bool) -> tuple[list[BaseTool], DeferredToolSetup]:
+    """Build the final tool list and deferred setup from candidate tools.
 
-    Call AFTER tool-policy filtering so the deferred catalog never exposes a tool
-    the agent is not allowed to use. Fail-closed: if tool_search is enabled and
-    MCP tools survived filtering but no deferred set was recovered, raise rather
-    than silently binding their full schemas to the model.
+    Fail closed on deferral assembly itself: if tool_search is enabled and MCP
+    candidates exist but no deferred set was recovered, raise rather than silently
+    binding their full schemas to the model. Lead-agent authorization is enforced
+    separately at runtime by ``SkillToolPolicyMiddleware``; subagents may already
+    have applied their static skill policy to ``candidate_tools``.
 
     Shared by every agent-build path (lead, embedded client, subagent) so they
     all get the same fail-closed guarantee from one place.
     """
-    deferred_setup = build_deferred_tool_setup(filtered_tools, enabled=enabled)
-    if enabled and not deferred_setup.deferred_names and any(is_mcp_tool(t) for t in filtered_tools):
-        raise RuntimeError("tool_search enabled and MCP tools survived policy filtering, but no deferred set was recovered - refusing to bind MCP schemas (fail-closed).")
-    final_tools = list(filtered_tools)
+    deferred_setup = build_deferred_tool_setup(candidate_tools, enabled=enabled)
+    if enabled and not deferred_setup.deferred_names and any(is_mcp_tool(t) for t in candidate_tools):
+        raise RuntimeError("tool_search enabled and MCP candidates exist, but no deferred set was recovered - refusing to bind MCP schemas (fail-closed).")
+    final_tools = list(candidate_tools)
     if deferred_setup.tool_search_tool:
         final_tools.append(deferred_setup.tool_search_tool)
     return final_tools, deferred_setup
+
+
+def _routing_priority(value: Any) -> int:
+    # Produces the typed priority stored in the routing index. McpRoutingMiddleware
+    # ._normalize_index re-parses this defensively (it is built to accept arbitrary
+    # serialized data), so keep the two coercion rules in sync if either changes.
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _routing_keywords(value: Any) -> list[str]:
+    # See _routing_priority: McpRoutingMiddleware._normalize_index re-normalizes
+    # keywords defensively; keep both coercion rules aligned.
+    if not isinstance(value, list):
+        return []
+    return [keyword for keyword in (str(item).strip() for item in value) if keyword]
+
+
+def build_mcp_routing_middleware(
+    tools: Iterable[BaseTool],
+    deferred_setup: DeferredToolSetup,
+    *,
+    top_k: int,
+) -> "AgentMiddleware | None":
+    """Build PR2 auto-promotion middleware from the caller's deferred tools.
+
+    The builder may inspect ``BaseTool.metadata`` at construction time, but the
+    returned middleware receives only a flat serializable routing index.
+    """
+    if deferred_setup.catalog_hash is None or not deferred_setup.deferred_names:
+        return None
+
+    routing_index: dict[str, dict[str, Any]] = {}
+    for candidate in tools:
+        tool_name = getattr(candidate, "name", "")
+        if tool_name not in deferred_setup.deferred_names:
+            continue
+        routing = get_mcp_routing(candidate)
+        if routing is None or routing.get("mode") != "prefer":
+            continue
+        keywords = _routing_keywords(routing.get("keywords"))
+        if not keywords:
+            continue
+        if routing.get("auto_promote_top_k") is not None:
+            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s in PR2", tool_name)
+        routing_index[str(tool_name)] = {
+            "priority": _routing_priority(routing.get("priority", 0)),
+            "keywords": keywords,
+        }
+
+    if not routing_index:
+        return None
+
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+
+    return McpRoutingMiddleware(routing_index, deferred_setup.catalog_hash, top_k)
 
 
 # Prompt rendering
@@ -209,7 +284,9 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
 
     Lists only names so the agent knows what exists and can use tool_search to
     load them. Returns empty string when there are no deferred tools. The set is
-    computed at agent build time (after tool-policy filtering) and passed in.
+    computed at agent build time and passed in. Lead-agent sets contain the full
+    configured MCP catalog because active skill policy is applied at runtime;
+    subagent sets may already have been filtered by their startup skill policy.
 
     Lives here, next to the assembly that produces ``deferred_names``, so every
     agent-build path (lead, embedded client, subagent) renders the section the
@@ -217,5 +294,48 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     """
     if not deferred_names:
         return ""
-    names = "\n".join(sorted(deferred_names))
+    # Names come verbatim from external MCP servers; escape so a crafted tool
+    # name cannot close this block and forge a framework tag. Mirrors
+    # get_skill_index_prompt_section.
+    names = "\n".join(html.escape(name, quote=False) for name in sorted(deferred_names))
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
+
+
+def _format_keyword_list(keywords: list[str]) -> str:
+    if len(keywords) == 1:
+        return keywords[0]
+    return f"{', '.join(keywords[:-1])}, or {keywords[-1]}"
+
+
+def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_names: frozenset[str] = frozenset()) -> str:
+    """Render <mcp_routing_hints> from MCP tools carrying routing metadata.
+
+    When tool_search has deferred an MCP tool, the hint must point the model at
+    promotion first; otherwise it may try to call a schema that is hidden from
+    the bound model request.
+    """
+    hints: list[tuple[int, str, list[str]]] = []
+    for candidate in tools:
+        routing = get_mcp_routing(candidate)
+        if routing is None or routing.get("mode") != "prefer":
+            continue
+        keywords = routing.get("keywords") or []
+        if not keywords:
+            continue
+        hints.append((int(routing.get("priority", 0)), candidate.name, [html.escape(str(keyword), quote=False) for keyword in keywords]))
+
+    if not hints:
+        return ""
+
+    lines = ["<mcp_routing_hints>"]
+    for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
+        # tool_name comes verbatim from the external MCP server; escape at render
+        # (keep the raw name for the deferred_names membership check above).
+        esc_name = html.escape(tool_name, quote=False)
+        lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
+        if tool_name in deferred_names:
+            lines.append(f"  use `tool_search` to fetch `{esc_name}`, then prefer that MCP tool.")
+        else:
+            lines.append(f"  prefer the `{esc_name}` tool.")
+    lines.append("</mcp_routing_hints>")
+    return "\n".join(lines)

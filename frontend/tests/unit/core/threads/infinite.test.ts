@@ -5,7 +5,9 @@ import {
   type InfiniteData,
 } from "@tanstack/react-query";
 
+import { PROJECTS_QUERY_KEY } from "@/core/projects/api";
 import {
+  fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   INFINITE_THREADS_PAGE_SIZE,
@@ -25,12 +27,16 @@ import type { AgentThread } from "@/core/threads/types";
 // / stream-finish in sync with both the legacy array cache and the new
 // infinite cache.
 
-function makeThread(id: string, title = `Title ${id}`): AgentThread {
+function makeThread(
+  id: string,
+  title = `Title ${id}`,
+  metadata: Record<string, unknown> = {},
+): AgentThread {
   return {
     thread_id: id,
     created_at: "2025-01-01T00:00:00Z",
     updated_at: "2025-01-01T00:00:00Z",
-    metadata: {},
+    metadata,
     status: "idle",
     values: { title },
   } as unknown as AgentThread;
@@ -83,6 +89,66 @@ describe("getInfiniteThreadsNextPageParam", () => {
     const page1 = makePage(0, 5);
     expect(getInfiniteThreadsNextPageParam(page1, [page1], 5)).toBe(5);
     expect(getInfiniteThreadsNextPageParam(page1, [page1], 10)).toBeUndefined();
+  });
+});
+
+describe("fetchInfiniteThreadsPage", () => {
+  test("fills a visible page while advancing offsets by raw backend rows", async () => {
+    const search = rs
+      .fn()
+      .mockResolvedValueOnce([
+        makeThread("sidecar-1", "Sidecar", { deerflow_sidecar: true }),
+        makeThread("primary-1"),
+      ])
+      .mockResolvedValueOnce([makeThread("primary-2")]);
+
+    const page = await fetchInfiniteThreadsPage(
+      { threads: { search } },
+      { sortBy: "updated_at", sortOrder: "desc" },
+      0,
+      2,
+    );
+
+    expect(page.map((thread) => thread.thread_id)).toEqual([
+      "primary-1",
+      "primary-2",
+    ]);
+    expect(search).toHaveBeenNthCalledWith(1, {
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      limit: 2,
+      offset: 0,
+    });
+    expect(search).toHaveBeenNthCalledWith(2, {
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      limit: 1,
+      offset: 2,
+    });
+    expect(getInfiniteThreadsNextPageParam(page, [page], 2)).toBe(3);
+  });
+
+  test("keeps sidecar rows when the caller explicitly searches for sidecars", async () => {
+    const search = rs.fn().mockResolvedValueOnce([
+      makeThread("sidecar-1", "Sidecar", {
+        deerflow_sidecar: true,
+        parent_thread_id: "parent-1",
+      }),
+    ]);
+
+    const page = await fetchInfiniteThreadsPage(
+      { threads: { search } },
+      {
+        sortBy: "updated_at",
+        sortOrder: "desc",
+        metadata: { deerflow_sidecar: true, parent_thread_id: "parent-1" },
+      },
+      0,
+      2,
+    );
+
+    expect(page.map((thread) => thread.thread_id)).toEqual(["sidecar-1"]);
+    expect(getInfiniteThreadsNextPageParam(page, [page], 2)).toBeUndefined();
   });
 });
 
@@ -259,7 +325,25 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       false,
     ]);
-    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
+  });
+
+  test("preserves loaded history pages while invalidating", () => {
+    const client = new QueryClient();
+    const key = ["thread-messages", "thread-1"] as const;
+    const latest = { data: [], has_more: true, next_before_seq: 20 };
+    const older = { data: [], has_more: false, next_before_seq: null };
+    client.setQueryData(key, {
+      pages: [latest, older],
+      pageParams: [null, 20],
+    });
+
+    invalidateStoppedThreadCaches(client, "thread-1", false);
+
+    expect(client.getQueryData(key)).toEqual({
+      pages: [latest, older],
+      pageParams: [null, 20],
+    });
   });
 
   test("does not refresh per-thread API caches for mock threads", () => {
@@ -277,7 +361,7 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-1",
       true,
     ]);
-    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+    expect(queryKeys()).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
   });
 
   test("wraps SDK stop and refreshes caches after it resolves", async () => {
@@ -412,4 +496,22 @@ describe("invalidateStoppedThreadCaches", () => {
       rs.useRealTimers();
     }
   });
+});
+
+test("run-created snapshots without archive metadata cannot insert into filtered lists", () => {
+  const client = new QueryClient();
+  const recentKey = [...INFINITE_THREADS_QUERY_KEY_PREFIX, { archived: false }];
+  const archivedKey = [
+    ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+    { archived: true },
+  ];
+  const empty = makeInfiniteData([[]]);
+  client.setQueryData(recentKey, empty);
+  client.setQueryData(archivedKey, empty);
+  upsertThreadInInfiniteCache(client, makeThread("running-thread"));
+  expect(client.getQueryData(recentKey)).toEqual(empty);
+  expect(client.getQueryData(archivedKey)).toEqual(empty);
+  expect(client.getQueryState(recentKey)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(archivedKey)?.isInvalidated).toBe(true);
+  client.clear();
 });

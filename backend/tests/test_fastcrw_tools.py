@@ -1,5 +1,6 @@
 """Unit tests for the fastCRW community tools."""
 
+import ipaddress
 import json
 from unittest.mock import MagicMock, patch
 
@@ -121,3 +122,56 @@ class TestWebFetchTool:
         from deerflow.community.fastcrw.tools import web_fetch_tool
 
         assert web_fetch_tool.invoke({"url": "https://example.com"}) == "Error: scrape failed"
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    def test_fetch_rejects_metadata_ip(self, mock_get_app_config, mock_fastcrw_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "http://169.254.169.254/latest/meta-data/"})
+
+        assert "private, loopback, or metadata" in result
+        mock_fastcrw_cls.assert_not_called()
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    def test_fetch_rejects_dns_resolving_to_private(self, mock_get_app_config, mock_fastcrw_cls):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        with patch(
+            "deerflow.community.url_safety.resolve_host_addresses",
+            return_value=[ipaddress.ip_address("10.0.0.5")],
+        ):
+            result = web_fetch_tool.invoke({"url": "https://internal.example.com/"})
+
+        assert "private, loopback, or metadata" in result
+        mock_fastcrw_cls.assert_not_called()
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    def test_fetch_allows_private_when_opted_in(self, mock_get_app_config, mock_fastcrw_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"allow_private_addresses": True, "base_url": "http://localhost:3000"}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Private markdown"
+        mock_scrape_result.metadata = MagicMock(title="Private Page")
+        mock_fastcrw_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "http://10.0.0.5/dashboard"})
+
+        assert result == "# Private Page\n\nPrivate markdown"
+        mock_fastcrw_cls.return_value.scrape.assert_called_once_with(
+            "http://10.0.0.5/dashboard",
+            formats=["markdown"],
+        )

@@ -14,6 +14,20 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+## Todo reminders
+
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
+the producer, presence check, and compaction filter share it. Its value remains
+`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+
 ## Configuration
 
 Summarization is configured in `config.yaml` under the `summarization` key:
@@ -21,7 +35,7 @@ Summarization is configured in `config.yaml` under the `summarization` key:
 ```yaml
 summarization:
   enabled: true
-  model_name: null  # Use default model or specify a lightweight model
+  model_name: null  # null = summarize with the run's own model (see below); or name a lightweight model
 
   # Trigger conditions (OR logic - any condition triggers summarization)
   trigger:
@@ -61,8 +75,11 @@ summarization:
 
 #### `model_name`
 - **Type**: String or null
-- **Default**: `null` (uses default model)
-- **Description**: Model to use for generating summaries. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+- **Default**: `null`
+- **Description**: Model to use for generating summaries.
+  - **`null` (model ownership)**: summarize with the model the run actually executes with — the lead run's resolved model, a subagent's own model, or a thread's custom-agent model — **not** `config.models[0]`. This keeps compaction working on a run whose model is healthy even when `models[0]`'s provider is broken (expired key, quota, outage).
+  - **Set to a model name**: that model generates summaries. If its provider fails, compaction **falls back to the run's own model** so a broken summary provider cannot disable compaction while a working model is available. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+  - Ownership applies to all three paths — automatic lead compaction, subagent compaction, and manual `/compact`. Manual `/compact` resolves the run model with the same precedence as a normal run: the model selected for the request (`POST /api/threads/{id}/compact` body `model_name`, sent by the frontend from the composer's current model) → the thread's custom-agent model → the default. A whitespace-only summary response is treated as a generation failure (it is never committed as a valid empty summary).
 
 #### `trigger`
 - **Type**: Single `ContextSize` or list of `ContextSize` objects
@@ -91,6 +108,18 @@ summarization:
      type: fraction
      value: 0.8  # 80% of max input tokens
    ```
+
+   The percentage resolves from the **summary model's** declared `context_window`
+   — the anchor that generates summaries: `summarization.model_name` when set,
+   otherwise the run's own model. Declare `context_window` on that models entry
+   in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Caveat: when a separate summary model
+   is configured, its window sizes the threshold — a 64k run model paired with
+   a 128k-window summary model resolves `fraction: 0.8` to ~102k tokens and
+   auto-summarization cannot fire before the run model overflows; in that setup
+   prefer absolute `tokens` thresholds sized for the run model.
 
 **Multiple Triggers:**
 ```yaml
@@ -127,7 +156,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Maximum tokens to include when preparing messages for the summarization call itself. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null
@@ -223,9 +252,9 @@ The middleware intelligently preserves message context:
   - Summaries don't require the most powerful models
   - Significant cost savings on high-volume applications
 
-- **Default**: If `model_name` is `null`, uses the default model
-  - May be more expensive but ensures consistency
-  - Good for simple setups
+- **Default**: If `model_name` is `null`, summarizes with the run's own model (not `models[0]`)
+  - Keeps compaction working when `models[0]`'s provider is broken but the run's model is healthy
+  - Good for simple setups; no separate summary provider to keep credentialed
 
 ### Optimization Tips
 

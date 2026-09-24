@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
@@ -20,9 +23,62 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
 from deerflow.config.app_config import AppConfig
+from deerflow.models.request_admission import AdmissionError
+from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_RESPONSE_RETRY_CONTEXT_KEY = "__empty_response_retry_consumed"
+_EMPTY_RESPONSE_RETRY_CONSUMED = object()
+_NON_CIRCUIT_FAILURE_REASONS = {"burst_rate", "empty_response"}
+
+
+@dataclass(slots=True)
+class _CircuitAdmission:
+    generation: int = -1
+
+
+class EmptyModelResponseError(RuntimeError):
+    """The model completed normally without producing persistent content."""
+
+    code = "EMPTY_RESPONSE"
+
+    def __init__(
+        self,
+        message: str = "Model returned a completed response with no content",
+        *,
+        response_message: AIMessage | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.response_message = response_message
+
+
+def _raise_for_empty_response(response: ModelCallResult) -> None:
+    """在响应写入图状态前把零内容 stop 转换为可重试错误。"""
+    message = last_ai_message(response)
+    if message is None:
+        raise EmptyModelResponseError()
+    if has_visible_content(message) or has_tool_call_intent(message):
+        return
+    reason = finish_reason(message)
+    if reason in (None, "", "stop", "end_turn"):
+        raise EmptyModelResponseError(response_message=message)
+
+
+def _consume_empty_response_retry(request: ModelRequest) -> bool:
+    """Consume the one empty-response retry budget stored in run context."""
+    runtime = getattr(request, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        # Direct middleware calls without runtime context retain one retry per call.
+        return True
+    if context.get(_EMPTY_RESPONSE_RETRY_CONTEXT_KEY) is _EMPTY_RESPONSE_RETRY_CONSUMED:
+        return False
+    context[_EMPTY_RESPONSE_RETRY_CONTEXT_KEY] = _EMPTY_RESPONSE_RETRY_CONSUMED
+    return True
+
 
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 _BUSY_PATTERNS = (
@@ -62,6 +118,18 @@ _AUTH_PATTERNS = (
     "未授权",
 )
 
+# Provider burst-rate (``limit_burst_rate``) signals. This is a *rate-of-change*
+# limit, not a quota limit: the provider throttles when request RPM ramps up too
+# steeply (e.g. the 08:30 morning peak going 0 -> full throttle in seconds).
+# Matched against both the error message and the error ``code``/``type``.
+_BURST_PATTERNS = (
+    "limit_burst_rate",
+    "rate increased too quickly",
+    "burst rate",
+    "请求速率增长过快",
+    "突发速率",
+)
+
 # Per-exception retry budget overrides.
 #
 # Some transient errors are retriable in principle but expensive to retry at
@@ -79,7 +147,21 @@ _AUTH_PATTERNS = (
 # value of 2 means "1 first attempt + 1 retry" (the CR-requested
 # "keep one retry" behavior).
 _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
+    "EmptyModelResponseError": 2,
     "StreamChunkTimeoutError": 2,
+    "ReadTimeout": 2,
+}
+
+# Per-reason retry budget overrides, applied in addition to the per-exception
+# overrides above; the tightest bound wins (so neither loosens the other) and
+# the user-configured ``retry_max_attempts`` still caps everything.
+#
+# A burst-rate (``limit_burst_rate``) 429 gets a tight budget on purpose:
+# retrying into the burst adds demand to the very request-rate slope being
+# throttled, so we keep at most one retry (with a longer backoff) and then shed
+# load rather than hammering the provider. Keys are ``_classify_error`` reasons.
+_REASON_RETRY_BUDGETS: dict[str, int] = {
+    "burst_rate": 2,
 }
 
 # Exception class names that indicate the upstream stream-chunk watchdog
@@ -98,12 +180,261 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 )
 
 
+# Process-global LLM call concurrency cap. ONE limiter is shared across every
+# ``LLMErrorHandlingMiddleware`` instance and every call path: the lead agent
+# (main event loop), subagents (the isolated persistent loop in
+# subagents/executor.py), ``asyncio.run`` tests, and the sync graph path. That
+# matters because a provider burst-rate (``limit_burst_rate``) limit fires on
+# the *slope* of the request rate, so the cap must bound aggregate in-flight
+# calls process-wide - a per-loop cap (which is what asyncio.Semaphore would
+# give) is defeated the moment subagent fan-out runs on a second loop.
+#
+# Correctness invariants the design below preserves:
+#   * Lossless waiter handoff: a permit handed to a waiter is *reserved* for
+#     that waiter at dequeue time (``granted=True``). If the waiter is
+#     cancelled before it wakes, the reserved permit is re-handed to the next
+#     waiter (or freed) - so a cancellation in the post-dequeue/pre-reacquire
+#     window never strands the next waiter with capacity idle.
+#   * Startup-only cap: the cap is resolved ONCE, at the first middleware
+#     construction (``_apply_configured_cap``), and frozen thereafter. Later
+#     ``__init__`` calls never touch the cap - whether they hold a newer or an
+#     older ``AppConfig`` snapshot. This removes the pseudo-generation path
+#     entirely: with no cap mutation at runtime there is no downscale that
+#     could hand excess permits to queued waiters (keeping ``in_flight`` pegged
+#     at the old cap), and no construction-order race where a stale config
+#     constructed after a fresher one could restore a higher cap. Per-attempt
+#     callers only acquire/release. Changing the cap requires a gateway
+#     restart (see ``LlmCallConfig.max_concurrent_calls``).
+
+
+class _AsyncWaiter:
+    """A parked async caller awaiting a transferred permit.
+
+    ``granted`` is flipped to ``True`` (under the limiter lock) at the exact
+    moment a permit is reserved for this waiter - by ``release`` handing off a
+    returning permit, or by another cancelling waiter handing off its reserved
+    permit. The reservation is atomic with the dequeue, so the invariant
+    ``granted is True  <=>  not in _async_waiters`` always holds: once granted,
+    the permit is already counted in ``_in_flight`` and the waiter need only
+    wake and return. A cancelled waiter therefore knows from ``granted``
+    whether it owes a handoff (granted) or is merely unregistering (not yet
+    granted).
+    """
+
+    __slots__ = ("loop", "event", "granted")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, event: asyncio.Event) -> None:
+        self.loop = loop
+        self.event = event
+        self.granted = False
+
+
+class _ProcessWideLimiter:
+    """In-flight call limiter shared across event loops and sync/async wrappers.
+
+    ``asyncio.Semaphore`` binds to the first event loop that uses it and raises
+    if acquired from another, so it cannot cap lead-agent and subagent calls
+    together (they run on different loops), nor the sync graph path. This
+    limiter is built on ``threading`` primitives (not loop-bound): every call
+    path shares one in-flight counter and one cap.
+
+    The cap is **immutable**: it is set once at construction (by
+    ``_apply_configured_cap`` on the first middleware ``__init__``) and never
+    mutated afterwards. Because the cap never changes at runtime there is no
+    downscale race (a lowered cap could otherwise keep admitting queued
+    waiters until ``in_flight`` drains) and no config-freshness race (a stale
+    snapshot constructed later could otherwise restore a higher cap). Per-
+    attempt callers (``acquire_sync``/``acquire_async``/``release``) never
+    touch the cap. Permits are released in a ``finally`` and an async waiter
+    that is cancelled after its permit was reserved hands the reservation to
+    the next waiter, so capacity never leaks and a cancellation never strands
+    a later waiter.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._in_flight = 0
+        self._limit = max(0, limit)
+        # FIFO of async callers waiting on capacity. Each waiter lives on its
+        # caller's loop; release/handoff wakes one across loops via
+        # call_soon_threadsafe so the wakeup runs on the right loop.
+        self._async_waiters: deque[_AsyncWaiter] = deque()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+    def acquire_sync(self) -> None:
+        """Block the calling thread until a permit is available, then take one."""
+        with self._cond:
+            while not self._try_acquire_locked():
+                self._cond.wait()
+
+    def release(self) -> None:
+        """Return one permit, handing it to a waiter if one is queued.
+
+        If an async waiter is queued, the returning permit *transfers* to it
+        (ownership moves; ``_in_flight`` is unchanged) and its event is set so
+        it wakes already owning a permit. Otherwise the permit returns to the
+        free pool (``_in_flight -= 1``) and one sync waiter is notified to grab
+        it on its next ``_try_acquire_locked`` re-check.
+        """
+        with self._cond:
+            if self._async_waiters:
+                waiter = self._async_waiters.popleft()
+                waiter.granted = True
+                if not self._wake_locked(waiter):
+                    # Owner loop closed: the transferred permit is stranded;
+                    # hand it to the next waiter or free it.
+                    self._handoff_granted_permit_locked()
+                return
+            if self._in_flight > 0:
+                self._in_flight -= 1
+            self._cond.notify()
+
+    async def acquire_async(self) -> None:
+        """Acquire a permit without blocking the event loop.
+
+        Free capacity -> take one immediately. Otherwise park on an
+        ``asyncio.Event``; ``release`` / a cap-raise transfers a permit to us
+        (``granted=True``) and sets the event. On cancellation, if a permit was
+        already reserved for us, hand it to the next waiter (or free it) so the
+        reservation is never lost; if we were still queued (not yet granted),
+        just unregister - no permit was reserved for us, so there is nothing to
+        release.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            waiter = _AsyncWaiter(loop=loop, event=asyncio.Event())
+            with self._cond:
+                if self._try_acquire_locked():
+                    return
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "LLM call parking on process-wide limiter (in_flight=%d, limit=%d, queued=%d)",
+                        self._in_flight,
+                        self._limit,
+                        len(self._async_waiters) + 1,
+                    )
+                self._async_waiters.append(waiter)
+            try:
+                await waiter.event.wait()
+            except asyncio.CancelledError:
+                with self._cond:
+                    if waiter.granted:
+                        # A permit was reserved for us but we're cancelling
+                        # before waking. Pass the reservation to the next
+                        # waiter (or free it) so it is not stranded.
+                        self._handoff_granted_permit_locked()
+                    else:
+                        # Still queued, never granted (granted is set only when
+                        # dequeued, under the lock): just unregister.
+                        self._async_waiters.remove(waiter)
+                raise
+            return  # woken => granted => we own a permit (already in _in_flight)
+
+    def _try_acquire_locked(self) -> bool:
+        if self._in_flight < self._limit:
+            self._in_flight += 1
+            return True
+        return False
+
+    def _handoff_granted_permit_locked(self) -> None:
+        """Transfer an already-reserved permit to the next queued waiter, or free it.
+
+        Used when a waiter that had a permit reserved cancels before waking, or
+        when a reservation target's loop is dead. The permit is already counted
+        in ``_in_flight``; transferring keeps it counted (ownership moves to the
+        next waiter), freeing returns it to the pool. Either way ``_in_flight``
+        stays correct and the reservation is never lost.
+        """
+        while self._async_waiters:
+            waiter = self._async_waiters.popleft()
+            waiter.granted = True
+            if self._wake_locked(waiter):
+                return  # ownership transferred; _in_flight unchanged
+            # dead loop; try the next waiter
+        # No async waiter to take it: free the permit and wake a sync waiter.
+        if self._in_flight > 0:
+            self._in_flight -= 1
+        self._cond.notify()
+
+    def _wake_locked(self, waiter: _AsyncWaiter) -> bool:
+        """Schedule ``event.set`` on the waiter's loop. False if the loop is dead."""
+        try:
+            waiter.loop.call_soon_threadsafe(waiter.event.set)
+            return True
+        except RuntimeError:
+            return False  # owner loop closed: the wakeup cannot land
+
+
+_LIMITER_LOCK = threading.Lock()
+_PROCESS_LIMITER: _ProcessWideLimiter | None = None
+
+# Whether the process-wide cap has been resolved yet. The cap is startup-only:
+# the first ``LLMErrorHandlingMiddleware`` ``__init__`` resolves it (creating a
+# limiter for a positive cap, or leaving it ``None`` for a disabled cap) and
+# every subsequent ``__init__`` is a no-op - regardless of whether its
+# ``AppConfig`` snapshot is newer or older than the first. This is the single
+# owner of the cap; per-attempt callers only acquire/release.
+_CAP_RESOLVED: bool = False
+
+
+def _get_process_limiter() -> _ProcessWideLimiter | None:
+    """Return the process-wide LLM-call limiter, or ``None`` when the cap is
+    disabled (or before the first middleware construction resolves it).
+
+    Per-attempt callers use this to acquire/release only - it never changes the
+    cap. ``limiter is None`` is the sole gate for "cap disabled": a per-call
+    short-circuit on the instance's configured value would let a later
+    (reloaded) instance with ``max_concurrent_calls=0`` silently drop the cap
+    mid-process, which is exactly the hot-reload churn the startup-only design
+    removes.
+    """
+    return _PROCESS_LIMITER
+
+
+def _apply_configured_cap(limit: int) -> None:
+    """Resolve the process-wide cap from the first middleware ``__init__``.
+
+    Startup-only: the very first call wins and freezes the cap. A positive
+    ``limit`` creates the limiter at that cap; ``limit <= 0`` resolves the cap
+    as disabled (limiter stays ``None``, callers short-circuit on
+    ``limiter is None``). Every later call - whether it carries a newer or an
+    older ``AppConfig`` snapshot, and whether it would raise or lower the cap -
+    is ignored, so the cap can never be mutated at runtime. Changing it requires
+    a gateway restart.
+    """
+    global _PROCESS_LIMITER, _CAP_RESOLVED
+    if _CAP_RESOLVED:
+        return  # cap already frozen at first construction; this instance is a no-op
+    with _LIMITER_LOCK:
+        if _CAP_RESOLVED:
+            return
+        _CAP_RESOLVED = True
+        if limit > 0:
+            _PROCESS_LIMITER = _ProcessWideLimiter(limit)
+
+
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Retry transient LLM errors and surface graceful assistant messages."""
 
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 1000
     retry_cap_delay_ms: int = 8000
+    # Longer backoff base used only for burst-rate (limit_burst_rate) 429s, so
+    # the single burst retry lands after the throttle window subsides.
+    burst_retry_base_delay_ms: int = 5000
+    # Process-wide cap on concurrently in-flight LLM calls. 0 disables the cap
+    # (default) so existing deployments see no behavior change; set to a
+    # positive int to bound aggregate concurrency and smooth provider
+    # burst-rate (limit_burst_rate) spikes. See _get_process_limiter.
+    max_concurrent_llm_calls: int = 0
 
     def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -111,26 +442,58 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
+        # Retry / backoff / concurrency knobs are all configured via the
+        # ``llm_call`` section of config.yaml; they override the class defaults
+        # above so operators can tune them without code changes.
+        llm_call = app_config.llm_call
+        self.retry_max_attempts = llm_call.retry_max_attempts
+        self.retry_base_delay_ms = llm_call.retry_base_delay_ms
+        self.retry_cap_delay_ms = llm_call.retry_cap_delay_ms
+        self.burst_retry_base_delay_ms = llm_call.burst_retry_base_delay_ms
+        self.max_concurrent_llm_calls = llm_call.max_concurrent_calls
+
+        # Resolve the process-wide cap (startup-only: the first ``__init__`` in
+        # the process wins and freezes it; later instances - newer or older
+        # config - are no-ops). Per-attempt callers only acquire/release, so the
+        # cap can never be mutated at runtime and there is no downscale or
+        # config-freshness race to admit waiters above the live cap.
+        _apply_configured_cap(self.max_concurrent_llm_calls)
+
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()
         self._circuit_failure_count = 0
         self._circuit_open_until = 0.0
         self._circuit_state = "closed"
+        self._circuit_generation = 0
         self._circuit_probe_in_flight = False
+        self._circuit_probe_token: object | None = None
 
-    def _max_attempts_for(self, exc: BaseException) -> int:
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "empty_response_retry_limit": 1,
+            "empty_response_retry_scope": "run",
+        }
+
+    def _max_attempts_for(self, exc: BaseException, reason: str = "transient") -> int:
         """Return the effective max attempt count for this exception.
 
-        Falls back to `self.retry_max_attempts` unless the exception class name
-        appears in the per-exception override table.
+        The user-configured ``retry_max_attempts`` is the ceiling; per-exception
+        (``_RETRY_BUDGET_OVERRIDES``, keyed by class name) and per-reason
+        (``_REASON_RETRY_BUDGETS``, keyed by ``_classify_error`` reason)
+        overrides can only *tighten* it. The tightest bound wins, so a burst-rate
+        429 never gets more attempts than its dedicated budget even if the
+        operator raised the global cap.
         """
-        override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
-        if override is None:
-            return self.retry_max_attempts
+        candidates = [self.retry_max_attempts]
+        class_override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
+        if class_override is not None:
+            candidates.append(class_override)
+        reason_override = _REASON_RETRY_BUDGETS.get(reason)
+        if reason_override is not None:
+            candidates.append(reason_override)
+        return min(candidates)
 
-        return min(override, self.retry_max_attempts)
-
-    def _check_circuit(self) -> bool:
+    def _check_circuit(self, *, probe_token: object | None = None) -> bool:
         """Returns True if circuit is OPEN (fast fail), False otherwise."""
         with self._circuit_lock:
             now = time.time()
@@ -138,32 +501,57 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             if self._circuit_state == "open":
                 if now < self._circuit_open_until:
                     return True
+                self._circuit_generation += 1
                 self._circuit_state = "half_open"
                 self._circuit_probe_in_flight = False
+                self._circuit_probe_token = None
 
             if self._circuit_state == "half_open":
                 if self._circuit_probe_in_flight:
                     return True
                 self._circuit_probe_in_flight = True
+                self._circuit_probe_token = probe_token
+                if isinstance(probe_token, _CircuitAdmission):
+                    probe_token.generation = self._circuit_generation
                 return False
 
+            if isinstance(probe_token, _CircuitAdmission):
+                probe_token.generation = self._circuit_generation
             return False
 
-    def _record_success(self) -> None:
+    def _owns_current_circuit_generation(self, admission: _CircuitAdmission | None) -> bool:
+        if admission is None:
+            return True
+        if admission.generation != self._circuit_generation:
+            return False
+        if self._circuit_state == "half_open":
+            return self._circuit_probe_token is admission
+        return self._circuit_state == "closed"
+
+    def _record_success(self, *, admission: _CircuitAdmission | None = None) -> None:
         with self._circuit_lock:
+            if not self._owns_current_circuit_generation(admission):
+                return
             if self._circuit_state != "closed" or self._circuit_failure_count > 0:
                 logger.info("Circuit breaker reset (Closed). LLM service recovered.")
+            if self._circuit_state == "half_open":
+                self._circuit_generation += 1
             self._circuit_failure_count = 0
             self._circuit_open_until = 0.0
             self._circuit_state = "closed"
             self._circuit_probe_in_flight = False
+            self._circuit_probe_token = None
 
-    def _record_failure(self) -> None:
+    def _record_failure(self, *, admission: _CircuitAdmission | None = None) -> None:
         with self._circuit_lock:
+            if not self._owns_current_circuit_generation(admission):
+                return
             if self._circuit_state == "half_open":
                 self._circuit_open_until = time.time() + self.circuit_recovery_timeout_sec
+                self._circuit_generation += 1
                 self._circuit_state = "open"
                 self._circuit_probe_in_flight = False
+                self._circuit_probe_token = None
                 logger.error(
                     "Circuit breaker probe failed (Open). Will probe again after %ds.",
                     self.circuit_recovery_timeout_sec,
@@ -174,30 +562,64 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             if self._circuit_failure_count >= self.circuit_failure_threshold:
                 self._circuit_open_until = time.time() + self.circuit_recovery_timeout_sec
                 if self._circuit_state != "open":
+                    self._circuit_generation += 1
                     self._circuit_state = "open"
                     self._circuit_probe_in_flight = False
+                    self._circuit_probe_token = None
                     logger.error(
                         "Circuit breaker tripped (Open). Threshold reached (%d). Will probe after %ds.",
                         self.circuit_failure_threshold,
                         self.circuit_recovery_timeout_sec,
                     )
 
+    def _release_half_open_probe(self, *, admission: _CircuitAdmission | None = None) -> None:
+        """Release the in-flight half-open probe without recording a failure.
+
+        Used when something other than a classified success/failure consumes the probe (a
+        GraphBubbleUp control-flow signal, or a non-retriable error), so the circuit can admit
+        the next probe instead of fast-failing forever. The admission identity prevents an
+        older call from releasing a different call's probe.
+        """
+        with self._circuit_lock:
+            if not self._owns_current_circuit_generation(admission):
+                return
+            if self._circuit_state == "half_open":
+                self._circuit_generation += 1
+                self._circuit_probe_in_flight = False
+                self._circuit_probe_token = None
+
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
+        if isinstance(exc, AdmissionError):
+            return False, "admission"
         detail = _extract_error_detail(exc)
         lowered = detail.lower()
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
 
+        if isinstance(exc, EmptyModelResponseError):
+            return True, "empty_response"
         if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
+        # Burst-rate (limit_burst_rate) 429 is retriable but needs its own
+        # policy: a tight retry budget and a longer backoff base (see
+        # _REASON_RETRY_BUDGETS / _build_retry_delay_ms). Detected before the
+        # generic 429->transient mapping so it isn't lumped in with ordinary
+        # transient errors.
+        if _matches_any(lowered, _BURST_PATTERNS) or _matches_any(str(error_code).lower(), _BURST_PATTERNS):
+            return True, "burst_rate"
 
         exc_name = exc.__class__.__name__
         if exc_name in {
             "APITimeoutError",
             "APIConnectionError",
             "InternalServerError",
+            "ReadTimeout",
+            "ConnectTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+            "TimeoutException",
             "ReadError",  # httpx.ReadError: connection dropped mid-stream
             "RemoteProtocolError",  # httpx: server closed connection unexpectedly
             "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
@@ -221,17 +643,122 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         return False, "generic"
 
-    def _build_retry_delay_ms(self, attempt: int, exc: BaseException) -> int:
+    def _bounded_model_call_sync(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Run one sync model attempt under the process-global concurrency cap.
+
+        The limiter wraps a *single* attempt only (not the retry loop), so
+        backoff sleeps release the slot for other callers. ``limiter is None``
+        (cap disabled at startup) is a direct passthrough; a non-``None``
+        limiter is always consulted - the cap is frozen at the first
+        ``__init__``, so a later instance whose ``max_concurrent_llm_calls`` is
+        0 cannot silently drop it. Permits release on any exit (return or
+        raise) via ``finally`` so a raised handler never leaks a slot.
+        """
+        limiter = _get_process_limiter()
+        if limiter is None:
+            return handler(request)
+        limiter.acquire_sync()
+        try:
+            return handler(request)
+        finally:
+            limiter.release()
+
+    async def _bounded_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Run one async model attempt under the process-global concurrency cap.
+
+        The limiter wraps a *single* attempt only (not the retry loop), so
+        backoff sleeps release the slot for other callers - we bound in-flight
+        requests, not waiting ones. ``limiter is None`` (cap disabled at
+        startup) is a direct passthrough; a non-``None`` limiter is always
+        consulted (cap frozen at first ``__init__``). Permits release on any
+        exit (return, raise, or cancellation) via ``finally``;
+        ``acquire_async`` separately cleans up if cancelled while waiting, so
+        capacity never leaks.
+        """
+        limiter = _get_process_limiter()
+        if limiter is None:
+            return await handler(request)
+        await limiter.acquire_async()
+        try:
+            return await handler(request)
+        finally:
+            limiter.release()
+
+    def _build_retry_delay_ms(self, prev_delay_ms: int | None, exc: BaseException, reason: str = "transient") -> int:
+        """Compute the next retry delay (ms) using decorrelated jitter.
+
+        An explicit ``Retry-After`` from the provider is honored as-is (no
+        jitter) - the server told us exactly when to come back, and for a
+        burst-rate 429 this is strongly preferred over any computed delay.
+        Otherwise AWS-style "decorrelated jitter" is applied:
+        ``delay = random(base, min(cap, max(base, seed * 3)))`` where ``seed``
+        is the previous delay, or the reason-specific base on the first retry
+        (``prev_delay_ms is None``). The window is clamped to the cap *before*
+        drawing (not after) so the distribution stays uniform up to the cap
+        rather than piling up at it. ``reason="burst_rate"`` swaps in
+        ``burst_retry_base_delay_ms`` (longer than the normal base) so the
+        single burst retry lands after the throttle window subsides.
+
+        Seeding the first retry from the *reason-specific* base (not always the
+        normal base) is what keeps the first-and-only burst retry
+        non-degenerate: with the normal base (1000ms) the burst window would
+        collapse to ``randint(5000, max(5000, 1000*3)) = randint(5000, 5000)``
+        and every concurrent burst failure would realign on the same 5s tick.
+        Seeding from 5000ms gives ``randint(5000, min(8000, 15000)) =
+        randint(5000, 8000)`` with defaults, so a fleet that failed together
+        spreads out across the whole window.
+
+        Deterministic exponential backoff (``base * 2^(attempt-1)``) makes
+        every concurrent retryer realign on the same backoff ticks; when a
+        whole fleet fails at once (e.g. a provider burst-rate limit at the
+        morning peak) that synchronized retry storm re-triggers the very limit
+        we are backing off from. Decorrelated jitter spreads those retries
+        across a random window so they don't re-peak in lockstep.
+        """
         retry_after = _extract_retry_after_ms(exc)
         if retry_after is not None:
             return retry_after
-        backoff = self.retry_base_delay_ms * (2 ** max(0, attempt - 1))
-        return min(backoff, self.retry_cap_delay_ms)
+        base = self.burst_retry_base_delay_ms if reason == "burst_rate" else self.retry_base_delay_ms
+        cap = self.retry_cap_delay_ms
+        seed = base if prev_delay_ms is None else prev_delay_ms
+        # Clamp the window to the cap *before* drawing so the jitter spreads
+        # uniformly across [base, min(cap, seed*3)] instead of concentrating at
+        # the cap: with defaults seed*3 (=15000) >> cap (=8000), drawing
+        # randint(base, seed*3) then min(delay, cap) would put ~70% of draws at
+        # exactly cap, re-clustering a fleet that the jitter is meant to spread.
+        high = min(cap, max(base, seed * 3))
+        if high < base:
+            return cap  # base exceeds cap (misconfiguration): the cap wins
+        return random.randint(base, high)
 
-    def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
+    def _build_retry_message(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> str:
         seconds = max(1, round(wait_ms / 1000))
-        reason_text = "provider is busy" if reason == "busy" else "provider request failed temporarily"
-        return f"LLM request retry {attempt}/{self.retry_max_attempts}: {reason_text}. Retrying in {seconds}s."
+        reason_text = {
+            "busy": "provider is busy",
+            "burst_rate": "provider is throttling request burst rate",
+            "empty_response": "provider returned an empty response",
+        }.get(reason, "provider request failed temporarily")
+        # ``max_attempts`` is the *effective* budget for this call (from
+        # ``_max_attempts_for``), not the configured ceiling: a burst-rate call
+        # is capped at 2 attempts, so its message must read ``1/2`` not ``1/3``
+        # even when ``retry_max_attempts`` is the default 3 - otherwise the UI
+        # promises a retry that will never happen.
+        return f"LLM request retry {attempt}/{max_attempts}: {reason_text}. Retrying in {seconds}s."
 
     def _build_circuit_breaker_message(self) -> str:
         return "The configured LLM provider is currently unavailable due to continuous failures. Circuit breaker is engaged to protect the system. Please wait a moment before trying again."
@@ -243,16 +770,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         error_type: str,
         reason: str,
         detail: str,
+        response_message: AIMessage | None = None,
     ) -> AIMessage:
-        return AIMessage(
-            content=content,
-            additional_kwargs={
+        additional_kwargs = dict(response_message.additional_kwargs or {}) if response_message is not None else {}
+        additional_kwargs.update(
+            {
                 "deerflow_error_fallback": True,
                 "error_type": error_type,
                 "error_reason": reason,
                 "error_detail": detail,
-            },
+            }
         )
+        if response_message is not None:
+            return response_message.model_copy(
+                update={
+                    "content": append_visible_text(response_message, content),
+                    "additional_kwargs": additional_kwargs,
+                }
+            )
+        return AIMessage(content=content, additional_kwargs=additional_kwargs)
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
         detail = _extract_error_detail(exc)
@@ -260,6 +796,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
             return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
+        if reason == "burst_rate":
+            return "The configured LLM provider is temporarily throttling requests because the request rate increased too quickly (burst-rate limit). Please wait a moment and try again."
+        if reason == "empty_response":
+            return "The configured LLM provider returned an empty response after one automatic retry. Please continue the conversation or use a different model."
         if reason in {"busy", "transient"}:
             # Stream-drop failures (chunk-gap timeout, peer-closed connection,
             # raw read error) almost always point at a single oversized
@@ -284,25 +824,70 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             error_type=type(exc).__name__,
             reason=reason,
             detail=_extract_error_detail(exc),
+            response_message=exc.response_message if isinstance(exc, EmptyModelResponseError) else None,
         )
 
-    def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
+    def _build_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> dict[str, Any]:
+        return {
+            "type": "llm_retry",
+            "attempt": attempt,
+            # Effective budget for this call (burst-rate == 2), not the
+            # configured ceiling - the frontend renders this and the
+            # ``message`` below, so both must describe the loop that runs.
+            "max_attempts": max_attempts,
+            "wait_ms": wait_ms,
+            "reason": reason,
+            "message": self._build_retry_message(attempt, wait_ms, reason, max_attempts=max_attempts),
+        }
+
+    def _emit_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> None:
         try:
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
-            writer(
-                {
-                    "type": "llm_retry",
-                    "attempt": attempt,
-                    "max_attempts": self.retry_max_attempts,
-                    "wait_ms": wait_ms,
-                    "reason": reason,
-                    "message": self._build_retry_message(attempt, wait_ms, reason),
-                }
+            emit_custom_event(
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                writer=writer,
             )
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to emit llm_retry event", exc_info=True)
+
+    async def _aemit_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> None:
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            await aemit_custom_event(
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                writer=writer,
+            )
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.debug("Failed to emit async llm_retry event", exc_info=True)
 
     @override
     def wrap_model_call(
@@ -310,7 +895,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        if self._check_circuit():
+        admission = _CircuitAdmission()
+        if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
                 error_type="CircuitBreakerOpen",
@@ -319,30 +905,38 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
+        prev_delay_ms: int | None = None
         while True:
             try:
-                response = handler(request)
-                self._record_success()
+                response = self._bounded_model_call_sync(request, handler)
+                _raise_for_empty_response(response)
+                self._record_success(admission=admission)
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-                with self._circuit_lock:
-                    if self._circuit_state == "half_open":
-                        self._circuit_probe_in_flight = False
+                self._release_half_open_probe(admission=admission)
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                max_attempts = self._max_attempts_for(exc)
-                if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+                max_attempts = self._max_attempts_for(exc, reason)
+                should_retry = retriable and attempt < max_attempts
+                if should_retry and reason == "empty_response":
+                    should_retry = _consume_empty_response_retry(request)
+                if should_retry:
+                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
+                    prev_delay_ms = wait_ms
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
                         attempt,
-                        self.retry_max_attempts,
+                        max_attempts,
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
+                    try:
+                        self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
+                    except GraphBubbleUp:
+                        self._release_half_open_probe(admission=admission)
+                        raise
                     time.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
@@ -352,8 +946,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable:
-                    self._record_failure()
+                if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
+                    self._record_failure(admission=admission)
+                else:
+                    # These outcomes do not show that the provider is broadly unavailable.
+                    self._release_half_open_probe(admission=admission)
                 return self._build_user_fallback_message(exc, reason)
 
     @override
@@ -362,7 +959,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        if self._check_circuit():
+        admission = _CircuitAdmission()
+        if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
                 error_type="CircuitBreakerOpen",
@@ -371,42 +969,59 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
-        while True:
-            try:
-                response = await handler(request)
-                self._record_success()
-                return response
-            except GraphBubbleUp:
-                # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-                with self._circuit_lock:
-                    if self._circuit_state == "half_open":
-                        self._circuit_probe_in_flight = False
-                raise
-            except Exception as exc:
-                retriable, reason = self._classify_error(exc)
-                max_attempts = self._max_attempts_for(exc)
-                if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+        prev_delay_ms: int | None = None
+        try:
+            while True:
+                try:
+                    response = await self._bounded_model_call(request, handler)
+                    _raise_for_empty_response(response)
+                    self._record_success(admission=admission)
+                    return response
+                except GraphBubbleUp:
+                    # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+                    self._release_half_open_probe(admission=admission)
+                    raise
+                except Exception as exc:
+                    retriable, reason = self._classify_error(exc)
+                    max_attempts = self._max_attempts_for(exc, reason)
+                    should_retry = retriable and attempt < max_attempts
+                    if should_retry and reason == "empty_response":
+                        should_retry = _consume_empty_response_retry(request)
+                    if should_retry:
+                        wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
+                        prev_delay_ms = wait_ms
+                        logger.warning(
+                            "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                            attempt,
+                            max_attempts,
+                            wait_ms,
+                            _extract_error_detail(exc),
+                        )
+                        try:
+                            await self._aemit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
+                        except GraphBubbleUp:
+                            self._release_half_open_probe(admission=admission)
+                            raise
+                        await asyncio.sleep(wait_ms / 1000)
+                        attempt += 1
+                        continue
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                        "LLM call failed after %d attempt(s): %s",
                         attempt,
-                        self.retry_max_attempts,
-                        wait_ms,
                         _extract_error_detail(exc),
+                        exc_info=exc,
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
-                    await asyncio.sleep(wait_ms / 1000)
-                    attempt += 1
-                    continue
-                logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
-                    attempt,
-                    _extract_error_detail(exc),
-                    exc_info=exc,
-                )
-                if retriable:
-                    self._record_failure()
-                return self._build_user_fallback_message(exc, reason)
+                    if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
+                        self._record_failure(admission=admission)
+                    else:
+                        # These outcomes do not show that the provider is broadly unavailable.
+                        self._release_half_open_probe(admission=admission)
+                    return self._build_user_fallback_message(exc, reason)
+        except asyncio.CancelledError:
+            # Cancellation can arrive during admission, the provider call, retry
+            # event delivery, or backoff. It is not a provider failure.
+            self._release_half_open_probe(admission=admission)
+            raise
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:

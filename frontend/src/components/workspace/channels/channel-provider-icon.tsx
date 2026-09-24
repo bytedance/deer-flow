@@ -5,6 +5,8 @@ import type { SVGProps } from "react";
 
 import { cn } from "@/lib/utils";
 
+import { BuzzProviderIcon } from "./buzz-provider-icon";
+
 type ChannelProviderIconProps = SVGProps<SVGSVGElement> & {
   provider: string;
 };
@@ -15,6 +17,10 @@ export function ChannelProviderIcon({
   ...props
 }: ChannelProviderIconProps) {
   const normalizedProvider = provider.toLowerCase();
+
+  if (normalizedProvider === "buzz") {
+    return <BuzzProviderIcon className={cn("size-5", className)} {...props} />;
+  }
 
   if (normalizedProvider === "telegram") {
     return (

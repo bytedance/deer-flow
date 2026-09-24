@@ -1,14 +1,17 @@
 """Comprehensive tests for ToolOutputBudgetMiddleware.
 
 Covers: pass-through, disk externalization, fallback truncation, UTF-8
-boundaries, Command results, model-request history patching, config
-variations, exempt tools, per-tool overrides, edge cases, and both
-sync/async code paths.
+boundaries, Command results, model-request history patching, superseded
+write_file payload elision (issue #5328), config variations, exempt tools,
+per-tool overrides, edge cases, and both sync/async code paths.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import pathlib
 import tempfile
 from types import SimpleNamespace
 
@@ -27,9 +30,11 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _needs_budget,
     _patch_model_messages,
     _sanitize_tool_name,
+    _snap_start_to_line_boundary,
     _snap_to_line_boundary,
     _tool_message_over_budget,
 )
+from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -37,6 +42,20 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _lines_then_long_line(total: int, newline_ratio: float = 0.6) -> str:
+    """Content that is line-oriented for the first *newline_ratio*, then one unbroken line.
+
+    Mirrors real bash/web_fetch output that logs progress lines and then dumps a
+    single-line artifact (minified JSON, base64 blob). The last newline lands in
+    the second half of the content, which is what exercises line snapping around
+    the tail offset.
+    """
+    head_len = int(total * newline_ratio)
+    lines = "".join(f"[info] step {i} ok\n" for i in range(head_len // 18 + 1))[:head_len]
+    lines = lines[:-1] + "\n" if not lines.endswith("\n") else lines
+    return lines + "A" * (total - len(lines))
 
 
 def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1", outputs_path: str | None = None) -> SimpleNamespace:
@@ -47,6 +66,27 @@ def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1"
         tool_call={"name": tool_name, "id": tool_call_id},
         runtime=runtime,
     )
+
+
+@contextlib.contextmanager
+def _unwritable_outputs_path():
+    """Yield an ``outputs_path`` that ``os.makedirs`` cannot create, on any platform.
+
+    The parent component is a regular file, so creating a directory below it
+    fails with an ``OSError`` subclass everywhere (``NotADirectoryError`` on
+    POSIX, ``FileNotFoundError`` on Windows) and nothing is written outside the
+    temporary directory.
+
+    This deliberately avoids expressing "unwritable" as a magic absolute path.
+    ``/nonexistent/...`` was creatable by root in the CI container, and its
+    replacement ``/dev/null/...`` relies on ``/dev/null`` being a character
+    device, which is only true on POSIX -- on Windows it is an ordinary
+    relative path that ``os.makedirs`` happily creates at the drive root.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        blocker = pathlib.Path(tmpdir) / "not-a-directory"
+        blocker.touch()
+        yield os.path.join(blocker, "outputs")
 
 
 def _tm(content: str = "ok", name: str = "tool", tool_call_id: str = "tc-1") -> ToolMessage:
@@ -99,6 +139,28 @@ class TestSnapToLineBoundary:
         assert _snap_to_line_boundary("abc", 10) == 10
 
 
+class TestSnapStartToLineBoundary:
+    def test_snaps_forward_to_newline(self):
+        text = "line1\nline2\nline3"
+        result = _snap_start_to_line_boundary(text, 2)  # inside "line1"
+        assert text[result - 1] == "\n"
+        assert result >= 2
+
+    def test_never_moves_backwards(self):
+        text = "aaaa\n" + "b" * 20
+        for pos in range(1, len(text)):
+            assert _snap_start_to_line_boundary(text, pos) >= pos
+
+    def test_no_snap_when_no_newline_in_range(self):
+        assert _snap_start_to_line_boundary("abcdefghij", 2) == 2
+
+    def test_zero_pos(self):
+        assert _snap_start_to_line_boundary("a\nbc", 0) == 0
+
+    def test_pos_beyond_length(self):
+        assert _snap_start_to_line_boundary("abc", 10) == 10
+
+
 class TestExternalize:
     def test_writes_file_and_returns_virtual_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -121,20 +183,15 @@ class TestExternalize:
                 assert f.read() == "full content here"
 
     def test_returns_none_on_invalid_path(self):
-        # ``/dev/null`` is a character device on both Linux and macOS, so
-        # ``os.makedirs`` cannot create any subdirectory under it for any
-        # user (including root). The previously-used ``/nonexistent/...``
-        # path was silently created by ``mkdir -p`` when the test process
-        # ran as root inside the CI container, which made this test fail
-        # in CI independently of the externalization logic under test.
-        path = _externalize(
-            "data",
-            tool_name="test",
-            tool_call_id="tc-1",
-            outputs_path="/dev/null/cannot-mkdir-here",
-            storage_subdir=".tool-results",
-        )
-        assert path is None
+        with _unwritable_outputs_path() as outputs_path:
+            path = _externalize(
+                "data",
+                tool_name="test",
+                tool_call_id="tc-1",
+                outputs_path=outputs_path,
+                storage_subdir=".tool-results",
+            )
+            assert path is None
 
     def test_txt_extension_for_unknown_tool(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,6 +260,45 @@ class TestExternalizePathTraversal:
         assert path is None
 
 
+class TestStorageSubdirConfig:
+    """storage_subdir must be a single path segment.
+
+    The workspace-changes scanner prunes by directory name during os.walk,
+    which yields one-segment dirnames — a nested value like
+    ``cache/tool-results`` would silently never match the exclusion and its
+    files would be counted as produced artifacts again. Rejecting it at config
+    time keeps the dir-name-based exclusion sound.
+    """
+
+    def test_default_is_single_segment(self):
+        assert ToolOutputConfig().storage_subdir == ".tool-results"
+
+    def test_single_segment_custom_accepted(self):
+        assert ToolOutputConfig(storage_subdir="tool-output-cache").storage_subdir == "tool-output-cache"
+
+    def test_nested_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache/tool-results")
+
+    def test_windows_separator_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache\\tool-results")
+
+    def test_absolute_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="/abs/path")
+
+    def test_dot_and_dotdot_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir=".")
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="..")
+
+    def test_empty_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="")
+
+
 class TestNeedsBudget:
     def test_small_output_does_not_need_budget(self):
         config = ToolOutputConfig(externalize_min_chars=1000)
@@ -226,7 +322,7 @@ class TestNeedsBudget:
 
 
 class TestBuildPreview:
-    def test_contains_head_and_tail_and_reference(self):
+    def test_contains_typed_summary_and_reference(self):
         content = "HEAD_" + "x" * 5000 + "_TAIL"
         preview = _build_preview(
             content,
@@ -235,8 +331,9 @@ class TestBuildPreview:
             head_chars=100,
             tail_chars=50,
         )
-        assert preview.startswith("HEAD_")
-        assert "_TAIL" in preview
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
         assert "start_line and end_line" in preview
@@ -251,6 +348,233 @@ class TestBuildPreview:
             tail_chars=100,
         )
         assert "10000 chars" in preview
+
+    def test_json_preview_includes_structure_and_raw_sample(self):
+        content = '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys" in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "items: array length 2" in preview
+        assert '$.meta.source: "unit"' in preview
+        assert not preview.startswith('{"meta"')
+        # The synopsis no longer hides the raw head/tail bytes; the model
+        # gets the typed synopsis AND inline raw samples so it can read
+        # the file with a tighter start_line range.
+        assert "Raw sample (head + tail" in preview
+        # payload segment dominates the document, so even with head_chars=80
+        # the raw head sample is almost entirely 'x' characters.
+        assert preview.count("x") >= 50
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        # Location hints were removed: they are wrong when a key string also
+        # appears as a value earlier in the document, or when the same key
+        # recurs at multiple depths.
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_json_paths_are_emitted_without_line_hints(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items" in preview
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_table_preview_extracts_columns(self):
+        content = "name,score\n" + "\n".join(f"Ada{i},{90 + i}" for i in range(10)) + "\n"
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 10 data rows and 2 columns" in preview
+        assert "columns: name, score" in preview
+        assert "first data row: name=Ada0 | score=90" in preview
+
+
+class TestToolOutputSynopsis:
+    def test_code_synopsis_extracts_imports_and_symbols(self):
+        content = "import os\nfrom pathlib import Path\n\nclass Runner:\n    pass\n\ndef main():\n    return Path(os.getcwd())\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="python")
+        assert synopsis.kind == "code"
+        assert "line count" in synopsis.structure[0]
+        assert any("imports: os, pathlib" in item for item in synopsis.structure)
+        assert "class Runner" in synopsis.notable_items
+        assert "def main" in synopsis.notable_items
+
+    def test_yaml_synopsis_extracts_top_level_keys(self):
+        content = "name: deer\nsettings:\n  enabled: true\n  retries: 3\nitems:\n  - alpha\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="config")
+        assert synopsis.kind == "yaml"
+        assert "Top-level keys: name, settings, items" in synopsis.summary
+        assert "settings: object" in synopsis.structure
+        assert "items: array" in synopsis.structure
+
+    def test_xml_synopsis_extracts_root_and_children(self):
+        content = '<feed><entry id="1"/><entry id="2"/><meta/></feed>'
+        synopsis = build_tool_output_synopsis(content, tool_name="xml")
+        assert synopsis.kind == "xml"
+        assert "XML document with root tag feed." in synopsis.summary
+        assert "root tag: feed" in synopsis.structure
+        assert "entry: 2" in synopsis.structure
+
+    # ------------------------------------------------------------------
+    # Regression tests for the @willem-bd review of PR #3377.
+    # Each test pins one of the eight findings so a future change cannot
+    # silently regress the fix.
+    # ------------------------------------------------------------------
+
+    def test_review_5_log_lines_are_not_misclassified_as_yaml(self):
+        # 200 lines of log output shaped like "LEVEL: message". The previous
+        # _looks_yaml counted 2 'key:' lines and accepted it; _try_yaml then
+        # produced a "YAML object with 3 top-level keys: INFO, ERROR, WARN"
+        # summary that hid every line, count, and middle-of-log signal.
+        content = "INFO: starting service\nERROR: failed to connect\nWARN: retrying\nINFO: connected\n" * 200
+        synopsis = build_tool_output_synopsis(content, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_6_json_paths_are_emitted_without_byte_offset(self):
+        # The previous _json_path_location anchored at the first textual
+        # occurrence of the key string, which is wrong when the key also
+        # appears as a value earlier in the document.
+        content = '{"label": "items", "items": {"id": 1, "name": "foo"}}'
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=200,
+            tail_chars=200,
+        )
+        assert "byte offset" not in preview
+        # The path itself is still useful navigation.
+        assert "$.items" in preview
+
+    def test_review_7_scalar_examples_respects_depth_cap(self):
+        # build_tool_output_synopsis used to recurse without a depth cap
+        # in _scalar_examples, which could trigger RecursionError on
+        # deeply nested JSON. The cap is now mirrored from
+        # _JSON_STRUCTURE_DEPTH.
+        deep = {"k": 1}
+        for _ in range(500):
+            deep = {"k": deep}
+        # Should not raise.
+        synopsis = build_tool_output_synopsis(json.dumps(deep))
+        assert synopsis.kind == "json"
+
+    def test_review_8_csv_first_row_quoted_cells_round_trip(self):
+        # delimiter.join(rows[1]) silently re-split cells containing the
+        # delimiter inside a quoted cell, misleading the model about
+        # column count.
+        header = "name,description,score"
+        rows = [
+            'Ada,"a fine, brilliant logician",98',
+            'Grace,"a creator, of compilers",99',
+            'Alan,"a pioneer, of computing",95',
+            'Kurt,"a poet, of logic",91',
+            'Ada2,"another, fine mind",97',
+            'Grace2,"yet another, creator",93',
+        ]
+        content = header + "\n" + "\n".join(rows) + "\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="csv_tool")
+        assert synopsis.kind == "csv"
+        first_row = next((line for line in synopsis.structure if line.startswith("first data row:")), "")
+        # All three columns must be present, and the quoted cell must
+        # round-trip without losing the embedded comma.
+        assert "name=Ada" in first_row
+        assert "score=98" in first_row
+        assert "a fine, brilliant logician" in first_row
+        # The re-joined comma-broken row is the failure mode we are guarding.
+        assert "Ada,a fine, brilliant" not in first_row
+
+    def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
+        # Tab-indented output (ls -l, tree, indented logs) used to be
+        # accepted as TSV because _try_table only checked that the
+        # delimiter is present and rows agree on width.
+        row = "drwxr-xr-x  2 user  group   64 Jun 24 17:00 dir"
+        bash_out = "ls -l output:\n\ttotal 0\n" + "\n".join(f"\t{row}{i}" for i in range(1, 6)) + "\n"
+        synopsis = build_tool_output_synopsis(bash_out, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_10_preview_includes_raw_head_and_tail_sample(self):
+        # Default behavior change in the PR removed the inline raw bytes
+        # for non-binary previews. The fix restores them so the model
+        # can see the actual first/last KB without a follow-up read_file.
+        content = "log line 1\n" * 200
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=400,
+            tail_chars=400,
+        )
+        assert "Raw sample (head + tail" in preview
+        # head_chars=400 should capture the first 80 'log line 1' lines
+        # verbatim; tail_chars=400 should capture the last 80.
+        assert preview.count("log line 1") >= 70  # line snapping may lose a few
+
+    def test_review_11_short_text_does_not_duplicate_excerpts(self):
+        # For inputs shorter than 2 * _TEXT_EXCERPT_CHARS, the previous
+        # opener/closer slices overlapped and the model saw the same
+        # body twice. build_tool_output_synopsis is reachable directly
+        # from tests and other callers that pass small inputs.
+        short = "hello world " * 30  # ~360 chars
+        synopsis = build_tool_output_synopsis(short)
+        opener_line = next((ln for ln in synopsis.summary if ln.startswith("Opening excerpt: ")), "")
+        # Closer is now suppressed entirely for short inputs.
+        assert all(not ln.startswith("Closing excerpt: ") for ln in synopsis.summary), f"unexpected closer for short input: {synopsis.summary}"
+        assert opener_line, "opening excerpt should still be present"
+
+    def test_review_12_preview_head_tail_chars_are_operational(self):
+        # preview_head_chars / preview_tail_chars were silently no-op
+        # for every non-binary kind. The fix plumbs them through
+        # render_tool_output_preview as an explicit 'Raw sample' section.
+        content = "alpha " * 1000  # 6000 chars
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=300,
+            tail_chars=300,
+        )
+        # The head sample should contain 'alpha' more times than the
+        # tail (or split-count), proving head_chars=300 took effect.
+        # The full document has 1000 'alpha' tokens; without head_chars
+        # we'd see fewer than 50 in the head sample.
+        assert preview.count("alpha") >= 50
 
 
 class TestBuildFallback:
@@ -280,6 +604,32 @@ class TestBuildFallback:
             content = "x" * 50000
             result = _build_fallback(content, tool_name="long_tool_name", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
             assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+
+    def test_result_never_exceeds_max_chars_with_newlines(self):
+        """Same guarantee as above, on content that actually exercises line snapping.
+
+        ``test_result_never_exceeds_max_chars`` passes newline-free content, so the
+        tail offset is never snapped. Real bash/web_fetch output has newlines.
+        """
+        for total in [50_000, 200_000, 1_000_000]:
+            content = _lines_then_long_line(total)
+            result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+            assert len(result) <= 30_000, f"total={total}: got {len(result)}"
+
+    def test_fallback_forward_snaps_tail_onto_line_boundary(self):
+        """The tail must begin *after* the newline, never before it.
+
+        The bound test above never moves the tail offset: its content has no
+        newline inside the snap window, so it would pass even with the snap
+        removed. Placing a newline in the window pins the direction instead —
+        a backward snap leaves the tail starting mid-line.
+        """
+        total, newline_pos = 100_000, 98_000  # window is [97_000, 98_500)
+        content = "A" * newline_pos + "\n" + "B" * (total - newline_pos - 1)
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+        assert len(result) <= 30_000
+        tail = result.rsplit("]\n\n", 1)[1]
+        assert tail.startswith("B"), f"tail begins mid-line: {tail[:20]!r}"
 
     def test_very_small_max_chars_does_not_crash(self):
         content = "x" * 1000
@@ -331,7 +681,7 @@ class TestWrapToolCallExternalize:
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
 
-    def test_preview_contains_head_and_tail(self):
+    def test_preview_contains_typed_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
             mw = ToolOutputBudgetMiddleware(config=config)
@@ -341,8 +691,10 @@ class TestWrapToolCallExternalize:
 
             result = mw.wrap_tool_call(req, lambda _: msg)
 
-            assert result.content.startswith("HEADPART_")
-            assert "_TAILPART" in result.content
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Text output" in result.content
+            assert "HEADPART_" in result.content
 
 
 class TestWrapToolCallFallback:
@@ -376,9 +728,10 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/dev/null/cannot-mkdir-here")
 
-        result = mw.wrap_tool_call(req, lambda _: msg)
+        with _unwritable_outputs_path() as outputs_path:
+            req = _make_request(outputs_path=outputs_path)
+            result = mw.wrap_tool_call(req, lambda _: msg)
 
         assert isinstance(result, ToolMessage)
         assert "omitted from tool output" in result.content
@@ -857,11 +1210,14 @@ class TestMiddlewareChainIntegration:
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
         # InputSanitizationMiddleware is the outermost wrap_model_call wrapper;
-        # ToolOutputBudgetMiddleware is the first wrap_tool_call handler.
+        # KnowledgeScopeMiddleware cleans model input immediately inside it;
+        # ToolOutputBudgetMiddleware remains immediately inside the scope guard.
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
 
         assert isinstance(middlewares[0], InputSanitizationMiddleware)
-        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
 
     def test_budget_middleware_in_lead_chain(self):
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -870,9 +1226,11 @@ class TestMiddlewareChainIntegration:
         middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
 
         assert isinstance(middlewares[0], InputSanitizationMiddleware)
-        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
 
 
 # ===========================================================================
@@ -1064,7 +1422,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=sb,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         # Mounted path must NOT touch the sandbox.
         assert sb.commands == []
         assert sb.writes == []
@@ -1092,7 +1451,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=sb,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         # Non-mounted path MUST write into the sandbox.
         assert sb.writes and sb.writes[0][1] == "x" * 500
         # And MUST NOT touch the host.
@@ -1121,7 +1481,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=None,
         )
         assert result is not None
-        assert "Persistent storage unavailable" in result
+        assert "Persistent storage unavailable" in result[0]
+        assert result[1] == "truncated"
 
 
 class TestResolveSandbox:
@@ -1233,6 +1594,548 @@ class TestBudgetContentNoSandboxNoProviderCall:
             sandbox=None,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         assert called["n"] == 0
         assert (tmp_path / ".tool-results").is_dir()
+
+
+# ===========================================================================
+# Superseded write payload elision (issue #5328, step 2)
+# ===========================================================================
+
+
+def _meta_result(name: str, tool_call_id: str, content: str = "OK", *, status: str | None = "success") -> ToolMessage:
+    """A ToolMessage stamped the way ToolErrorHandlingMiddleware stamps it; ``status=None`` leaves it unstamped."""
+    msg = ToolMessage(content=content, name=name, tool_call_id=tool_call_id, status="error" if status == "error" else "success")
+    if status is not None:
+        msg.additional_kwargs["deerflow_tool_meta"] = {
+            "status": status,
+            "error_type": None,
+            "recoverable_by_model": True,
+            "recommended_next_action": "continue",
+            "source": "content_analysis",
+        }
+    return msg
+
+
+def _write(tool_call_id: str, path: str, content: str, *, append: bool = False, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    args = {"description": "d", "path": path, "content": content, "append": append}
+    ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": tool_call_id, "args": args}])
+    return ai, _meta_result("write_file", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+def _read(tool_call_id: str, path: str, *, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "read_file", "id": tool_call_id, "args": {"path": path}}])
+    return ai, _meta_result("read_file", tool_call_id, "Error: File not found" if status == "error" else "file text", status=status)
+
+
+def _str_replace(tool_call_id: str, path: str, *, new_str: str = "n", status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "str_replace", "id": tool_call_id, "args": {"path": path, "old_str": "o", "new_str": new_str}}])
+    return ai, _meta_result("str_replace", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+class TestSupersededWriteElision:
+    """Model-bound requests drop the content of successful write_file calls superseded by a later read or write of the same path."""
+
+    PATH = "/mnt/user-data/outputs/report.md"
+    OTHER = "/mnt/user-data/outputs/other.md"
+
+    @staticmethod
+    def _middleware(**overrides) -> ToolOutputBudgetMiddleware:
+        return ToolOutputBudgetMiddleware(config=ToolOutputConfig(**overrides))
+
+    @staticmethod
+    def _model_request(messages) -> ModelRequest:
+        return ModelRequest(model=None, messages=list(messages), tools=[], state={"messages": list(messages)})
+
+    def _forward(self, mw: ToolOutputBudgetMiddleware, messages) -> tuple[ModelRequest, ModelRequest]:
+        """Run ``wrap_model_call`` and return ``(original request, request the handler received)``."""
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return AIMessage(content="ok")
+
+        request = self._model_request(messages)
+        mw.wrap_model_call(request, handler)
+        return request, captured["request"]
+
+    @staticmethod
+    def _content(forwarded: ModelRequest, index: int) -> str:
+        return forwarded.messages[index].tool_calls[0]["args"]["content"]
+
+    # -- policy ------------------------------------------------------------
+
+    def test_superseded_write_is_elided_and_newest_write_is_kept(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        human = HumanMessage(content="go")
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.PATH, "y" * 5000, append=True)
+
+        request, forwarded = self._forward(mw, [human, w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is not request
+        elided = forwarded.messages[1].tool_calls[0]["args"]
+        assert elided["content"].startswith("[content elided: 5000 chars")
+        assert "read_file" in elided["content"]
+        assert payload not in elided["content"]
+        assert elided["path"] == self.PATH
+        assert elided["description"] == "d"
+        assert elided["append"] is False
+        # The newest successful write stays visible (keep_recent_writes=1).
+        assert forwarded.messages[5] is w2
+        # Untouched neighbours pass through by identity; state and stored history keep the original.
+        assert forwarded.messages[0] is human
+        assert forwarded.messages[2] is r1
+        assert forwarded.messages[3] is rd
+        assert request.messages[1] is w1
+        assert request.state["messages"][1] is w1
+        assert w1.tool_calls[0]["args"]["content"] == payload
+
+    def test_write_without_a_later_touch_of_the_path_is_kept(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "z" * 5000)
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_newest_write_is_kept_even_when_superseded(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+
+        request, forwarded = self._forward(self._middleware(), [w1, r1, rd, rr])
+        assert forwarded is request
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=0), [w1, r1, rd, rr])
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+
+    def test_keep_recent_counts_successful_writes_across_paths(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "tiny")
+        history = [w1, r1, rd, rr, w2, r2, w3, r3]
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=2), history)
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+        request, forwarded = self._forward(self._middleware(keep_recent_writes=3), history)
+        assert forwarded is request
+
+    def test_later_successful_write_of_the_same_path_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000)
+        w3, r3 = _write("call-3", self.OTHER, "z" * 5000)
+
+        _request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[2] is w2  # not superseded, and older than the newest write
+        assert forwarded.messages[4] is w3
+
+    def test_later_successful_str_replace_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        sr, srr = _str_replace("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, sr, srr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert forwarded.messages[2] is sr
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_later_write_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status=status)
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_gate_blocked_later_write_does_not_supersede(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status="error")
+        r2.additional_kwargs[WRITE_BLOCK_KEY] = {"path": self.PATH, "tool": "write_file"}
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    @pytest.mark.parametrize("status", ["error", None], ids=["error", "unstamped"])
+    def test_read_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status=status)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_partial_read_still_supersedes(self):
+        """A truncated or ranged read still showed the model the on-disk file."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status="partial_success")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_write_that_did_not_succeed_is_never_a_candidate(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status=status)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_unanswered_write_is_never_a_candidate(self):
+        mw = self._middleware()
+        w1, _unused = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_same_turn_read_does_not_supersede(self):
+        """Parallel calls in one AIMessage run in no fixed order, so the read may predate the write."""
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "call-1", "args": {"description": "d", "path": self.PATH, "content": payload}},
+                {"name": "read_file", "id": "call-2", "args": {"path": self.PATH}},
+            ],
+        )
+        results = [_meta_result("write_file", "call-1"), _meta_result("read_file", "call-2", "file text")]
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, *results, w2, r2])
+
+        assert forwarded is request
+
+    def test_paths_are_normalized_before_matching(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", "/mnt/user-data/outputs/./report.md", "x" * 5000)
+        rd, rr = _read("call-2", "/mnt/user-data/outputs/sub/../report.md")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    def test_different_path_does_not_supersede(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.OTHER)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_str_replace_payloads_are_never_elided(self):
+        mw = self._middleware()
+        sr, srr = _str_replace("call-1", self.PATH, new_str="n" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [sr, srr, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    # -- thresholds and config ---------------------------------------------
+
+    def test_content_below_min_chars_stays_visible(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "short " * 20)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_min_chars_zero_elides_any_non_empty_content(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        w1, r1 = _write("call-1", self.PATH, "v1")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "")
+        rd2, rr2 = _read("call-4", self.OTHER)
+        w3, r3 = _write("call-5", "/mnt/user-data/outputs/third.md", "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, rd2, rr2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 2 chars")
+        assert forwarded.messages[4] is w2
+
+    def test_non_string_content_is_left_alone(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": {"path": self.PATH, "content": ["not", "a", "string"]}}])
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_disabled_by_config_passes_request_through(self):
+        mw = self._middleware(elide_superseded_writes=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_middleware_disabled_passes_request_through(self):
+        mw = self._middleware(enabled=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_config_defaults(self):
+        config = ToolOutputConfig()
+        assert config.elide_superseded_writes is True
+        assert config.superseded_write_min_chars == 2000
+        assert config.keep_recent_writes == 1
+
+    def test_release_policy_declares_config(self):
+        params = self._middleware(keep_recent_writes=3, superseded_write_min_chars=123).release_policy_parameters()
+        assert params["config"]["elide_superseded_writes"] is True
+        assert params["config"]["superseded_write_min_chars"] == 123
+        assert params["config"]["keep_recent_writes"] == 3
+
+    def test_from_app_config_passes_the_keys(self):
+        config = AppConfig(sandbox=SandboxConfig(use="test"), tool_output={"superseded_write_min_chars": 10, "keep_recent_writes": 0})
+        mw = ToolOutputBudgetMiddleware.from_app_config(config)
+        assert mw._config.superseded_write_min_chars == 10
+        assert mw._config.keep_recent_writes == 0
+
+    def test_config_example_documents_the_keys(self):
+        import yaml
+
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        with open(example_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        tool_output = data["tool_output"]
+        assert tool_output["elide_superseded_writes"] is True
+        assert tool_output["superseded_write_min_chars"] == 2000
+        assert tool_output["keep_recent_writes"] == 1
+        # New user-settable keys are a schema change: the outdated-config warning must fire.
+        assert data["config_version"] >= 42
+
+    # -- surfaces, pairing, determinism, composition ------------------------
+
+    def test_rewrites_every_provider_surface_together(self):
+        mw = self._middleware()
+        payload = "y" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[
+                {"type": "text", "text": "writing"},
+                {"type": "tool_use", "id": "call-1", "name": "write_file", "input": dict(args), "partial_json": json.dumps(args)},
+            ],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}]},
+        )
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        rewritten = forwarded.messages[0]
+        structured = rewritten.tool_calls[0]["args"]
+        assert structured["content"].startswith("[content elided: 5000 chars")
+        raw = json.loads(rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"])
+        assert raw == structured
+        block = rewritten.content[1]
+        assert block["input"] == structured
+        assert "partial_json" not in block
+        assert rewritten.content[0] == {"type": "text", "text": "writing"}
+        assert payload not in json.dumps(rewritten.model_dump(), ensure_ascii=False)
+        # Original objects are untouched.
+        assert ai.content[1]["input"]["content"] == payload
+        assert payload in ai.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+
+    def test_reused_call_ids_pair_per_occurrence(self):
+        """A failed write and a later successful one may share a tool-call id; the failed one must not inherit success."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status="error")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-1", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_elision_is_deterministic_across_model_calls(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+
+        _request, first = self._forward(mw, history)
+        _request, second = self._forward(mw, history)
+
+        assert first.messages[0].tool_calls == second.messages[0].tool_calls
+
+    def test_elision_is_monotonic_as_history_grows(self):
+        """Once a write is elided, appending more history never brings its content back."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+        _request, before = self._forward(mw, history)
+        assert self._content(before, 0).startswith("[content elided")
+
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "z" * 5000)
+        _request, after = self._forward(mw, [*history, HumanMessage(content="more"), w3, r3])
+
+        assert after.messages[0].tool_calls == before.messages[0].tool_calls
+
+    def test_rewritten_history_drops_openai_response_chain_ids(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w1.response_metadata = {"id": "resp_write", "output_version": "responses/v1"}
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w2.response_metadata = {"id": "resp_latest"}
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert "id" not in forwarded.messages[0].response_metadata
+        assert "id" not in forwarded.messages[4].response_metadata
+
+    def test_applies_alongside_historical_output_truncation(self):
+        mw = self._middleware(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        oversized = _tm("q" * 1000, name="tool", tool_call_id="tc-q")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, oversized, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert "omitted" in forwarded.messages[4].content
+        assert forwarded.messages[5] is w2
+
+    def test_async_model_call_elides(self):
+        import asyncio
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        request = self._model_request([w1, r1, rd, rr, w2, r2])
+        seen: dict[str, ModelRequest] = {}
+
+        async def handler(req):
+            seen["request"] = req
+            return AIMessage(content="ok")
+
+        asyncio.run(mw.awrap_model_call(request, handler))
+
+        assert seen["request"] is not request
+        assert self._content(seen["request"], 0).startswith("[content elided")
+
+    def test_no_write_calls_in_history_is_a_cheap_no_op(self):
+        mw = self._middleware()
+        history = [HumanMessage(content="go"), AIMessage(content="", tool_calls=[{"name": "bash", "id": "call-1", "args": {"command": "ls"}}]), _meta_result("bash", "call-1", "files")]
+
+        request, forwarded = self._forward(mw, history)
+
+        assert forwarded is request
+
+    def test_chat_completions_payload_uses_the_placeholder(self):
+        """End to end against the OpenAI chat-completions message converter."""
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        mw = self._middleware()
+        payload = "x" * 5000
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        wire = json.loads(_convert_message_to_dict(forwarded.messages[0])["tool_calls"][0]["function"]["arguments"])
+        assert wire["content"].startswith("[content elided: 5000 chars")
+        assert payload not in json.dumps(wire)
+
+    def test_unanswered_write_with_a_reused_id_is_never_treated_as_successful(self):
+        """Review on #5374: an interrupted write must not inherit the success of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted, _never_delivered = _write("reused", self.PATH, draft)
+        rd, rr = _read("call-2", self.PATH)
+        later, later_ok = _write("reused", self.OTHER, "n" * 5000)
+        last, last_ok = _write("call-4", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [interrupted, rd, rr, later, later_ok, last, last_ok])
+
+        assert forwarded is request
+        assert interrupted.tool_calls[0]["args"]["content"] == draft
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a failed sibling sharing the id of a superseded successful write must not be rewritten into it."""
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"path": self.OTHER, "content": "b" * 5000}},
+            ],
+        )
+        results = [_meta_result("write_file", "dup"), _meta_result("write_file", "dup", "Error: boom", status="error")]
+        rd, rr = _read("call-2", self.PATH)
+        last, last_ok = _write("call-3", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [turn, *results, rd, rr, last, last_ok])
+
+        assert forwarded is request
+        assert [call["args"]["path"] for call in turn.tool_calls] == [self.PATH, self.OTHER]
+        assert turn.tool_calls[1]["args"]["content"] == "b" * 5000
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to an elision candidate must be skipped, not hashed."""
+        mw = self._middleware(keep_recent_writes=0)
+        payload = "x" * 5000
+        turn, ok = _write("call-1", self.PATH, payload)
+        turn.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        rd, rr = _read("call-2", self.PATH)
+
+        _request, forwarded = self._forward(mw, [turn, ok, rd, rr])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[0].tool_calls[1] == turn.tool_calls[1]

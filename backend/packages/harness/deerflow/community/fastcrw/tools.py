@@ -4,6 +4,7 @@ import os
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 
 # fastCRW is a Firecrawl-compatible web data engine (single Rust binary; self-host
@@ -27,6 +28,23 @@ def _get_fastcrw_client(tool_name: str = "web_search") -> FirecrawlApp:
     if base_url is None:
         base_url = os.getenv("CRW_API_URL", DEFAULT_BASE_URL)
     return FirecrawlApp(api_key=api_key, api_url=base_url)  # type: ignore[arg-type]
+
+
+def _get_tool_config_extra(tool_name: str) -> dict:
+    config = get_app_config().get_tool_config(tool_name)
+    return dict(config.model_extra or {}) if config is not None else {}
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 @tool("web_search", parse_docstring=True)
@@ -73,6 +91,11 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
+        cfg = _get_tool_config_extra("web_fetch")
+        allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses"), False)
+        url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
+        if url_error:
+            return url_error
         client = _get_fastcrw_client("web_fetch")
         result = client.scrape(url, formats=["markdown"])
 

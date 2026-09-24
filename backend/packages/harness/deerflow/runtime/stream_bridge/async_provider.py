@@ -20,8 +20,9 @@ from collections.abc import AsyncIterator
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, get_stream_bridge_config
+from deerflow.utils.file_io import await_drained
 
-from .base import StreamBridge
+from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, StreamBridge
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +59,20 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
         maxsize = config.queue_maxsize if config is not None else 256
-        bridge = MemoryStreamBridge(queue_maxsize=maxsize)
-        logger.info("Stream bridge initialised: memory (queue_maxsize=%d)", maxsize)
+        heartbeat_interval = config.heartbeat_interval_seconds if config is not None else DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+        bridge = MemoryStreamBridge(
+            queue_maxsize=maxsize,
+            heartbeat_interval=heartbeat_interval,
+        )
+        logger.info(
+            "Stream bridge initialised: memory (queue_maxsize=%d, heartbeat_interval_seconds=%.1f)",
+            maxsize,
+            heartbeat_interval,
+        )
         try:
             yield bridge
         finally:
-            await bridge.close()
+            await await_drained(bridge.close())
         return
 
     if config.type == "redis":
@@ -73,19 +82,21 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         bridge = RedisStreamBridge(
             redis_url=redis_url,
             queue_maxsize=config.queue_maxsize,
+            heartbeat_interval=config.heartbeat_interval_seconds,
             max_connections=config.max_connections,
             stream_ttl_seconds=config.stream_ttl_seconds,
         )
         logger.info(
-            "Stream bridge initialised: redis (queue_maxsize=%d, max_connections=%s, stream_ttl_seconds=%d)",
+            "Stream bridge initialised: redis (queue_maxsize=%d, heartbeat_interval_seconds=%.1f, max_connections=%s, stream_ttl_seconds=%d)",
             config.queue_maxsize,
+            config.heartbeat_interval_seconds,
             config.max_connections,
             config.stream_ttl_seconds,
         )
         try:
             yield bridge
         finally:
-            await bridge.close()
+            await await_drained(bridge.close())
         return
 
     raise ValueError(f"Unknown stream bridge type: {config.type!r}")

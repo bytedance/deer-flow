@@ -11,6 +11,7 @@ from deerflow.skills.describe import (
     build_skill_search_setup,
     get_skill_index_prompt_section,
 )
+from deerflow.skills.tool_policy import allowed_tool_names_for_skills
 from deerflow.skills.types import Skill, SkillCategory
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -264,19 +265,41 @@ def test_describe_tool_keyword_search(catalog: SkillCatalog):
     assert "deep-research" in messages[0].content
 
 
-def test_describe_tool_select_uncapped(tmp_path):
+def test_describe_tool_select_uncapped():
     """select: must return ALL requested skills, not capped at MAX_RESULTS."""
-    from deerflow.skills.catalog import MAX_RESULTS
+    from deerflow.skills.catalog import MAX_QUERY_CHARS, MAX_RESULTS
 
     # Build more skills than MAX_RESULTS so the cap would visibly truncate
-    many_skills = [_make_skill(f"skill-{i:02d}") for i in range(MAX_RESULTS + 2)]
+    many_skills = [_make_skill(f"skill-number-{i:02d}-with-a-longish-name") for i in range(MAX_RESULTS + 10)]
     big_catalog = SkillCatalog(tuple(many_skills))
     tool = build_describe_skill_tool(big_catalog)
 
     names_csv = ",".join(s.name for s in many_skills)
+    assert len(names_csv) > MAX_QUERY_CHARS
     result = tool.invoke(
         {"args": {"name": f"select:{names_csv}"}, "name": "describe_skill", "type": "tool_call", "id": "test_select_uncapped"},
     )
     content = result.update["messages"][0].content
     for s in many_skills:
         assert s.name in content, f"select: truncated — {s.name} missing from result"
+
+
+# ── Explicitly empty allowed-tools ─────────────────────────────────────────────
+
+
+def test_render_explicit_empty_allowed_tools_does_not_claim_all():
+    restricted = _make_skill("locked-down", allowed_tools=())
+    rendered = _render_skill_metadata([restricted], "/mnt/skills")
+    assert "Allowed tools: (all)" not in rendered
+    assert "Allowed tools: (none)" in rendered
+
+
+def test_rendered_allowed_tools_agree_with_skill_tool_policy():
+    """`(all)` must mean unrestricted, which is the one state that renders it."""
+    omitted = _make_skill("legacy")
+    assert allowed_tool_names_for_skills([omitted]) is None
+    assert "Allowed tools: (all)" in _render_skill_metadata([omitted], "/mnt/skills")
+
+    restricted = _make_skill("locked-down", allowed_tools=())
+    assert allowed_tool_names_for_skills([restricted]) == set()
+    assert "Allowed tools: (all)" not in _render_skill_metadata([restricted], "/mnt/skills")
