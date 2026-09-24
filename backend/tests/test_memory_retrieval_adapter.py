@@ -287,3 +287,34 @@ def test_deermem_create_and_restart_use_retrieval_adapter(tmp_path: Path) -> Non
 
     restarted = DeerMem(backend_config=config)
     assert any(fact["id"] == fact_id for fact in restarted.search("restart retrieval", user_id="alice"))
+
+
+def test_indexed_zero_confidence_keeps_its_retrieval_weight(tmp_path: Path) -> None:
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert({**_fact("zero", "confidence weight probe"), "confidence": 0.0}, scope=scope, path="")
+        adapter.upsert({**_fact("half", "confidence weight probe"), "confidence": 0.5}, scope=scope, path="")
+        unset_fact = _fact("unset", "confidence weight probe")
+        del unset_fact["confidence"]
+        adapter.upsert(unset_fact, scope=scope, path="")
+        scores = {item["fact"]["id"]: item["score"] for item in adapter.search("confidence", scopes=[scope], top_k=5, mode="fts5", filters=None)}
+
+        assert scores["zero"] < scores["half"]
+        # A missing confidence still falls back to the default, so only the explicit 0.0 is discounted.
+        assert scores["unset"] == pytest.approx(scores["half"])
+    finally:
+        adapter.close()
+
+
+def test_substring_fallback_keeps_zero_confidence_weight(tmp_path: Path) -> None:
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        storage.upsert_fact({**_fact("zero", "substring confidence probe"), "confidence": 0.0}, user_id="alice", agent_name="agent-a")
+        storage.upsert_fact({**_fact("half", "substring confidence probe"), "confidence": 0.5}, user_id="alice", agent_name="agent-a")
+        scores = {item["fact"]["id"]: item["score"] for item in storage.search_facts("substring", scopes=[scope], top_k=5)}
+
+        assert scores == {"zero": 0.0, "half": 0.5}
+    finally:
+        storage.close()
