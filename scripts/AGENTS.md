@@ -18,7 +18,9 @@ success; failures print Compose status and recent Gateway logs. Root
 need not be on `PATH`.
 
 `scripts/wait-for-port.sh <port> [timeout_seconds] [service_name] [child_pid]`
-owns the wait for a service's listening port. With `child_pid` set, a watched
+owns the wait for a service's listening port. It checks the watched process's
+liveness (`kill -0`) before each port probe, so a launcher that already exited
+is reported without paying a port-probe cycle. With `child_pid` set, a watched
 process that exits before the port opens aborts the wait immediately with exit
 code 2; `scripts/serve.sh` reports it as
 `✗ <name> exited before listening on port <port>` plus the log tail. Exit code
