@@ -1216,6 +1216,7 @@ export interface Translations {
         work: string;
         personal: string;
         topOfMind: string;
+        cognitiveStyle: string;
         historyBackground: string;
         recentMonths: string;
         earlierContext: string;
@@ -1234,6 +1235,7 @@ export interface Translations {
           };
           content: string;
           source: string;
+          unknown: string;
           createdAt: string;
           view: string;
         };

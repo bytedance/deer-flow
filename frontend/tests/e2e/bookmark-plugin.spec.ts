@@ -124,7 +124,7 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
         await route.fulfill({ status: 204, headers: cors });
         return;
       }
-      if (url.pathname.includes("/modules/")) {
+      if (url.pathname.includes("/assets/")) {
         moduleRequests.push(url.href);
         if (
           !(await route.request().allHeaders()).cookie?.includes(
@@ -157,9 +157,9 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
       exact: true,
     });
     await expect(libraryLink).toHaveAttribute("href", libraryURL);
-    expect(moduleRequests).toHaveLength(1);
+    expect(moduleRequests).toHaveLength(2);
     const modulePrefix = new URL(
-      `${backendBase.replace(/\/+$/, "")}/api/plugins/modules/`,
+      `${backendBase.replace(/\/+$/, "")}/api/plugins/community.bookmarks/assets/`,
       frontendURL,
     ).href;
     expect(moduleRequests[0]?.startsWith(modulePrefix)).toBe(true);
@@ -219,6 +219,21 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
     await expect(
       page.getByText("Keep answers worth returning to", { exact: true }),
     ).toBeVisible();
+    await expect(page.locator(".intro")).toHaveCSS("border-radius", "16px");
+    await expect
+      .poll(() =>
+        page.locator(".intro img").evaluate((node) => {
+          const image = node as HTMLImageElement;
+          return image.complete && image.naturalWidth > 0;
+        }),
+      )
+      .toBe(true);
+    expect(moduleRequests.some((url) => url.endsWith("/styles.css"))).toBe(
+      true,
+    );
+    expect(moduleRequests.some((url) => url.endsWith("/bookmark.svg"))).toBe(
+      true,
+    );
     const name = page.getByRole("textbox", {
       name: "Bookmark name",
       exact: true,

@@ -15,6 +15,9 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+Root `make install` runs pre-commit through uv, so uv's tool bin directory
+need not be on `PATH`.
+
 ## Shell Script Invocation Contract
 
 Root Makefile recipes must invoke repository `.sh` files through

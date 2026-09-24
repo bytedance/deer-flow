@@ -1,6 +1,6 @@
 ### Stream Bridge Heartbeats
 
-Memory and Redis bridges keep the startup-only `stream_bridge.heartbeat_interval_seconds` default on the instance; explicit `subscribe(..., heartbeat_interval=...)` overrides it per subscription. Provider context managers own cache/bridge backends through exit: drain `aclose()` / `close()` across caller cancellation before propagating cancellation.
+Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts retain backend ownership through exit: drain cache/bridge `aclose()`/`close()` and SQLite/PostgreSQL checkpointer/Store `__aexit__` across cancellation before it propagates.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 

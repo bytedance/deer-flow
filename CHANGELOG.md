@@ -2972,6 +2972,29 @@ This release closes that milestone with **765 merged pull requests**.
   and Chinese agents/threads/lead-agent pages: the required ASCII `name`
   request field, lowercase storage, `/api/agents/check` name-availability
   behavior, and no auto-derived slug from `display_name`. ([#4944])
+- **docs:** Restructure the subagent documentation into an eleven-chapter user
+  manual under `harness/subagents/` in both languages: concepts, quick start,
+  the catalog, delegating work, results and acceptance, limits and capacity,
+  sandbox and isolation, observability, troubleshooting by symptom, developer
+  integration, and a reference appendix with the June to September 2026
+  change log. The former single page becomes the section index, so existing
+  page links keep working; deep links to sections of the old page now land
+  on the index.
+- **docs:** Add an extension developer manual under `harness/extensions/` in
+  both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
+  to write an extension, a quick start, the runtime model, middleware
+  placements, lifecycle and observer hooks, services and routes, the run
+  evidence reader, operating extensions, troubleshooting by error message,
+  and a reference of every public name with the contract's version history.
+  Also correct stale descriptions of the contribution kinds and of run
+  evidence metadata redaction in `AGENTS.md`.
+- **docs:** Bring the extension developer manual up to the
+  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
+  covering `registry.plugin()`, browser modules and packaged assets, backend
+  actions, model tools and settings; the request-scoped run evidence reader
+  with a per-user route example; and plugin troubleshooting and operations
+  notes. Also correct the plugin `mount` return value in
+  `docs/full-stack-plugins.md`.
 
 ### Internal
 

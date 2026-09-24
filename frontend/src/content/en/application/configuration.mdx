@@ -319,6 +319,37 @@ When the config schema changes, `config_version` is bumped. To merge new fields 
 make config-upgrade
 ```
 
+## Runtime environment variables
+
+DeerFlow reads these from its own process environment — via a `.env` file, the
+Docker environment, or the shell.
+
+Only `DEER_FLOW_SKILLS_PATH` resolves a relative value against
+`DEER_FLOW_PROJECT_ROOT`. `DEER_FLOW_HOME` and `DEER_FLOW_CONFIG_PATH` are used
+as given, so a relative value resolves against the process working directory —
+set both to absolute paths so writable state and the loaded config file land
+where you expect them.
+
+| Variable                 | Default                            | Description                                                                                 |
+| ------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------- |
+| `DEER_FLOW_PROJECT_ROOT` | current working directory          | Root for project-relative defaults, including the `skills` lookup                           |
+| `DEER_FLOW_HOME`         | `<project root>/.deer-flow`        | Writable directory for runtime state (threads, uploads); use an absolute path               |
+| `DEER_FLOW_CONFIG_PATH`  | auto-discovered under project root | Absolute path to `config.yaml`                                                              |
+| `DEER_FLOW_SKILLS_PATH`  | `<project root>/skills`            | Directory containing skill definitions (a relative value resolves against the project root) |
+| `AUTH_JWT_SECRET`        | auto-generated                     | JWT signing secret for the Gateway                                                          |
+
+Log verbosity is not an environment variable — set `log_level` in `config.yaml`
+instead (`debug`, `info`, `warning`, or `error`; default `info`). See
+[Harness Configuration](/docs/harness/configuration) for the module reference.
+
+`DEER_FLOW_ROOT` is a host-side variable for the Docker Compose dev stack only;
+the DeerFlow process does not read it. See the
+[Deployment Guide](/docs/application/deployment-guide).
+
+When `AUTH_JWT_SECRET` is unset, DeerFlow generates a secret on first start and
+persists it to `.jwt_secret`, so sessions survive restarts. Set it explicitly in
+production to keep a stable, secret value.
+
 <Cards num={2}>
   <Cards.Card
     title="Deployment Guide"
