@@ -378,3 +378,45 @@ class TestImageSearch:
         # image_search_tool only passes query to client.image_search
         # site parameter is empty string by default
         mock_client.image_search.assert_awaited_once_with("sunset")
+
+
+class TestRedirectParity:
+    """The sync `requests.post` client followed redirects by default; the
+    httpx migration must keep that behavior or a 3xx answer from the
+    reader/search endpoints surfaces as an error instead of the content.
+
+    Review note on #5782: httpx.AsyncClient defaults to
+    follow_redirects=False, unlike requests.
+    """
+
+    @patch("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient")
+    @pytest.mark.anyio
+    async def test_fetch_client_follows_redirects(self, mock_async_client_cls):
+        mock_response = httpx.Response(200, text=json.dumps({"reader_result": "<html>ok</html>"}), request=httpx.Request("POST", "https://reader.infoquest.bytepluses.com"))
+        mock_async_client_cls.return_value = _mock_async_client(mock_response)
+
+        await InfoQuestClient().fetch("https://example.com")
+
+        mock_async_client_cls.assert_called_once_with(follow_redirects=True)
+
+    @patch("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient")
+    @pytest.mark.anyio
+    async def test_web_search_client_follows_redirects(self, mock_async_client_cls):
+        payload = {"type": "search", "results": []}
+        mock_response = httpx.Response(200, text=json.dumps(payload), request=httpx.Request("POST", "https://search.infoquest.byteplues.com"))
+        mock_async_client_cls.return_value = _mock_async_client(mock_response)
+
+        await InfoQuestClient().web_search_raw_results("query", site="")
+
+        mock_async_client_cls.assert_called_once_with(follow_redirects=True)
+
+    @patch("deerflow.community.infoquest.infoquest_client.httpx.AsyncClient")
+    @pytest.mark.anyio
+    async def test_image_search_client_follows_redirects(self, mock_async_client_cls):
+        payload = {"type": "Images", "results": []}
+        mock_response = httpx.Response(200, text=json.dumps(payload), request=httpx.Request("POST", "https://search.infoquest.bytepluses.com"))
+        mock_async_client_cls.return_value = _mock_async_client(mock_response)
+
+        await InfoQuestClient().image_search_raw_results("query")
+
+        mock_async_client_cls.assert_called_once_with(follow_redirects=True)

@@ -67,7 +67,7 @@ class InfoQuestClient:
 
         logger.debug("Sending crawl request to InfoQuest API")
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
                 response = await client.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data, timeout=_REQUEST_TIMEOUT_SECONDS)
 
             # Check if status code is not 200
@@ -169,7 +169,7 @@ class InfoQuestClient:
         if site != "":
             params["site"] = site
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
@@ -345,7 +345,7 @@ class InfoQuestClient:
         elif self.image_size:
             logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
