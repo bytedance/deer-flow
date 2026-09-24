@@ -248,7 +248,7 @@ export function buildRunContext({
       : {}),
     thinking_enabled: settings.mode !== "flash",
     is_plan_mode: settings.mode === "pro" || settings.mode === "ultra",
-    subagent_enabled: settings.mode === "ultra",
+    ...(settings.mode === "ultra" ? { subagent_enabled: true } : {}),
     reasoning_effort:
       settings.reasoning_effort ??
       (settings.mode === "ultra"

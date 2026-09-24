@@ -66,4 +66,22 @@ describe("buildRunContext", () => {
     references.push("source-b");
     expect(context.conversation_references).toEqual(["source-a"]);
   });
+
+  it("enables subagents explicitly for ultra mode", () => {
+    const context = buildRunContext({
+      settings: { ...settings, mode: "ultra" },
+      threadId: "t-1",
+    });
+    expect(context.subagent_enabled).toBe(true);
+  });
+
+  it("leaves subagent selection unset for other modes", () => {
+    for (const mode of ["flash", "thinking", "pro", undefined] as const) {
+      const context = buildRunContext({
+        settings: { ...settings, mode },
+        threadId: "t-1",
+      });
+      expect(context).not.toHaveProperty("subagent_enabled");
+    }
+  });
 });
