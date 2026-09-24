@@ -7,9 +7,9 @@
 
 [English](./CHANGELOG.md) | 中文
 
-## [未发布]
+## [2.1.0] — 2026-09-24
 
-本节累积面向 **2.1.0** 里程碑（[里程碑 2](https://github.com/bytedance/deer-flow/milestone/2)）的工作。
+本节累积面向 [2.1.0](https://github.com/bytedance/deer-flow/milestone/2)）的工作。
 该里程碑随本次发布收尾，共合并 **772 个 pull request**。
 
 ### ⚠ 不兼容变更（Breaking Changes）
