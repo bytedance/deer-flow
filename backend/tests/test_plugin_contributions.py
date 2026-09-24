@@ -11,12 +11,19 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers.plugins import router
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.extensions.registry import ExtensionRegistry
 
 
 @pytest.fixture
 def plugin_client():
     calls = []
+    # These tests exercise the action route itself (limits, error mapping), so the
+    # gate has to be a no-op: a readable config with authorization disabled. An
+    # *absent/unreadable* config is a request-time failure and denies — see
+    # tests/test_plugin_action_authorization.py.
+    set_app_config(AppConfig(sandbox=SandboxConfig(use="test")))
 
     async def check(payload, context):
         calls.append((payload, context))
@@ -44,8 +51,11 @@ def plugin_client():
 
     setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda request: ExtensionPrincipal("user-1", is_admin=role["value"] == "admin"))
     app.include_router(router)
-    with TestClient(app) as http:
-        yield http, role, calls, plugin
+    try:
+        with TestClient(app) as http:
+            yield http, role, calls, plugin
+    finally:
+        reset_app_config()
 
 
 def test_one_card_and_deployment_owned_switch(plugin_client):

@@ -270,10 +270,13 @@ async def write_permissions(namespace: str, request: Request):
   no-op and a deployment that turns authorization off does not start rejecting
   enterprise routes. An enterprise that needs an unconditional floor keeps
   calling `require_admin` as well.
-- "Cannot answer" includes a configuration the host cannot read right now
-  (for example mid-write during a hot reload): the decision uses the config
-  snapshot captured when the request's provider was resolved, and an unavailable
-  snapshot is a denial, never an implicit allow.
+- "Cannot answer" includes a configuration the host cannot read right now: a
+  config file mid-write or briefly absent while an editor, a deploy or a
+  ConfigMap mount replaces it, or a document that does not validate. The
+  decision uses the config snapshot captured when the request's provider was
+  resolved, and an unavailable snapshot is a denial, never an implicit allow.
+  A Gateway only serves requests after it loaded a config, so request-time
+  absence is never "authorization was never configured".
 - Use `arequire_plugin_management` from an async endpoint. `require_plugin_management`
   is the synchronous form for a FastAPI `def` endpoint, which FastAPI runs in
   its thread pool; calling it from an async endpoint would do the host's

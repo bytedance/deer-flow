@@ -580,6 +580,44 @@ Phase 1 最低验证要求：
   时更严格）。
 - **延期：** 不变（工具链路 PR2、页面切片 PR3）。
 
+### 2026-09-25 — Phase 5 / PR1 review round 2（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`62197d96`）再提两条：P1 —— `_plugin_app_config` 仍把
+  `FileNotFoundError`（请求时刻文件不在）映射成「授权从未启用」并返回 `None`，调用方据此放行
+  受保护的插件 action 与 management 路由；但真实 Gateway 不可能在没有可读 `config.yaml` 的情况下
+  启动（`app/gateway/app.py` 的 `lifespan` 用同一个访问器读配置，失败即 `RuntimeError`），
+  因此请求期的「缺失」只意味着这份配置在运行中变得不可用（热重载 / 原子替换窗口）。
+  P2 —— `_deny_reason_code` 在 provider 校验的 `try` 之外遍历 `decision.reasons`，
+  自定义 provider 返回 `AuthzDecision(allow=False, reasons=None)`（或任何不可迭代对象）时抛
+  `TypeError`，把一次拒绝变成未捕获错误，而不是配置好的授权失败（403）。
+- **决策（P1，采纳审查建议的第二种修法）：** Gateway 侧不再区分「缺失」与「读不了」：任何配置读取
+  失败都算**不可用**，异常上抛，两个解析函数以 `_PluginAuthorizationUnavailable(fail_closed=True)`
+  失败关闭（能放行的那个开关本身读不到）。`(None, None, None)` 这条放行路径删除，解析三元组的
+  第三个元素由 `AppConfig | None` 收紧为 `AppConfig`，三个调用点（action 分发、sync/async
+  management resolver）只按 `provider is None` 判定「授权已关闭」。
+  *被取代的规则：* round 1 记录的「不存在 `config.yaml` → 今日行为，无门禁」。该分支在已启动的
+  Gateway 中不可达，且与决策层的 `authz.config_unavailable` 规则、以及已写进
+  `docs/full-stack-plugins.md` / `reference.mdx` 的「宿主读不到配置即拒绝」相矛盾。
+- **决策（P2）：** 拒绝码提取改为全函数：`reasons` 不可迭代时直接退化为 `authz.denied`，
+  元素校验额外要求 `reason.code` 是非空 `str`。刻意**不**并入 `_validated_decision` 的「畸形判决」
+  判定：`allow` 已是真正的 `bool`，这条判决本身是合法拒绝；若按畸形判决走 `fail_closed`，
+  在 `fail_closed: false` 下会把明确拒绝翻成放行。
+- **证据：** 新增回归测试并做了反证（修复前必须变红）——
+  `test_installed_resolver_denies_when_no_config_exists`（True vs False）、
+  `test_installed_async_resolver_denies_when_no_config_exists`（未抛 `PermissionError`）、
+  `test_no_config_at_all_denies_the_action`（200 vs 403）、
+  `test_malformed_reasons_keep_the_denial[...]` / `test_async_malformed_reasons_keep_the_denial[...]`
+  （`TypeError: 'NoneType' object is not iterable`，`plugin_authz.py:113`）。
+  `tests/test_plugin_contributions.py` 的 action 路由用例原先依赖「进程里没有配置」，
+  现改为显式安装一份 `authorization.enabled: false` 的可读配置（门禁按文档是 no-op）。
+  插件相关 12 个测试文件 301 项、blocking-IO 163 项、`ruff check` 与 `format --check` 全绿。
+- **否决方案：** 保留 startup 快照（「最后一次成功读取的配置」）作为缺失时的回退。它要在 Gateway
+  侧新增全局状态，且当最后已知配置是 `enabled: false` 时窗口内又变成 fail-open；决策层与公开文档
+  已经规定「不可用即拒绝」，不引入第二套语义。
+- **兼容性：** 配置可读且 `authorization.enabled: false` 时行为不变（no-op）；只有「运行中配置
+  消失/读不了」由放行改为拒绝，与公开文档一致。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。
+
 ### 新记录模板
 
 ```markdown

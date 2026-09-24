@@ -98,11 +98,12 @@ def _installed_plugin_namespace(request: Request, namespace: str) -> bool:
 def _resolve_extension_plugin_management(request: Request, namespace: str, scope: str = "read") -> bool | None:
     """Answer a contributed route's ``plugin_management`` question (sync callers).
 
-    ``None`` means the host cannot answer — an unknown plugin, an anonymous
-    caller, or an unreadable config — and the public helper turns that into a
-    denial. ``True``/``False`` are decisions (``True`` also when authorization
-    is disabled, so a deployment that turns authorization off does not start
-    403-ing enterprise routes).
+    ``None`` means the host cannot answer — an unknown plugin or an anonymous
+    caller — and the public helper turns that into a denial. ``True``/``False``
+    are decisions: ``True`` when authorization is disabled, so a deployment that
+    turns authorization off does not start 403-ing enterprise routes, and
+    ``False`` for a policy denial or a configuration that cannot be read (that
+    resolution layer is fail-closed).
 
     Runs in the caller's thread: a FastAPI ``def`` endpoint is executed in the
     thread pool, which is where a synchronous caller legitimately lives. An
@@ -117,7 +118,7 @@ def _resolve_extension_plugin_management(request: Request, namespace: str, scope
         provider, principal, app_config = resolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
         return not unavailable.fail_closed
-    if provider is None or app_config is None:
+    if provider is None:
         return True
     if principal is None:
         return None
@@ -145,7 +146,7 @@ async def _resolve_extension_plugin_management_async(request: Request, namespace
         provider, principal, app_config = await aresolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
         return not unavailable.fail_closed
-    if provider is None or app_config is None:
+    if provider is None:
         return True
     if principal is None:
         return None

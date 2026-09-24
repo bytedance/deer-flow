@@ -406,6 +406,36 @@ def test_a_non_bool_allow_is_a_malformed_decision(monkeypatch, allow, fail_close
         enforce_plugin_management(principal=_principal(), app_config=config, namespace=NAMESPACE, write=True)
 
 
+@pytest.mark.parametrize("reasons", [None, 5])
+@pytest.mark.parametrize("fail_closed", [True, False])
+def test_malformed_reasons_keep_the_denial(monkeypatch, reasons, fail_closed):
+    """Review P2: a denied verdict with unusable ``reasons`` still denies.
+
+    ``AuthzDecision`` is a plain dataclass, so ``reasons`` can be any object.
+    The verdict is a valid denial (``allow`` is a real ``bool``), so the denial
+    stands and only the informative code degrades: extracting it must not raise,
+    or a denial would escape as an unhandled error instead of ``403``.
+    """
+    _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=False, reasons=reasons)))
+
+    with pytest.raises(PluginAuthorizationError) as error:
+        enforce_plugin_management(principal=_principal(), app_config=_app_config(fail_closed=fail_closed), namespace=NAMESPACE, write=True)
+
+    assert error.value.reason_code == "authz.denied"
+    assert error.value.fail_closed is fail_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasons", [None, 5])
+async def test_async_malformed_reasons_keep_the_denial(monkeypatch, reasons):
+    _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=False, reasons=reasons)))
+
+    with pytest.raises(PluginAuthorizationError) as error:
+        await aenforce_plugin_action(principal=_principal(), app_config=_app_config(), namespace=NAMESPACE, action_name="check")
+
+    assert error.value.reason_code == "authz.denied"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("allow", ["false", 1])
 @pytest.mark.parametrize("fail_closed", [True, False])
@@ -588,8 +618,14 @@ def test_installed_resolver_denies_when_the_config_cannot_be_read(host_app, monk
     assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
 
 
-def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
-    """An absent config.yaml cannot have enabled authorization: today's behavior."""
+def test_installed_resolver_denies_when_no_config_exists(host_app, monkeypatch):
+    """Review P1: an absent config.yaml at request time is unavailable, not disabled.
+
+    A Gateway cannot start without a readable config (``lifespan`` loads it
+    through this same accessor and fails hard otherwise), so absence *during a
+    request* is the hot-reload / atomic-replace window: the policy that would
+    permit an allow is unreadable, and the resolver must not answer 'allowed'.
+    """
 
     def absent_config():
         raise FileNotFoundError("`config.yaml` file not found")
@@ -599,7 +635,21 @@ def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
+    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
+
+
+@pytest.mark.asyncio
+async def test_installed_async_resolver_denies_when_no_config_exists(host_app, monkeypatch):
+    """The async resolver applies the same rule (``aresolve_plugin_authorization``)."""
+
+    def absent_config():
+        raise FileNotFoundError("`config.yaml` file not found")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", absent_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
+
+    with pytest.raises(PermissionError):
+        await arequire_plugin_management(_plain_request(app=host_app), NAMESPACE, scope="read")
 
 
 @pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])
