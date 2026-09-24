@@ -24,7 +24,6 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WAIT="$ROOT/scripts/wait-for-port.sh"
 
 # PIDs are assigned further down, and early-failure paths (missing Python, a
 # failing case 1) exit before reaching them: initialize both before installing
@@ -72,16 +71,17 @@ dead_pid=$!
 sleep 0.6 # let the launcher exit and be reaped before we start watching
 
 start=$SECONDS
-bash "$WAIT" "$closed" 15 DeadService "$dead_pid" >/dev/null 2>&1
+bash "$ROOT/scripts/wait-for-port.sh" "$closed" 15 DeadService "$dead_pid" >/dev/null 2>&1
 status=$?
 duration=$((SECONDS - start))
 
 [ "$status" -eq 2 ] || fail "case 1: expected exit 2 for a child that died before listening, got $status"
 # The bound only has to catch a regression to the full 15s timeout (which line
-# 79's exit-code check would also catch). Keep generous headroom for a cold
-# windows-latest runner: on Windows the probe runs one powershell.exe +
-# Get-NetTCPConnection call before the kill -0 liveness check, and a fresh
-# runner's first PowerShell/CIM start can take several seconds on its own.
+# 79's exit-code check would also catch). wait-for-port.sh checks liveness
+# before any port probe, so this path never pays a probe cycle — even a cold
+# windows-latest runner (slow powershell.exe + CIM start) cannot push the
+# duration near the timeout. The bound stays generous for runner scheduling
+# noise only.
 [ "$duration" -le 10 ] || fail "case 1: fail-fast took ${duration}s; it should not approach the 15s timeout"
 
 # ── Case 2: live child, port opens after several polls -> exit 0 + progress ──
@@ -106,7 +106,7 @@ done
 [ -s "$TMP/slow.port" ] || fail "case 2: slow launcher did not report its port"
 open_port="$(tr -d '\r\n ' <"$TMP/slow.port")"
 
-out="$(bash "$WAIT" "$open_port" 20 SlowService "$slow_pid")"
+out="$(bash "$ROOT/scripts/wait-for-port.sh" "$open_port" 20 SlowService "$slow_pid")"
 status=$?
 
 # One progress emission is guaranteed (the 6s delay spans at least one poll
@@ -118,7 +118,7 @@ status=$?
 # ── Case 3: no child_pid, unreachable port -> exit 1 with the timeout message ──
 
 closed="$(closed_port)"
-out="$(bash "$WAIT" "$closed" 1 NoPidService 2>&1)"
+out="$(bash "$ROOT/scripts/wait-for-port.sh" "$closed" 1 NoPidService 2>&1)"
 status=$?
 
 [ "$status" -eq 1 ] || fail "case 3: expected exit 1 on timeout without child_pid, got $status"
@@ -127,7 +127,7 @@ printf '%s' "$out" | grep -q "failed to start on port" || fail "case 3: missing 
 # ── Case 4: live child_pid but timeout elapses -> still exit 1 ──
 
 closed="$(closed_port)"
-out="$(bash "$WAIT" "$closed" 1 AliveService "$$" 2>&1)"
+out="$(bash "$ROOT/scripts/wait-for-port.sh" "$closed" 1 AliveService "$$" 2>&1)"
 status=$?
 
 [ "$status" -eq 1 ] || fail "case 4: expected exit 1 on timeout with a live child_pid, got $status"
