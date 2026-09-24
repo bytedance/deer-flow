@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -1277,14 +1278,22 @@ class TestLazyInitializationFailure:
         outcome: dict[str, object] = {}
 
         def _worker():
-            with pytest.raises(RuntimeError):
-                asyncio.get_event_loop()
-            outcome["result"] = cache_module.get_cached_mcp_tools()
+            # ``Thread.join`` does not propagate exceptions: capture them so a
+            # regression surfaces its real traceback instead of a bare KeyError.
+            try:
+                with pytest.raises(RuntimeError):
+                    asyncio.get_event_loop()
+                outcome["result"] = cache_module.get_cached_mcp_tools()
+            except BaseException:
+                outcome["error"] = sys.exc_info()
 
         worker = threading.Thread(target=_worker, name="mcp-no-loop-worker")
         worker.start()
         worker.join(timeout=10)
         assert not worker.is_alive()
+        if "error" in outcome:
+            _, exc, tb = outcome["error"]
+            raise exc.with_traceback(tb)
 
         assert outcome["result"] == []
         assert len(calls) == 1
