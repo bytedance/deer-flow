@@ -52,6 +52,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
@@ -240,6 +241,7 @@ class DeerFlowClient:
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
+        self._thread_incarnations: dict[str, str] = {}
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -324,6 +326,9 @@ class DeerFlowClient:
                 self._loaded_agent_config_key = loaded_config_key
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
+        mcp_plugins = getattr(agent_config, "mcp_plugins", None)
+        # Delegation reads this run's metadata, including when the graph is cached.
+        config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -349,6 +354,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             memory_enabled,
+            frozenset(mcp_plugins) if mcp_plugins is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -390,7 +396,7 @@ class DeerFlowClient:
         )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
@@ -483,11 +489,11 @@ class DeerFlowClient:
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(*, model_name: str | None, subagent_enabled: bool, mcp_plugins: list[str] | None = None):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -944,7 +950,15 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         run_id = str(uuid.uuid4())
-        context: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+        thread_incarnations = getattr(self, "_thread_incarnations", None)
+        if thread_incarnations is None:
+            thread_incarnations = self._thread_incarnations = {}
+        thread_incarnation = thread_incarnations.setdefault(thread_id, uuid.uuid4().hex)
+        context: dict[str, Any] = {
+            "thread_id": thread_id,
+            "run_id": run_id,
+            THREAD_INCARNATION_CONTEXT_KEY: thread_incarnation,
+        }
         for key in _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS:
             if key in kwargs:
                 context[key] = kwargs[key]
@@ -1774,10 +1788,9 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts

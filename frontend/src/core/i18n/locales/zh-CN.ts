@@ -17,7 +17,35 @@ export const zhCN: Translations = {
     localName: "中文",
   },
 
+  extensions: {
+    title: "扩展插件",
+    navigation: "扩展",
+    search: "按名称或用途搜索扩展",
+    loading: "正在加载扩展…",
+    pageLoading: "正在加载扩展…",
+    unavailable: "扩展暂不可用。",
+    retry: "重试",
+    reload: "重新加载",
+    reloadAll: "重新加载扩展（刷新页面）",
+    all: "全部扩展",
+    notInstalled: "此扩展未安装或已移除。",
+    enabledManaged: "已启用 · 由管理员管理",
+    disabledManaged: "已停用 · 由管理员管理",
+    deploymentHint:
+      "界面和浏览器功能在手动刷新后更新；安装、启停和配置由部署管理员通过配置文件或 CLI 管理。",
+    moduleUnavailable: "当前页面加载失败",
+    noResults: "没有匹配的已安装扩展。",
+    pageUnavailable: "扩展页面不可用",
+    pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
+    viewAll: "查看扩展",
+    viewFailed: "扩展界面加载失败，请刷新重试。",
+    actionFailed: "暂时无法执行扩展操作，请重试。",
+    view: (name) => `查看 ${name}`,
+    open: (name) => `打开 ${name}`,
+  },
+
   capabilities: {
+    toolsAndIntegrations: "工具与集成",
     icon: {
       title: "插件图标",
       upload: "上传插件图标",
@@ -148,6 +176,19 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+  },
+
+  skillUsage: {
+    used: "使用的技能",
+    title: "技能",
+    name: "名称",
+    description: "描述",
+    builtIn: "内置",
+    custom: "自定义",
+    integration: "集成",
+    legacy: "旧版",
+    copy: "复制技能快照",
+    partial: "此快照仅包含本次运行加载的部分技能内容。",
   },
 
   runDuration: {
@@ -1304,6 +1345,7 @@ export const zhCN: Translations = {
         work: "工作",
         personal: "个人",
         topOfMind: "近期关注（Top of mind）",
+        cognitiveStyle: "思维习惯",
         historyBackground: "历史背景",
         recentMonths: "近几个月",
         earlierContext: "更早上下文",
@@ -1322,6 +1364,7 @@ export const zhCN: Translations = {
           },
           content: "内容",
           source: "来源",
+          unknown: "未知",
           createdAt: "创建时间",
           view: "查看",
         },
@@ -1655,6 +1698,7 @@ export const zhCN: Translations = {
       exportOptional: "可选",
       exportRequired: "必需",
       exportUndeclared: "未声明",
+      exportNone: "无",
       exportScope:
         "包含此技能目录内的全部文件。账号配置、对话和目录外的历史不会导出；目标环境需重新配置工具与凭据。",
       exportWarnings: "请检查包内文件",

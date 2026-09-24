@@ -941,6 +941,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** Deleting an uploaded document no longer deletes the converted
+  Markdown beside it. Conversion names a companion after the document's stem
+  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
+  a document can belong to another document sharing the stem, or to the user:
+  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
+  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
+  document, stay listed, and can be deleted on their own. ([#5673])
 - **subagents:** Recognize zero-byte regular deliverables in remote sandbox
   acceptance checks. Readable empty files now satisfy `exists` and
   `file_written` and deterministically fail `non-empty`, instead of remaining
@@ -2785,6 +2792,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
+  first-boot requests both create an admin. The handler counted admins in one
+  session and created the account in another, so two requests with different
+  emails both saw an empty system; the loser now gets the documented
+  `409 system_already_initialized`. The count and the insert share one
+  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
+  PostgreSQL advisory lock). ([#5776])
 - **uploads:** Document conversion no longer re-opens the upload by name. The
   Gateway converted the committed file and the embedded client converted the
   copy it had just placed in the thread's uploads directory, so a sandbox that
@@ -2965,9 +2979,40 @@ This release closes that milestone with **765 merged pull requests**.
   and Chinese agents/threads/lead-agent pages: the required ASCII `name`
   request field, lowercase storage, `/api/agents/check` name-availability
   behavior, and no auto-derived slug from `display_name`. ([#4944])
+- **docs:** Restructure the subagent documentation into an eleven-chapter user
+  manual under `harness/subagents/` in both languages: concepts, quick start,
+  the catalog, delegating work, results and acceptance, limits and capacity,
+  sandbox and isolation, observability, troubleshooting by symptom, developer
+  integration, and a reference appendix with the June to September 2026
+  change log. The former single page becomes the section index, so existing
+  page links keep working; deep links to sections of the old page now land
+  on the index.
+- **docs:** Add an extension developer manual under `harness/extensions/` in
+  both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
+  to write an extension, a quick start, the runtime model, middleware
+  placements, lifecycle and observer hooks, services and routes, the run
+  evidence reader, operating extensions, troubleshooting by error message,
+  and a reference of every public name with the contract's version history.
+  Also correct stale descriptions of the contribution kinds and of run
+  evidence metadata redaction in `AGENTS.md`.
+- **docs:** Bring the extension developer manual up to the
+  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
+  covering `registry.plugin()`, browser modules and packaged assets, backend
+  actions, model tools and settings; the request-scoped run evidence reader
+  with a per-user route example; and plugin troubleshooting and operations
+  notes. Also correct the plugin `mount` return value in
+  `docs/full-stack-plugins.md`.
 
 ### Internal
 
+- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
+  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
+  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
+  first write dropped after a full → delta migration
+  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
+  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
+  the patch; the full → delta migration contract test remains the gate.
+  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged. ([#5734])
 - **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
   a DOM environment. ([#3703], [#4453])
 - **tests:** Require explicit opt-in for live client tests. ([#4482])
@@ -4331,3 +4376,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776

@@ -7,7 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service
+from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service, get_thread_store
+from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api/threads/{thread_id}/mcp-tasks", tags=["mcp-tasks"])
@@ -63,6 +64,27 @@ async def _current_user_id(request: Request) -> str:
     return user_id
 
 
+async def _current_thread_incarnation(
+    request: Request,
+    *,
+    thread_id: str,
+    user_id: str,
+) -> str | None:
+    """Capture the server-owned thread generation for the repository CAS."""
+    thread_store = get_thread_store(request)
+    record = await thread_store.get(thread_id, user_id=user_id)
+    if record is None:
+        unscoped = await thread_store.get(thread_id, user_id=None)
+        if unscoped is not None and unscoped.get("user_id") is None:
+            record = unscoped
+    if record is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    incarnation = record.get("incarnation")
+    if not is_valid_thread_incarnation(incarnation):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return incarnation
+
+
 @router.get("")
 @require_permission("threads", "read", owner_check=True)
 async def list_mcp_tasks(
@@ -73,9 +95,15 @@ async def list_mcp_tasks(
     repository = get_mcp_task_repo(request)
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
+    thread_incarnation = await _current_thread_incarnation(
+        request,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
     records = await repository.list_by_thread(
         thread_id,
         user_id=user_id,
+        thread_incarnation=thread_incarnation,
         limit=limit,
     )
     threshold = service.tracking_degraded_after_errors
@@ -92,8 +120,18 @@ async def get_mcp_task(
     repository = get_mcp_task_repo(request)
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
-    record = await repository.get(task_id, user_id=user_id)
-    if record is None or record["thread_id"] != thread_id:
+    thread_incarnation = await _current_thread_incarnation(
+        request,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+    record = await repository.get(
+        task_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        thread_incarnation=thread_incarnation,
+    )
+    if record is None:
         raise HTTPException(status_code=404, detail="MCP task not found")
     return _detail(
         record,
@@ -110,6 +148,11 @@ async def cancel_mcp_task(
 ) -> dict[str, Any]:
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
+    thread_incarnation = await _current_thread_incarnation(
+        request,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
     if not getattr(request.app.state, "mcp_tasks_available", False):
         # The service exists whenever SQL persistence is configured, but the
         # background loop that owns the remote cancel call only runs when
@@ -120,6 +163,7 @@ async def cancel_mcp_task(
         task_id=task_id,
         thread_id=thread_id,
         user_id=user_id,
+        thread_incarnation=thread_incarnation,
     )
     if record is None:
         raise HTTPException(status_code=404, detail="MCP task not found")

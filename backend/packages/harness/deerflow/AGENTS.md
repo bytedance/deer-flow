@@ -62,10 +62,10 @@ drift.
   - `"custom"` — forwarded from `StreamWriter`; DeerFlow-built-in custom events are dual-emitted through `deerflow.utils.custom_events`, so `astream_events(version="v2")` consumers also receive one `on_custom_event` with `name=payload["type"]` and the unchanged payload as `data`
   - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
 - **Custom-event invariant** — use `emit_custom_event` / `aemit_custom_event`, never `StreamWriter` alone. Built-in payloads require a non-empty string `type`; typeless payloads stay writer-only, absent from `astream_events`. The writer runs first and is authoritative for Gateway/Web UI/embedded clients; best-effort callbacks must not break it. Async graph hooks must await the async helper, never dispatch synchronously on a running event loop.
-- Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
-- Cache graphs by effective storage `user_id` in every auth mode because prompts and middleware bind user SOUL, skills, and storage. `stream()` must materialize it before worker or isolated-loop boundaries.
+- Lazy graph creation uses `create_agent()` + `build_middlewares()`.
+- Cache graphs by storage `user_id` and the unordered set of named-agent `mcp_plugins`. `stream()` materializes `user_id` before worker/loop boundaries in every auth mode.
 - Supports `checkpointer` parameter for state persistence across turns
-- `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
+- `reset_agent()` reloads AgentConfig and rebuilds the graph. Every run's metadata carries `mcp_plugins` for delegation, including cache hits.
 - [Streaming design](../../../docs/STREAMING.md): Gateway/client parallel paths, LangGraph `stream_mode`, per-id deduplication, and regression tests
 
 **Gateway Equivalent Methods** (replaces Gateway API):

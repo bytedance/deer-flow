@@ -18,6 +18,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage, record_skill_usage
 from deerflow.runtime.events.catalog import (
     MIDDLEWARE_SKILL_ACTIVATION_TAG,
     MIDDLEWARE_SKILL_SECRETS_TAG,
@@ -358,13 +359,41 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages), activation
 
-    def _handle_model_request(self, request: ModelRequest, *, hook: str) -> ModelRequest | AIMessage:
+    def _handle_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage, _Activation | None]:
         prepared, activation = self._prepare_model_request(request, hook=hook)
         if isinstance(prepared, AIMessage):
-            return prepared
+            return prepared, None
         effective = prepared if prepared is not None else request
         self._resolve_secret_bindings(effective, activation, hook=hook)
-        return effective
+        if activation is not None:
+            record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(activation))
+        return effective, activation
+
+    @staticmethod
+    def _usage_snapshot(activation: _Activation) -> dict | None:
+        return build_skill_usage(
+            activation.container_file_path,
+            activation.skill_content,
+            skills_root=posixpath.dirname(activation.container_file_path),
+            activation="slash",
+            name=activation.skill_name,
+            category=activation.category,
+        )
+
+    @staticmethod
+    def _stamp_usage(response: ModelResponse | AIMessage, activation: _Activation | None) -> ModelResponse | AIMessage:
+        if activation is None:
+            return response
+        # Embedded/checkpoint clients also keep evidence on the first response.
+        # The journal independently attaches a run aggregate before serialization.
+        usage = SkillActivationMiddleware._usage_snapshot(activation)
+        if usage is not None:
+            messages = [response] if isinstance(response, AIMessage) else getattr(response, "result", [])
+            for message in messages:
+                if isinstance(message, AIMessage):
+                    message.additional_kwargs = {**message.additional_kwargs, SKILL_USAGE_KEY: usage}
+                    break
+        return response
 
     def _resolve_secret_bindings(self, request: ModelRequest, activation: _Activation | None, *, hook: str) -> None:
         """Recompute the per-run secret injection set (binding point A+, #3861/#3914).
@@ -576,10 +605,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse | AIMessage:
-        prepared = self._handle_model_request(request, hook="wrap_model_call")
+        prepared, activation = self._handle_model_request(request, hook="wrap_model_call")
         if isinstance(prepared, AIMessage):
             return prepared
-        return handler(prepared)
+        return self._stamp_usage(handler(prepared), activation)
 
     @override
     async def awrap_model_call(
@@ -587,7 +616,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | AIMessage:
-        prepared = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call")
+        prepared, activation = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call")
         if isinstance(prepared, AIMessage):
             return prepared
-        return await handler(prepared)
+        return self._stamp_usage(await handler(prepared), activation)

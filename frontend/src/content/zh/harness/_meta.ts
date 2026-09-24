@@ -37,6 +37,9 @@ const meta: MetaRecord = {
   mcp: {
     title: "MCP 集成",
   },
+  extensions: {
+    title: "扩展包",
+  },
   customization: {
     title: "自定义与扩展",
   },

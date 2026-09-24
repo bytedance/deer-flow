@@ -69,7 +69,11 @@ If the server starts before MCP tools are initialized (e.g., in LangGraph Studio
 
 ### Cache invalidation
 
-The MCP tools cache tracks the modification time (`mtime`) of `extensions_config.json`. When the file changes — for example, when a server is enabled or disabled through the Gateway API — the cache is marked stale and tools are reloaded on the next request.
+The MCP tools cache tracks the resolved path and a `(mtime, size, sha256)` content signature of `extensions_config.json`. A changed signature is only a signal to re-check the effective MCP configuration: the cache compares the enabled servers' parsed configuration plus the global `mcpInterceptors` list, and retires cached tools and pooled sessions only when that slice actually changed.
+
+Skills-only or middleware-only edits therefore keep the current MCP tools and sessions, and so does a switch to another config file with an identical MCP configuration. Enabling, disabling, or reconfiguring a server reloads tools on the next request. When no MCP server is enabled, tool assembly retires any previously initialized cache and sessions without starting new tool discovery.
+
+The Gateway's explicit **Reset MCP tools cache** action (`POST /api/mcp/cache/reset`) is separate from this automatic check and always clears the cache and pooled sessions.
 
 This means MCP server changes take effect without restarting the DeerFlow server.
 

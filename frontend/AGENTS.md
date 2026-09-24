@@ -262,3 +262,24 @@ Draft credentials stay in editor state, never query cache or browser storage; bl
 keeps the saved key, explicit removal sends an empty key. Saving invalidates both the
 admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
 callbacks. Static demos and non-admin users must not query the management API.
+
+## Full-stack plugin UI
+
+`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
+Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
+native credentialed module scripts, preserving relative imports and resource URLs.
+Both honor the backend base and prefixes; transport and cache semantics are documented in
+`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+Conversation action factories, shapes and availability callbacks are guarded per plugin;
+only validated value snapshots reach the toolbar/sidebar render paths.
+`PluginNavigation` and the dynamic workspace extension route consume page declarations;
+Capability Center details only show metadata and status. Conversation action slots augment
+normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
+Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
+namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
+
+Plugin page `openConversation(threadId)` resolves authenticated thread metadata
+with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
+abort signal fences late navigation after unmount/account changes. Synchronous
+conversation-action callbacks reject Promise returns while consuming rejections.

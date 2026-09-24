@@ -1,0 +1,258 @@
+---
+title: Services and Routes
+description: How an extension runs code for the lifetime of the Gateway and serves its own HTTP API. Covers the service start and stop order, the dependencies a service receives, failure and timeout behavior, how contributed routers are validated and mounted, authentication and CSRF, and identifying the caller.
+---
+
+import { Callout } from "nextra/components";
+
+# Services and Routes
+
+A **service** is an object the Gateway starts once its persistence layer is ready and stops at shutdown. A **router** is a FastAPI `APIRouter` the Gateway mounts next to its own API. They are separate contributions, but most extensions that serve HTTP need both: the router declares the paths, and the service holds whatever those paths read at runtime.
+
+Both are app-scoped. They exist once per Gateway process, not once per run. For per-run behavior, see [Middleware Contributions](/docs/harness/extensions/middleware).
+
+## Services
+
+### The contract
+
+```python
+from deerflow_extension_api import ExtensionRuntimeDeps
+
+
+class MyService:
+    async def start(self, deps: ExtensionRuntimeDeps) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+def install(registry, config):
+    registry.service(MyService())
+```
+
+Both methods are async and both have defaults in the protocol, so a service may implement only the one it needs.
+
+### What start() receives
+
+Every service receives the same `ExtensionRuntimeDeps` snapshot:
+
+| Field                 | Type                        | Meaning                                                                                                   |
+| --------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `app_store`           | `ExtensionData`             | The app-scoped typed store, the same object middleware contributors and lifecycle hooks receive as `app_store` |
+| `policy`              | `HostPolicySnapshot`        | The limits the host enforces: token-budget settings (populated only when `token_budget.enabled`) and `max_subagents_per_run` from `subagents.max_total_per_run` |
+| `session_factory`     | SQLAlchemy `async_sessionmaker` or `None` | The Gateway's database session factory. `None` when `database.backend` is `memory`                    |
+| `run_evidence_reader` | `RunEvidenceReader` or `None` | A read-only view of every user's runs and persisted events. Route handlers use a caller-scoped reader instead. See [Run Evidence](/docs/harness/extensions/run-evidence) |
+
+`session_factory` is the host's own database connection, not a sandboxed one. A service that uses it can read and write every host table. If your extension keeps its own tables, declare a `table_prefix` in its `plugins:` record so that `alembic revision --autogenerate` leaves them alone.
+
+### When services start and stop
+
+Services start during Gateway startup in registration order, which follows the `plugins:` list and, within one extension, the order of `registry.service()` calls. The position in the startup sequence is fixed:
+
+1. The database engine, checkpointer, and store are initialized.
+2. The run store and run event store are created, and the evidence reader is bound to them.
+3. **Services start**, one at a time, each awaited before the next.
+4. The rest of the runtime comes up: thread store, run manager, recovery of interrupted runs, the lease heartbeat. Only then does the Gateway accept requests.
+
+Shutdown runs in the opposite direction:
+
+1. In-flight runs and subagents are drained.
+2. **Services stop in reverse registration order.**
+3. Stores, the checkpointer, and the database engine are closed.
+
+So a service can use `session_factory` and `run_evidence_reader` from `start()` until `stop()` returns, and no run is executing when `stop()` is called.
+
+### Failure and timeouts
+
+| What happens                          | Result                                                                                   |
+| ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `start()` raises                      | Logged as `Extension <use>: service start() failed; continuing without it: ...`. The next service starts normally |
+| `start()` raises `CancelledError` itself | Treated like any other failure. A real cancellation of Gateway startup still propagates |
+| `start()` never returns               | There is no start timeout. The Gateway waits, and startup does not complete              |
+| `stop()` raises                       | Logged; the remaining services still stop                                                |
+| `stop()` takes longer than 30 seconds | Cancelled and logged as `service stop() timed out after 30.0s; continuing shutdown`. Each service has its own 30-second budget |
+
+A service whose `start()` failed still gets `stop()` at shutdown, because `start()` may have acquired resources before failing. Write `stop()` so it is safe to call on a half-started service.
+
+<Callout type="warning">
+  Do long-running work in a background task that `start()` creates, not inside
+  `start()` itself. A `start()` that blocks on a slow network call holds up
+  Gateway startup for as long as it waits.
+</Callout>
+
+## Routers
+
+### Registering a router
+
+Build routers **inside `install()`** and register them eagerly:
+
+```python
+def install(registry, config):
+    service = MyService()
+    registry.service(service)
+    registry.routers((build_router(service),))
+```
+
+`registry.routers()` takes a sequence of `APIRouter` objects. The contract types them as `Any` so the contract package has no FastAPI dependency; declare `fastapi` in your own package metadata.
+
+The router exists before the service starts and before any request arrives, so the path set is fixed at startup. Route handlers reach runtime state through the service object they close over.
+
+### How routers are mounted
+
+The Gateway mounts contributed routers **after every host route**, so a host handler always wins a match. Before mounting each router it checks every route. A router with any rejected route is rejected **as a whole**; other routers, including other routers from the same extension, still mount.
+
+| Rejected                                                                    | Operator sees                                                                                  |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| A WebSocket route                                                           | `contributed WebSocket routes are not supported until the host can apply authentication and Origin checks` |
+| A Starlette `Mount`                                                         | `contributed router contains a Starlette Mount, which FastAPI.include_router() ignores`        |
+| `on_startup` / `on_shutdown` hooks or a custom `lifespan` on the router     | `contributed router lifecycle hooks are not supported; register an ExtensionService instead`   |
+| A path that can reach a host public namespace: `/health`, `/docs`, `/redoc`, `/openapi.json`, `/api/v1/auth/oauth/`, `/api/v1/auth/callback/`, `/api/webhooks/` | `contributed route <path> can enter a host public namespace` |
+| A path that can reach a host auth endpoint that skips authentication or CSRF, such as `/api/v1/auth/register`, or a state-changing method on `/api/v1/auth/me` | `contributed route <path> can enter a host-reserved exact path` |
+| A path and method already served by the host or an earlier extension         | `router path <path> is already served by <host or entry point>; this router was not mounted`   |
+
+Each message is logged as an error prefixed with `Extension <use>:`. When mounting succeeds the Gateway logs `Extension routers mounted: <use> -> <path>; ...`.
+
+The shadow check is conservative. It rejects a route only when an earlier route **provably** covers it for the same method: identical paths, or parameter segments whose converter matches every value the new route could receive. A pattern it cannot prove either way is allowed. A catch-all such as `/api/{name}` therefore mounts, but it only receives requests no host route matched. Prefix your paths with a namespace you own, such as `/api/<extension-name>/`.
+
+### Authentication and CSRF
+
+Contributed routes sit behind the same middleware as the host API, and they cannot opt out:
+
+- **Authentication.** An unauthenticated request gets `401` before your handler runs. A personal access token (PAT) cannot access contributed routes: even a valid PAT gets `403 {"detail": "PAT credentials are not permitted on this route"}` from the host before your handler runs.
+- **CSRF.** A `POST`, `PUT`, `PATCH`, or `DELETE` from a browser session must carry the `csrf_token` cookie value in an `X-CSRF-Token` header, as the DeerFlow frontend already does. Without it the request gets `403` before your handler runs. A Bearer header skips the CSRF check, but does not grant PAT access to contributed routes.
+
+When the Gateway runs with `DEER_FLOW_AUTH_DISABLED=1`, a local-development switch that is ignored when `DEER_FLOW_ENV` or `ENVIRONMENT` is `prod` or `production`, every request runs as a synthetic admin user and neither check applies.
+
+### Identifying the caller
+
+Handlers never see the host's auth objects. Instead, `deerflow_extension_api` gives them a projection:
+
+```python
+@dataclass(frozen=True)
+class ExtensionPrincipal:
+    user_id: str
+    is_admin: bool = False
+    is_internal: bool = False
+    roles: tuple[str, ...] = ()
+```
+
+| Helper                      | Returns                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------ |
+| `resolve_principal(request)` | The caller's `ExtensionPrincipal`, or `None` when the host cannot determine it             |
+| `require_admin(request)`     | The principal when it is an admin. Otherwise raises `PermissionError`, including when the identity is unknown |
+
+`roles` holds the caller's single system role, such as `("admin",)` or `("user",)`. `is_internal` is `true` for requests the Gateway's own components send with its internal service token, such as the IM channel bridge; those callers carry the role `internal` and are not admins. PAT requests are rejected before contributed route handlers run, so these helpers do not receive a PAT principal here.
+
+Both helpers are synchronous, so they work in sync and async handlers alike. They are framework-neutral, so map their results to HTTP status codes yourself: `None` to `401`, `PermissionError` to `403`.
+
+### Reading run evidence in a route
+
+Do not serve data from the service's `run_evidence_reader` in a route: it sees every user. Call `require_run_evidence_reader(request)` instead. The host returns a reader scoped to the authenticated caller, provided they hold the `runs:read` permission. Map `PermissionError` to `403` and `NotImplementedError` to `503`. [Run Evidence](/docs/harness/extensions/run-evidence) covers the rules and a complete route.
+
+## Example: a status API
+
+This extension serves two routes. `GET /api/ext-status/me` is open to every signed-in user. `POST /api/ext-status/reset` requires an admin. Both return `503` until the service has started.
+
+```python filename="deerflow_extension_status/__init__.py"
+"""Expose a small status API backed by a Gateway-lifetime service."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from deerflow_extension_api import (
+    ExtensionPrincipal,
+    ExtensionRegistry,
+    ExtensionRuntimeDeps,
+    extension,
+    require_admin,
+    resolve_principal,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+
+class StatusService:
+    def __init__(self) -> None:
+        self._deps: ExtensionRuntimeDeps | None = None
+        self.resets = 0
+
+    async def start(self, deps: ExtensionRuntimeDeps) -> None:
+        self._deps = deps
+
+    async def stop(self) -> None:
+        self._deps = None
+
+    def require_running(self) -> ExtensionRuntimeDeps:
+        if self._deps is None:
+            raise HTTPException(status_code=503, detail="status extension is not running")
+        return self._deps
+
+
+def caller(request: Request) -> ExtensionPrincipal:
+    principal = resolve_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="unknown caller")
+    return principal
+
+
+def admin(request: Request) -> ExtensionPrincipal:
+    try:
+        return require_admin(request)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def build_router(service: StatusService) -> APIRouter:
+    router = APIRouter(prefix="/api/ext-status", tags=["ext-status"])
+
+    @router.get("/me")
+    async def me(
+        principal: ExtensionPrincipal = Depends(caller),
+        deps: ExtensionRuntimeDeps = Depends(service.require_running),
+    ) -> dict[str, Any]:
+        return {
+            "user_id": principal.user_id,
+            "is_admin": principal.is_admin,
+            "database": deps.session_factory is not None,
+            "evidence": deps.run_evidence_reader is not None,
+        }
+
+    @router.post("/reset")
+    async def reset(
+        principal: ExtensionPrincipal = Depends(admin),
+        deps: ExtensionRuntimeDeps = Depends(service.require_running),
+    ) -> dict[str, int]:
+        service.resets += 1
+        return {"resets": service.resets}
+
+    return router
+
+
+@extension(api="0.2.0", name="status")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    service = StatusService()
+    registry.service(service)
+    registry.routers((build_router(service),))
+```
+
+The `503` guard is not dead code. If `start()` fails, the Gateway starts without the service, but the router is still mounted. The routes then answer `503` instead of failing on missing state.
+
+Against a Gateway with the memory database backend, the routes answer:
+
+| Request                                                | Response                                                                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `GET /me`, no session                                  | `401 {"detail": {"code": "not_authenticated", ...}}` from the host        |
+| `POST /reset`, signed in, no `X-CSRF-Token`            | `403 {"detail": "CSRF token missing. Include X-CSRF-Token header."}` from the host |
+| `GET /me`, signed in as a regular user                 | `200 {"user_id": "...", "is_admin": false, "database": false, "evidence": true}` |
+| `POST /reset`, regular user                            | `403 {"detail": "this endpoint requires an administrator account"}`       |
+| `GET /me` or `POST /reset`, personal access token       | `403 {"detail": "PAT credentials are not permitted on this route"}` from the host |
+| `POST /reset`, admin session with CSRF header          | `200 {"resets": 1}`                                                      |
+
+## Common pitfalls
+
+- **Opening resources in `install()`.** `install()` runs while the Gateway builds its application, before the database exists. Build routers there, but open connections and start tasks in `start()`.
+- **Router lifespan hooks.** They are rejected. Anything with a lifetime belongs in a service.
+- **Generic paths.** Anything under a host namespace is rejected, and a path another extension registered first wins. Use a prefix you own.
+- **Treating `resolve_principal` as authentication.** The host already rejected unauthenticated requests. Use the principal for authorization within your routes, and fail closed when it is `None`.
+- **Assuming admin from a token.** Personal access tokens never grant admin through `require_admin`, by design.
+- **Returning service-reader data from a route.** The service reader is global. Routes use the caller-scoped request reader.

@@ -258,13 +258,19 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
-    bash_command_timeout: int = Field(
+    bash_command_timeout: float = Field(
         default=600,
         gt=0,
+        allow_inf_nan=False,
         description=(
-            "Maximum wall-clock seconds a bash command may run before it is terminated. LocalSandboxProvider applies it to the host process group; "
-            "OpenSandboxProvider forwards it to the remote exec service when a call has no explicit timeout. Keeps a blocking foreground command "
-            "(e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+            "Provider command deadline. AIO images on the supported semver line "
+            "(1.9.3+, recommended 1.11.0) enforce it server-side through "
+            "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
+            "only gets the bounded host-side request. `bash_command_timeout` is "
+            "used by providers that explicitly wire this setting (currently "
+            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
+            "their provider-specific command defaults unless a caller supplies an "
+            "explicit timeout."
         ),
     )
 

@@ -20,7 +20,7 @@ Deploy any project to Vercel instantly. No authentication required.
 ## Usage
 
 ```bash
-bash /mnt/skills/user/vercel-deploy/scripts/deploy.sh [path]
+bash /mnt/skills/public/vercel-deploy/scripts/deploy.sh [path]
 ```
 
 **Arguments:**
@@ -30,13 +30,13 @@ bash /mnt/skills/user/vercel-deploy/scripts/deploy.sh [path]
 
 ```bash
 # Deploy current directory
-bash /mnt/skills/user/vercel-deploy/scripts/deploy.sh
+bash /mnt/skills/public/vercel-deploy/scripts/deploy.sh
 
 # Deploy specific project
-bash /mnt/skills/user/vercel-deploy/scripts/deploy.sh /path/to/project
+bash /mnt/skills/public/vercel-deploy/scripts/deploy.sh /path/to/project
 
 # Deploy existing tarball
-bash /mnt/skills/user/vercel-deploy/scripts/deploy.sh /path/to/project.tgz
+bash /mnt/skills/public/vercel-deploy/scripts/deploy.sh /path/to/project.tgz
 ```
 
 ## Output
@@ -99,7 +99,7 @@ To transfer this deployment to your Vercel account, visit the Claim URL.
 
 ## Troubleshooting
 
-### Network Egress Error
+### Network Restriction Error
 
 If deployment fails due to network restrictions (common on claude.ai), tell the user:
 

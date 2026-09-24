@@ -55,6 +55,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [运行应用](#运行应用)
       - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
+      - [升级已有的代码仓库](#升级已有的代码仓库)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
       - [Sandbox 模式](#sandbox-模式)
@@ -278,6 +279,13 @@ make down   # 停止并移除容器
 
 更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+#### 升级已有的代码仓库
+
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`。停止当前运行的服务后，
+执行 `git pull --ff-only`，再按原运行方式启动。日常源码升级不需要再次运行 `make config`
+或 `make docker-init`；如果新版本需要变更配置，请在重启前运行 `make config-upgrade`。
+各运行方式的命令见[运维与排障](frontend/src/content/zh/application/operations-and-troubleshooting.mdx#升级已有的代码仓库)。
+
 #### 方式二：本地开发
 
 如果你更希望直接在本地启动各个服务：
@@ -294,6 +302,8 @@ make down   # 停止并移除容器
    ```bash
    make install  # 安装 backend + frontend 依赖
    ```
+
+   pre-commit 由 uv 调用，不要求其工具目录在 `PATH` 中。
 
 3. **（可选）预拉取 sandbox 镜像**：
    ```bash
@@ -633,6 +643,8 @@ Skills 是 DeerFlow 能做“几乎任何事”的关键。
 
 Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下文。只有任务确实需要时才加载，这样能把上下文窗口控制得更干净，也更适合对 token 比较敏感的模型。
 
+回答加载过技能时，底部工具栏会显示「使用的技能」。悬停或点击图标可查看本轮技能及其来源，悬停技能名称显示下划线，点击名称即可在可拖拽侧栏（手机端为抽屉）查看当时加载的 `SKILL.md` 快照。自动读取和 `/技能名` 显式调用均会记录，同一技能按首次加载顺序去重；之后修改或删除技能不会改变这份历史。复制得到包含 YAML 元数据的原始 Markdown 快照；包内相对链接和图片显示为引用，不会误跳转离开对话。范围读取或超出快照大小上限时会标明内容不完整。旧对话、失败读取以及通过 shell 等其他工具加载的技能不会凭回答文本推断为已使用。
+
 通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
 
 Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
@@ -773,6 +785,12 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。
 
 **摘要压缩**：在单个 session 内，DeerFlow 会比较积极地管理上下文，包括总结已完成的子任务、把中间结果转存到文件系统、压缩暂时不重要的信息。这样在长链路、多步骤任务里，它也能保持聚焦，而不会轻易把上下文窗口打爆。
+
+### 读取引用的会话
+
+Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
+
+无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
 
 ### 长期记忆
 

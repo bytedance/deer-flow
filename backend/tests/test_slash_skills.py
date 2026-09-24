@@ -852,3 +852,38 @@ def test_skill_activation_middleware_reports_invalid_utf8_skill_file_safely(monk
 
     assert isinstance(result, AIMessage)
     assert "could not be loaded safely" in result.content
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypatch, tmp_path, asynchronous):
+    from langchain.agents.middleware.types import ModelResponse
+
+    content = "---\nname: data-analysis\ndescription: Analyze data.\n---\n# Original instructions"
+    skill = _make_skill(tmp_path, "data-analysis", content=content)
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    recorded = []
+    runtime = SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)})
+    request = _make_model_request([HumanMessage(content="/data-analysis analyze", id="user-1")], runtime=runtime)
+
+    def call():
+        response = ModelResponse(result=[AIMessage(content="Analyzing")])
+        if asynchronous:
+
+            async def handler(_request):
+                return response
+
+            return asyncio.run(middleware.awrap_model_call(request, handler))
+        return middleware.wrap_model_call(request, lambda _: response)
+
+    first = call()
+    snapshot = first.result[0].additional_kwargs["skill_usage"]
+    assert recorded == [snapshot]
+    assert snapshot["activation"] == "slash"
+    assert snapshot["name"] == "data-analysis"
+    assert snapshot["category"] == "custom"
+    assert snapshot["content"] == content
+    assert snapshot["path"] == "/mnt/skills/custom/data-analysis/SKILL.md"
+    skill.skill_file.write_text("Changed later", encoding="utf-8")
+    assert snapshot["content"] == content
+    assert "skill_usage" not in call().result[0].additional_kwargs

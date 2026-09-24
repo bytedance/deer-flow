@@ -111,6 +111,7 @@ def get_available_tools(
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
     app_config: AppConfig | None = None,
+    extensions=None,
     chat_model: BaseChatModel | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -232,29 +233,45 @@ def get_available_tools(
     if include_mcp:
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.mcp.cache import get_cached_mcp_tools, refresh_mcp_cache_if_active
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+            try:
+                extensions_config = ExtensionsConfig.from_file()
+            except Exception as exc:
+                # Only this call carries the resolved-credential risk:
+                # from_file() resolves $VAR values before validation, so a
+                # ValidationError message can embed secrets. Log the type only.
+                logger.error("Failed to load MCP extensions config (%s)", type(exc).__name__)
+            else:
+                if extensions_config.get_enabled_mcp_servers():
+                    mcp_tools = get_cached_mcp_tools()
+                    if mcp_tools:
+                        logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly at each
-                    # agent construction site can identify them. Lead agents
-                    # assemble their full configured MCP catalog and apply active
-                    # skill policy at runtime; subagents may pass an already
-                    # policy-filtered list because their skills load at startup.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
-            if mcp_plugins is not None:
-                from deerflow.capabilities.runtime import filter_mcp_plugins
+                        # Tag MCP-sourced tools so deferred-tool assembly at each
+                        # agent construction site can identify them. Lead agents
+                        # assemble their full configured MCP catalog and apply active
+                        # skill policy at runtime; subagents may pass an already
+                        # policy-filtered list because their skills load at startup.
+                        for t in mcp_tools:
+                            tag_mcp_tool(t)
+                else:
+                    # A change that disables the last MCP server must still retire
+                    # the previously initialized cache and its pooled sessions.
+                    # This never initializes tools: a process that never initialized
+                    # MCP pays no config-hashing or discovery cost, while one that
+                    # did still checks the existing cache for staleness.
+                    refresh_mcp_cache_if_active()
+                if mcp_plugins is not None:
+                    from deerflow.capabilities.runtime import filter_mcp_plugins
 
-                mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
+                    mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
-        except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+        except Exception:
+            # Tool caching, pool cleanup and plugin filtering raise ordinary
+            # exceptions whose messages are safe and needed for debugging.
+            logger.exception("Failed to get cached MCP tools")
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []
@@ -278,7 +295,14 @@ def get_available_tools(
     # Deduplicate by tool name — config-loaded tools take priority, followed by
     # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
     # receive ambiguous or concatenated function schemas (issue #1803).
-    all_tools = [_ensure_sync_invocable_tool(t) for t in loaded_tools + builtin_tools + mcp_tools + acp_tools]
+    from deerflow.extensions import get_agent_build_extensions
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    ordinary_tools = loaded_tools + builtin_tools + mcp_tools + acp_tools
+    # Keep plugin-vs-plugin validation strict. Host/plugin collisions use the
+    # ordinary-first deduplication below, without dropping unrelated tools.
+    plugin_tools = build_plugin_tools(extensions if extensions is not None else get_agent_build_extensions(), groups=groups)
+    all_tools = [_ensure_sync_invocable_tool(t) for t in ordinary_tools + plugin_tools]
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
     for t in all_tools:

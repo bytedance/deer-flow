@@ -727,6 +727,10 @@
 
 ### 修复
 
+- **上传：** 删除已上传的文档时，不再连带删除其旁边转换生成的 Markdown。转换以文档主干名
+  命名配套文件，名称被占用时回退为 `_N` 后缀，因此文档旁的 `.md` 可能属于主干名相同的另一个
+  文档，或属于用户自己：上传 `a.docx` 与 `a.pdf` 会生成 `a.md` 与 `a_1.md`，删除 `a.pdf`
+  却会销毁 `a.docx` 的配套文件。现在配套文件会保留、继续出现在列表中，可单独删除。([#5673])
 - **nginx：** 把 600 秒读取超时扩展到其余两个会等待 Gateway 的 location，它们在线程路由的修复
   之后仍沿用 nginx 默认的 60 秒。`/api/` 兜底 location 之后：无状态的 `POST /api/runs/wait`
   阻塞在同一套运行完成等待上，并在客户端断开时取消该运行，因此等待超过 60 秒的 API 调用方会
@@ -2091,6 +2095,11 @@
 
 ### 安全
 
+- **认证：** `POST /api/v1/auth/initialize` 不再让两个并发的首次初始化请求都创建 admin。
+  此前处理器在一个会话中统计 admin 数量、在另一个会话中创建账号，因此两个使用不同邮箱的请求
+  会同时看到空系统；现在失败方会返回文档所述的 `409 system_already_initialized`。统计与插入现在
+  在同一事务内完成，并先对写入串行化（SQLite 用 `BEGIN IMMEDIATE`，PostgreSQL 用
+  advisory lock）。([#5776])
 - **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
   客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
   宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
@@ -2218,9 +2227,30 @@
 - **文档：** 自定义智能体文档与 API 对齐（中英文 agents / threads / lead-agent
   页面）：必填的 ASCII `name` 请求字段、小写存储、`/api/agents/check` 的名称可用
   性行为，以及不再声称从 `display_name` 自动派生 slug。([#4944])
+- **文档：** 将子 Agent 文档重构为中英文各十一章的用户手册（`harness/subagents/`）：
+  概念、快速上手、目录、委派用法、结果与验收、限制与容量、沙箱与隔离、可观测性、
+  按症状排查、开发者集成，以及附带 2026 年 6 月至 9 月变更记录的参考附录。原单页
+  成为该章节的索引页，指向该页面的已有链接保持有效；指向旧页面小节锚点的深链接
+  会落到索引页。
+- **文档：** 新增中英文扩展开发手册（`harness/extensions/`），覆盖
+  `deerflow-extension-api` 0.2.1 契约：何时编写扩展、快速上手、运行时模型、中间件
+  放置位置、生命周期与观察者、服务与路由、运行证据读取器、扩展运维、按错误信息排查，
+  以及列出全部公开名称和契约版本历史的参考章节。同时修正 `AGENTS.md` 中对贡献类型
+  和运行证据元数据脱敏的过时描述。
+- **文档：** 将扩展开发手册更新到 `deerflow-extension-api` 0.2.3 契约：新增全栈
+  插件章节，涵盖 `registry.plugin()`、浏览器模块与打包资源、后端动作、模型工具和
+  设置；新增请求级运行证据读取器及按用户的路由示例；补充插件的排查与运维说明。同时
+  修正 `docs/full-stack-plugins.md` 中插件 `mount` 返回值的描述。
 
 ### 内部改进
 
+- **依赖：** `langgraph-checkpoint` 下限提升到 `>=4.2.0,<5.0`，
+  `langgraph-checkpoint-postgres` 提升到 `>=3.1.2,<3.2`，并移除
+  `InMemorySaver` delta-history 兼容补丁。上游 4.2.0 修复了 full → delta
+  迁移后首条写入丢失（langchain-ai/langgraph#8526），postgres 新版本能定位
+  plain-value delta 种子（langchain-ai/langgraph#8535），因此由依赖下限取代
+  补丁；full → delta 迁移合约测试保留为门禁。`langgraph` 与
+  `langgraph-checkpoint-sqlite` 不变。 ([#5734])
 - **测试：** 前端单元测试迁移到 rstest，并在 DOM 环境运行 hook 级测试。([#3703]、[#4453])
 - **测试：** live client 测试要求显式 opt-in。([#4482])
 - **测试：** LLM 错误测试替身不再复用共享 `FakeError`。([#4744])
@@ -3522,3 +3552,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776

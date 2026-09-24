@@ -37,11 +37,9 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```bash
    make docker-init
    ```
-   This will:
-   - Build Docker images
-   - Install frontend dependencies (pnpm)
-   - Install backend dependencies (uv)
-   - Share pnpm cache with host for faster builds
+   This pulls the sandbox image that the container sandbox modes run, so the
+   first sandbox container does not wait on the download. It is a no-op in
+   local sandbox mode (the default), which needs no image.
 
 3. **Start development services**:
    ```bash
@@ -86,7 +84,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Docker Commands
 
 ```bash
-# Build the custom k3s image (with pre-cached sandbox image)
+# Pull the sandbox image used by the container sandbox modes
 make docker-init
 # Start Docker services (mode-aware, localhost:2026)
 make docker-start
@@ -100,7 +98,7 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
-If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-start`:
 
 ```bash
 export UV_INDEX_URL=https://pypi.org/simple

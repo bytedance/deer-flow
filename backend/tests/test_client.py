@@ -1277,6 +1277,99 @@ class TestExtractText:
 # ---------------------------------------------------------------------------
 
 
+class TestClientMcpSelection:
+    @pytest.fixture
+    def mcp_client(self, client):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        app_config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        app_config.tool_search.enabled = False
+        client._app_config = app_config
+        client._agent_name = "researcher"
+        extensions = ExtensionsConfig.model_validate({"mcpServers": {name: {"enabled": True, "capability": {"id": identity}} for name, identity in [("work", "installation-A"), ("personal", "installation-B")]}})
+        cached_tools = [tag_mcp_tool(StructuredTool.from_function(lambda: "result", name=f"{name}_search", description="Search"), server_name=name) for name in extensions.mcp_servers]
+        graph = MagicMock()
+        graph.stream.return_value = []
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=graph) as create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch("deerflow.client.load_agent_config") as load_config,
+            patch("deerflow.tools.tools.get_app_config", return_value=app_config),
+            patch("deerflow.config.acp_config.get_acp_agents", return_value={}),
+            patch.object(ExtensionsConfig, "from_file", return_value=extensions),
+            patch("deerflow.mcp.cache.get_cached_mcp_tools", return_value=cached_tools),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            yield SimpleNamespace(client=client, graph=graph, create_agent=create_agent, load_config=load_config, cached_tools=cached_tools)
+
+    @pytest.mark.parametrize(
+        ("selection", "expected_names"),
+        [(None, ["work_search", "personal_search"]), ([], []), (["installation-A"], ["work_search"])],
+    )
+    def test_selects_mcp_tools_without_changing_shared_cache(self, mcp_client, selection, expected_names):
+        from deerflow.tools.mcp_metadata import is_mcp_tool
+
+        mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+        config = mcp_client.client._get_runnable_config("t1")
+        mcp_client.client._ensure_agent(config)
+
+        tools = mcp_client.create_agent.call_args.kwargs["tools"]
+        assert [tool.name for tool in tools if is_mcp_tool(tool)] == expected_names
+        assert [tool.name for tool in mcp_client.cached_tools] == ["work_search", "personal_search"]
+
+    @pytest.mark.parametrize("selection", [None, [], ["installation-A"]])
+    def test_each_stream_carries_mcp_selection_for_delegation_on_cache_hit(self, mcp_client, selection):
+        mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+        for _ in range(2):
+            list(mcp_client.client.stream("hello", thread_id="t1"))
+
+        mcp_client.create_agent.assert_called_once()
+        mcp_client.load_config.assert_called_once()
+        assert mcp_client.graph.stream.call_count == 2
+        for call in mcp_client.graph.stream.call_args_list:
+            metadata = call.kwargs["config"]["metadata"]
+            assert metadata["mcp_plugins"] == selection
+
+    def test_reuses_graph_when_mcp_selection_order_changes(self, mcp_client):
+        agent_config = AgentConfig(name="researcher", mcp_plugins=["installation-A", "installation-B"])
+        mcp_client.load_config.return_value = agent_config
+        client = mcp_client.client
+        client._ensure_agent(client._get_runnable_config("t1"))
+
+        agent_config.mcp_plugins = ["installation-B", "installation-A"]
+        config = client._get_runnable_config("t2")
+        client._ensure_agent(config)
+
+        mcp_client.create_agent.assert_called_once()
+        assert config["metadata"]["mcp_plugins"] == ["installation-B", "installation-A"]
+
+    def test_reset_refreshes_mcp_selection_and_graph_cache_identity(self, mcp_client):
+        client = mcp_client.client
+        keys = []
+        for selection in [None, [], ["installation-A"]]:
+            mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=selection)
+            client.reset_agent()
+            config = client._get_runnable_config("t1")
+            config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
+            client._ensure_agent(config)
+            keys.append(client._agent_config_key)
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+
+            # Changing the saved config takes effect only after reset_agent().
+            mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
+            cached_config = client._get_runnable_config("t2")
+            client._ensure_agent(cached_config)
+            assert cached_config["metadata"]["mcp_plugins"] == selection
+
+        assert keys[0] != keys[1] != keys[2]
+        assert mcp_client.load_config.call_count == 3
+        assert mcp_client.create_agent.call_count == 3
+
+
 class TestEnsureAgent:
     @pytest.mark.parametrize(
         ("agent_name", "agent_config", "expected_memory_enabled"),
@@ -1690,6 +1783,7 @@ class TestEnsureAgent:
             None,
             None,
             True,
+            None,
             None,
             "full",
             10,
@@ -2864,6 +2958,21 @@ class TestUploads:
             assert result["success"] is True
             assert "delete-me.txt" in result["message"]
             assert not (uploads_dir / "delete-me.txt").exists()
+
+    def test_delete_upload_keeps_the_converted_markdown(self, client):
+        """A .md sharing the document's stem may belong to another document."""
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads_dir = Path(tmp)
+            (uploads_dir / "report.docx").write_bytes(b"docx-bytes")
+            (uploads_dir / "report.md").write_text("converted from the docx", encoding="utf-8")
+            (uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
+
+            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+                result = client.delete_upload("thread-1", "report.pdf")
+
+            assert result["success"] is True
+            assert not (uploads_dir / "report.pdf").exists()
+            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "converted from the docx"
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:

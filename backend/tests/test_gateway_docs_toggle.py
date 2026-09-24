@@ -78,6 +78,31 @@ def test_enable_docs_unexpected_value_disables():
             assert config.enable_docs is False, f"Expected False for GATEWAY_ENABLE_DOCS={value}"
 
 
+def test_blank_host_and_port_fall_back_to_defaults():
+    """A blank GATEWAY_HOST/GATEWAY_PORT means unset, not a crash or an empty bind address.
+
+    ``docker run -e GATEWAY_PORT=`` and ``environment: [GATEWAY_PORT=${PORT}]`` with PORT
+    unset both reach us as an empty string, and create_app() reads this at import time.
+    """
+    with patch.dict(os.environ, {"GATEWAY_HOST": "", "GATEWAY_PORT": ""}):
+        _reset_gateway_config()
+        from app.gateway.config import get_gateway_config
+
+        config = get_gateway_config()
+        assert config.port == 8001
+        assert config.host == "0.0.0.0"
+
+
+def test_zero_port_is_not_treated_as_unset():
+    """GATEWAY_PORT=0 asks the OS for a free port, so it must survive the blank fallback."""
+    with patch.dict(os.environ, {"GATEWAY_PORT": "0"}):
+        _reset_gateway_config()
+        from app.gateway.config import get_gateway_config
+
+        config = get_gateway_config()
+        assert config.port == 0
+
+
 # ---------------------------------------------------------------------------
 # App-level endpoint visibility
 # ---------------------------------------------------------------------------
