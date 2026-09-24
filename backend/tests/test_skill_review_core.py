@@ -152,6 +152,39 @@ def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
     assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
+def test_resource_graph_strips_fragment_from_code_span_refs(tmp_path):
+    # A code span can carry a section anchor just like a markdown link
+    # target ("`references/faq.md#pricing`"). The anchor is not part of
+    # the path: it must not turn a valid reference into a
+    # resource.missing finding.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/faq.md#pricing` for details.\n",
+    )
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert "references/faq.md" not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_keeps_real_dots_when_stripping_code_span_fragments(tmp_path):
+    # Stripping the fragment must not eat real dotted filenames: the
+    # extension dots of a fragment-bearing code span reference survive.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nRead `references/v1.0.md#notes`.\n",
+    )
+    _write(tmp_path / "references" / "v1.0.md", "# v1.0\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/v1.0.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(

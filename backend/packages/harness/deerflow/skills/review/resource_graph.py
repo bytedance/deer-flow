@@ -101,7 +101,10 @@ def _extract_references(content: str) -> set[str]:
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:
-            refs.add(token.rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+            # A code span can carry a section anchor just like a markdown
+            # link target ("`references/faq.md#pricing`"); drop it the same
+            # way, then strip trailing sentence punctuation.
+            refs.add(token.split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     for match in _PATH_TOKEN_RE.finditer(content):
         refs.add(match.group(0).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     return refs
