@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
@@ -62,8 +63,8 @@ class SandboxProvider(ABC):
         user_id: str,
         projection: "SkillProjectionPaths",
     ) -> None:
-        """Async wrapper for upload-based skill synchronization."""
-        await asyncio.to_thread(
+        """Async wrapper that keeps lifecycle ownership until sync finishes."""
+        await run_sync_lifecycle_operation(
             self.sync_agent_skills,
             sandbox_id,
             thread_id=thread_id,
@@ -80,6 +81,22 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def get_scoped(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> Sandbox | None:
+        """Return an active sandbox only when it belongs to this identity.
+
+        This hook must remain a non-blocking in-memory lookup. Providers that
+        do not implement identity-aware lookup fail closed; the caller then
+        resolves the canonical sandbox through ``acquire``.
+        """
+        del sandbox_id, thread_id, user_id
+        return None
+
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox environment.
@@ -95,6 +112,40 @@ class SandboxProvider(ABC):
         Provider overrides can release resources and make the instance unusable.
         """
         pass
+
+    def sandbox_network_mode(self) -> str:
+        """Return the provider's effective outbound network mode."""
+        return "open"
+
+    def sandbox_network_temporary_grant_ttl(self) -> int:
+        return 300
+
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        """Claim the oldest unsurfaced trusted-proxy event for a sandbox.
+
+        Providers without a managed network policy use the empty default.
+        """
+        del sandbox_id
+        return []
+
+    async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
+        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
+        del sandbox_id
+        return False
+
+    async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
+        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        """Apply a user decision to one trusted-proxy event."""
+        del sandbox_id, request_id, decision
+        return False
+
+    async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
 
 
 _default_sandbox_provider: SandboxProvider | None = None
@@ -113,6 +164,12 @@ _default_sandbox_provider: SandboxProvider | None = None
 # self-deadlock such a provider and would block every concurrent `get()` during a
 # slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
+
+
+def get_initialized_sandbox_provider() -> SandboxProvider | None:
+    """Return the provider only when another lifecycle path initialized it."""
+    with _provider_lock:
+        return _default_sandbox_provider
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:

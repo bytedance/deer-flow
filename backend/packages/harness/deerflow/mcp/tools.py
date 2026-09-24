@@ -9,7 +9,8 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
@@ -28,6 +29,7 @@ from deerflow.mcp.tasks.runtime import (
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
+from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
@@ -54,7 +56,15 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
 # user-data tree, so an over-eager match is harmless (left untouched).
-_LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+")
+_LOCAL_PATH_IN_TEXT_RE = re.compile(
+    r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
+    r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
+    # Windows drive-qualified absolute path; the lookbehind keeps a word
+    # character before the colon (file:/…, id:/…) on the earlier alternatives
+    r"|(?<![\w.-])[A-Za-z]:[\\/][^\s'\"<>|*?]+"
+    # path relative to the server cwd (Windows servers print "\" separators)
+    r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
+)
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -77,7 +87,27 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     except ValueError:
         return None
     if parsed.scheme == "file":
-        raw = unquote(parsed.path)
+        # url2pathname converts the "/C:/..." form a file URI's path takes on
+        # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
+        # It already percent-decodes, so no extra unquote here, and it can
+        # reject odd Windows spellings with OSError — leave those untouched.
+        netloc = parsed.netloc
+        if netloc and netloc.lower() != "localhost":
+            # Some Windows tools emit file://C:/… (two slashes): the drive
+            # lands in the URI authority. Any other host is not a local file.
+            if len(netloc) != 2 or not netloc[0].isalpha() or netloc[1] != ":":
+                return None
+            url_path = f"/{netloc}{parsed.path}"
+        else:
+            url_path = parsed.path
+        try:
+            raw = url2pathname(url_path)
+        except OSError:
+            return None
+    elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():
+        # urlparse reads a Windows drive prefix ("C:\...") as the URI scheme;
+        # the original string is a bare local path, not a remote URI.
+        raw = uri
     elif parsed.scheme == "":
         raw = uri
     else:
@@ -248,7 +278,10 @@ def _rewrite_unique_bare_filenames(
         # Do not rewrite inside longer paths/words. A final sentence period is
         # allowed, but ".bak" or another path segment is not.
         pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
-        rewritten_text, count = pattern.subn(unique[name], rewritten)
+        # A callable replacement, not a template: the virtual path is built from
+        # the real file's relative path, where a backslash is an ordinary
+        # character, so it must never be read as a regex escape.
+        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
@@ -456,7 +489,7 @@ def _make_session_pool_tool(
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user_id:thread_id)``.  This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -481,7 +514,12 @@ def _make_session_pool_tool(
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        scope_key = f"{user_id}:{thread_id}"
+        thread_incarnation = runtime_thread_incarnation(runtime)
+        scope_key = mcp_session_scope_key(
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+        )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.
@@ -644,6 +682,7 @@ def _make_background_submit_tool(
         submitter = get_mcp_task_submitter()
         thread_id = _extract_thread_id(runtime)
         user_id = resolve_runtime_user_id(runtime)
+        thread_incarnation = runtime_thread_incarnation(runtime)
         context = runtime.context if runtime is not None and runtime.context else {}
         run_id = context.get("run_id")
         tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
@@ -652,6 +691,7 @@ def _make_background_submit_tool(
             request=TaskSubmitRequest(
                 user_id=user_id,
                 thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
                 run_id=str(run_id) if run_id is not None else None,
                 tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
                 server_name=server_name,

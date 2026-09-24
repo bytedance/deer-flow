@@ -1,6 +1,6 @@
 [project]
 name = "deer-flow"
-version = "2.1.0"
+version = "2.1.0-rc0"
 description = "LangGraph-based AI agent system with sandbox execution capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,6 +47,7 @@ redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
 buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
+ollama = ["deerflow-harness[ollama]"]
 browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
 

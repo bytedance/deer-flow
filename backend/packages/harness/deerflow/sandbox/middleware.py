@@ -1,16 +1,19 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.authz.sandbox_authz import (
     authorize_sandbox_execution,
@@ -27,8 +30,16 @@ from deerflow.sandbox.lease import (
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 
 logger = logging.getLogger(__name__)
+
+NETWORK_POLICY_HUMAN_INPUT_SOURCE = "sandbox_network"
+_NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox"})
+
+
+def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
+    return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
 
 class SandboxMiddlewareState(AgentState):
@@ -167,7 +178,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            get_sandbox_lease_manager(provider).retain(
+            sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -192,7 +203,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            await get_sandbox_lease_manager(provider).retain_async(
+            sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -218,6 +229,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return super().before_agent(state, runtime)
+        self._apply_network_policy_response(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
         projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
@@ -294,15 +306,53 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             user_id=user_id,
             owner_id=owner_id,
         )
-        if retained_id is not None and runtime.context is not None:
-            runtime.context["sandbox_id"] = retained_id
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return super().before_agent(state, runtime)
+
+    def _apply_network_policy_response(self, state: SandboxMiddlewareState, runtime: Runtime) -> None:
+        sandbox_id = self._read_sandbox_id_from_state(state)
+        if sandbox_id is None:
+            return
+        messages = state.get("messages", [])
+        response = None
+        for message in reversed(messages):
+            if not isinstance(message, HumanMessage):
+                continue
+            candidate = read_human_input_response(message.additional_kwargs)
+            # A network decision is actionable only when it is the current
+            # user turn. Stop at the newest HumanMessage so an older persisted
+            # card response cannot be re-applied after ordinary conversation.
+            if candidate is None or candidate["source"] != NETWORK_POLICY_HUMAN_INPUT_SOURCE:
+                return
+            response = candidate
+            break
+        if response is None or response["response_kind"] != "option":
+            return
+        decision = response["option_id"]
+        if decision not in _NETWORK_POLICY_DECISIONS:
+            raise SandboxRuntimeError("Invalid sandbox network approval response")
+        context = runtime.context or {}
+        applied = context.setdefault("sandbox_network_decisions_applied", set())
+        marker = (sandbox_id, response["request_id"], decision)
+        if marker in applied:
+            return
+        provider = get_sandbox_provider()
+        if provider.sandbox_network_mode() != "allowlist":
+            return
+        if not provider.decide_network_policy_request(sandbox_id, response["request_id"], decision):
+            raise SandboxRuntimeError("The sandbox network approval is stale or does not belong to this sandbox")
+        applied.add(marker)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
+        await asyncio.to_thread(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
         projection = await asyncio.to_thread(
             self._prepare_agent_skill_projection,
@@ -369,8 +419,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             user_id=user_id,
             owner_id=owner_id,
         )
-        if retained_id is not None and runtime.context is not None:
-            runtime.context["sandbox_id"] = retained_id
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return await super().abefore_agent(state, runtime)
 
     @override
@@ -461,7 +514,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return sandbox_id if isinstance(sandbox_id, str) else None
 
     @staticmethod
-    def _attach_sandbox_update(result: ToolMessage | Command, sandbox_id: str) -> ToolMessage | Command:
+    def _attach_sandbox_update(
+        result: ToolMessage | Command,
+        sandbox_id: str,
+        *,
+        overwrite: bool = False,
+    ) -> ToolMessage | Command:
         """Wrap or merge ``result`` so that ``sandbox.sandbox_id`` is persisted.
 
         - ``ToolMessage`` -> ``Command(update={"sandbox": ..., "messages": [msg]})``
@@ -470,7 +528,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         - ``Command`` with non-dict / None update -> leave it untouched to
           avoid silent data loss on unknown update shapes.
         """
-        sandbox_update = {"sandbox": {"sandbox_id": sandbox_id}}
+        sandbox_value: object = {"sandbox_id": sandbox_id}
+        if overwrite:
+            sandbox_value = Overwrite(sandbox_value)
+        sandbox_update = {"sandbox": sandbox_value}
 
         if isinstance(result, ToolMessage):
             return Command(update={**sandbox_update, "messages": [result]})
@@ -497,12 +558,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> ToolMessage | Command:
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = handler(request)
-        if prev_sandbox_id is not None:
-            return result
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if curr_sandbox_id is None:
-            return result
-        return self._attach_sandbox_update(result, curr_sandbox_id)
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
+        return self._maybe_request_network_approval(request, result, curr_sandbox_id or prev_sandbox_id)
 
     @override
     async def awrap_tool_call(
@@ -512,9 +575,97 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> ToolMessage | Command:
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = await handler(request)
-        if prev_sandbox_id is not None:
-            return result
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if curr_sandbox_id is None:
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
+        sandbox_id = curr_sandbox_id or prev_sandbox_id
+        if sandbox_id is None:
             return result
-        return self._attach_sandbox_update(result, curr_sandbox_id)
+        context = getattr(request.runtime, "context", None) or {}
+        provider = get_initialized_sandbox_provider()
+        if provider is None:
+            return result
+        if provider.sandbox_network_mode() != "allowlist":
+            return result
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if not await provider.deny_pending_network_policy_events_async(sandbox_id):
+                logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
+            return result
+        events = await provider.consume_network_policy_events_async(sandbox_id)
+        return self._network_approval_result(request, result, sandbox_id, events)
+
+    def _maybe_request_network_approval(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+        sandbox_id: str | None,
+    ) -> ToolMessage | Command:
+        if sandbox_id is None:
+            return result
+        context = getattr(request.runtime, "context", None) or {}
+        provider = get_initialized_sandbox_provider()
+        if provider is None:
+            return result
+        if provider.sandbox_network_mode() != "allowlist":
+            return result
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if not provider.deny_pending_network_policy_events(sandbox_id):
+                logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
+            return result
+        events = provider.consume_network_policy_events(sandbox_id)
+        return self._network_approval_result(request, result, sandbox_id, events)
+
+    def _network_approval_result(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+        sandbox_id: str,
+        events: list[dict[str, object]],
+    ) -> ToolMessage | Command:
+        if not events:
+            return result
+        event = events[0]
+        request_id = event.get("request_id")
+        host = event.get("host")
+        port = event.get("port")
+        if not isinstance(request_id, str) or not isinstance(host, str) or not isinstance(port, int):
+            logger.warning("Ignoring malformed trusted sandbox network event: %r", event)
+            return result
+        tool_call_id = str(request.tool_call.get("id") or "")
+        tool_name = str(request.tool_call.get("name") or "sandbox")
+        ttl_seconds = get_sandbox_provider().sandbox_network_temporary_grant_ttl()
+        ttl_label = f"{ttl_seconds // 60} minutes" if ttl_seconds % 60 == 0 else f"{ttl_seconds} seconds"
+        message = ToolMessage(
+            id=f"sandbox-network:{request_id}",
+            content=(f"Sandbox network policy blocked {host}:{port}. The command was not retried. Choose whether this destination should be available, then ask the agent to retry if appropriate."),
+            tool_call_id=tool_call_id,
+            name=tool_name,
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": NETWORK_POLICY_HUMAN_INPUT_SOURCE,
+                    "request_id": request_id,
+                    "tool_call_id": tool_call_id,
+                    "clarification_type": "risk_confirmation",
+                    "title": "Sandbox network access",
+                    "question": f"Allow this sandbox to connect to {host}:{port}?",
+                    "context": "Private, loopback, link-local, multicast, and cloud metadata addresses can never be approved.",
+                    "input_mode": "single_choice",
+                    "options": [
+                        {"id": "deny", "label": "Deny", "value": "Deny network access"},
+                        {"id": "allow_temporary", "label": f"Allow for {ttl_label}", "value": f"Allow network access for {ttl_label}"},
+                        {"id": "allow_sandbox", "label": "Allow for this sandbox", "value": "Allow network access for this sandbox"},
+                    ],
+                }
+            },
+        )
+        update: dict = {"messages": [message], "sandbox": {"sandbox_id": sandbox_id}}
+        if isinstance(result, Command) and isinstance(result.update, dict):
+            update = {**result.update, "messages": [message]}
+            update.setdefault("sandbox", {"sandbox_id": sandbox_id})
+        return Command(update=update, goto=END)

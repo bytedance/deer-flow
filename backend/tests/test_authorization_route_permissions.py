@@ -91,6 +91,13 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
     cached.assert_not_called()
 
@@ -107,6 +114,13 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         Permissions.THREADS_WRITE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
     assert [(request.resource, request.action, request.target) for request in provider.requests] == [
         ("route", "read", Permissions.THREADS_READ),
@@ -115,6 +129,13 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         ("route", "create", Permissions.RUNS_CREATE),
         ("route", "read", Permissions.RUNS_READ),
         ("route", "cancel", Permissions.RUNS_CANCEL),
+        ("route", "read", Permissions.MEMORY_READ),
+        ("route", "write", Permissions.MEMORY_WRITE),
+        ("route", "read", Permissions.AGENTS_READ),
+        ("route", "write", Permissions.AGENTS_WRITE),
+        ("route", "read", Permissions.PROJECTS_READ),
+        ("route", "write", Permissions.PROJECTS_WRITE),
+        ("route", "delete", Permissions.PROJECTS_DELETE),
     ]
     principal = provider.requests[0].principal
     assert principal.user_id == "user-123"
@@ -137,6 +158,13 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
         Permissions.THREADS_DELETE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
 
 
@@ -154,6 +182,13 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
 
 
@@ -171,6 +206,13 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
                 Permissions.RUNS_CREATE,
                 Permissions.RUNS_READ,
                 Permissions.RUNS_CANCEL,
+                Permissions.MEMORY_READ,
+                Permissions.MEMORY_WRITE,
+                Permissions.AGENTS_READ,
+                Permissions.AGENTS_WRITE,
+                Permissions.PROJECTS_READ,
+                Permissions.PROJECTS_WRITE,
+                Permissions.PROJECTS_DELETE,
             ],
         ),
     ],

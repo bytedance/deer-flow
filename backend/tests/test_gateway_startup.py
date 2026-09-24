@@ -7,7 +7,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+from support.shell import find_script_bash
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Only the two deploy.sh tests shell out; they need Git Bash on Windows (the
+# WSL launcher and Store alias stubs cannot run the repo scripts).
+SCRIPT_BASH = find_script_bash()
+requires_script_bash = pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 
 
 def _read(path: str) -> str:
@@ -62,6 +70,7 @@ def test_production_gateway_has_a_real_readiness_probe() -> None:
     assert "gateway:\n        condition: service_healthy" in compose
 
 
+@requires_script_bash
 def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> None:
     capture = tmp_path / "docker-args.txt"
     worktree, env = _deploy_fixture(
@@ -71,7 +80,7 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
     env["CAPTURE_DOCKER_ARGS"] = str(capture)
 
     result = subprocess.run(
-        ["bash", str(worktree / "scripts" / "deploy.sh"), "start"],
+        [SCRIPT_BASH, str(worktree / "scripts" / "deploy.sh"), "start"],
         cwd=worktree,
         env=env,
         check=False,
@@ -86,6 +95,7 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
     assert "DeerFlow is running!" in result.stdout
 
 
+@requires_script_bash
 def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path) -> None:
     capture = tmp_path / "docker-calls.txt"
     worktree, env = _deploy_fixture(
@@ -95,7 +105,7 @@ def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_
     env["CAPTURE_DOCKER_CALLS"] = str(capture)
 
     result = subprocess.run(
-        ["bash", str(worktree / "scripts" / "deploy.sh"), "start"],
+        [SCRIPT_BASH, str(worktree / "scripts" / "deploy.sh"), "start"],
         cwd=worktree,
         env=env,
         check=False,

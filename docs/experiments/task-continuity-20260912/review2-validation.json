@@ -1,0 +1,88 @@
+{
+  "review_id": 5185827206,
+  "reviewed_commit": "fac6a37eaef8f98b424acfc6e7a864d459cdadbf",
+  "base_commit": "4501c76b0f44cc55af6332d65ac2e7f5311f71fd",
+  "red_before_fix": {
+    "failed": 20,
+    "passed": 83,
+    "seconds": 2.93
+  },
+  "focused": {
+    "passed": 249,
+    "seconds": 3.21
+  },
+  "format": "passed",
+  "lint": "passed",
+  "full_branch": {
+    "failed": 15,
+    "passed": 15499,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 378.66
+  },
+  "previous_full_base": {
+    "failed": 15,
+    "passed": 15427,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 467.39
+  },
+  "fresh_base_failure_rerun": {
+    "failed": 15,
+    "seconds": 2.59
+  },
+  "branch_only_failure_ids": [],
+  "shared_failure_ids": [
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_emits_screenshot_artifact_and_browser_view",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_returns_snapshot",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_screenshot_failure_does_not_break_action",
+    "tests/test_browser_router.py::test_validate_browser_url_rejects_private_and_non_http",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_and_web_capture_tools_agree_on_target_error_warning",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_no_warning_for_normal_target_status",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_success",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_warns_on_target_error_status",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_invalid_filter_falls_back_to_fit",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_passes_configured_filter",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_success",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_truncates_to_4096",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_string_on_exception",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_when_no_content",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_uses_web_fetch_config"
+  ],
+  "negative_control": "Removing the typed-block filter in an isolated Python process makes the serialization regression fail; tracked code was not mutated.",
+  "guidance": {
+    "errors": 0,
+    "warnings": 1,
+    "code": "AG002",
+    "description": "Existing guide chain exceeds the soft size limit, below the hard limit."
+  },
+  "boundaries": [
+    "Plain strings and mixed lists of strings and type:text blocks are retained; reasoning, image and unknown typed blocks remain excluded.",
+    "The shared extractor serves active lookup and archive capture for HumanMessage, AIMessage and ToolMessage.",
+    "Sync and async graph compaction plus checkpoint reconstruction recover exact source text through the native search/read functions without active-message fallback.",
+    "Each enabled continuity retention setting and its enabled switch affects assembly identity; all disabled retention settings normalize to None.",
+    "DurableContext declares its normalized skills root, sorted unique read-tool names and continuity switch.",
+    "The previous full clean-base result is retained; this round reran all 15 base failures on that unchanged clean worktree.",
+    "No new live model, historical prototype, deployment or remote CI result is claimed for this local follow-up."
+  ],
+  "source_sha256": {
+    "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md": "16d4165726e913534fd97d276b85d5e1797eb57d517a1dfa0c7e5ce5b789953b",
+    "backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py": "0583f1c6ce59fb8c0aef0e98fb972ce817993ef7ed6f934090d433463583fd3c",
+    "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "57677b96e9e8c49bb0c0c87906865baaa408f9aca00dacae8427261f9cb80197",
+    "backend/packages/harness/deerflow/agents/task_continuity/archive.py": "e65eeab0f4e94bf056b1dece40b981c50a9cd27a9f7a448e3318bea4c72f2ca4",
+    "backend/tests/test_middleware_release_policy.py": "249d2171efc855e5223785f24b5925b5a18f1d0508ad2dceb5d78c2bf19a417f",
+    "backend/tests/test_task_continuity.py": "98f360eb6b69d62fe3a06aaec2d50bcdcfd17403f3bd34cde7565820827c981e",
+    "docs/task-continuity.md": "60c8839df7d0e3f0d0b6a6dfd0d198e531aec2b768f8cb0153ee1ad9b6f7aaf1"
+  },
+  "log_sha256": {
+    "red": "c775cdf4dd7338beb5d24cfa0f3b519b1022dd31d40a6d340b45d0597185efe2",
+    "focused": "be23c387137e3c4ce55602228065a40e132b7467ea0a5824fc4b7341d52fdcc2",
+    "format": "e460172c2fa4fa9bb169e44621311f0785bf4a4deb011ba04364a7d13e55f453",
+    "lint": "f2d84da72b0d5e3287e7bf39c8b1096f1291c6d95f4e87e96d226557177f1229",
+    "full_branch": "1f490753a332e86dc4cd726d59da6d3dfbdb22e702a21024f90254ede47326b9",
+    "base_failure_rerun": "8fe788482dd1f5db31589b719dd4fd18335c43833cf7660d1df4e27d12f8e5fa",
+    "filter_mutation": "ac6dc641cf0f04679f20544aee084b5ed3bf0ef31d9d5a3228d386db00285984",
+    "guidance": "2b8e899758a579c100cf94642a2fbf89273ee12ea5ef698487a7c9d395e2d04c"
+  },
+  "previous_full_base_log_sha256": "533d31aec15acbb365204e7572dded9859abf4a84c4c3a2f2f003b5c76b0520b"
+}

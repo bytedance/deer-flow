@@ -41,6 +41,7 @@ import {
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
+import { readConversationReferences } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -57,15 +58,19 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
+import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeSourcesPanel } from "../citations/knowledge-source";
+import { ConversationReferenceChip } from "../conversation-references/conversation-reference-chip";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
@@ -451,6 +456,10 @@ function MessageContent_({
       ),
     [message.additional_kwargs],
   );
+  const conversationReferences = useMemo(
+    () => readConversationReferences(message.additional_kwargs),
+    [message.additional_kwargs],
+  );
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
@@ -515,6 +524,24 @@ function MessageContent_({
             testId="message-reference-attachment"
           />
         )}
+        {conversationReferences.length > 0 && (
+          <div
+            aria-label={t.inputBox.referencedConversations}
+            className="flex max-w-full flex-wrap justify-end gap-1"
+            data-testid="message-conversation-references"
+            role="group"
+          >
+            {conversationReferences.map((reference) => (
+              <ConversationReferenceChip
+                href={pathOfThread(reference.threadId, {
+                  agent_name: reference.agentName,
+                })}
+                key={reference.threadId}
+                title={reference.title || "Untitled"}
+              />
+            ))}
+          </div>
+        )}
         {filesList}
         {editState ? (
           <div className="bg-background border-border flex w-full min-w-0 flex-col gap-2 rounded-lg border p-2 shadow-sm">
@@ -567,6 +594,11 @@ function MessageContent_({
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         ) : null}
+        <KnowledgeScopeSummary
+          additionalKwargs={
+            message.additional_kwargs as Record<string, unknown> | undefined
+          }
+        />
       </div>
     );
   }
@@ -587,6 +619,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}

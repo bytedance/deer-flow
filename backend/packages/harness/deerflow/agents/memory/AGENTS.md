@@ -37,6 +37,9 @@ Only `AuthMiddleware` can authorize the internal owner header.
 
 No-auth mode uses `DEFAULT_USER_ID`, which is `"default"`.
 An absolute `storage_path` opts out of the default per-user root.
+`UserRepository.list_user_ids()` returns registered IDs in creation order for
+administrative workflows such as `scripts/load_memory_sample.py --all-users`.
+The bulk loader requires persistent database mode and backs up each user's memory by default.
 
 DeerMem uses this layout:
 
@@ -72,7 +75,25 @@ Tool-mode injection includes only shared summaries.
 Tool mode leaves agent facts behind `memory_search`.
 `memory.injection_enabled: false` disables the complete injected block.
 
+Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own
+`config.yaml`. This is a complete per-agent opt-out: dynamic context remains
+date-only, passive capture is not installed, automatic and manual compaction do
+not flush summarized messages, tool mode exposes no memory tools or tool
+guidance, and the global memory configuration remains unchanged for other
+agents. On the next run after an existing agent opts out, Dynamic Context emits
+`RemoveMessage` updates for its server-tagged frozen `__memory` entries while
+retaining date reminders and real user messages. Omission defaults to the
+existing enabled behavior.
+
 #### DeerMem storage contract
+
+`memory.backend_config.storage_class: markdown` opts into tolerant summary
+reads; writes still use JSON. Only a JSON object in a closed `memory-json`
+fence is accepted from Markdown. Decode the value before checking its closing
+fence so embedded backticks and later fenced notes stay lossless. Parser and
+storage regressions belong in `tests/test_memory_storage.py`; configure a data
+root directory, not the existing manifest file. Legacy v1 reads still migrate
+and advance the revision. Unparseable summary text is quarantined before rebuild.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
@@ -111,6 +132,10 @@ Every destructive migration first writes a verified `{manifest_filename}.v1.bak`
 Missing or mismatched backups abort migration without changing v1 data.
 Delete legacy agent JSON only after safe summary adoption or equality checks.
 Summary conflicts keep the source file and return an error.
+Compare both summary operands after additive normalization; preserve extension
+fields and keep fact migration validation strict. Replacement imports reject
+invalid fact containers or unusable content before normalization or storage
+access; recoverable metadata may default, but malformed facts never mean clear.
 
 Run the proactive migration from `backend/`:
 
@@ -129,6 +154,9 @@ The older isolation migration remains available:
 ```bash
 PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 ```
+
+It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the global
+`USER.md` to `--user-id` (default `default`).
 
 #### Retrieval
 
@@ -202,6 +230,18 @@ Use the earliest source review deadline for its next review.
 
 #### Remote backends
 
+Strict reads use the backend-neutral `MemoryReadError`.
+Backends declare their policy through `read_failures_are_fatal_for_config()`.
+`DynamicContextMiddleware` preserves that policy at its injection timeout.
+Policy methods must use only in-memory config. The non-loading lookup returns
+unknown for a cold backend; discovery/config reload runs inside the existing
+timed injection worker. Per-call policy state cannot leak across runs, and
+timeout handling never submits more executor work. Unknown policy fails closed.
+The prompt loader retains `MemoryManagerError` + `fail_closed` compatibility
+for third-party backends that have not adopted the typed error.
+The base policy resolver also honors legacy `fail_closed` at the timeout boundary;
+other settings remain permissive unless the backend overrides the resolver.
+
 OpenViking uses the maintained `langchain-openviking` package.
 Keep it in middleware mode.
 One API key is bound to one configured DeerFlow owner.
@@ -256,3 +296,69 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
+
+#### Write-side near-duplicate fact gate (opt-in)
+
+`fact_dedup_enabled` / `fact_dedup_similarity_threshold` implement the
+write-side counterpart to relevance-aware retrieval (issue #5252): a proposed
+NEW fact that paraphrases an existing same-category fact merges into it
+(existing id/content/createdAt kept, confidence raised to the maximum, source
+refreshed only when confidence increases) instead of being appended, and one `facts_merged_dedup` metric
+increment records the merge. The similarity is deterministic and network-free
+(bounded token-Jaccard via the updater-local tokenizer). Exact-content
+duplicates keep going through the existing content-key check; targeted updates
+by fact id are untouched.
+
+Paired replacement proposals bypass near-dedup so their content remains
+available to the post-capacity replacement check. Any ID proposed for normal
+or stale removal is excluded from merge targets, even if a removal guard or
+cap retains it. Scope, confidence, exact-content, and capacity gates still
+apply; dedup never authorizes a removal or supplies a confirmation signal.
+Latin words and CJK bigrams both participate in mixed-script similarity.
+Whitespace-separated CJK runs retain adjacent-character ordering.
+INFO logs identify the target and proposal index without memory content and
+explicitly describe a proposed merge, not a completed persistence audit.
+
+#### Relevance-aware retrieval (opt-in)
+
+The deterministic lexical strategy behind issue #4495 lives in
+`deermem/core/relevance.py` (token overlap + idf weights + confidence blend +
+greedy MMR diversity). It never touches the persisted memory format and never
+runs by default.
+
+- `retrieval_relevance_enabled: true` opts in. `memory_search` then ranks every
+  fact in scope (not only literal substring matches) and prompt injection ranks
+  facts against the current query before the token-budget selection.
+  This takes precedence over `retrieval_adapter`: search bypasses FTS5/custom
+  retrieval, while adapter indexing and warm-up remain configured.
+- Ranking reads at most 4096 characters and 128 tokens per query/fact. The
+  no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  `DeerMem.warm()` initializes optional jieba before serving requests, even
+  with character-based token counting. Invalid/missing confidence defaults to 0.
+- Search stops MMR after `top_k` picks. Injection diversifies guaranteed and
+  regular pools independently and lazily, stopping when each token budget is
+  exhausted; it never truncates candidates before the guaranteed partition.
+  MMR caches token sets and incrementally updates maximum similarity penalties.
+- `retrieval_relevance_weight` blends lexical relevance with confidence;
+  `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
+  legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
+  content cannot replace missing terms or saturate a partial match.
+  Prefix matching requires one complete token to prefix the other; a shared
+  four-character bucket alone is not a match (Postman is not PostgreSQL).
+- DeerMem injection builds IDF once from the selected user/agent fact scope,
+  before guaranteed/regular partitioning, using the same bounded tokenizer as
+  search. No IDF work runs without an active lexical query. Category-filtered
+  search uses its filtered corpus; budgets and separate diversity pools can
+  still produce different final selections. No IDF cache crosses calls/scopes.
+- The current-turn query flows from `DynamicContextMiddleware` (bounded,
+  user-message text) through the optional `query` keyword on
+  `MemoryManager.get_context` / `aget_context`. Shared signature inspection
+  omits `query` when it is `None` or the backend is old/uninspectable, preserving
+  forwarding wrappers' absent-hint contract; backend errors never cause retries.
+  Query extraction prefers preserved `original_user_content` before applying
+  the character cap, so upload descriptions never displace the user's request.
+  Attachment-only messages with an empty preserved request stay query-less.
+- Ranking must be deterministic, network-free, and mutation-free: caller-owned
+  fact dicts are read-only inputs.
+
+Legacy fact normalization in DeerMem and `frontend/src/core/memory/import-memory.ts` uses neutral confidence `0.5` for missing or invalid values, clamps finite confidence to `[0, 1]`, trims content, and defaults blank or missing sources to `unknown`. Keep these compatibility defaults aligned.

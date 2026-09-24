@@ -27,7 +27,7 @@ export function extractCitationSources(markdown: string): CitationSource[] {
     return [];
   }
 
-  const searchable = maskCode(markdown);
+  const searchable = maskCitationCode(markdown);
   const sourcesByUrl = new Map<string, CitationSource>();
 
   for (const match of searchable.matchAll(CITATION_LINK_RE)) {
@@ -99,7 +99,7 @@ function extractDomain(url: string): string {
 // Blanks out code regions so example citations inside code aren't scraped as
 // real sources, while preserving string length (and newlines) so occurrence
 // indices stay aligned with the original markdown.
-function maskCode(markdown: string): string {
+export function maskCitationCode(markdown: string): string {
   return maskInlineCode(maskFencedCodeBlocks(markdown));
 }
 

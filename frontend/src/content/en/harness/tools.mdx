@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -198,11 +198,19 @@ Requires a [GroundRoute](https://groundroute.ai) API key. Also supports `web_fet
 Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.sofya.tools:web_search_tool
+    api_key: $SOFYA_API_KEY
+```
+Results include the content of each page, not only a snippet. Requires a [Sofya](https://sofya.co) API key. `max_results` is capped at 20, and each result's content is capped at `contents_max_characters` (default 2000, set 0 for no cap). Also supports `web_fetch`.
+  </Tabs.Tab>
 </Tabs>
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -250,6 +258,14 @@ tools:
   - use: deerflow.community.groundroute.tools:web_fetch_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.sofya.tools:web_fetch_tool
+    api_key: $SOFYA_API_KEY
+```
+Returns the page as markdown. Requires a [Sofya](https://sofya.co) API key.
   </Tabs.Tab>
 </Tabs>
 

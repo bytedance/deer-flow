@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from support.shell import require_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVE_SH = REPO_ROOT / "scripts" / "serve.sh"
@@ -33,12 +33,10 @@ def _is_repo_nginx_pid(
     *,
     command: str,
     args: str,
-    repo_root: Path,
+    repo_root: Path | str,
     deerflow_pid: bool = False,
 ) -> bool:
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash is required to exercise serve.sh helpers")
+    bash = require_script_bash()
 
     function = _extract_shell_function("_is_repo_nginx_pid")
     script = f"""
@@ -69,8 +67,12 @@ _is_repo_nginx_pid 12345
 
 
 def test_repo_nginx_pid_accepts_macos_rewritten_master_command(tmp_path):
-    repo_root = tmp_path / "deer-flow"
-    nginx_conf = repo_root / "docker" / "nginx" / "nginx.local.conf"
+    # The simulated macOS ps line embeds POSIX-form paths no matter which host
+    # runs this test, so build the fixture with forward slashes explicitly;
+    # on Windows a Path would render with backslashes and never match the
+    # "$root"/docker/nginx/... pattern the shell function greps for.
+    repo_root = (tmp_path / "deer-flow").as_posix()
+    nginx_conf = f"{repo_root}/docker/nginx/nginx.local.conf"
 
     assert _is_repo_nginx_pid(
         command=f"nginx: master process /opt/homebrew/bin/nginx -c {nginx_conf}",
