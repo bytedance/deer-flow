@@ -28,13 +28,13 @@ import weakref
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
@@ -255,6 +255,27 @@ def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str,
         }
         for row in task_rows
     ]
+
+
+def _merge_state_into_graph_input(graph_input: Any, updates: dict[str, Any]) -> Any:
+    """Attach state updates to *graph_input*, whichever shape it has.
+
+    A fresh turn passes a plain state mapping, but a run resuming a parked
+    interrupt passes a ``Command`` — which is a dataclass, not a mapping, so
+    ``{**graph_input, ...}`` raises ``TypeError: 'Command' object is not a
+    mapping``. ``Command`` carries its own state delta in ``update``, applied by
+    LangGraph before the interrupted node replays, so the updates go there
+    instead of being dropped (or crashing the caller) on every resume.
+    """
+    if isinstance(graph_input, Command):
+        merged = dict(graph_input.update) if isinstance(graph_input.update, dict) else {}
+        merged.update(updates)
+        return replace(graph_input, update=merged)
+    if isinstance(graph_input, Mapping):
+        return {**graph_input, **updates}
+    # A non-mapping, non-Command input (e.g. a bare message list) has nowhere to
+    # carry a state delta; leave it untouched rather than guessing a shape.
+    return graph_input
 
 
 async def _persist_delivery_receipt(
@@ -967,10 +988,10 @@ async def run_agent(
                     thread_incarnation=thread_incarnation,
                     limit=20,
                 )
-                graph_input = {
-                    **graph_input,
-                    "background_tasks": _project_background_tasks(task_rows),
-                }
+                graph_input = _merge_state_into_graph_input(
+                    graph_input,
+                    {"background_tasks": _project_background_tasks(task_rows)},
+                )
             except Exception:
                 logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
 

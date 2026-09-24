@@ -10,6 +10,7 @@ Consumers: ``deerflow.runtime.runs.worker`` (SSE publishing) and
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -121,6 +122,54 @@ def serialize_channel_values_for_api(channel_values: dict[str, Any]) -> dict[str
     if isinstance(result.get("messages"), list):
         result["messages"] = strip_data_url_image_blocks(result["messages"])
     return result
+
+
+def serialize_interrupts(raw_interrupts: Any) -> list[dict[str, Any]]:
+    """Reshape LangGraph interrupts into the ``{"id", "value"}`` wire format.
+
+    LangGraph publishes a tuple of ``Interrupt`` objects, both on the
+    ``__interrupt__`` channel and on ``PregelTask.interrupts``. They use
+    ``__slots__``, so they are not dict-like and must be projected field by
+    field. A checkpoint replay can hand back plain dicts instead, so both
+    forms are accepted.
+
+    Args:
+        raw_interrupts: Interrupt objects, dicts, or ``None``.
+
+    Returns:
+        One entry per interrupt, empty when nothing is pending.
+    """
+    if not raw_interrupts:
+        return []
+    if isinstance(raw_interrupts, (str, bytes)) or not isinstance(raw_interrupts, Iterable):
+        raw_interrupts = [raw_interrupts]
+
+    serialized: list[dict[str, Any]] = []
+    for item in raw_interrupts:
+        if isinstance(item, dict):
+            serialized.append({"id": item.get("id"), "value": serialize_lc_object(item.get("value"))})
+            continue
+        if not hasattr(item, "value"):
+            # Not interrupt-shaped; a str would otherwise yield one entry per
+            # character once it reached the iteration above.
+            continue
+        serialized.append({"id": getattr(item, "id", None), "value": serialize_lc_object(item.value)})
+    return serialized
+
+
+def serialize_tasks_for_api(raw_tasks: Any) -> list[dict[str, Any]]:
+    """Project snapshot tasks for REST responses, preserving interrupts.
+
+    ``interrupts`` is included only when a task actually carries one, so an
+    ordinary in-flight task keeps the shape older clients already parse.
+    """
+    tasks: list[dict[str, Any]] = []
+    for task in raw_tasks or ():
+        entry: dict[str, Any] = {"id": getattr(task, "id", ""), "name": getattr(task, "name", "")}
+        if interrupts := serialize_interrupts(getattr(task, "interrupts", None)):
+            entry["interrupts"] = interrupts
+        tasks.append(entry)
+    return tasks
 
 
 def serialize_messages_tuple(obj: Any) -> Any:

@@ -32,9 +32,11 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY, TOOL_APPROVAL_OMIT_KEY
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
@@ -54,7 +56,7 @@ from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
-from deerflow.runtime import CheckpointStateAccessor
+from deerflow.runtime import CheckpointStateAccessor, serialize_interrupts
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
@@ -124,7 +126,7 @@ def _run_async_from_sync(coro):
     return asyncio.run(coro)
 
 
-StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
+StreamEventType = Literal["values", "messages-tuple", "custom", "interrupt", "end"]
 
 
 @dataclass
@@ -134,6 +136,9 @@ class StreamEvent:
     Event types align with the LangGraph SSE protocol:
         - ``"values"``: State snapshot (title, messages, artifacts, summary_text).
         - ``"messages-tuple"``: Per-message update (AI text, tool calls, tool results).
+        - ``"interrupt"``: The run is parked awaiting human input (tool approval).
+          Payload is ``{"interrupts": [{"id", "value"}, ...]}``. Resume with
+          :meth:`DeerFlowClient.resume`; until then the run makes no progress.
         - ``"end"``: Stream finished.
 
     Attributes:
@@ -456,6 +461,7 @@ class DeerFlowClient:
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
                     subagent_execution_capacity=subagent_execution_capacity,
+                    tools=final_tools,
                 ),
                 self._checkpoint_channel_mode,
                 self._checkpoint_snapshot_frequency,
@@ -775,11 +781,55 @@ class DeerFlowClient:
     # Public API — conversation
     # ------------------------------------------------------------------
 
+    def resume(
+        self,
+        decisions: Sequence[Mapping[str, Any]],
+        *,
+        thread_id: str,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
+        """Resume a run parked on a tool-approval interrupt.
+
+        Pairs with the ``interrupt`` event emitted by :meth:`stream`. The run
+        continues inside the middleware that raised the interrupt, so no new
+        ``HumanMessage`` is appended — the decisions replace the interrupt's
+        return value.
+
+        Args:
+            decisions: One decision per interrupted tool call, in the order the
+                interrupt listed them. Each is a mapping with a ``type`` of
+                ``approve``, ``edit``, ``reject``, or ``respond``, plus that
+                type's own fields (``edited_action`` for ``edit``, ``message``
+                for ``reject`` / ``respond``).
+            thread_id: The parked thread. Required — a resume has no meaning
+                without the checkpoint holding the pending interrupt.
+            **kwargs: Same overrides as :meth:`stream`.
+
+        Yields:
+            The same event types as :meth:`stream`, continuing the turn. A
+            further ``interrupt`` event can follow if the run parks again.
+
+        Raises:
+            ValueError: If ``thread_id`` is empty or ``decisions`` is empty.
+        """
+        if not thread_id:
+            raise ValueError("resume() requires the thread_id of the parked run")
+        if not decisions:
+            raise ValueError("resume() requires at least one decision")
+
+        yield from self.stream(
+            "",
+            thread_id=thread_id,
+            resume={"decisions": [dict(decision) for decision in decisions]},
+            **kwargs,
+        )
+
     def stream(
         self,
         message: str,
         *,
         thread_id: str | None = None,
+        resume: Any = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn with a DeerFlow request trace context.
@@ -788,6 +838,10 @@ class DeerFlowClient:
         for the turn so logs, Langfuse metadata, and delegated work correlate.
         A caller that opened its own scope with ``request_trace_context`` keeps
         that id; otherwise the turn gets a fresh one.
+
+        When ``resume`` is not ``None``, *message* is ignored and the turn
+        continues a parked interrupt instead of starting a new one. Prefer
+        :meth:`resume`, which builds the payload for you.
         """
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
@@ -801,7 +855,7 @@ class DeerFlowClient:
         # Per-step set/reset keeps LangGraph node execution and its log
         # records inside the binding while returning control to the caller
         # with the ContextVar restored.
-        inner = self._stream_turn(message, thread_id=thread_id, **kwargs)
+        inner = self._stream_turn(message, thread_id=thread_id, resume=resume, **kwargs)
         _EXHAUSTED = object()
         try:
             while True:
@@ -834,6 +888,7 @@ class DeerFlowClient:
         message: str,
         *,
         thread_id: str | None = None,
+        resume: Any = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn, yielding events incrementally.
@@ -983,8 +1038,19 @@ class DeerFlowClient:
 
         self._ensure_agent(config, context=context)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        # A resume continues inside the middleware that raised the interrupt,
+        # so it must NOT append a HumanMessage: the graph input is the resume
+        # value itself, which becomes the return value of ``interrupt()``.
+        state: dict[str, Any] | Command
+        if resume is not None:
+            state = Command(resume=resume)
+        else:
+            state = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+        if kwargs.get(DISABLE_TOOL_APPROVAL_KEY):
+            context[DISABLE_TOOL_APPROVAL_KEY] = True
+        if kwargs.get(TOOL_APPROVAL_OMIT_KEY):
+            context[TOOL_APPROVAL_OMIT_KEY] = kwargs[TOOL_APPROVAL_OMIT_KEY]
         if self._agent_name:
             context["agent_name"] = self._agent_name
 
@@ -1117,6 +1183,13 @@ class DeerFlowClient:
                 continue
 
             # mode == "values"
+            # ``values`` snapshots carry ``__interrupt__`` when the graph parks
+            # on a real ``interrupt()`` (tool approval). It is emitted as its
+            # own event rather than folded into the snapshot below, because a
+            # parked run produces no further messages until ``resume()``.
+            if interrupt_payload := serialize_interrupts(chunk.get("__interrupt__")):
+                yield StreamEvent(type="interrupt", data={"interrupts": interrupt_payload})
+
             messages = chunk.get("messages", [])
 
             for msg in messages:

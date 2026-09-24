@@ -202,9 +202,19 @@ GET /api/langgraph/threads/{thread_id}/state
     "title": "Conversation Title"
   },
   "next": [],
-  "config": {...}
+  "config": {...},
+  "tasks": [{"id": "...", "name": "tools"}]
 }
 ```
+
+A run parked on tool approval keeps its payload on the pending task, so each
+entry grows an `interrupts` list: `{"id": "...", "name": "tools", "interrupts":
+[{"id": "...", "value": {"action_requests": [...]}}]}`. The key is absent on an
+ordinary in-flight task. `GET /api/threads/{thread_id}` carries the same
+projection under `interrupts`, keyed by task id, and `POST
+/api/threads/{thread_id}/history` under each entry's `tasks`. Resume the run by
+posting a `Command(resume={"decisions": [...]})` input. See
+[TOOL_APPROVAL.md](TOOL_APPROVAL.md).
 
 ### Runs
 

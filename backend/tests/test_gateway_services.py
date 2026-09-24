@@ -1466,6 +1466,27 @@ def test_interaction_policy_context_override_honored_for_internal_caller():
     assert config["configurable"]["model_name"] == "gpt"
 
 
+def test_scheduled_launch_context_auto_approves_tool_calls():
+    """A scheduled run must not park on a tool-approval interrupt.
+
+    ``launch_scheduled_thread_run`` marks its runs ``non_interactive`` and never
+    sets ``disable_tool_approval``. Nothing can resume a scheduled run, so the
+    approval middleware has to read the marker the scheduler actually sends:
+    this walks the real forwarding path and then asks the middleware itself.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+    from deerflow.agents.middlewares.human_in_the_loop import DeerFlowHumanInTheLoopMiddleware
+
+    config = build_run_config("thread-1", None, None)
+    # Exactly what ``launch_scheduled_thread_run`` puts in ``body.context``.
+    merge_run_context_overrides(config, {"non_interactive": True, "user_id": "owner-1"}, internal=True)
+
+    middleware = DeerFlowHumanInTheLoopMiddleware(interrupt_on={"bash": {"allowed_decisions": ["approve", "reject"]}})
+    runtime = SimpleNamespace(context=config["context"])
+
+    assert middleware._approval_disabled(runtime) is True
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -2133,6 +2154,114 @@ def test_merge_run_context_overrides_context_only_keys_do_not_override_existing(
     merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
 
     assert config["context"]["github_token"] == "pre-existing"
+
+
+def test_merge_run_context_overrides_forwards_tool_approval_omit():
+    """The web client's "don't ask again" list must reach ``runtime.context``.
+
+    ``DeerFlowHumanInTheLoopMiddleware`` reads ``tool_approval_omit`` from the
+    runtime context. Without it on the forwarding whitelist the key was dropped
+    here, so the button worked in the TUI (which calls ``DeerFlowClient``
+    directly) but re-prompted forever in the browser.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": ["bash", "write_file"]})
+
+    assert config["context"]["tool_approval_omit"] == ["bash", "write_file"]
+    # Session-scoped runtime flag, so it stays out of the persisted checkpoint.
+    assert "tool_approval_omit" not in config.get("configurable", {})
+
+
+def test_merge_run_context_overrides_sanitizes_tool_approval_omit():
+    """Client-supplied, so the shape is normalized rather than trusted.
+
+    The middleware stringifies whatever it finds; coercing here keeps a
+    malformed payload (nested structures, a bare string, non-strings) from
+    reaching it as tool names that can never match.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": "bash"})
+    assert config["context"]["tool_approval_omit"] == ["bash"]
+
+    config = build_run_config("thread-2", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": ["bash", 7, None, {"a": 1}, "bash", "  "]})
+    assert config["context"]["tool_approval_omit"] == ["bash"]
+
+
+def test_merge_run_context_overrides_drops_unusable_tool_approval_omit():
+    """Nothing usable means the key is absent, not an empty list."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": [None, 7]})
+    assert "tool_approval_omit" not in config["context"]
+
+    config = build_run_config("thread-2", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": 42})
+    assert "tool_approval_omit" not in config["context"]
+
+
+def test_merge_run_context_overrides_caps_tool_approval_omit():
+    """A bounded list: the context is serialized into every run of the session."""
+    from app.gateway.services import MAX_TOOL_APPROVAL_OMIT_ENTRIES, build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"tool_approval_omit": [f"tool_{index}" for index in range(MAX_TOOL_APPROVAL_OMIT_ENTRIES + 25)]})
+
+    omitted = config["context"]["tool_approval_omit"]
+    assert len(omitted) == MAX_TOOL_APPROVAL_OMIT_ENTRIES
+    assert omitted[0] == "tool_0"
+
+
+def test_sanitize_tool_approval_omit_in_config_normalizes_config_context_path():
+    """A client sending ``tool_approval_omit`` via ``body.config['context']`` (not
+    ``body.context``) must be sanitized identically -- ``build_run_config`` copies
+    that section largely verbatim, bypassing ``merge_run_context_overrides``'s own
+    normalization entirely.
+    """
+    from app.gateway.services import build_run_config, sanitize_tool_approval_omit_in_config
+
+    config = build_run_config("thread-1", {"context": {"tool_approval_omit": ["bash", 7, None, "bash", "  "]}}, None)
+    assert config["context"]["tool_approval_omit"] == ["bash", 7, None, "bash", "  "]  # verbatim before sanitizing
+
+    sanitize_tool_approval_omit_in_config(config)
+    assert config["context"]["tool_approval_omit"] == ["bash"]
+
+
+def test_sanitize_tool_approval_omit_in_config_drops_unusable_value():
+    """Nothing usable means the key is dropped, matching ``merge_run_context_overrides``."""
+    from app.gateway.services import build_run_config, sanitize_tool_approval_omit_in_config
+
+    config = build_run_config("thread-1", {"context": {"tool_approval_omit": 42}}, None)
+    sanitize_tool_approval_omit_in_config(config)
+    assert "tool_approval_omit" not in config["context"]
+
+
+def test_sanitize_tool_approval_omit_in_config_caps_entries():
+    """The bypass path is capped the same way the whitelist path already is."""
+    from app.gateway.services import MAX_TOOL_APPROVAL_OMIT_ENTRIES, build_run_config, sanitize_tool_approval_omit_in_config
+
+    names = [f"tool_{index}" for index in range(MAX_TOOL_APPROVAL_OMIT_ENTRIES + 25)]
+    config = build_run_config("thread-1", {"context": {"tool_approval_omit": names}}, None)
+    sanitize_tool_approval_omit_in_config(config)
+    assert len(config["context"]["tool_approval_omit"]) == MAX_TOOL_APPROVAL_OMIT_ENTRIES
+
+
+def test_sanitize_tool_approval_omit_in_config_noop_when_absent():
+    """No key, no context, or a non-dict context section is all a no-op."""
+    from app.gateway.services import build_run_config, sanitize_tool_approval_omit_in_config
+
+    config = build_run_config("thread-1", None, None)
+    sanitize_tool_approval_omit_in_config(config)  # no 'context' key at all
+    assert "context" not in config
+
+    config = build_run_config("thread-1", {"context": {"model_name": "gpt"}}, None)
+    sanitize_tool_approval_omit_in_config(config)
+    assert config["context"] == {"model_name": "gpt", "thread_id": "thread-1"}
 
 
 def test_context_does_not_override_existing_configurable():
