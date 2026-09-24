@@ -63,7 +63,11 @@ Delta-mode processes read legacy full checkpoints transparently, so **full → d
 Switching a store back to `full` therefore requires materializing and converting those threads' checkpoints first, which is what the error text tells the operator to do. Until that is done, keep `delta` in every process that touches the store.
 
 <Callout type="warning">
-  Editing `checkpoint_channel_mode` in `config.yaml` without restarting does not take effect. The next
-  attempt to build a graph fails with `CheckpointModeReconfigurationError`, which the gated threads routes
-  surface as HTTP 503. Roll the change out by restarting every process that shares the checkpoint database.
+  Editing `checkpoint_channel_mode` in `config.yaml` without restarting does not take effect: the run
+  worker injects the frozen mode, so the edit is ignored until a restart. Editing
+  `checkpoint_delta.snapshot_frequency` without restarting is louder — the next run fails with
+  `CheckpointModeReconfigurationError` in its run record and SSE `error` frame. Neither edit makes a
+  request return `503`; see
+  [Troubleshooting](/docs/harness/checkpoints/troubleshooting#a-run-fails-after-a-config-edit). Roll
+  either change out by restarting every process that shares the checkpoint database.
 </Callout>

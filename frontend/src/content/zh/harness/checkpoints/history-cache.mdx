@@ -86,7 +86,7 @@ import { Callout } from "nextra/components";
 
 ## 配置
 
-缓存是**随 checkpointer 一起、每个进程构造一次**的。`langgraph_runtime()` 用启动时的 `AppConfig` 快照构造 checkpointer（`deps:463`），当时 `make_checkpoint_cache()` 返回什么，delta saver 就被 `CachedHistorySaver` 包住什么（`asyncprov:250-254`）。运行期不会再读本节，因此下表每个字段在整个进程生命周期内都保持启动时的取值。
+缓存是**随 checkpointer 一起、每个进程构造一次**的。`langgraph_runtime()` 用启动时的 `AppConfig` 快照构造 checkpointer（`backend/app/gateway/deps.py:463`），当时 `make_checkpoint_cache()` 返回什么，delta saver 就被 `CachedHistorySaver` 包住什么（`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py:250-254`）。运行期不会再读本节，因此下表每个字段在整个进程生命周期内都保持启动时的取值。
 
 | 配置键 | 类型 | 默认值 | 范围 | 是否需重启才生效 | 说明 |
 | --- | --- | --- | --- | --- | --- |

@@ -14,10 +14,11 @@ This chapter is organized by **what you see**. Each entry gives the cause, the f
 | Symptom | Most likely cause | Section |
 | --- | --- | --- |
 | `409` from a state/history/thread read | a full-mode process reading a delta thread | [HTTP 409 on a delta thread](#http-409-on-a-delta-thread) |
-| `503` with a restart-required message | config edited without restarting | [HTTP 503 after editing config.yaml](#http-503-after-editing-configyaml) |
+| A run request returns `500` before admission | the thread's run-event feed is empty, so the seeding read runs under the mode gate | [HTTP 409 on a delta thread](#http-409-on-a-delta-thread) |
+| A run fails with a restart-required message | a config edit the frozen process rejects when it builds the graph | [A run fails after a config edit](#a-run-fails-after-a-config-edit) |
 | A config edit seems ignored | mode and cadence are frozen at agent-build time | [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect) |
 | A history-cache edit seems ignored | the cache is built with the checkpointer at startup | [A history-cache change appears to have no effect](#a-history-cache-change-appears-to-have-no-effect) |
-| Regenerate or state endpoints return `500` | the run-runs router does not map the mode errors | [The regenerate or state endpoints return 500 instead of 409](#the-regenerate-or-state-endpoints-return-500-instead-of-409) |
+| Regenerate endpoints return `500` | the run-runs router does not map the mode errors | [Regenerate endpoints return 500 instead of 409](#regenerate-endpoints-return-500-instead-of-409) |
 | Delta did not shrink storage | still in full mode, or the writes table was not counted | [Delta did not shrink storage](#delta-did-not-shrink-storage) |
 | Materialization got slower | snapshot cadence raised too far | [Materialization got slower after raising the cadence](#materialization-got-slower-after-raising-the-cadence) |
 | The replaced answer comes back after regenerate | delta fork replay (#4458) | [The old answer reappears after regenerate](#the-old-answer-reappears-after-regenerate) |
@@ -39,7 +40,9 @@ This chapter is organized by **what you see**. Each entry gives the cause, the f
 
 **Cause**: a process running `full` read a thread whose checkpoints were written in `delta`. The read gate raises `CheckpointModeMismatchError` before materializing, so a full-mode process never silently returns empty state. The routes that return `409` are `GET /api/threads/{thread_id}`, `GET` and `POST /api/threads/{thread_id}/state`, and `POST /api/threads/{thread_id}/history` (all covered by tests); `POST /api/threads/{thread_id}/branches` and `POST .../compact` gate the same way by code path. `compact` also uses `409` for a different reason, with detail `Context compaction is disabled.`
 
-Run creation does not pre-gate, so it fails asynchronously instead: `POST .../runs` returns a `200` run record that later turns `status: error`, `POST .../runs/stream` returns `200 text/event-stream` and then an `event: error` frame, and `POST .../runs/wait` returns `200` JSON with `{"status": "error", "error": "<the mismatch text>"}`. In the embedded TUI the client raises in-process before the graph streams and the CLI has no handler, so you get an uncaught traceback rather than a status code.
+The threads router does not pre-gate run creation, so a mismatch there fails asynchronously: `POST .../runs` returns a `200` run record that later turns `status: error`, `POST .../runs/stream` returns `200 text/event-stream` and then an `event: error` frame, and `POST .../runs/wait` returns `200` JSON with `{"status": "error", "error": "<the mismatch text>"}`. One run path reads a checkpoint before admission, though: when a thread's run-event feed is empty but a checkpoint head exists, `ensure_checkpoint_history_seeded` materializes that head inside `start_run`, where only `ConflictError` and `UnsupportedStrategyError` are mapped, so the mismatch escapes as an unhandled `500` on `POST /api/threads/{thread_id}/runs`, `/runs/stream`, and `/runs/wait`. With the default `run_events.backend: memory` a Gateway restart empties every existing thread's feed, so that branch is reachable after a restart.
+
+In the embedded TUI the client raises in-process before the graph streams: the Textual runner turns it into an `AssistantError` plus `RunEnded` pair, while the headless `--print` and `--json` runners have no handler and print an uncaught traceback instead of a status code.
 
 **Fix**: pick one of two exits.
 
@@ -48,18 +51,25 @@ Run creation does not pre-gate, so it fails asynchronously instead: `POST .../ru
 
 See [Channel Modes](/docs/harness/checkpoints/modes) for the marker semantics and [Quick Start](/docs/harness/checkpoints/quick-start) for the switch procedure.
 
-### HTTP 503 after editing config.yaml
+### A run fails after a config edit
 
-**Symptom**: a request returns `503` with one of
+**Symptom**: after editing `config.yaml` without restarting, the next run fails with one of
 
 ```
 checkpoint_channel_mode is restart-required and cannot change in a running process
 checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process
 ```
 
-**Cause**: `CheckpointModeReconfigurationError`. The process froze its mode and cadence at startup, and something tried to build an agent with a different value — a config hot-reload that diverged from the frozen startup snapshot. The threads router maps this error to `503` (transient) and the mismatch error to `409` (operator-actionable).
+in its run record, its SSE `error` frame, or the worker log line `Run %s failed: %s`.
 
-**Fix**: restart the process so the new value is frozen. The snapshot cadence is also part of the failure because it is compiled into each graph's channel table and is likewise restart-required.
+**Cause**: `CheckpointModeReconfigurationError`. The process froze its mode and cadence at startup, and something built a graph with a different value — a config hot-reload that diverged from the frozen startup snapshot. Only Gateway startup, `make_lead_agent`, and `DeerFlowClient.__init__` call the freeze helpers, and no state, history, or thread route builds an agent — those routes read the startup-frozen `app.state` values — so this is a run-side failure: none of them answers `503` for a config edit. The router-level `503` mapping exists for that error class but nothing in the threads routes raises it.
+
+Each knob behaves differently:
+
+- `database.checkpoint_channel_mode`: no failure. The run worker injects the frozen mode into the run config and the agent factory prefers that injected value over the request-time config, so the edited value is ignored until a restart — that is [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect).
+- `database.checkpoint_delta.snapshot_frequency`: the next run fails, because the cadence has no injected override and the agent factory freezes it from the reloaded config.
+
+**Fix**: restart the process so the new value is frozen, then re-run. The snapshot cadence is part of the failure because it is compiled into each graph's channel table and is likewise restart-required.
 
 ### A config change appears to have no effect
 
@@ -79,7 +89,7 @@ This is not the frozen-for-correctness case: nothing about the cache can corrupt
 
 **Fix**: restart the Gateway after editing the section — and on the embedded or TUI path, restart that process, whose checkpointer singleton is also created once and reused. Only `database.checkpoint_graph_cache.accessor_graph_max` applies without a restart, because it is re-read on every eviction check.
 
-### The regenerate or state endpoints return 500 instead of 409
+### Regenerate endpoints return 500 instead of 409
 
 **Symptom**: regenerate preparation returns `500` with `detail: "Failed to read latest checkpoint"` or `detail: "Failed to inspect checkpoint history"`, even though the same thread yields `409` elsewhere.
 

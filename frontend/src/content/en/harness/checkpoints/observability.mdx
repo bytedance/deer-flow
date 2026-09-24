@@ -15,7 +15,7 @@ The checkpoint mode is server-side state. Neither the mode nor the snapshot cade
 - The only custom SSE headers are `Cache-Control`, `Connection`, `X-Accel-Buffering`, and `Content-Location`.
 - The Gateway consumes the mode server-side only, into `app.state.checkpoint_channel_mode` / `app.state.checkpoint_snapshot_frequency` and the run context. Nothing serializes it outward.
 
-There is no field to poll for "is this deployment in delta mode?". You infer it from a thread's metadata, from a 409 or 503, or from inside the process.
+There is no field to poll for "is this deployment in delta mode?". You infer it from a thread's metadata, from a `409` on a gated route, or from inside the process.
 
 ## What a client can and cannot see
 
@@ -47,11 +47,12 @@ A mode problem produces different evidence depending on which path hit it.
 | --- | --- | --- |
 | A run hits a mismatch | run worker log (`exc_info=True`) | `Run %s failed: %s` with the mismatch text as `%s` |
 | A run hits a mismatch | run record / `/wait` body / SSE `error` frame | `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` |
+| A run hits a restart-required violation | run worker log (`exc_info=True`), run record, SSE `error` frame | `Run %s failed: %s` with `checkpoint_channel_mode is restart-required and cannot change in a running process` (or the `checkpoint_delta.snapshot_frequency` twin) as `%s` |
 | Context usage hits a mismatch | log | `Failed to load checkpoint for context usage on thread %s` |
 | Regenerate cannot read the latest checkpoint | log, then HTTP 500 `detail` | `Failed to read latest checkpoint for regenerate thread %s` → `Failed to read latest checkpoint` |
 | Regenerate cannot list checkpoint history | log, then HTTP 500 `detail` | `Failed to list checkpoints for regenerate thread %s` → `Failed to inspect checkpoint history` |
 
-The failure payloads differ by route. Run creation does **not** pre-gate: `POST /api/threads/{thread_id}/runs` returns a `200` run record that later turns `status: error` with the mismatch text, `POST /runs/stream` returns `200 text/event-stream` and then an `event: error` frame with `{"message": ..., "name": "CheckpointModeMismatchError"}`, and `POST /runs/wait` returns `200` JSON with `{"status": "error", "error": "<mismatch text>"}`.
+The failure payloads differ by route. Run creation does **not** pre-gate on the threads router: `POST /api/threads/{thread_id}/runs` returns a `200` run record that later turns `status: error` with the mismatch text, `POST /runs/stream` returns `200 text/event-stream` and then an `event: error` frame with `{"message": ..., "name": "CheckpointModeMismatchError"}`, and `POST /runs/wait` returns `200` JSON with `{"status": "error", "error": "<mismatch text>"}`. The exception is a thread whose run-event feed is empty but whose checkpoint head exists: `ensure_checkpoint_history_seeded` materializes that head inside `start_run`, where the mode errors are not mapped, so the same mismatch returns a plain `500` before the run is admitted. The stateless `/api/runs/*` routes share that path.
 
 <Callout type="warning">
   The mode gate itself logs nothing. `checkpoint_mode.py` has no logger,

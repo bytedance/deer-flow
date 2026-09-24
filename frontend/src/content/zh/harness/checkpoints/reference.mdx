@@ -22,6 +22,7 @@ import { Callout } from "nextra/components";
 | `factory` | `backend/packages/harness/deerflow/agents/factory.py` |
 | `client` | `backend/packages/harness/deerflow/client.py` |
 | `worker` | `backend/packages/harness/deerflow/runtime/runs/worker.py` |
+| `agent` | `backend/packages/harness/deerflow/agents/lead_agent/agent.py` |
 | `goalsrc` | `backend/packages/harness/deerflow/runtime/goal.py` |
 | `checkpoint_patches` | `backend/packages/harness/deerflow/checkpoint_patches.py` |
 | `syncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/provider.py` |
@@ -150,7 +151,7 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | `CheckpointModeMismatchError` | `409` | `f"Thread {thread_id}: {exc}"`，即 `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.` | `threads:105-106` |
 | `CheckpointModeReconfigurationError` | `503` | `str(exc)` | `threads:107` |
 
-路由给出的理由：不匹配说明线程持久化的检查点与进程冻结的模式冲突（运维可处理，409）；重新配置说明进程自身正处于模式切换中（暂时性，503）（`threads:99-102`）。
+路由给出的理由：不匹配说明线程持久化的检查点与进程冻结的模式冲突（运维可处理，409）；重新配置说明进程自身正处于模式切换中（暂时性，503）（`threads:99-102`）。`503` 这一半属于防御性代码 —— 这些路由中没有任何路径会抛出它。冻结辅助函数只被 Gateway 启动（`deps:451-452`）、`agent:835,839` 与 `client:230-231` 调用，而没有任何状态、历史或线程路由会构建 agent：`checkpoint_channel_mode` 的改动会被 run worker 注入的值覆盖（`worker:1018-1019`，优先采用于 `agent:831-835`），在重启前被忽略；`snapshot_frequency` 的改动则会让下一次 run 失败（`worker:1450-1462`），而不是返回某个状态码。
 
 ### 返回 409 的路由
 
@@ -167,7 +168,7 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 
 | 路由 | 即时响应 | 失败载荷 | 证据 |
 | --- | --- | --- | --- |
-| `POST /api/threads/{thread_id}/runs` | `200` run 记录，无前置门禁 | run 记录稍后变为 `status: error`，`error` 为不匹配原文 | `thread_runs:945-960`、`worker:1018-1030,1044-1047`、`worker:1450-1462` |
+| `POST /api/threads/{thread_id}/runs` | `200` run 记录，无前置门禁 —— 但当线程的 run event 流为空时，`ensure_checkpoint_history_seeded` 会先在 `start_run` 内物化头部，此时返回 `500` | run 记录稍后变为 `status: error`，`error` 为不匹配原文 | `thread_runs:945-960`、`worker:1018-1030,1044-1047`、`worker:1450-1462`、`services:1503-1520,2055` |
 | `POST /api/threads/{thread_id}/runs/stream` | `200` `text/event-stream` | 一帧 `event: error`，其 `data` 为 `{"message": <不匹配原文>, "name": "CheckpointModeMismatchError"}` | `worker:1466-1472`、`services:2374-2378` |
 | `POST /api/threads/{thread_id}/runs/wait` | `200` JSON，从不返回 `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}` | `thread_runs:1018-1076` |
 | `POST /api/runs/stream`、`POST /api/runs/wait`（无状态） | 同上 | 同样的 `{"status", "error"}` 载荷 | `runs:59-91` |
@@ -179,7 +180,8 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | `POST /api/threads/{thread_id}/runs/regenerate/prepare` | `500`，`detail: "Failed to read latest checkpoint"`——访问器构建位于任何 `try` 之外 | `thread_runs:747,749-752` |
 | 同一路由的谱系/历史扫描 | `500`，`detail: "Failed to inspect checkpoint history"` | `thread_runs:679-681` |
 | `POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` | 同样两条 `500` 路径 | `thread_runs:838-841`、`thread_runs:633-697` |
-| `GET /api/threads/{thread_id}/token-usage` | `200`，`context_usage: null`，仅记一条警告日志 | `context_usage:73-78`、`thread_runs:1872-1873` |
+| `POST /api/threads/{thread_id}/runs`、`/runs/stream`、`/runs/wait` 及无状态 `/api/runs/*`，当线程的 run event 流为空且存在检查点头部时 | `500`：`ensure_checkpoint_history_seeded` 在准入前通过受门禁的访问器读取该头部，而 `start_run` 只映射 `ConflictError`（`409`）与 `UnsupportedStrategyError`（`501`） | `services:1503-1520`、`services:2055`、`services:2126-2129` |
+| `GET /api/threads/{thread_id}/token-usage` | `200`，`context_usage: null`，仅记一条警告日志 | `context_usage.py:73-78`、`thread_runs:1872-1873` |
 | `GET` / `PUT` / `DELETE /api/threads/{thread_id}/goal` | 完全没有门禁：直接对 `channel_values["goal"]` 调用 `checkpointer.aget_tuple` / `aput` | `threads:1329-1383`、`goalsrc:442-453,468-477,480-542` |
 | `DELETE /api/threads/{thread_id}`、`POST /search`、`PATCH`、`POST /move` | 只操作元数据库，对模式无感 | `threads:706,1173,1216,1255` |
 
@@ -352,10 +354,10 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | 编号 | 种类 / 状态 | 触发场景 | 本地应对 | 固定版本 | 证据 |
 | --- | --- | --- | --- | --- | --- |
 | `#4380` | DeerFlow issue；已在本地打补丁 | 向空的 Union 类型 `BinaryOperatorAggregate` 通道做替换式写入会把 `Overwrite` 包装器持久化；下一次读取以 `TypeError: 'Overwrite' object is not subscriptable` 崩溃 | `checkpoint_patches.py` 中的探针守卫补丁；补丁测试；`test_threads_router.py` 中的分支/状态更新锚点 | `langgraph 1.2.9` | `checkpoint_patches:91-107`、`backend/tests/test_checkpoint_patches.py:31-95` |
-| `#8526`（修复上游 `#8384`），以及 postgres `#8535` | 上游 langgraph PR；2026-08-07 合并；`langgraph-checkpoint` 4.2.0 修复 | 线程从 `BinaryOperatorAggregate` 切换到 `DeltaChannel` 后，迁移后的第一次写入能从实时 `invoke` 返回值中看到，却从之后每次读取中消失；postgres 侧在没有 seed 时走到根并重放全部内容 | 删除本地 `InMemorySaver` 补丁；依赖下限 `langgraph-checkpoint>=4.2.0,<5.0`；回归门禁 `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`；禁止再引入版本守卫式 saver 补丁 | `langgraph-checkpoint 4.2.0` | `checkpoint_patches:11-17`、`backend/packages/harness/pyproject.toml:49-56`、`CHANGELOG.md:3032-3039` |
+| `#8526`（修复上游 `#8384`），以及 postgres `#8535` | 上游 langgraph PR；2026-08-07 合并；`langgraph-checkpoint` 4.2.0 修复 | 线程从 `BinaryOperatorAggregate` 切换到 `DeltaChannel` 后，迁移后的第一次写入能从实时 `invoke` 返回值中看到，却从之后每次读取中消失；postgres 侧在没有 seed 时走到根并重放全部内容 | 删除本地 `InMemorySaver` 补丁；依赖下限 `langgraph-checkpoint>=4.2.0,<5.0`；回归门禁 `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`；禁止再引入版本守卫式 saver 补丁 | `langgraph-checkpoint 4.2.0` | `checkpoint_patches:11-17`、`backend/packages/harness/pyproject.toml:49-56`、`CHANGELOG.md:3040-3048` |
 | `#8382` | 上游 langgraph issue；**open**；修复 PR `#8544` 未合并，无发布版本 | 并行 super-step 写入的 delta 重放顺序与实时执行顺序不一致：实时 `invoke` 返回按路径排序的 `[a..h]`，`get_state` 重放为 `[f,b,g,h,a,c,d,e]`（纯置换）；在 memory、sqlite、postgres 上均可复现 | 触发 skip 并点名该 issue；`test_delta_channel_checkpointers.py::test_parallel_superstep_replay_matches_live_write_order` | `langgraph-checkpoint 4.2.0` | `test_delta_channel_checkpointers.py:419,440-460` |
 | `#8448` | 上游 langgraph issue；**open**；修复 PR `#8556` 未合并 | 目标检查点不在第一页分页结果中时，`PostgresSaver.get_delta_channel_history` 会永久污染游标，导致老检查点物化为空；只有 Postgres 会对 stage-1 扫描分页 | memory/sqlite 上断言保持生效（与 `InMemorySaver` 预言机做差分）；Postgres 触发 skip；`test_delta_channel_checkpointers.py::test_long_chain_history_survives_pagination` | `langgraph-checkpoint-postgres 3.1.2` | `test_delta_channel_checkpointers.py:459` |
-| `#8548` | 上游 langgraph PR；**open**；修复上游 `#8443`（镜像 issue `#8551` 阻塞于它） | 不把被放弃的分支重放进 `DeltaChannel` 分叉 | 未合并期间本地线性化不能移除：保留 `_linearize_delta_checkpoint_resume` | `langgraph 1.2.9` | `worker:2267-2279`、`docs/plans/2026-09-22-checkpoint-dependency-upgrade-and-patch-cleanup.md:33,48,67,93` |
+| `#8548` | 上游 langgraph PR；**open**；修复上游 `#8443`，相关 issue `#8551` 仍在等它 | 不把被放弃的分支重放进 `DeltaChannel` 分叉 | 未合并期间本地线性化不能移除：保留 `_linearize_delta_checkpoint_resume` | `langgraph 1.2.9` | `worker:2267-2279`、`test_run_worker_delta_resume.py::test_linearizes_a_delta_resume_onto_the_head` |
 | `#4458` | DeerFlow issue；分叉缺陷对用户可见的症状 | 在分叉线程中重新生成后，重载时旧助手消息会与新回答并排复活；在 postgres、sqlite 与内存 saver 上均可复现，且当种子行共用一个 run id 时还会破坏分支历史 | 线性化加按轮次播种的 run id；`test_run_worker_delta_resume.py::test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answer` | `langgraph 1.2.9` | `worker:2267-2289`、`test_run_worker_delta_resume.py:204` |
 | `#4189` 第 3 项 | DeerFlow 设计讨论 | 检查点行的保留与删除；哪些内容可以被删除 | `backend/docs/checkpoint-retention-contract.md`、`backend/tests/test_checkpoint_retention_contract.py`、`backend/app/gateway/checkpoint_retention.py`；目前没有接入生产触发点 | — | `checkpoint_retention.py:1-40`、`backend/docs/checkpoint-retention-contract.md:31-77` |
 | `#3859`（评审） | DeerFlow 评审参考 | 被中断的标题写入必须递增 `channel_versions["title"]` 并在 `new_versions` 中声明，否则数据库 saver 会丢弃该 blob | `backend/tests/test_run_worker_rollback.py:3501-3504` 固定了这一形状 | — | `backend/tests/test_run_worker_rollback.py:3501-3504` |

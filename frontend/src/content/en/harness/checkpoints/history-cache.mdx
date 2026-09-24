@@ -88,9 +88,9 @@ The sync path mirrors this recursion and shares the same cache and depth budget.
 ## Configuration
 
 The cache is built **with the checkpointer, once per process**. `langgraph_runtime()` constructs the
-checkpointer from the startup `AppConfig` snapshot (`deps:463`), and the delta saver is wrapped in
+checkpointer from the startup `AppConfig` snapshot (`backend/app/gateway/deps.py:463`), and the delta saver is wrapped in
 `CachedHistorySaver` around whatever `make_checkpoint_cache()` returned at that moment
-(`asyncprov:250-254`). Nothing re-reads this section at runtime, so every field below keeps its
+(`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py:250-254`). Nothing re-reads this section at runtime, so every field below keeps its
 startup value for the process's lifetime.
 
 | Key | Type | Default | Range | Restart to change | Notes |

@@ -63,7 +63,7 @@ The router records the rationale for the split:
 
 > A mismatch means the thread's persisted checkpoints conflict with the process's frozen mode (operator-actionable, 409); a reconfiguration means the process itself is mid mode-flip (transient, 503).
 
-Only the threads router maps these two errors; run-creation routes surface the same mismatch text asynchronously in the run record or the SSE `error` frame. See [Observability](/docs/harness/checkpoints/observability) and [Troubleshooting](/docs/harness/checkpoints/troubleshooting).
+Only the threads router maps these two errors; run-creation routes surface the same mismatch text asynchronously in the run record or the SSE `error` frame — except when the thread's run-event feed is empty and its checkpoint head has to be materialized before admission, where the seeding read turns the mismatch into a plain `500`. The `503` half of the mapping is defensive: reconfiguration errors are raised when a graph is built (Gateway startup, `make_lead_agent`, `DeerFlowClient.__init__`) and no state, history, or thread route builds an agent, so an operator who edited `config.yaml` without restarting sees a failed run rather than a `503`. See [Observability](/docs/harness/checkpoints/observability) and [Troubleshooting](/docs/harness/checkpoints/troubleshooting).
 
 ## Cross-process invariant
 

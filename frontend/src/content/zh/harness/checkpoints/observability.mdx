@@ -15,7 +15,7 @@ import { Callout } from "nextra/components";
 - 仅有的自定义 SSE 响应头是 `Cache-Control`、`Connection`、`X-Accel-Buffering` 和 `Content-Location`。
 - Gateway 只在服务端消费该模式，写入 `app.state.checkpoint_channel_mode` / `app.state.checkpoint_snapshot_frequency` 与 run 上下文，不向外序列化。
 
-因此不存在可以轮询的「本部署是否为 delta 模式」字段。你只能从线程的 metadata、一次 `409` 或 `503`，或者在进程内部自行判断。
+因此不存在可以轮询的「本部署是否为 delta 模式」字段。你只能从线程的 metadata、受门禁路由上的一次 `409`，或者在进程内部自行判断。
 
 ## 客户端能看到与不能看到什么
 
@@ -47,11 +47,12 @@ import { Callout } from "nextra/components";
 | --- | --- | --- |
 | run 命中不匹配 | run worker 日志（`exc_info=True`） | `Run %s failed: %s`，`%s` 为不匹配文本 |
 | run 命中不匹配 | run 记录 / `/wait` 响应体 / SSE `error` 帧 | `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` |
+| run 命中重启要求违例 | run worker 日志（`exc_info=True`）、run 记录、SSE `error` 帧 | `Run %s failed: %s`，`%s` 为 `checkpoint_channel_mode is restart-required and cannot change in a running process`（或 `checkpoint_delta.snapshot_frequency` 的对应文本） |
 | 上下文用量命中不匹配 | 日志 | `Failed to load checkpoint for context usage on thread %s` |
 | 重新生成无法读取最新检查点 | 日志，随后 HTTP 500 `detail` | `Failed to read latest checkpoint for regenerate thread %s` → `Failed to read latest checkpoint` |
 | 重新生成无法列出检查点历史 | 日志，随后 HTTP 500 `detail` | `Failed to list checkpoints for regenerate thread %s` → `Failed to inspect checkpoint history` |
 
-失败载荷随路由不同。创建 run **不会**提前做门禁：`POST /api/threads/{thread_id}/runs` 返回 `200` run 记录，随后变为 `status: error` 并带上不匹配文本；`POST /runs/stream` 返回 `200 text/event-stream`，随后发出 `event: error` 帧，载荷为 `{"message": ..., "name": "CheckpointModeMismatchError"}`；`POST /runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。
+失败载荷随路由不同。创建 run 在 threads 路由上**不会**提前做门禁：`POST /api/threads/{thread_id}/runs` 返回 `200` run 记录，随后变为 `status: error` 并带上不匹配文本；`POST /runs/stream` 返回 `200 text/event-stream`，随后发出 `event: error` 帧，载荷为 `{"message": ..., "name": "CheckpointModeMismatchError"}`；`POST /runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。例外是 run event 流为空但存在检查点头部的线程：`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里没有映射模式错误，于是同一个不匹配会在 run 被准入之前返回普通的 `500`。无状态的 `/api/runs/*` 路由共享这条路径。
 
 <Callout type="warning">
   模式门自身不记任何日志。`checkpoint_mode.py` 没有 logger，threads

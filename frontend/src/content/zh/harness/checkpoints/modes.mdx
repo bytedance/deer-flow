@@ -62,7 +62,7 @@ superstep 上限的作用，是让停止接收写入的通道重放深度也有�
 
 > A mismatch means the thread's persisted checkpoints conflict with the process's frozen mode (operator-actionable, 409); a reconfiguration means the process itself is mid mode-flip (transient, 503).
 
-只有线程路由映射这两个错误；创建运行的路径会把同一段不一致文本异步地写进 run 记录或 SSE `error` 帧。见[可观测性](/docs/harness/checkpoints/observability)与[故障排查](/docs/harness/checkpoints/troubleshooting)。
+只有线程路由映射这两个错误；创建运行的路径会把同一段不一致文本异步地写进 run 记录或 SSE `error` 帧 —— 例外是线程的 run event 流为空、检查点头部必须在准入前被物化时，播种读取会把这个不一致变成普通的 `500`。映射中的 `503` 一半属于防御性代码：重新配置错误在构建图时抛出（Gateway 启动、`make_lead_agent`、`DeerFlowClient.__init__`），而没有任何状态、历史或线程路由会构建 agent，所以改完 `config.yaml` 却没重启的运维人员看到的是失败的 run，而不是 `503`。见[可观测性](/docs/harness/checkpoints/observability)与[故障排查](/docs/harness/checkpoints/troubleshooting)。
 
 ## 跨进程不变量
 

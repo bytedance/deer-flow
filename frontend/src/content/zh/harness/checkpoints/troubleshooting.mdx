@@ -14,10 +14,11 @@ import { Callout } from "nextra/components";
 | 症状 | 最可能的原因 | 章节 |
 | --- | --- | --- |
 | 状态/历史/线程读接口返回 `409` | full 模式进程读取了 delta 线程 | [delta 线程上的 HTTP 409](#delta-线程上的-http-409) |
-| `503` 且带重启要求信息 | 改了配置但未重启 | [改完 config.yaml 后返回 HTTP 503](#改完-configyaml-后返回-http-503) |
+| run 请求在准入前返回 `500` | 线程的 run event 流为空，播种读取落在模式门下 | [delta 线程上的 HTTP 409](#delta-线程上的-http-409) |
+| run 失败并带重启要求信息 | 配置改动在被冻结的进程构建图时被拒绝 | [改完配置后 run 失败](#改完配置后-run-失败) |
 | 配置改动似乎被忽略 | 模式与节奏在构建 agent 时已冻结 | [配置改动似乎没有生效](#配置改动似乎没有生效) |
 | 历史缓存改动似乎被忽略 | 缓存在启动时随 checkpointer 一起构造 | [历史缓存的改动没有生效](#历史缓存的改动没有生效) |
-| 重新生成或状态接口返回 `500` | run-runs 路由没有映射模式错误 | [重新生成或状态接口返回 500 而不是 409](#重新生成或状态接口返回-500-而不是-409) |
+| 重新生成接口返回 `500` | run-runs 路由没有映射模式错误 | [重新生成接口返回 500 而不是 409](#重新生成接口返回-500-而不是-409) |
 | delta 没有缩小存储 | 仍在 full 模式，或没统计 writes 表 | [delta 没有缩小存储](#delta-没有缩小存储) |
 | 物化变慢 | 快照节奏调得过高 | [提高节奏后物化变慢](#提高节奏后物化变慢) |
 | 重新生成后被替换的回答复活 | delta 分叉回放（#4458） | [重新生成后旧回答复活](#重新生成后旧回答复活) |
@@ -39,7 +40,9 @@ import { Callout } from "nextra/components";
 
 **原因**：一个运行在 `full` 的进程读取了以 `delta` 写入检查点的线程。读门在物化之前抛出 `CheckpointModeMismatchError`，因此 full 模式进程绝不会静默返回空状态。返回 `409` 的路由是 `GET /api/threads/{thread_id}`、`GET` 与 `POST /api/threads/{thread_id}/state`、`POST /api/threads/{thread_id}/history`（均有测试覆盖）；`POST /api/threads/{thread_id}/branches` 与 `POST .../compact` 在代码路径上以同样方式门禁。`compact` 也会因另一原因返回 `409`，detail 为 `Context compaction is disabled.`
 
-创建 run 不会提前门禁，因此改为异步失败：`POST .../runs` 返回 `200` run 记录，随后变为 `status: error`；`POST .../runs/stream` 返回 `200 text/event-stream` 后发出 `event: error` 帧；`POST .../runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。在内嵌 TUI 里，client 在图开始流式输出前就在进程内抛出，而 CLI 没有对应的处理器，因此你会看到未捕获的 traceback，而不是状态码。
+threads 路由不会对创建 run 提前门禁，因此那里的不匹配改为异步失败：`POST .../runs` 返回 `200` run 记录，随后变为 `status: error`；`POST .../runs/stream` 返回 `200 text/event-stream` 后发出 `event: error` 帧；`POST .../runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。不过有一条 run 路径会在准入前读取检查点：当线程的 run event 流为空但存在检查点头部时，`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里只映射 `ConflictError` 与 `UnsupportedStrategyError`，因此不匹配会以未处理的 `500` 逃出，作用于 `POST /api/threads/{thread_id}/runs`、`/runs/stream` 与 `/runs/wait`。默认的 `run_events.backend: memory` 会让 Gateway 重启后每个既有线程的流都变空，所以这条分支在重启后可达。
+
+在内嵌 TUI 里，client 在图开始流式输出前就在进程内抛出：Textual runner 会把它变成 `AssistantError` 与 `RunEnded` 的组合，而无头的 `--print`、`--json` runner 没有对应处理器，会打印未捕获的 traceback，而不是状态码。
 
 **处理**：二选一。
 
@@ -48,18 +51,23 @@ import { Callout } from "nextra/components";
 
 标记语义见[通道模式](/docs/harness/checkpoints/modes)，切换步骤见[快速上手](/docs/harness/checkpoints/quick-start)。
 
-### 改完 config.yaml 后返回 HTTP 503
+### 改完配置后 run 失败
 
-**症状**：请求返回 `503`，内容为下二者之一
+**症状**：在未重启的情况下改完 `config.yaml` 后，下一次 run 失败，其 run 记录、SSE `error` 帧或 worker 日志行 `Run %s failed: %s` 中出现下二者之一
 
 ```
 checkpoint_channel_mode is restart-required and cannot change in a running process
 checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process
 ```
 
-**原因**：`CheckpointModeReconfigurationError`。进程在启动时冻结了模式与节奏，而某处试图用不同的值构建 agent —— 即一次与启动冻结值分歧的配置热重载。threads 路由把该错误映射为 `503`（瞬态），把不匹配错误映射为 `409`（运维可处理）。
+**原因**：`CheckpointModeReconfigurationError`。进程在启动时冻结了模式与节奏，而某处用不同的值构建了图 —— 即一次与启动冻结值分歧的配置热重载。只有 Gateway 启动、`make_lead_agent` 与 `DeerFlowClient.__init__` 会调用冻结辅助函数，而没有任何状态、历史或线程路由会构建 agent（这些路由读取启动时冻结的 `app.state` 值），所以这是 run 侧的失败：它们都不会因配置改动返回 `503`。路由层的 `503` 映射为该错误类而存在，但 threads 路由中没有任何路径会抛出它。
 
-**处理**：重启进程，让新值被冻结。快照节奏也参与其中，因为它被编译进每张图的通道表，同样需要重启。
+两个开关的行为不同：
+
+- `database.checkpoint_channel_mode`：完全不会失败。run worker 会把冻结的模式注入 run 配置，而 agent 工厂优先采用该注入值而非请求期配置，因此改动在重启前被忽略 —— 即[配置改动似乎没有生效](#配置改动似乎没有生效)。
+- `database.checkpoint_delta.snapshot_frequency`：下一次 run 会失败，因为节奏没有注入覆盖，agent 工厂会按重载后的配置冻结它。
+
+**处理**：重启进程以冻结新值，然后重跑。快照节奏也参与其中，因为它被编译进每张图的通道表，同样需要重启。
 
 ### 配置改动似乎没有生效
 
@@ -79,7 +87,7 @@ checkpoint_delta.snapshot_frequency is restart-required and cannot change in a r
 
 **处理**：改完该段后重启 Gateway；内嵌或 TUI 路径则重启那个进程，因为它的 checkpointer 单例同样只创建一次并一直复用。只有 `database.checkpoint_graph_cache.accessor_graph_max` 无需重启，因为它在每次淘汰检查时都会重读。
 
-### 重新生成或状态接口返回 500 而不是 409
+### 重新生成接口返回 500 而不是 409
 
 **症状**：重新生成准备返回 `500`，detail 为 `"Failed to read latest checkpoint"` 或 `"Failed to inspect checkpoint history"`，而同一线程在别处却返回 `409`。
 

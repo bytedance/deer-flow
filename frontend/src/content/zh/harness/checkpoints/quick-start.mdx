@@ -63,7 +63,10 @@ database:
 因此把存储切回 `full` 之前，必须先物化并转换这些线程的检查点，错误文本本身就是在告诉运维人员这件事。在完成之前，请让所有接触该存储的进程保持 `delta`。
 
 <Callout type="warning">
-  只改 `config.yaml` 里的 `checkpoint_channel_mode` 而不重启不会生效。下一次构建图时会抛出
-  `CheckpointModeReconfigurationError`，受闸门的线程路由会把它表现为 HTTP 503。请通过重启所有共享
-  该检查点数据库的进程来发布这次改动。
+  只改 `config.yaml` 里的 `checkpoint_channel_mode` 而不重启不会生效：run worker 会注入冻结的模式，
+  因此这次改动在重启前一直被忽略。改 `checkpoint_delta.snapshot_frequency` 而不重启则更响——
+  下一次 run 会失败，run 记录与 SSE `error` 帧里带着 `CheckpointModeReconfigurationError`。
+  这两种改动都不会让任何请求返回 `503`；见
+  [故障排查](/docs/harness/checkpoints/troubleshooting#改完配置后-run-失败)。请通过重启所有共享
+  该检查点数据库的进程来发布改动。
 </Callout>

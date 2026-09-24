@@ -200,7 +200,7 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py 
 
 - **同步路径拒绝 redis。** 选择 `database.checkpoint_cache.type: redis` 会在构建 checkpointer 时抛出 `ValueError("database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.")`，因此对网关合法的配置可能让 TUI 起不来。这是诚实的拒绝而非降级：同步路径本来就是进程内的。
 - **没有降级读取路径。** 增量物化需要图的通道表，TUI 没有网关那种退回原始 checkpointer 读取的等价物。
-- **未捕获的模式不一致会变成 traceback。** 内嵌客户端在进程内抛出 `CheckpointModeMismatchError`——没有 HTTP 状态码、没有运行记录、没有 SSE 帧——而 CLI 直接分派到它的 print、JSON 或 TUI 入口且没有处理器，于是运维在 stderr 上看到一段 Python traceback。
+- **未捕获的模式不一致在无头入口上会变成 traceback。** 内嵌客户端在进程内抛出 `CheckpointModeMismatchError`——没有 HTTP 状态码、没有运行记录、没有 SSE 帧——而 CLI 直接分派到它的 print 或 JSON 入口且没有处理器，于是 `--print`、`--json` 在 stderr 上打印一段 Python traceback。Textual TUI 是例外：它的 `stream_actions()` 会捕获来自 `client.stream()` 的每个异常并发出 `AssistantError` 与 `RunEnded`，所以交互用户是在界面里看到这次失败。
 
 第三方嵌入者还会撞上相关守卫：`create_deerflow_agent` 在 `checkpoint_channel_mode="delta"` **且**传入 checkpointer 时抛出 `ValueError`，因为在那里构建的图绕过了检查点模式标记注入与失败关闭的兼容门，混合模式的存储会静默损坏线程状态。不带 checkpointer 的 delta 是临时的，允许使用；需要持久化的增量图必须走受守卫的应用路径（`make_lead_agent` 或 `DeerFlowClient`）。
 
