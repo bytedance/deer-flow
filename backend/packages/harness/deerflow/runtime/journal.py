@@ -360,7 +360,7 @@ class RunJournal(BaseCallbackHandler):
             return
         caller = self._identify_caller(tags)
         if parent_run_id is None:
-            if caller == "lead_agent":
+            if caller == "lead_agent" and self._root_graph_run_id is None:
                 self._root_graph_run_id = run_id
             # Root graph invocation — emit a single trace event for the run start.
             chain_name = (serialized or {}).get("name", "unknown")
@@ -383,6 +383,8 @@ class RunJournal(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._closed:
+            return
         if run_id in self._tools_node_run_ids:
             self._tools_node_run_ids.discard(run_id)
             # Middleware can return without on_tool_end. Persist those results
@@ -391,6 +393,9 @@ class RunJournal(BaseCallbackHandler):
         # Nested chain ends fire for internal graph nodes; only the root chain
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
+            return
+        # An unrelated root callback must not retire the active lead graph.
+        if self._root_graph_run_id is not None and run_id != self._root_graph_run_id:
             return
         self._root_graph_run_id = None
         self._tools_node_run_ids.clear()
@@ -404,6 +409,8 @@ class RunJournal(BaseCallbackHandler):
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        if self._closed:
+            return
         self._tools_node_run_ids.discard(run_id)
         if run_id == self._root_graph_run_id:
             self._root_graph_run_id = None

@@ -556,8 +556,9 @@ class TestLifecycleCallbacks:
     @pytest.mark.anyio
     async def test_chain_start_end_produce_trace_events(self, journal_setup):
         j, store = journal_setup
-        j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=None)
-        j.on_chain_end({}, run_id=uuid4())
+        run_id = uuid4()
+        j.on_chain_start({}, {}, run_id=run_id, parent_run_id=None)
+        j.on_chain_end({}, run_id=run_id)
         await asyncio.sleep(0.05)
         await j.flush()
         events = await store.list_events("t1", "r1")
@@ -621,6 +622,70 @@ class TestToolCallbacks:
 
 
 class TestToolMessageReconciliation:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("stray_finish", ["running", "end", "error"])
+    async def test_stray_root_does_not_displace_active_graph(self, journal_setup, stray_finish):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        for index in range(2):  # A completed graph must allow the next invocation.
+            root_id, stray_id, node_id = uuid4(), uuid4(), uuid4()
+            call_id = f"blocked-{index}"
+            j.on_chain_start({}, {}, run_id=root_id)
+            j.on_llm_end(_make_llm_response("", tool_calls=[{"id": call_id, "name": "tool", "args": {}}]), run_id=uuid4())
+            j.on_chain_start({}, {}, run_id=stray_id)
+            if stray_finish == "end":
+                j.on_chain_end({"messages": [ToolMessage("unrelated", tool_call_id=call_id)]}, run_id=stray_id)
+            elif stray_finish == "error":
+                j.on_chain_error(ValueError("unrelated"), run_id=stray_id)
+            j.on_chain_start({}, {}, run_id=node_id, parent_run_id=root_id, metadata={"langgraph_node": "tools"})
+            output = {"messages": [ToolMessage("denied", tool_call_id=call_id, status="error")]}
+            j.on_chain_end(output, run_id=node_id, parent_run_id=root_id)
+            j.on_llm_end(_make_llm_response("done"), run_id=uuid4())
+            j.on_chain_end(output, run_id=root_id)
+        await j.flush()
+
+        events = await store.list_messages("t1")
+        assert [event["content"]["content"] for event in events] == ["", "denied", "done"] * 2
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("callback", ["end", "error"])
+    async def test_late_chain_callback_during_detach_does_not_mutate_summary(self, journal_setup, monkeypatch, callback):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        started, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def blocked_write(events):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelling.set()
+                await release.wait()
+                raise
+
+        monkeypatch.setattr(store, "put_batch", blocked_write)
+        root_id = uuid4()
+        j.on_chain_start({}, {}, run_id=root_id)
+        j._flush_sync()
+        await started.wait()
+        j.on_llm_end(_make_llm_response("pending", tool_calls=[{"id": "blocked", "name": "tool", "args": {}}]), run_id=uuid4())
+        closing = asyncio.create_task(j.close(flush=False))
+        try:
+            await cancelling.wait()
+            assert j._closed
+            before = (j._msg_count, j._last_ai_msg, set(j._persisted_tool_message_identities))
+            if callback == "end":
+                j.on_chain_end({"messages": [ToolMessage("late", tool_call_id="blocked")]}, run_id=root_id)
+            else:
+                j.on_chain_error(ValueError("late"), run_id=root_id)
+            assert (j._msg_count, j._last_ai_msg, j._persisted_tool_message_identities) == before
+        finally:
+            release.set()
+            await closing
+        assert await store.list_events("t1", "r1") == []
+
     @pytest.mark.anyio
     @pytest.mark.parametrize("output_shape", ["messages", "commands"])
     async def test_tools_node_reconciles_before_next_response(self, journal_setup, output_shape):
