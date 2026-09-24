@@ -197,7 +197,7 @@ def _list_uploaded_files_impl(
     try:
         # Collect file entries once to build the name set and iterate.
         with os.scandir(uploads_dir) as scan:
-            entries = [e for e in scan if e.is_file(follow_symlinks=False) and not e.is_symlink() and not is_upload_staging_file(e.name)]
+            entries = [e for e in scan if e.is_file(follow_symlinks=False) and not is_upload_staging_file(e.name)]
         all_names: set[str] = {e.name for e in entries}
 
         for entry in entries:
