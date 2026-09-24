@@ -1,6 +1,7 @@
 """Worker-level regression tests for the terminal run.delivery event (#4272 slice 1)."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -14,6 +15,7 @@ from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -736,3 +738,194 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
+
+
+class _BlockingJournalBatchStore(MemoryRunEventStore):
+    """Journal event store whose first ``put_batch`` blocks until released.
+
+    Batch A is the journal's first threshold-sized write; it stays in flight
+    until the test releases it, so the worker's bounded ``flush()`` deadline
+    expires with A unresolved and B still buffered behind it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.batches: list[list[str]] = []
+        self.batch_a_entered = asyncio.Event()
+        self.release_batch_a = asyncio.Event()
+        self.receipt_attempted = asyncio.Event()
+
+    async def put_batch(self, events):
+        self.batches.append([event["event_type"] for event in events])
+        if len(self.batches) == 1:
+            self.batch_a_entered.set()
+            await self.release_batch_a.wait()
+        return await super().put_batch(events)
+
+    async def put_if_absent(self, **kwargs):
+        self.receipt_attempted.set()
+        return await super().put_if_absent(**kwargs)
+
+
+@pytest.mark.anyio
+async def test_terminal_receipt_waits_for_bounded_flush_to_settle(monkeypatch):
+    """``flush() == False`` must settle the journal before the terminal receipt.
+
+    The bounded flush only reports whether its deadline was met, so the receipt
+    and the durable terminal row have to wait for the batch that missed it:
+    otherwise the terminal run outlives journal events that must precede it.
+    """
+    # The bounded drain deadline is what the worker's barrier observes; shrink it
+    # so the test does not wait the production timeout to reach the timeout case.
+    monkeypatch.setattr("deerflow.runtime.journal._CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
+    event_store = _BlockingJournalBatchStore()
+
+    bounded_flush_results: list[bool] = []
+    bounded_flush_done = asyncio.Event()
+    real_flush = RunJournal.flush
+
+    async def spy_flush(journal):
+        settled = await real_flush(journal)
+        bounded_flush_results.append(settled)
+        bounded_flush_done.set()
+        return settled
+
+    monkeypatch.setattr(RunJournal, "flush", spy_flush)
+
+    class OrderingRunStore(MemoryRunStore):
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            if status not in {"pending", "running"}:
+                assert await event_store.list_events("thread-1", run_id, event_types=["run.delivery"]), "durable terminal status landed before the delivery receipt"
+            return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
+
+    run_store = OrderingRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            # The default 20-event threshold makes A the first batch while the
+            # remaining five events stay buffered as B.
+            for index in range(25):
+                journal._put(event_type=f"test.step.{index}", category="steps", content={"index": index})
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            _make_bridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=lambda *, config: JournalingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    try:
+        await asyncio.wait_for(event_store.batch_a_entered.wait(), timeout=2)
+        await asyncio.wait_for(bounded_flush_done.wait(), timeout=2)
+        assert bounded_flush_results == [False]
+        assert event_store.batches == [[f"test.step.{index}" for index in range(20)]]
+
+        # While A is unresolved the worker must not have attempted the receipt ...
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(event_store.receipt_attempted.wait()), timeout=0.2)
+        assert not task.done()
+        # ... and the durable row must not already claim the staged success.
+        assert record.status == RunStatus.success
+        assert (await run_store.get(record.run_id))["status"] == "running"
+    finally:
+        event_store.release_batch_a.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    # Releasing A settled the journal: A, then the still-buffered B.
+    assert [len(batch) for batch in event_store.batches] == [20, 5]
+    events = await event_store.list_events("thread-1", record.run_id)
+    journal_seqs = [event["seq"] for event in events if event["event_type"].startswith("test.step.")]
+    receipt_seqs = [event["seq"] for event in events if event["event_type"] == "run.delivery"]
+    assert len(journal_seqs) == 25
+    assert len(receipt_seqs) == 1
+    assert max(journal_seqs) < receipt_seqs[0]
+    assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_definite_journal_write_failure_never_publishes_success(caplog):
+    """A journal write that definitely failed must not become a success run."""
+
+    class FailingBatchStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_batches: list[list[str]] = []
+
+        async def put_batch(self, events):
+            self.failed_batches.append([event["event_type"] for event in events])
+            raise RuntimeError("journal store unavailable")
+
+    event_store = FailingBatchStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            yield {"messages": []}
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.worker"):
+        await run_agent(
+            _make_bridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=lambda *, config: JournalingAgent(),
+            graph_input={},
+            config={},
+        )
+
+    assert event_store.failed_batches, "the journal write was never attempted"
+    assert await _delivery_events(event_store, "thread-1", record.run_id) == []
+    persisted = await event_store.list_events("thread-1", record.run_id)
+    assert not any(event["event_type"] == "test.step" for event in persisted)
+    assert record.status == RunStatus.error
+    assert record.error == "Run event journal did not settle before terminal receipt"
+    assert (await run_store.get(record.run_id))["status"] == "error"
+    assert "journal did not settle before its terminal receipt" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_cancelled_run_stays_interrupted_when_the_journal_also_fails():
+    """D2d: a cancelled run whose journal write fails stays ``interrupted``."""
+
+    class FailingBatchStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RuntimeError("journal store unavailable")
+
+    event_store = FailingBatchStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class CancelledAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            record.abort_event.set()
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: CancelledAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.interrupted
+    assert record.error is None
+    assert await _delivery_events(event_store, "thread-1", record.run_id) == []
+    assert (await run_store.get(record.run_id))["status"] == "interrupted"
