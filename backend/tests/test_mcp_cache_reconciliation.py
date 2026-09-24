@@ -408,6 +408,35 @@ def test_interceptor_change_is_a_full_reset(cache_globals, monkeypatch, tmp_path
     assert cache_module._cache_initialized is False
 
 
+def test_equivalent_path_switch_during_in_flight_rediscovery_keeps_sessions(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """A path switch must compare against the applied baseline, not the published snapshot.
+
+    A selective reconcile clears the published tool snapshot while retaining the
+    applied baseline, so an equivalent path switch landing before rediscovery
+    finishes must not fall back to a whole-pool reset.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_b = _open_session(owner_loop, pool, "B")
+
+    # A's connection changes: only A retires, and the published snapshot clears.
+    _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert cache_module._mcp_config_snapshot is None
+    assert cache_module._mcp_applied_servers is not None
+
+    # Before rediscovery completes, switch to a file with the same effective slice.
+    other = tmp_path / "other_extensions_config.json"
+    _write_config(other, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(other))
+
+    assert cache_module._classify_cache_transition() is None
+    assert get_session_pool() is pool
+    assert session_b.closed is False
+    assert cache_module._mcp_applied_path == other
+
+
 def test_whole_pool_reset_signals_owner_before_background_teardown(cache_globals, monkeypatch, tmp_path):
     """A whole-pool reset must detach and signal owners before any worker runs."""
     cfg = tmp_path / "extensions_config.json"
