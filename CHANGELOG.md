@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This section accumulates work toward the **2.1.0** milestone
 ([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
-This release closes that milestone with **765 merged pull requests**.
+This release closes that milestone with **772 merged pull requests**.
 
 ### ⚠ Breaking changes
 
@@ -941,6 +941,16 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
+  sidebar. In the sidebar's grouped Projects mode the indented nested menus
+  kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
+  100% of the width plus 16px and their absolutely positioned `right-1`
+  action landed past the sidebar edge — clipped on active-project rows and
+  pushed out entirely on the doubly indented rows under the Archived group,
+  while the flat chat list (the only unindented menu) was unaffected, which
+  is why it slipped through. Both nested menus now use `w-auto`, so the
+  block-level flex container fills the remaining width minus its margin. No
+  behavior, data, or API change beyond the layout fix. ([#5682])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -952,7 +962,74 @@ This release closes that milestone with **765 merged pull requests**.
   upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
   `UserPreferenceRow` are also registered in the ORM model registry so
   `create_all` and autogenerate see every table through explicit imports
-  instead of module side effects.
+  instead of module side effects. ([#5517])
+- **backend:** Validate pagination on the LangGraph-compatible
+  `POST /api/assistants/search`. `limit` and `offset` were applied directly
+  through Python slicing, so invalid values such as `offset: -1`, `limit: 0`,
+  or an excessive limit returned `200` with misleading results instead of
+  being rejected at the API boundary. `limit` is now required within the
+  compatible range of 1–1000 and `offset` must be non-negative; invalid
+  requests get `422`. ([#5506])
+- **models:** Guard the Claude Code credential loader against a malformed
+  `claudeAiOauth` container. `~/.claude/.credentials.json` can hold a
+  syntactically valid JSON payload whose `claudeAiOauth` value is not an
+  object — a `null` left by a partial export, a raw string, an array, a
+  number — and the extractor called `.get` on it, raising `AttributeError`
+  out of `ClaudeChatModel.model_post_init` and aborting model construction,
+  the opposite of the loader's documented degrade-gracefully behavior (the
+  sibling Codex loader already guarded the identical shape). A non-object
+  top-level payload or `claudeAiOauth` value now logs at debug level and
+  counts as "no credential from this source", so loading falls through to
+  the next source and ultimately returns `None` when every source is
+  unusable. ([#5494])
+- **events:** Preserve the DB write-lock generation across thread deletion.
+  `DbRunEventStore` serializes per-thread sequence assignment with an
+  `asyncio.Lock`, and `delete_by_thread()` evicted that lock whenever
+  `lock.locked()` was false — but `asyncio.Lock.release()` clears the locked
+  state before a queued waiter resumes, so a deletion landing in that
+  handoff window removed the registry entry while an admitted waiter still
+  referenced the old lock. A later writer then created a new lock generation
+  for the same thread, and two writers could proceed under different locks,
+  violating the single-process serialization around `max(seq) + INSERT`.
+  The per-thread registry is now weak, so an admitted holder/waiter keeps
+  its lock generation discoverable until it drains, while a separate strong
+  pin preserves the existing stable one-lock-per-thread behavior; deletion
+  retires only the pin. ([#5462])
+- **setup:** Honor a custom sandbox image in BOM-prefixed configs.
+  `setup-sandbox.sh` matched `^sandbox:` against a first line still carrying
+  its UTF-8 BOM, never matched, and silently chose and pulled the default
+  image instead of the configured one, although the runtime YAML loader
+  accepts the same configuration. The script now strips a UTF-8 BOM at the
+  beginning of the first line before the image-selection pipeline, with no
+  new runtime dependency. ([#5515])
+- **gateway:** Keep the shutdown run drain alive across repeated
+  cancellation. `_drain_inflight_runs()` shielded the `RunManager.shutdown()`
+  task and then awaited it again, but a second `Task.cancel()` while that
+  second shield was pending interrupted the helper itself, letting the
+  lifespan continue unwinding while run tasks were still draining —
+  reopening the exact resource-ordering hazard the drain exists to prevent:
+  run tasks could still be writing checkpoints after checkpointer teardown
+  began. The helper now keeps the already-started shutdown task strongly
+  owned and repeatedly shields it until it reaches a terminal state,
+  remembering the first caller cancellation and propagating it only after
+  the bounded drain completes. Logging and error behavior on a failing
+  drain are unchanged. ([#5487])
+- **models:** Pair Codex invalid tool calls with their tool results. A Codex
+  model that emits a `function_call` whose `arguments` are not valid JSON
+  does not fail the turn: the call is parked on `invalid_tool_calls` and
+  answered with a placeholder `ToolMessage` by `DanglingToolCallMiddleware`,
+  so the model sees a recoverable tool error. But the Codex Responses
+  serializer emitted input items for valid `tool_calls` only, so the
+  placeholder reached the provider as a `function_call_output` whose
+  `call_id` had no matching `function_call` in the same request, and the
+  Responses API requires the pair — the exact case the middleware exists to
+  recover from ended in a provider error instead of a retry. Chat
+  Completions providers already replay invalid calls through LangChain's
+  converter, and the OpenAI-compatible path had the same failure class
+  repaired in the middleware; Codex requests now also replay
+  `invalid_tool_calls` as `function_call` input items next to the valid
+  ones. The valid-call path, the parse side, and the middleware are
+  unchanged. ([#5509])
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
@@ -2915,7 +2992,7 @@ This release closes that milestone with **765 merged pull requests**.
   integration, and a reference appendix with the June to September 2026
   change log. The former single page becomes the section index, so existing
   page links keep working; deep links to sections of the old page now land
-  on the index.
+  on the index. ([#5761])
 - **docs:** Add an extension developer manual under `harness/extensions/` in
   both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
   to write an extension, a quick start, the runtime model, middleware
@@ -2923,7 +3000,7 @@ This release closes that milestone with **765 merged pull requests**.
   evidence reader, operating extensions, troubleshooting by error message,
   and a reference of every public name with the contract's version history.
   Also correct stale descriptions of the contribution kinds and of run
-  evidence metadata redaction in `AGENTS.md`.
+  evidence metadata redaction in `AGENTS.md`. ([#5769])
 
 ### Internal
 
@@ -2990,6 +3067,15 @@ This release closes that milestone with **765 merged pull requests**.
 - **tests:** Skip the POSIX mode-bit skill-permission assertions on Windows,
   where the `chmod` contract is unobservable, so Windows contributors can
   reach a green backend-suite baseline. ([#5244])
+- **tests:** Pin the composer's skill suggestions against an empty skill
+  catalog (RFC #4063 Phase 4): a caller whose `skills` policy allows nothing
+  — or a fresh install with no skills — receives `[]` from `GET /api/skills`,
+  and the composer must degrade to a builtin-only dropdown, never a broken
+  or fully vanishing one. New tests drive the matcher and mount the real
+  `InputBox` with an empty catalog: typing `/` offers exactly the builtin
+  commands, and an unmatched query renders no listbox. No production code
+  changed; all four `useSkills()` consumers were audited and already
+  degrade gracefully. ([#5490])
 
 ## [2.0.0] — 2026-06-15
 
@@ -4263,6 +4349,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5458]: https://github.com/bytedance/deer-flow/pull/5458
 [#5459]: https://github.com/bytedance/deer-flow/pull/5459
 [#5461]: https://github.com/bytedance/deer-flow/pull/5461
+[#5462]: https://github.com/bytedance/deer-flow/pull/5462
 [#5463]: https://github.com/bytedance/deer-flow/pull/5463
 [#5465]: https://github.com/bytedance/deer-flow/pull/5465
 [#5467]: https://github.com/bytedance/deer-flow/pull/5467
@@ -4277,9 +4364,19 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5483]: https://github.com/bytedance/deer-flow/pull/5483
 [#5485]: https://github.com/bytedance/deer-flow/pull/5485
 [#5486]: https://github.com/bytedance/deer-flow/pull/5486
+[#5487]: https://github.com/bytedance/deer-flow/pull/5487
 [#5488]: https://github.com/bytedance/deer-flow/pull/5488
+[#5490]: https://github.com/bytedance/deer-flow/pull/5490
 [#5492]: https://github.com/bytedance/deer-flow/pull/5492
+[#5494]: https://github.com/bytedance/deer-flow/pull/5494
 [#5496]: https://github.com/bytedance/deer-flow/pull/5496
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
+[#5506]: https://github.com/bytedance/deer-flow/pull/5506
+[#5509]: https://github.com/bytedance/deer-flow/pull/5509
+[#5515]: https://github.com/bytedance/deer-flow/pull/5515
+[#5517]: https://github.com/bytedance/deer-flow/pull/5517
+[#5682]: https://github.com/bytedance/deer-flow/pull/5682
+[#5761]: https://github.com/bytedance/deer-flow/pull/5761
+[#5769]: https://github.com/bytedance/deer-flow/pull/5769
