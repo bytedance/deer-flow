@@ -1313,6 +1313,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._renew_owned_leases()
             except Exception:
                 logger.exception("Error in sandbox ownership renewal loop")
+            try:
+                self._health_check_owned_sandboxes()
+            except Exception:
+                logger.exception("Error in sandbox health check loop")
+
+    def _health_check_owned_sandboxes(self) -> None:
+        """Evict cached sandboxes whose containers died since last use.
+
+        ``get()``/``get_scoped()`` are intentionally pure in-memory lookups
+        (async tool paths call them directly on the event loop), so a
+        mid-run container crash is otherwise only caught the next time
+        ``acquire``/``reclaim`` runs. Riding the existing renewal thread lets a
+        crash between two tool calls be detected and evicted — via the same
+        ownership-fenced teardown as every other reap path — within one
+        renewal interval instead of persisting for the rest of the run.
+        """
+        if not self._config.get("auto_restart", True):
+            return
+
+        with self._lock:
+            tracked = list(self._sandbox_infos.items()) + [(sandbox_id, info) for sandbox_id, (info, _) in self._warm_pool.items()]
+
+        for sandbox_id, info in tracked:
+            if self._check_tracked_sandbox_alive(sandbox_id, info) is False:
+                self._drop_unhealthy_sandbox(
+                    sandbox_id,
+                    "periodic health check",
+                    expected_info=info,
+                )
 
     def _renew_owned_leases(self) -> None:
         """Renew every container this instance believes it owns.

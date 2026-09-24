@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from test_aio_sandbox_provider import _make_provider_with_active_sandbox
 
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -50,3 +51,47 @@ def test_get_remains_in_memory_lookup():
 
     assert provider.get("sandbox-1") is sandbox
     provider._backend.is_alive.assert_not_called()
+
+
+def test_health_check_evicts_sandbox_that_crashed_between_tool_calls(tmp_path):
+    """A container crash between two tool calls must not keep handing out a dead client.
+
+    ``get()``/``get_scoped()`` stay pure in-memory lookups (see
+    ``test_get_remains_in_memory_lookup`` / ``test_get_uses_in_memory_registry_only``),
+    so the renewal-thread health check is what catches a mid-run crash: it must
+    evict the cached sandbox so the *next* cache lookup misses and the caller
+    falls through to ``acquire()`` for a fresh container.
+    """
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-crashed")
+    provider._thread_sandboxes = {("default", "thread-crashed"): "sandbox-crashed"}
+    info = provider._sandbox_infos["sandbox-crashed"]
+
+    # First tool call: container is healthy.
+    assert provider.get("sandbox-crashed") is sandbox
+
+    # Container crashes mid-run, before the next tool call.
+    provider._backend.is_alive = MagicMock(return_value=False)
+
+    provider._health_check_owned_sandboxes()
+
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once_with(info)
+    assert "sandbox-crashed" not in provider._sandboxes
+    assert "sandbox-crashed" not in provider._sandbox_infos
+    assert ("default", "thread-crashed") not in provider._thread_sandboxes
+
+    # Next tool call's cache lookup must miss instead of returning the dead client.
+    assert provider.get("sandbox-crashed") is None
+
+
+def test_health_check_respects_auto_restart_disabled(tmp_path):
+    """With auto_restart disabled, a crashed container must not be evicted."""
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-crashed-disabled")
+    provider._config = {"auto_restart": False}
+    provider._backend.is_alive = MagicMock(return_value=False)
+
+    provider._health_check_owned_sandboxes()
+
+    provider._backend.is_alive.assert_not_called()
+    provider._backend.destroy.assert_not_called()
+    assert provider.get("sandbox-crashed-disabled") is sandbox
