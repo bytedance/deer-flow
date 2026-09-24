@@ -16,8 +16,8 @@ DEFAULT_MAX_RESULTS = 5
 
 def _coerce_max_results(value: object) -> int:
     """Normalize config/parameter values before passing them to DDGS."""
-    if isinstance(value, float) and not value.is_integer():
-        # int() would silently truncate a YAML value such as 3.5.
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
         count = 0
     else:
         try:
