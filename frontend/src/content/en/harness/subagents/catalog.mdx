@@ -1,0 +1,131 @@
+---
+title: Subagent Catalog
+description: Built-in subagent defaults and availability, the three definition sources and their precedence, Custom Agent delegation scope, and external ACP agents.
+---
+
+import { Callout } from "nextra/components";
+
+# Subagent Catalog
+
+The set of subagents the `task` tool can see is the **catalog**. It is merged from three sources and then filtered by the caller's allowlist. This chapter explains how each source is defined and which one wins on conflict.
+
+## Built-in subagents
+
+| Name              | Tools                                                  | Default max turns | Default timeout | Use for                                                        |
+| ----------------- | ------------------------------------------------------ | ----------------- | --------------- | -------------------------------------------------------------- |
+| `general-purpose` | Inherits every Lead Agent tool                         | 150               | 1800 s          | Multi-step reasoning, web search, file operations, artifacts   |
+| `bash`            | `bash`, `ls`, `read_file`, `write_file`, `str_replace` | 60                | 1800 s          | Scripting, data processing, file transformation, environment setup |
+
+Both use the model `inherit`, meaning the Lead Agent's current model. Both deny `task`, `ask_clarification`, and `present_files`.
+
+`bash` appears in the catalog only when the sandbox allows command execution:
+
+- Not available without a `sandbox` section.
+- Available with any container sandbox (any non-local provider).
+- Under the local sandbox it depends on `sandbox.allow_host_bash`, which defaults to `false`. Delegating to `bash` then returns an explicit failure explaining that the option should only be enabled in a fully trusted local environment.
+
+The `general-purpose` system prompt carries a `tool_restrictions` block stating that `task` is unavailable and that it must never spawn further subagents; when parallelism is needed it should use bash background processes or work sequentially.
+
+## Three definition sources and their precedence
+
+| Source        | Defined in                        | Who changes it                    |
+| ------------- | --------------------------------- | --------------------------------- |
+| Built-in      | Code                              | Nobody; only parameters can be overridden |
+| `config.yaml` | `subagents.custom_agents.<name>`  | Operators, restart required       |
+| Managed       | **Settings → Subagents**          | Administrators, effective at once |
+
+Runtime precedence is **built-in → `config.yaml` → managed**. A managed definition whose name collides with a built-in or `config.yaml` entry stays stored and shows a conflict marker in Settings, but is excluded from the runtime catalog.
+
+On top of that, `subagents.agents.<name>` can override `timeout_seconds`, `max_turns`, `model`, `skills`, and `token_budget` for a subagent from any source. The Settings catalog shows the `timeout_seconds`, `max_turns`, `model`, and `skills` overrides.
+
+<Callout type="warning">
+  The global `subagents.timeout_seconds` and `subagents.max_turns` apply to
+  built-in subagents only. `config.yaml` custom agents and managed subagents
+  have their own defaults (900 seconds, 50 turns); change them through the
+  per-agent `subagents.agents.<name>` override.
+</Callout>
+
+## Defining in config.yaml
+
+```yaml
+subagents:
+  custom_agents:
+    analysis:
+      description: "Data analysis specialist for processing datasets and generating insights"   # required; shown in the Lead Agent's catalog
+      system_prompt: |                                                                          # required
+        You are a data analysis specialist...
+      tools: null            # null inherits every Lead Agent tool; or give an allowlist
+      disallowed_tools:      # default; task is always unavailable, the other two only while listed here
+        - task
+        - ask_clarification
+        - present_files
+      skills: null           # null inherits all enabled skills; [] exposes none
+      model: inherit         # or a configured model name
+      max_turns: 50
+      timeout_seconds: 900
+```
+
+The first line of `description` is rendered into the `subagent_system` block of the Lead Agent's system prompt. It is HTML-escaped first, so angle brackets in a description cannot become tags.
+
+## Managing in Settings
+
+Administrators add reusable workers under **Settings → Subagents**. Each definition has:
+
+| Field                        | Notes                                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `name`                       | Letters, digits, and hyphens only; stored lowercase and used as the `subagent_type`                |
+| `display_name`               | Optional                                                                                           |
+| `description`                | Dispatch description the Lead Agent uses to decide when to delegate                                |
+| `system_prompt`              | The system prompt                                                                                  |
+| `tools` / `disallowed_tools` | Allow and deny lists. `task`, `ask_clarification`, and `present_files` are always merged into the deny list |
+| `skills`                     | Skill allowlist                                                                                    |
+| `model`                      | `inherit` or a configured model name, validated on save                                            |
+| `max_turns`                  | Default 50                                                                                         |
+| `timeout_seconds`            | Default 900                                                                                        |
+| `enabled`                    | Disabled definitions leave the runtime catalog                                                     |
+
+Built-in and `config.yaml` definitions appear in the same catalog as read-only entries.
+
+Storage follows the Custom Agent backend: `agent_storage.backend: file` writes one atomic JSON file per definition under `DEER_FLOW_HOME/managed-subagents/`; `agent_storage.backend: db` stores them in the shared application database for multi-instance deployments. These definitions are deployment-wide, not user-scoped. The API lives at `/api/subagents`: any user can list the catalog (system prompts are shown to administrators only), while create, update, and delete require an administrator. The runtime caches definitions for about one second.
+
+## Custom Agent delegation scope
+
+The default Lead Agent sees every enabled runtime subagent. Each Custom Agent can narrow that with the **Subagent access** option in its agent settings:
+
+| Option                   | Effect                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| All enabled subagents    | No extra restriction                                                                |
+| No subagents             | Delegation stays off even when the request enables Ultra mode                       |
+| Selected subagents       | The prompt lists only the selected names, and `task` and `batch_task` accept only those |
+
+The allowlist is snapshotted into run metadata when a run starts and enforced again by the `task` tool, so a client cannot bypass it by naming a hidden subagent directly. The assembly descriptor extensions see (`effective_policies.subagents`) is filtered by the same allowlist and never leaks the full catalog.
+
+## External ACP agents
+
+Besides built-in and custom subagents, DeerFlow can delegate to external agents that run as separate processes over the **Agent Client Protocol (ACP)**, including third-party CLIs wrapped with an ACP adapter.
+
+```yaml
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code for implementation, refactoring, and debugging
+    model: null
+    # auto_approve_permissions: false   # false denies every permission request from the agent
+    # timeout_seconds: 1800             # same shape as subagents.timeout_seconds
+    # env:
+    #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    description: Codex CLI for repository tasks and code generation
+    model: null
+```
+
+The Lead Agent calls them through the `invoke_acp_agent` tool. ACP agents do not go through the `task` catalog, capacity, or ledger; only their own `timeout_seconds` bounds them.
+
+<Callout type="tip">
+  The plain `claude` and `codex` commands are not ACP-compatible by default.
+  Use the adapter packages above or another ACP-compatible wrapper.
+</Callout>

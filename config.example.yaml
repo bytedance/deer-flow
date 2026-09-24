@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 46
+config_version: 47
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -2261,6 +2261,33 @@ memory:
     #                         = bundled core/prompts/. Supports per-agent subdirectories.
     # patterns_dir: ""            # empty = bundled defaults
     # prompts_dir: ""             # empty = bundled defaults
+
+# ============================================================================
+# Blob Storage Configuration
+# ============================================================================
+# Content-addressed blob store: content is addressed by its sha256, so writes
+# are idempotent, identical bytes dedupe to one object, and reads verify the
+# digest. Mirrors the memory mechanism: a `backend` name matches a
+# storage/backends/<name>/ folder that exposes STORE_CLASS (e.g. local_fs), or
+# takes a dotted import path to a BlobStore subclass. The factory resolves the
+# backend at get_blob_store() time and fails fast on an unresolvable value --
+# blobs are persistent state, so a broken backend name must not silently swap
+# the storage location.
+#
+# Off by default and purely opt-in: no producer is migrated yet, so a config
+# that never sets this key behaves exactly as before. Contract, the two named
+# producers, and the migration order: backend/docs/blob-storage.md.
+blob_storage:
+  enabled: false               # master switch (inert until the producer follow-ups land)
+  backend: local_fs            # folder name under storage/backends/, or a dotted import path
+  # Backend-private config (dict), passed verbatim to the backend; each backend
+  # self-interprets it. local_fs reads `root` -- empty defaults to
+  # {runtime_home}/blobs; point it at a shared volume (NFS / EFS / a
+  # ReadWriteMany PVC) for multi-instance deployments:
+  #
+  # backend_config:
+  #   root: /mnt/shared/deerflow-blobs
+  backend_config: {}
 
 # ============================================================================
 # Custom Agent Management API

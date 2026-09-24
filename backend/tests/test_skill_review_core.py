@@ -81,6 +81,20 @@ def test_review_core_reports_non_string_frontmatter_key_as_unknown_field(tmp_pat
     assert "unexpected-field" in finding["message"]
 
 
+def test_review_core_reports_non_boolean_required_secret_optional(tmp_path):
+    _write(
+        tmp_path / "SKILL.md",
+        '---\nname: demo-skill\ndescription: Demo skill. Invoke when testing review.\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: "true"\n---\n\n# Demo\n\nFollow the steps and stop.\n',
+    )
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    finding = next(f for f in facts["findings"] if f["rule_id"] == "structure.invalid-required-secrets-optional")
+    assert finding["severity"] == "error"
+    assert finding["message"] == "required-secrets[].optional must be a boolean."
+    assert finding["remediation"] == "Use true or false for each required-secrets entry's optional field."
+
+
 def test_resource_graph_reports_unreferenced_resource(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(tmp_path / "references" / "unused.md", "# Unused\n")

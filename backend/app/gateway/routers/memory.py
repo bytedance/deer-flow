@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
@@ -50,6 +51,10 @@ class UserContext(BaseModel):
     workContext: ContextSection = Field(default_factory=ContextSection)
     personalContext: ContextSection = Field(default_factory=ContextSection)
     topOfMind: ContextSection = Field(default_factory=ContextSection)
+    cognitiveStyle: ContextSection = Field(
+        default_factory=ContextSection,
+        description="Stable thinking and collaboration habits (reasoning style, depth, feedback patterns)",
+    )
 
 
 class HistoryContext(BaseModel):
@@ -208,7 +213,8 @@ class MemoryStatusResponse(BaseModel):
     summary="Get Memory Data",
     description="Retrieve the current global memory data including user context, history, and facts.",
 )
-async def get_memory(http_request: Request) -> MemoryResponse:
+@require_permission("memory", "read")
+async def get_memory(request: Request) -> MemoryResponse:
     """Get the current global memory data.
 
     Returns:
@@ -243,7 +249,7 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         ```
     """
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(request), "get memory")
     return MemoryResponse(**memory_data)
 
 
@@ -254,7 +260,8 @@ async def get_memory(http_request: Request) -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
-async def reload_memory(http_request: Request) -> MemoryResponse:
+@require_permission("memory", "read")
+async def reload_memory(request: Request) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -263,7 +270,7 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    user_id = _resolve_memory_user_id(http_request)
+    user_id = _resolve_memory_user_id(request)
     manager = await asyncio.to_thread(get_memory_manager)
     try:
         memory_data = await asyncio.to_thread(manager.reload_memory, user_id=user_id)
@@ -287,11 +294,12 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     summary="Clear All Memory Data",
     description="Delete all saved memory data and reset the memory structure to an empty state.",
 )
-async def clear_memory(http_request: Request) -> MemoryResponse:
+@require_permission("memory", "write")
+async def clear_memory(request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.clear_memory, user_id=_resolve_memory_user_id(http_request))
+        memory_data = await asyncio.to_thread(manager.clear_memory, user_id=_resolve_memory_user_id(request))
     except NotImplementedError:
         raise _unsupported_501(manager, "clear memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
@@ -309,16 +317,17 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
     summary="Create Memory Fact",
     description="Create a single saved memory fact manually.",
 )
-async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
+@require_permission("memory", "write")
+async def create_memory_fact_endpoint(body: FactCreateRequest, request: Request) -> MemoryResponse:
     """Create a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
         memory_data, fact_id = await asyncio.to_thread(
             manager.create_fact,
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=_resolve_memory_user_id(http_request),
+            content=body.content,
+            category=body.category,
+            confidence=body.confidence,
+            user_id=_resolve_memory_user_id(request),
         )
     except NotImplementedError:
         raise _unsupported_501(manager, "create fact") from None
@@ -342,11 +351,12 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
     summary="Delete Memory Fact",
     description="Delete a single saved memory fact by its fact id.",
 )
-async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
+@require_permission("memory", "write")
+async def delete_memory_fact_endpoint(fact_id: str, request: Request) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.delete_fact, fact_id, user_id=_resolve_memory_user_id(http_request))
+        memory_data = await asyncio.to_thread(manager.delete_fact, fact_id, user_id=_resolve_memory_user_id(request))
     except NotImplementedError:
         raise _unsupported_501(manager, "delete fact") from None
     except KeyError as exc:
@@ -366,17 +376,18 @@ async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> Me
     summary="Patch Memory Fact",
     description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
+@require_permission("memory", "write")
+async def update_memory_fact_endpoint(fact_id: str, body: FactPatchRequest, request: Request) -> MemoryResponse:
     """Partially update a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
         memory_data = await asyncio.to_thread(
             manager.update_fact,
             fact_id=fact_id,
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=_resolve_memory_user_id(http_request),
+            content=body.content,
+            category=body.category,
+            confidence=body.confidence,
+            user_id=_resolve_memory_user_id(request),
         )
     except NotImplementedError:
         raise _unsupported_501(manager, "update fact") from None
@@ -399,10 +410,11 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
     summary="Export Memory Data",
     description="Export the current global memory data as JSON for backup or transfer.",
 )
-async def export_memory(http_request: Request) -> MemoryResponse:
+@require_permission("memory", "read")
+async def export_memory(request: Request) -> MemoryResponse:
     """Export the current memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(request), "export memory")
     return MemoryResponse(**memory_data)
 
 
@@ -413,19 +425,22 @@ async def export_memory(http_request: Request) -> MemoryResponse:
     summary="Import Memory Data",
     description="Import and overwrite the current global memory data from a JSON payload.",
 )
-async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
+@require_permission("memory", "write")
+async def import_memory(body: MemoryResponse, request: Request) -> MemoryResponse:
     """Import and persist memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
         memory_data = await asyncio.to_thread(
             manager.import_memory,
-            request.model_dump(exclude_none=True),
-            user_id=_resolve_memory_user_id(http_request),
+            body.model_dump(exclude_none=True),
+            user_id=_resolve_memory_user_id(request),
         )
     except NotImplementedError:
         raise _unsupported_501(manager, "import memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
         raise _map_memory_manager_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid memory import: facts must be a list of objects with non-empty content.") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -438,7 +453,8 @@ async def import_memory(request: MemoryResponse, http_request: Request) -> Memor
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+@require_permission("memory", "read")
+async def get_memory_config_endpoint(request: Request) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -488,7 +504,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
+@require_permission("memory", "read")
+async def get_memory_status(request: Request) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
@@ -496,7 +513,7 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
     """
     config = get_memory_config()
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory status")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(request), "get memory status")
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
