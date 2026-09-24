@@ -19,6 +19,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.uploads.companion_map import forget_companion_mappings, record_companion_mapping
 from deerflow.uploads.manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
@@ -58,6 +59,7 @@ __all__ = [
     "ensure_uploads_dir",
     "get_sandbox_provider",
     "normalize_filename",
+    "record_companion_mapping",
     "router",
     "try_acquire_sandbox_for_request",
     "upload_artifact_url",
@@ -180,7 +182,17 @@ def _get_upload_limits(app_config: AppConfig) -> UploadLimits:
     )
 
 
-def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
+def _cleanup_uploaded_paths(
+    paths: list[os.PathLike[str] | str],
+    companion_pairs: dict[Path, list[tuple[str, str]]] | None = None,
+) -> None:
+    """Delete paths written by a rejected request, then roll back their mappings.
+
+    *companion_pairs* maps an uploads directory to the ``(original, companion)``
+    pairs this request recorded there. Rollback is scoped to those exact pairs
+    so a pre-existing entry that happens to share a companion name survives —
+    deleting by name alone would drop an unrelated historical mapping.
+    """
     for path in reversed(paths):
         try:
             os.unlink(path)
@@ -188,6 +200,14 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             pass
         except Exception:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+
+    for uploads_dir, pairs in (companion_pairs or {}).items():
+        if not pairs:
+            continue
+        try:
+            forget_companion_mappings(uploads_dir, pairs)
+        except Exception:
+            logger.warning("Failed to roll back companion mappings in %s", uploads_dir, exc_info=True)
 
 
 def _pure_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
@@ -357,7 +377,7 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
 
 def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename)
+    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
 
 
 async def _stream_upload_file(file: UploadFile) -> AsyncIterator[bytes]:

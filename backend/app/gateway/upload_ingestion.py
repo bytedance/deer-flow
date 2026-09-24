@@ -2,9 +2,9 @@
 
 Owns the whole pipeline for files landing in a thread's uploads directory:
 staging, ``claim_unique_filename``, size checks, optional conversion under
-``uploads.auto_convert_documents``, sandbox-readable permissions, and
-non-mounted-provider synchronization of original + derived files through the
-authorized sandbox request lease. A denied ``sandbox:execute`` retains the
+``uploads.auto_convert_documents``, advisory companion-sidecar recording,
+sandbox-readable permissions, and non-mounted-provider synchronization of
+original + derived files through the authorized sandbox request lease. A denied ``sandbox:execute`` retains the
 host upload without allocating a sandbox (ordinary uploads behavior);
 acquisition, sync and conversion failures follow the ordinary upload error
 and cleanup behavior.
@@ -154,6 +154,10 @@ class ThreadUploadIngestionService:
         self._auto_convert = False
         self._seen_filenames: set[str] = set()
         self._written_paths: list[Path] = []
+        # (original, companion) pairs this session recorded, keyed by uploads dir.
+        # Populated only after record_companion_mapping succeeds, so a rollback
+        # removes exactly the mappings this session created.
+        self._recorded_companions: dict[Path, list[tuple[str, str]]] = {}
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
@@ -381,6 +385,22 @@ class ThreadUploadIngestionService:
                 file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
                 file_info["markdown_virtual_path"] = md_virtual_path
                 file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
+                try:
+                    # Late-bind through the uploads module so router tests that
+                    # patch ``uploads.record_companion_mapping`` / ``run_file_io``
+                    # still cover both ordinary upload and shelf-attach.
+                    await uploads.run_file_io(uploads.record_companion_mapping, self._uploads_dir, safe_filename, md_path.name)
+                except (OSError, ValueError):
+                    # Sidecar is advisory: the companion is already on disk and
+                    # stem fallback still resolves it. Do not 500 / roll back
+                    # files this session already wrote.
+                    logger.warning(
+                        "Failed to record companion mapping for %s",
+                        safe_filename,
+                        exc_info=True,
+                    )
+                else:
+                    self._recorded_companions.setdefault(self._uploads_dir, []).append((safe_filename, md_path.name))
         return file_info
 
     async def finalize(self) -> None:
@@ -406,11 +426,12 @@ class ThreadUploadIngestionService:
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
-        if not self._written_paths:
+        if not self._written_paths and not self._recorded_companions:
             return
         uploads = _uploads()
-        await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths, self._recorded_companions)
         self._written_paths = []
+        self._recorded_companions = {}
 
     async def aclose(self) -> None:
         """Release the sandbox request lease (failures are logged, never raised)."""

@@ -1022,6 +1022,8 @@ export interface FileInMessage {
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
   status?: "uploading" | "uploaded";
+  /** Basename of the converted UTF-8 companion, when auto-convert produced one. */
+  markdown_file?: string;
 }
 
 /**

@@ -110,7 +110,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件会保存在同一目录下。通常名为原 stem + `.md`；若该名已被占用（同一次请求里的 `a.docx` + `a.pdf`，或目录里已有更早的 `notes.md` / `a.md`），则会写成 `a_1.md` 这样的唯一名，并通过上传响应的 `markdown_file` 返回。companion 名用 `O_CREAT|O_EXCL|O_NOFOLLOW` 原子占位，所以跨请求也不会覆盖已有文件。转换通过同目录临时文件 + `os.replace` 写出，不会跟随占位被换成的 symlink，因此不能写出 uploads 目录外。转换返回失败、抛错或中途取消时会释放这个空占位，避免留下 0 字节 `.md` 永久占名。Gateway / `DeerFlowClient` 还会把「原文件 → companion」写进同目录的隐藏 sidecar（`.deer-flow-companions.json`），这样 `list_uploaded_files` 在压缩历史之后仍能把 `a.pdf` 指到 `a_1.md`，而不会误用旁边的 `a.md`。sidecar 写入是建议性的：companion 已经落盘后，映射失败只记 warning，不会让整次上传 500，也不会回滚本请求已写入的文件。sidecar 锁（`.deer-flow-companions.lock`）放在 `user-data` 旁边的 thread 目录里（沙箱挂载 / `/mnt/user-data` 都碰不到），用 no-follow 打开并校验为独占普通文件；flock 有界非阻塞，拿不到就跳过这次映射写入，避免沙箱或另一进程握锁把 Gateway 文件 IO 线程占死。sidecar 读取同样 no-follow 且非阻塞（避免沙箱把映射换成 FIFO 把文件 IO 线程占死），并限制字节数和条目数，避免沙箱把映射文件换成超大 JSON 撑爆 Gateway。写出 sidecar 前按同一上限（256KiB / 2048 条）从最旧条目裁剪并 unpin，避免写出超限后下次 load 把整表当成空映射。被裁掉的原文件名会写成墓碑（`evicted`）；墓碑名单自己也放不下时再写持久化的 `no_legacy_fallback` 开关。查找和删除都认这些证据，所以 `a.pdf → a_1.md` 被挤掉后不会再被当成升级前的老上传去猜/删旁边的 `a.md`。sidecar 同时记录 companion 转换时的指纹（size / mtime / inode）和私有 hard-link 身份钉：原地编辑（`echo >>`、`write_file`、`str_replace`）保持 inode，映射仍然有效；Linux 在 `unlink` 后会立刻复用 inode 号，所以单靠 `(st_dev, st_ino)` 不能区分「原地编辑」和「删后同名重建」——身份钉把转换时的 inode 钉在沙箱看不到的目录里（生产布局在 `user-data` 旁边的 `.deer-flow-companion-ids/`），替换文件即使复用了号码也不会被当成 companion，也不会随原文件被 `delete_file_safe` 删掉。没有身份钉的旧版 size/mtime 行仍把原地编辑视为失效。从最新一轮分叉会话时只复制 `user-data`，不会带走旁边的身份钉；复制完成后按源线程里仍然有效的映射，给新会话的 companion 重新打钉并改写 sidecar（只把钉文件拷过去对不上新 inode）。重新打钉失败时分叉仍是 200，文件保留，`workspace_clone_mode` 为 `current_thread_best_effort_companion_rebind_failed`，与整次工作区拷贝失败区分开。重绑定只换新会话的钉和 inode，保留转换时的 size/mtime，所以原地编辑过的 companion 在分叉里重新上传时不会被当成未改过的转换稿删掉。源会话已经失效的行、以及拷贝后源会话又用同名文件重新转换的行，在新会话写成 `evicted` 墓碑（阻止同 stem 回退），不会只看文件名就把分叉里的笔记钉成新一代 companion。分叉复制用 no-follow、nonblocking 打开源文件，记下当时打开的 inode，而不是复制后再按路径比较内容：独立还原的 Markdown 即使和新转换稿字节相同，也不会被当成配套文件；源路径在校验后被换成 FIFO 也不会卡住文件 IO 线程。无法确认身份时写成墓碑并保留文件。重绑定只认 ``uploads/`` 下的复制身份，user-data 根目录同名文件不能盖掉上传附件的 inode。分叉复制通过 fd 还原源文件和目录权限位（可执行脚本、沙箱可写的上传文件不会被收成 0644，0777 目录不会被 umask 收成 0755），循环写完当前块才读下一块，写入失败会丢掉残缺目标文件而不是登记为复制成功。源文件的 size/mtime/ctime 在读取期间若变化，则不登记可自动清理的 companion 身份，避免「新内容 + 旧 mtime」被当成未改过的转换稿。没有 pin 的旧映射在分叉重绑定时仍走 size/mtime 有效性校验，不能只凭 sidecar 里的 inode 重新激活。复制身份优先用临时 hard-link 保活到重绑定结束；hard-link 不可用时才短暂占用源 fd，且按进程 fd 上限封顶，避免大批量复制把 fd 表撑爆。无法保活时仍完成复制，但不登记可重绑定的身份，对应映射在分叉里写成墓碑。避免源文件被删后 Linux 复用 inode 号误匹配。只读目录会先按可写权限拷完子项，再恢复源权限，避免 0555 目录把内部文件漏掉。重新上传同一个原文件时，若旧 companion 仍是未改过的转换产物则删除它；若用户已原地改过或条目已失效，则保留该文件。删除 mapped companion 时先把该目录项原子 rename 到隔离路径，再核对移走后的 inode 与身份钉；对不上则恢复，避免沙箱在原文件 unlink 之后占用同名的文件被删掉。删除接口在原文件（以及可能的 companion）已经 unlink 之后，sidecar 元数据清理失败只记 warning，不再把已成功的删除报成 500。其中复用重命名 companion 名字（如 `a_1.md`）的新文件会按普通用户文件展示，而与原文件同 stem 的 `.md`（如 `report.pdf` 旁的 `report.md`）仍会被同 stem 启发式规则隐藏（已知限制）。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -128,9 +128,13 @@ The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
+  Converted text: /mnt/user-data/uploads/document.md
+  Document outline (line numbers refer to the converted text; use `read_file` on that path):
+    L1: Introduction
 
 To work with these files:
-- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- If a file lists Converted text, call `read_file` on that path. `read_file` cannot open binary originals such as .pdf or .xlsx.
+- Otherwise read from the listed Path first — use the outline line numbers and `read_file` to locate relevant sections.
 - Use `grep` to search for keywords when you are not sure which section to look at.
 - Use `glob` to find files by name pattern.
 </current_uploads>
@@ -138,18 +142,20 @@ To work with these files:
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
 `list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
-`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
-`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。该工具仍会隐藏作为转换产物的
+companion `.md` 行和 sidecar 本身，但会在原文件条目上返回 `markdown_file` /
+`markdown_path`（优先读 sidecar，没有映射时才回退到同 stem 的 `.md`）。
+`list_uploaded_files` 和 `UploadsMiddleware` 每个目录每次调用只读一次 sidecar，
+已解析的 companion 路径直接交给 outline，不再按文件重复打开 JSON。
+如果已知文件名，也可直接使用 `read_file` 或 `grep`
+访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
 
 ```python
-# 读取原始 PDF（如果支持）
-read_file(path="/mnt/user-data/uploads/document.pdf")
-
-# 读取转换后的 Markdown（推荐）
+# 二进制原件无法用 read_file 打开；使用 Converted text 路径
 read_file(path="/mnt/user-data/uploads/document.md")
 ```
 
@@ -222,12 +228,15 @@ print(response.json())
 ```
 backend/.deer-flow/threads/
 └── {thread_id}/
+    ├── .deer-flow-companions.lock   # 在沙箱挂载之外：sidecar 写锁
+    ├── .deer-flow-companion-ids/    # 在沙箱挂载之外：companion inode 身份钉
     └── user-data/
         └── uploads/
             ├── document.pdf          # 原始文件
             ├── document.md           # 转换后的 Markdown
             ├── presentation.pptx
             ├── presentation.md
+            ├── .deer-flow-companions.json  # 隐藏：原文件 → companion 映射
             └── ...
 ```
 
@@ -236,7 +245,7 @@ backend/.deer-flow/threads/
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 删除只作用于普通文件：上传目录中的符号链接不会被跟随，删除请求按文件不存在（404）处理
-- 删除文档不会一并删除其转换生成的 Markdown：该 `.md` 的归属无法从文件名确定（同主干名的另一个文档或用户自己上传的文件都可能占用该名称），因此不再依据推测删除。它仍会出现在上传列表中，可单独删除（见 issue #5672）
+- 删除文档时，只有 sidecar 能证明归属的转换 Markdown 会一并删除；无法证明归属的 `.md`（同主干名的另一文档或用户文件）会保留，可单独删除（见 issue #5672）
 - 上传（HTTP 与嵌入式 `DeerFlowClient`）不会写穿符号链接：目标名已是符号链接的文件会被跳过并列入 `skipped_files`，转换生成的 Markdown 也不会写入同名符号链接
 - 转换读取的是本次上传写入的字节，而非落盘后的文件名：HTTP 上传在 uploads 之外的私有副本上转换，嵌入式客户端转换调用方提供的源文件，因此沙箱替换该文件名无法让宿主文件内容被转换进 uploads
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问

@@ -3878,6 +3878,312 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert source_user_data.exists()
 
 
+def test_branch_thread_rebinds_converted_markdown_identities(tmp_path) -> None:
+    """Latest-turn branch copy must rebuild companion pins against copied files.
+
+    Pins live beside ``user-data``, so copying only that tree leaves the sidecar
+    ``id`` pointing at a missing pin. ``list_uploaded_files`` then drops
+    converted-text paths and lists collision-renamed companions as standalone
+    rows even though the Markdown copies succeeded.
+    """
+    from deerflow.tools.builtins.list_uploaded_files_tool import _list_uploaded_files_impl
+    from deerflow.uploads.companion_map import (
+        companion_entry_matches,
+        companion_identity_path,
+        load_companion_entries,
+        record_companion_mapping,
+    )
+
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-with-companions"
+    user_id = "branch-user"
+
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_uploads / "report.pdf").write_bytes(b"%PDF")
+    (source_uploads / "report.md").write_text("# Intro\n\nBody.\n", encoding="utf-8")
+    record_companion_mapping(source_uploads, "report.pdf", "report.md")
+    (source_uploads / "a.docx").write_bytes(b"docx")
+    (source_uploads / "a.pdf").write_bytes(b"%PDF")
+    (source_uploads / "a.md").write_text("# From DOCX\n", encoding="utf-8")
+    (source_uploads / "a_1.md").write_text("# From PDF\n", encoding="utf-8")
+    record_companion_mapping(source_uploads, "a.docx", "a.md")
+    record_companion_mapping(source_uploads, "a.pdf", "a_1.md")
+    source_report = load_companion_entries(source_uploads)["report.pdf"]
+
+    human = HumanMessage(id="human-file", content="Make a file")
+    ai = AIMessage(id="ai-file", content="Done")
+
+    async def _seed(parent_config: dict) -> None:
+        after_human = await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human], step=1, parent_config=parent_config)
+        await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human, ai], step=2, parent_config=after_human)
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+        initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
+        assert initial is not None
+        asyncio.run(_seed(initial.config))
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workspace_clone_mode"] == "current_thread_best_effort"
+
+    dest_uploads = paths.sandbox_uploads_dir(body["thread_id"], user_id=user_id)
+    runtime = SimpleNamespace(
+        context={"thread_id": body["thread_id"], "user_id": user_id},
+        state={"uploaded_files": []},
+        config=None,
+        server_info=None,
+    )
+    listed = _list_uploaded_files_impl(include_outline=True, runtime=runtime, _paths=paths)
+    by_name = {row["filename"]: row for row in listed["files"]}
+    assert set(by_name) == {"report.pdf", "a.docx", "a.pdf"}
+    assert by_name["report.pdf"]["markdown_file"] == "report.md"
+    assert by_name["report.pdf"]["markdown_path"] == "/mnt/user-data/uploads/report.md"
+    assert by_name["report.pdf"]["outline"][0]["title"] == "Intro"
+    assert by_name["a.pdf"]["markdown_file"] == "a_1.md"
+    assert "a_1.md" not in by_name
+
+    dest_report = load_companion_entries(dest_uploads)["report.pdf"]
+    assert dest_report.id
+    assert dest_report.id != source_report.id
+    assert companion_entry_matches(dest_uploads, dest_report)
+    dest_pin = companion_identity_path(dest_uploads, dest_report.id)
+    assert dest_pin.stat().st_ino == (dest_uploads / "report.md").stat().st_ino
+    assert dest_pin.stat().st_ino != (source_uploads / "report.md").stat().st_ino
+
+
+def test_branch_thread_reports_companion_rebind_failure(tmp_path) -> None:
+    """A pin rebuild error must not 500 after files are copied.
+
+    The branch stays usable; ``workspace_clone_mode`` distinguishes this from a
+    full workspace copy failure, and the dest sidecar is left unrebound.
+    """
+    from deerflow.tools.builtins.list_uploaded_files_tool import _list_uploaded_files_impl
+    from deerflow.uploads.companion_map import companion_entry_matches, load_companion_entries, record_companion_mapping
+
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-rebind-fail"
+    user_id = "branch-user"
+
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_uploads / "report.pdf").write_bytes(b"%PDF")
+    (source_uploads / "report.md").write_text("# Intro\n", encoding="utf-8")
+    (source_uploads / "a.pdf").write_bytes(b"%PDF")
+    (source_uploads / "a_1.md").write_text("# From PDF\n", encoding="utf-8")
+    record_companion_mapping(source_uploads, "report.pdf", "report.md")
+    record_companion_mapping(source_uploads, "a.pdf", "a_1.md")
+    source_report = load_companion_entries(source_uploads)["report.pdf"]
+
+    human = HumanMessage(id="human-file", content="Make a file")
+    ai = AIMessage(id="ai-file", content="Done")
+
+    async def _seed(parent_config: dict) -> None:
+        after_human = await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human], step=1, parent_config=parent_config)
+        await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human, ai], step=2, parent_config=after_human)
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        patch("app.gateway.routers.threads.rebind_cloned_companion_identities", side_effect=OSError("pin failed")),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+        initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
+        assert initial is not None
+        asyncio.run(_seed(initial.config))
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workspace_clone_mode"] == "current_thread_best_effort_companion_rebind_failed"
+
+    dest_uploads = paths.sandbox_uploads_dir(body["thread_id"], user_id=user_id)
+    assert (dest_uploads / "report.pdf").is_file()
+    assert (dest_uploads / "report.md").is_file()
+    dest_report = load_companion_entries(dest_uploads)["report.pdf"]
+    assert dest_report.id == source_report.id
+    assert not companion_entry_matches(dest_uploads, dest_report)
+
+    runtime = SimpleNamespace(
+        context={"thread_id": body["thread_id"], "user_id": user_id},
+        state={"uploaded_files": []},
+        config=None,
+        server_info=None,
+    )
+    listed = _list_uploaded_files_impl(include_outline=True, runtime=runtime, _paths=paths)
+    by_name = {row["filename"]: row for row in listed["files"]}
+    assert "markdown_file" not in by_name["report.pdf"]
+    assert "a_1.md" in by_name
+
+
+def test_copy_branch_tombstones_when_source_rerecords_during_copytree(tmp_path) -> None:
+    """A same-name re-upload on the source after copy must not pin dest notes.
+
+    Upload/delete do not take the source branch reservation, so this window is
+    real. Pause after copy, re-record on the source, then resume rebind.
+    """
+    import threading
+
+    from app.gateway.routers.threads import _copy_branch_user_data_sync
+    from deerflow.uploads.companion_map import (
+        copy_user_data_tree,
+        load_companion_entries,
+        load_companion_state,
+        lookup_companion_mapping,
+        record_companion_mapping,
+    )
+    from deerflow.uploads.manager import delete_file_safe
+
+    paths = Paths(tmp_path)
+    source_thread_id = "source-rerecord-race"
+    dest_thread_id = "dest-rerecord-race"
+    user_id = "branch-user"
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_uploads / "report.pdf").write_bytes(b"%PDF")
+    (source_uploads / "report.md").write_text("# convert\n", encoding="utf-8")
+    record_companion_mapping(source_uploads, "report.pdf", "report.md")
+    copied_id = load_companion_entries(source_uploads)["report.pdf"].id
+    (source_uploads / "report.md").unlink()
+    (source_uploads / "report.md").write_text("# independent notes\n", encoding="utf-8")
+
+    copied = threading.Event()
+    resume = threading.Event()
+    modes: list[str] = []
+
+    def _copy_then_pause(src, dst, ignore=None):
+        result = copy_user_data_tree(src, dst, ignore=ignore)
+        copied.set()
+        assert resume.wait(timeout=5), "timed out waiting to resume after source re-record"
+        return result
+
+    with patch("app.gateway.routers.threads.copy_user_data_tree", _copy_then_pause):
+        worker = threading.Thread(
+            target=lambda: modes.append(_copy_branch_user_data_sync(paths, source_thread_id, dest_thread_id, user_id=user_id)),
+            daemon=True,
+        )
+        worker.start()
+        assert copied.wait(timeout=5), "copy did not run"
+        (source_uploads / "report.md").unlink()
+        (source_uploads / "report.md").write_text("# new convert\n", encoding="utf-8")
+        record_companion_mapping(source_uploads, "report.pdf", "report.md")
+        new_id = load_companion_entries(source_uploads)["report.pdf"].id
+        resume.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    if copied_id is None and new_id is None:
+        pytest.skip("identity pins unavailable; generation tokens cannot differ")
+    assert new_id != copied_id
+    assert modes == ["current_thread_best_effort"]
+
+    dest_uploads = paths.sandbox_uploads_dir(dest_thread_id, user_id=user_id)
+    assert lookup_companion_mapping(dest_uploads, "report.pdf") is None
+    assert "report.pdf" in load_companion_state(dest_uploads).evicted
+    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == "# independent notes\n"
+    delete_file_safe(dest_uploads, "report.pdf", convertible_extensions={".pdf"})
+    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == "# independent notes\n"
+
+
+def test_copy_branch_tombstones_when_sidecar_copied_after_source_rerecord(tmp_path) -> None:
+    """Copy can copy notes first and the sidecar after a source re-record.
+
+    Sidecar identity and even matching bytes then look valid, but dest markdown
+    is still the independent restore. Pause after copying everything except the
+    sidecar, re-record the same text on the source, then copy the new sidecar.
+    """
+    import threading
+    from pathlib import Path
+
+    from app.gateway.routers.threads import _copy_branch_user_data_sync
+    from deerflow.uploads.companion_map import (
+        COMPANION_MAP_FILENAME,
+        _copy_regular_file_nofollow,
+        copy_user_data_tree,
+        load_companion_state,
+        lookup_companion_mapping,
+        record_companion_mapping,
+    )
+    from deerflow.uploads.manager import delete_file_safe
+
+    same_text = "# same bytes\n"
+    paths = Paths(tmp_path)
+    source_thread_id = "source-sidecar-late"
+    dest_thread_id = "dest-sidecar-late"
+    user_id = "branch-user"
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_uploads / "report.pdf").write_bytes(b"%PDF")
+    (source_uploads / "report.md").write_text("# convert\n", encoding="utf-8")
+    record_companion_mapping(source_uploads, "report.pdf", "report.md")
+    (source_uploads / "report.md").unlink()
+    (source_uploads / "report.md").write_text(same_text, encoding="utf-8")
+
+    copied = threading.Event()
+    resume = threading.Event()
+    modes: list[str] = []
+
+    def _copy_markdown_before_sidecar(src, dst, ignore=None):
+        orig_ignore = ignore
+
+        def ignore_sidecar(directory, names):
+            ignored = set(orig_ignore(directory, names)) if orig_ignore else set()
+            if COMPANION_MAP_FILENAME in names:
+                ignored.add(COMPANION_MAP_FILENAME)
+            return ignored
+
+        result = copy_user_data_tree(src, dst, ignore=ignore_sidecar)
+        copied.set()
+        assert resume.wait(timeout=5), "timed out waiting to resume after source re-record"
+        src_sidecar = Path(src) / "uploads" / COMPANION_MAP_FILENAME
+        dst_sidecar = Path(dst) / "uploads" / COMPANION_MAP_FILENAME
+        if src_sidecar.is_file() and dst_sidecar.parent.is_dir():
+            _copy_regular_file_nofollow(src_sidecar, dst_sidecar)
+        return result
+
+    with patch("app.gateway.routers.threads.copy_user_data_tree", _copy_markdown_before_sidecar):
+        worker = threading.Thread(
+            target=lambda: modes.append(_copy_branch_user_data_sync(paths, source_thread_id, dest_thread_id, user_id=user_id)),
+            daemon=True,
+        )
+        worker.start()
+        assert copied.wait(timeout=5), "copy did not run"
+        (source_uploads / "report.md").unlink()
+        (source_uploads / "report.md").write_text(same_text, encoding="utf-8")
+        record_companion_mapping(source_uploads, "report.pdf", "report.md")
+        resume.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    assert modes == ["current_thread_best_effort"]
+
+    dest_uploads = paths.sandbox_uploads_dir(dest_thread_id, user_id=user_id)
+    assert lookup_companion_mapping(dest_uploads, "report.pdf") is None
+    assert "report.pdf" in load_companion_state(dest_uploads).evicted
+    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == same_text
+    delete_file_safe(dest_uploads, "report.pdf", convertible_extensions={".pdf"})
+    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == same_text
+
+
 def test_branch_thread_from_historical_turn_skips_workspace_clone(tmp_path) -> None:
     """Branching from a non-latest turn must not clone the current workspace.
 
