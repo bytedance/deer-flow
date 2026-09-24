@@ -439,6 +439,13 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         # Let ``close`` reach the detached-write drain, then interrupt it there.
         await asyncio.sleep(0.02)
         close_task.cancel()
+        await asyncio.sleep(0)  # deliver the cancellation into the settled drain
+        # The settled drain owns the detached write: ``close`` keeps waiting for it
+        # instead of abandoning it, and re-raises only after that write settled.
+        assert not close_task.done()
+        assert len(journal._detached_write_tasks) == 1
+        feed_before = journal.feed_generation
+        store.release.set()
         with pytest.raises(asyncio.CancelledError):
             await close_task
 
@@ -452,11 +459,7 @@ async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypat
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
         assert progress_task in journal_module._cancelling_progress_tasks
 
-        # The ambiguous durable write stays supervised and its outcome is observed.
-        assert len(journal._detached_write_tasks) == 1
-        feed_before = journal.feed_generation
-        store.release.set()
-        await asyncio.gather(*tuple(journal._detached_write_tasks), return_exceptions=True)
+        # The ambiguous durable write was supervised to its outcome before detach.
         assert journal._detached_write_tasks == {}
         assert journal.feed_generation == feed_before + 1
     finally:
@@ -1250,6 +1253,213 @@ class TestBufferFlush:
             detached = tuple(getattr(journal, "_detached_write_tasks", ()))
             if detached:
                 await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_keeps_drain_owned_when_caller_cancelled_while_blocked(self, monkeypatch):
+        """The settled drain keeps running for a detached predecessor after cancellation.
+
+        Reproduces the reviewer's schedule: a bounded ``flush()`` left write A
+        detached, ``flush_until_settled()`` is blocked joining that drain, and
+        the public caller is cancelled. The drain owns A, so the caller must
+        still be pending until A settles, and must then re-raise the received
+        cancellation without replaying A.
+        """
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+
+        settled_wait_entered = asyncio.Event()
+        real_asyncio = journal_module.asyncio
+
+        class WaitSpy:
+            """Journal-local ``asyncio`` proxy that signals every task-set wait.
+
+            The event is set from inside ``wait`` before delegating, so it means
+            "the journal is suspending in a real wait right now": the awaiting
+            task keeps running into the real ``asyncio.wait`` and suspends there
+            before this test resumes. Cancelling the caller afterwards therefore
+            lands in that wait instead of the drain's pre-wait cancellation
+            checkpoint, which would swallow it.
+            """
+
+            def __getattr__(self, name):
+                return getattr(real_asyncio, name)
+
+            async def wait(self, *args, **kwargs):
+                settled_wait_entered.set()
+                return await real_asyncio.wait(*args, **kwargs)
+
+        monkeypatch.setattr(journal_module, "asyncio", WaitSpy())
+
+        settle_task = asyncio.create_task(journal.flush_until_settled())
+        try:
+            await store.started.wait()
+            assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+            assert len(journal._detached_write_tasks) == 1
+
+            # The settled drain reached the predecessor wait and is blocked on A,
+            # so the public caller is waiting on that owned drain, not idling.
+            await asyncio.wait_for(settled_wait_entered.wait(), timeout=0.5)
+            assert not settle_task.done()
+
+            settle_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into the join
+            assert not settle_task.done()
+
+            store.finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(settle_task, timeout=0.5)
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            if not settle_task.done():
+                settle_task.cancel()
+            await asyncio.gather(settle_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        assert store.calls == 1
+        assert journal._detached_write_tasks == {}
+        assert journal._buffer == []
+        assert journal.feed_generation == 1
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["first"]
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_propagates_fresh_cancellation_with_empty_journal(self):
+        """A cancellation requested before entry is observed even with nothing to drain."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+
+        async def settle_after_cancel():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await journal.flush_until_settled()
+
+        await asyncio.wait_for(asyncio.create_task(settle_after_cancel()), timeout=0.5)
+
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert await store.list_events("t1", "r1") == []
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_ignores_handled_cancellation_with_empty_journal(self):
+        """A cancellation already handled earlier is not re-reported as new."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+
+        async def settle_after_handled_cancel():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+            return await journal.flush_until_settled()
+
+        settle_task = asyncio.create_task(settle_after_handled_cancel())
+        assert (await asyncio.wait_for(settle_task, timeout=0.5)) is True
+
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert await store.list_events("t1", "r1") == []
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_reports_store_cancelled_write_as_failure(self):
+        """A store cancelling its own write is a definite failure, not caller cancellation."""
+
+        class StoreCancellingWrite:
+            def __init__(self):
+                self.attempts = 0
+
+            async def put_batch(self, batch):
+                self.attempts += 1
+                raise asyncio.CancelledError
+
+        store = StoreCancellingWrite()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+
+        with pytest.raises(BaseException) as excinfo:
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=0.5)
+
+        assert isinstance(excinfo.value, Exception), "the store's own cancellation must be a definite write failure"
+        assert isinstance(excinfo.value.__cause__, asyncio.CancelledError)
+        assert store.attempts == 1
+        assert journal._active_write_tasks == {}
+        assert journal._detached_write_tasks == {}
+        assert journal.feed_generation == 0
+        assert [event["event_type"] for event in journal._buffer] == ["first"]
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_reports_write_failure_over_caller_cancellation(self, monkeypatch):
+        """A definite write failure is reported before the cancellation received while draining."""
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        class FailingStore:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.fail = asyncio.Event()
+                self.attempts = 0
+
+            async def put_batch(self, batch):
+                self.attempts += 1
+                self.started.set()
+                await self.fail.wait()
+                raise RuntimeError("store write failed")
+
+        store = FailingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+
+        settle_task = asyncio.create_task(journal.flush_until_settled())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.5)
+            settle_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into the join
+            assert not settle_task.done()
+
+            store.fail.set()
+            with pytest.raises(RuntimeError, match="store write failed"):
+                await asyncio.wait_for(settle_task, timeout=0.5)
+        finally:
+            store.fail.set()
+            await asyncio.gather(settle_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        # The failure is reported, not the cancellation it replaced; that
+        # cancellation was received and suppressed, so the count is balanced.
+        assert settle_task.cancelling() == 0
+        assert store.attempts == 1
+        assert journal._active_write_tasks == {}
+        assert journal.feed_generation == 0
+        assert [event["event_type"] for event in journal._buffer] == ["first"]
 
     @pytest.mark.anyio
     async def test_close_without_flush_does_not_wait_for_stubborn_progress(self):

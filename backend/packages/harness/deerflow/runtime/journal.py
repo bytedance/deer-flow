@@ -24,6 +24,12 @@ Write-ownership invariants (keep these when changing buffering or progress):
 - Outcomes: success advances ``feed_generation``; only an explicitly failed or
   cancelled write prepends its batch once for retry; an unresolved write is never
   requeued, and caller cancellation re-raises after the outcome is handled.
+- Ownership of the settled drain: ``flush_until_settled()`` runs the drain in its
+  own task and joins it without ever cancelling it, so a cancelled caller stops
+  waiting without abandoning the drain. The received cancellation is re-raised
+  only after the drain's outcome is applied; a definite write failure is reported
+  first, and a store cancelling its own write is reported as that failure instead
+  of masquerading as caller cancellation.
 - Teardown: ``close(flush=False)`` keeps supervising an already-started write;
   ``close(flush=True)`` detaches on success and on caller cancellation
   (cancelling and retaining any progress snapshot first) before re-raising,
@@ -238,6 +244,52 @@ def build_checkpoint_history_seed_events(
         run_id_prefix=run_id_prefix,
         seed_metadata={"checkpoint_history_seed": True},
     )
+
+
+async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
+    """Join an owned task without cancelling it or losing its outcome.
+
+    The caller's cancellation stops this wait but must not abandon ``task``:
+    the write or drain it owns has to reach a terminal outcome before the
+    cancellation is re-raised. Only a ``CancelledError`` actually delivered
+    here makes this wait treat the caller as cancelled — a request handled at
+    an earlier checkpoint is not new. A received cancellation is either
+    propagated, leaving the caller's count untouched, or — when a definite
+    child failure replaces it — suppressed together with the other requests
+    made while joining, so the count returns to what it was on entry.
+    """
+    current = asyncio.current_task()
+    cancellations_on_entry = current.cancelling() if current is not None else 0
+    cancellation_received = False
+    try:
+        # Also observes a cancellation requested before this call.
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        cancellation_received = True
+    while not task.done():
+        try:
+            # Unlike ``gather``/``await task``, ``asyncio.wait`` does not cancel
+            # the task it observes, so repeated cancellation cannot lose it.
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            cancellation_received = True
+    try:
+        result = task.result()
+    except asyncio.CancelledError:
+        # The owned task itself was cancelled; that cancellation is not ours to
+        # absorb, so keep propagating it without touching the count.
+        raise
+    except BaseException:
+        # A definite child failure wins over the cancellation received here, so
+        # the requests made while joining are suppressed: uncancel exactly those,
+        # never the count that was already there when this call started.
+        if current is not None:
+            for _ in range(current.cancelling() - cancellations_on_entry):
+                current.uncancel()
+        raise
+    if cancellation_received:
+        raise asyncio.CancelledError
+    return result
 
 
 class RunJournal(BaseCallbackHandler):
@@ -1291,15 +1343,39 @@ class RunJournal(BaseCallbackHandler):
             )
         return settled
 
+    async def _flush_until_settled_owned(self) -> bool:
+        """Drain predecessors and buffer inside the task that owns the drain.
+
+        The drain runs in its own task, so the joining caller's cancellation
+        never reaches it and the only ``CancelledError`` that can arrive is the
+        store cancelling its own write. That is a definite write failure (the
+        caller never requested it), so it is converted into an ordinary failure
+        with the batch retained for retry instead of surfacing as caller
+        cancellation.
+        """
+        async with self._flush_lock:
+            try:
+                return await self._flush_locked(settle_predecessors=True)
+            except asyncio.CancelledError as error:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    # The owned drain itself was cancelled: keep propagating.
+                    raise
+                raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
+
     async def flush_until_settled(self) -> bool:
         """Flush in order and return ``True`` only after every predecessor settled.
 
         ``settle`` waits without a deadline, so this returns ``True`` on success
         or raises (for example on caller cancellation or a durable write
-        failure); it never reports ``False`` for an unresolved predecessor.
+        failure); it never reports ``False`` for an unresolved predecessor. The
+        drain is owned by its own task, so cancelling this caller stops waiting
+        without abandoning it: the cancellation is re-raised only after the
+        drain's outcome has been applied, and a definite write failure is
+        reported instead of it.
         """
-        async with self._flush_lock:
-            return await self._flush_locked(settle_predecessors=True)
+        task = asyncio.create_task(self._flush_until_settled_owned())
+        return await _await_owned_task(task)
 
     async def _flush_locked(self, *, settle_predecessors: bool = False) -> bool:
         if self._closed:
