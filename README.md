@@ -86,6 +86,8 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
   - [Projects](#projects)
+
+  - [Conversation Sharing](#conversation-sharing)
   - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
@@ -2083,6 +2085,32 @@ origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.
 Deleting a project moves its entire shelf to trash in the same step.
 
+
+## Conversation Sharing
+
+The current implementation provides **backend API groundwork only** for
+revocable, read-only conversation snapshots. It is disabled by default,
+requires a SQL database, and does not yet include the Share dialog or the
+public `/share/{token}` frontend page. The returned `share_url` reserves that
+future page path; API clients can resolve the token today through
+`GET /api/shares/{share_token}`.
+
+The snapshot removes assistant reasoning outside code examples. Place a blank
+line between Markdown link-reference definitions and code examples: the sharing
+sanitizer conservatively strips reasoning markers throughout a definition's
+nonblank continuation region, including ambiguous or malformed definitions. If
+a fence, HTML or math block begins within that region, stripping continues to
+the message end because the block boundary is ambiguous.
+At the first possible list or quote line (including empty markers), code
+protection stops for the current paragraph and the remaining message, even
+across blank lines. Literal `<think>` examples there may be removed; earlier
+code examples and already-open root code blocks remain intact.
+
+Operators enable it with `conversation_sharing.enabled` in `config.yaml`.
+Multi-replica deployments must give every replica the same
+`SHARE_TOKEN_PEPPER`; see the
+[Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
+for the current create, list, revoke, and resolve contracts.
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.

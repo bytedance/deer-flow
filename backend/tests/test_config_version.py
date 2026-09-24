@@ -472,6 +472,56 @@ def _merge_missing(target: dict, source: dict) -> None:
             _merge_missing(target[key], value)
 
 
+def test_conversation_sharing_bumped_config_version():
+    """Sharing must advance past the merge parent's released v46 schema —
+    a stale `>` bound passed vacuously once main moved past it, leaving
+    v46 installs un-warned and `make config-upgrade` a no-op before the
+    sharing defaults merged (bot round, 09-14 05:00)."""
+    example = _load_repo_example()
+    assert example.get("config_version", 0) >= 47
+    assert example["conversation_sharing"]["enabled"] is False
+
+
+@pytest.mark.parametrize("previous_version", [37, 46])
+def test_config_upgrade_adds_conversation_sharing_preserving_user_values(tmp_path, caplog, previous_version):
+    """Both the original baseline and current main acquire sharing defaults."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example = _load_repo_example()
+    user = {"config_version": previous_version, "models": {"fake": True}}
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(
+        (repo_root / "config.example.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config_path.write_text(yaml.safe_dump(user), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+        AppConfig._check_config_version(dict(user), config_path)
+    assert "outdated" in caplog.text
+    assert f"(version {previous_version})" in caplog.text
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert upgraded["conversation_sharing"]["enabled"] is False
+    assert upgraded["conversation_sharing"]["default_expiry_days"] == 30
+    # Existing user keys untouched.
+    assert upgraded["models"]["fake"] is True
+    assert upgraded["config_version"] == example["config_version"]
+    assert upgraded["config_version"] > 37
+
+
 def test_security_fail_closed_bumped_config_version():
     """The example must ship security_fail_closed under a version > 26 so v26 configs upgrade."""
     example = _load_repo_example()

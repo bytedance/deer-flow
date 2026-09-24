@@ -1,0 +1,43 @@
+{{- if .Values.gateway.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- /* Only the bundled nginx front door may reach the gateway directly.
+          Without this, any pod in the namespace (the user-code sandbox
+          pods included) could talk to the gateway ClusterIP — and with a
+          wide AUTH_TRUSTED_PROXIES those pods would count as trusted
+          proxies, able to forge X-Real-IP and rotate the login/share
+          throttle buckets. Same-namespace peers (frontend, provisioner)
+          talk to the gateway too, so they are named alongside nginx:
+          the policy's job is to exclude what must never connect — user
+          code — not to enumerate every internal caller. */}}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "deer-flow.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: nginx
+        - podSelector:
+            matchLabels:
+              {{- include "deer-flow.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: frontend
+        - podSelector:
+            matchLabels:
+              {{- include "deer-flow.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: provisioner
+      ports:
+        - protocol: TCP
+          port: 8001
+{{- end }}

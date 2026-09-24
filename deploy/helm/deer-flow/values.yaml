@@ -42,6 +42,20 @@ gateway:
   # shutdown begins (which runs the memory queue drain). 0 disables the hook.
   # Counts against terminationGracePeriodSeconds.
   preStopSleepSeconds: 5
+  # Trust ONLY a real proxy hop, never a whole cluster network by default:
+  # sandbox pods share the namespace network and must not become trusted
+  # proxies (a forged X-Real-IP rotates the login/share throttle buckets).
+  # Empty (default) keys anonymous throttles on the peer address — all
+  # visitors share the nginx pod's bucket. With gateway.networkPolicy on
+  # (default), only nginx/frontend/provisioner pods can connect, so setting
+  # your pod network here (e.g. "10.0.0.0/8") safely restores per-IP keying.
+  trustedProxies: ""
+  # Restrict gateway ingress to the bundled nginx/frontend/provisioner pods
+  # so user-code sandbox pods cannot reach the ClusterIP directly. Requires
+  # a CNI with NetworkPolicy enforcement; where the CNI ignores policies
+  # this is inert (and trustedProxies stays empty, so nothing is trusted).
+  networkPolicy:
+    enabled: true
   resources:
     requests:
       cpu: 200m
