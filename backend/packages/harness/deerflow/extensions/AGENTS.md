@@ -141,9 +141,10 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes seven contribution kinds: middleware
+themselves. Its registry contract exposes eight contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers, and
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -287,15 +288,23 @@ covers creations and changes to retained rows only; synchronization consumers mu
 `get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
 is required. A DB run store preserves positions across restarts, while memory only provides
 process-lifetime ordering. Per-run events retain the event store's thread-scoped
-`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
-and status comes from the authoritative run store. The reader passes its fixed scope to
+`after_seq` semantics; metadata has only the legacy `auth_token` key removed (there is no
+other redaction), event content is returned unchanged, and status comes from the
+authoritative run store. The reader passes its fixed scope to
 event reads explicitly, including global `None`, so ambient request identity cannot
 change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
 fields are frozen, but nested containers remain locally mutable without touching host
 storage. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
-global cross-user visibility because services have no request principal. A host embedding
-the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+global cross-user visibility because services have no request principal. User-facing contributed
+routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
+the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
+The resolver requires the request's effective `runs:read` permission and never widens admin
+or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
+helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
+these to 503/403 at their HTTP boundary. The public API remains framework-independent.
+A host embedding the harness may instead bind a reader to one user. This is not a sandbox boundary: services
 already retain `session_factory` and execute with Gateway privileges. Empty pages mean
 caught up or not visible, never unsupported -- absence is represented
 by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
@@ -377,3 +386,14 @@ that the current host silently ignores.
 `test_extension_manager.py` creates temporary Git repositories for local extension sources.
 Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
 Tests for hook behavior must create and invoke their own hook fixtures.
+
+## Full-stack contributions
+
+`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
+and model tools under one deployment-owned namespace. The public method defaults to False
+for older hosts; accepted contributions share source attribution and positional rollback.
+`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
+No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
+the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
+public-field projection is an allowlist. Package code is trusted, not sandboxed. See
+`docs/full-stack-plugins.md` and the independently packaged bookmark example.

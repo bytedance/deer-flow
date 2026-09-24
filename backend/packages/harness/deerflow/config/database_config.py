@@ -309,6 +309,14 @@ class DatabaseConfig(BaseModel):
             return f"sqlite:///{self.sqlite_path}"
         if self.backend == "postgres":
             url = self.postgres_url
+            if self.postgres_schema:
+                # The synchronous agent stores use psycopg via SQLAlchemy,
+                # so they need the same search_path as the async ORM engine
+                # and LangGraph stores.  Keep the option merge in the shared
+                # PostgreSQL helper so existing libpq options are preserved.
+                from deerflow.persistence.postgres_schema import dsn_with_search_path
+
+                url = dsn_with_search_path(url, self.postgres_schema)
             if url.startswith("postgresql+asyncpg://"):
                 url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
             elif url.startswith("postgresql://"):

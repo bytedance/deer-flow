@@ -25,6 +25,10 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- memory:read   - View memory data/config
+- memory:write  - Modify memory data (create/update/delete facts, import, clear)
+- agents:read   - View custom agents and the user profile
+- agents:write  - Create/update/delete custom agents and the user profile
 """
 
 from __future__ import annotations
@@ -72,6 +76,14 @@ class Permissions:
     PROJECTS_READ = "projects:read"
     PROJECTS_WRITE = "projects:write"
     PROJECTS_DELETE = "projects:delete"
+
+    # Memory (per-user memory data surfaced by /api/memory*)
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+
+    # Custom agents and the per-user USER.md profile (/api/agents*, /api/user-profile)
+    AGENTS_READ = "agents:read"
+    AGENTS_WRITE = "agents:write"
 
 
 class AuthContext:
@@ -153,6 +165,10 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
@@ -357,6 +373,37 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     ``_AuthorizationUnavailable`` (carrying ``fail_closed``).
     """
     return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def authorize_model_use(user: User, model_name: str | None, *, is_internal: bool, app_config: AppConfig) -> None:
+    """Enforce model:use for an explicit model or the factory's default model.
+
+    Shared by model details and caller-selected one-shot requests. Explicit
+    denies always reject; provider failures honor the configured failure policy.
+    """
+    if model_name is None:
+        if not app_config.models:
+            return  # The caller's existing no-model handling remains authoritative.
+        model_name = app_config.models[0].name
+    detail = f"Model '{model_name}' is not available for your role"
+    try:
+        provider, principal = resolve_model_authorization(user, is_internal=is_internal)
+    except _AuthorizationUnavailable:
+        if app_config.authorization.fail_closed:
+            raise HTTPException(status_code=403, detail=detail) from None
+        return
+    if provider is None or principal is None:
+        return
+    try:
+        decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        allowed = decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking model:use for %s", model_name, exc_info=True)
+        allowed = not app_config.authorization.fail_closed
+    if not allowed:
+        raise HTTPException(status_code=403, detail=detail)
 
 
 def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
@@ -657,20 +704,25 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Bind the wrapped signature so a request passed positionally
+            # (direct calls in unit tests, non-FastAPI callers) is honored
+            # instead of colliding with an injected keyword stub.
+            signature = inspect.signature(func)
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
             request = kwargs.get("request")
+            if request is None and bound is not None:
+                request = bound.arguments.get("request")
             if request is None:
                 # Unit tests may call decorated route handlers directly — with
                 # or without constructing a FastAPI Request object — and may
-                # pass ``request`` positionally. Bind to the real signature
-                # first so a positional request is found rather than
-                # duplicated by the stub injection below.
-                try:
-                    bound = inspect.signature(func).bind_partial(*args, **kwargs)
-                except TypeError:
-                    bound = None
-                if bound is not None and "request" in bound.arguments:
-                    request = bound.arguments["request"]
-                elif "request" in inspect.signature(func).parameters:
+                # pass ``request`` positionally. The full-signature bind at
+                # the top of this wrapper already recovered a positional
+                # request, so only the stub injection for handlers that
+                # declare ``request`` but received none remains here.
+                if "request" in signature.parameters:
                     kwargs["request"] = _make_test_request_stub()
                     request = kwargs["request"]
                 else:
@@ -707,6 +759,8 @@ def require_permission(
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
                 thread_id = kwargs.get("thread_id")
+                if thread_id is None and bound is not None:
+                    thread_id = bound.arguments.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 

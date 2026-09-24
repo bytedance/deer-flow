@@ -217,8 +217,11 @@ export default function SkillExportDialog({
                       {text.exportTools}
                     </dt>
                     <dd className="break-words">
-                      {manifest.requirements.allowed_tools?.join(", ") ??
-                        text.exportUndeclared}
+                      {manifest.requirements.allowed_tools === null
+                        ? text.exportUndeclared
+                        : manifest.requirements.allowed_tools.length === 0
+                          ? text.exportNone
+                          : manifest.requirements.allowed_tools.join(", ")}
                     </dd>
                   </div>
                   <div>
@@ -226,12 +229,16 @@ export default function SkillExportDialog({
                       {text.exportSecrets}
                     </dt>
                     <dd className="break-words">
-                      {manifest.requirements.required_secrets
-                        ?.map(
-                          (secret) =>
-                            `${secret.name} (${secret.optional ? text.exportOptional : text.exportRequired})`,
-                        )
-                        .join(", ") ?? text.exportUndeclared}
+                      {manifest.requirements.required_secrets === null
+                        ? text.exportUndeclared
+                        : manifest.requirements.required_secrets.length === 0
+                          ? text.exportNone
+                          : manifest.requirements.required_secrets
+                              .map(
+                                (secret) =>
+                                  `${secret.name} (${secret.optional ? text.exportOptional : text.exportRequired})`,
+                              )
+                              .join(", ")}
                     </dd>
                   </div>
                 </dl>

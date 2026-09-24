@@ -396,6 +396,73 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
     return dest
 
 
+def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_bits: int) -> None:
+    """Apply sandbox permission bits to an upload, bound to its validated inode.
+
+    The gateway writes uploads as root with ``0o600``. In AIO/Docker sandbox mode
+    the sandbox runs as a non-root user on the bind-mounted path, so it needs
+    extra group/other (and, for the writable variant, write) bits.
+
+    The change is applied with ``os.fchmod`` on a descriptor opened with
+    ``O_NOFOLLOW`` (and ``O_NONBLOCK`` where available) and validated as a
+    regular file via ``os.fstat``. That binds the permission change to the exact
+    inode that was validated instead of re-resolving the pathname, so a sandbox
+    process that swaps the upload for a symlink after validation cannot redirect
+    the change to a target outside the uploads directory. ``O_NONBLOCK`` stops a
+    swapped-in FIFO from blocking the open before the type check. On platforms
+    without ``O_NOFOLLOW``/``os.fchmod`` (Windows) the ``os.chmod`` path (with
+    the lstat symlink guard) is retained. A path that disappears or becomes a
+    symlink during validation is skipped; other permission errors propagate so
+    callers do not report an upload the sandbox still cannot access.
+    """
+    try:
+        file_stat = os.lstat(file_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    if stat.S_ISLNK(file_stat.st_mode):
+        return
+
+    if hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod"):
+        open_flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            # The uploads directory is sandbox-writable, so the sandbox can swap
+            # the just-written file for a FIFO before this open. Without
+            # O_NONBLOCK an O_RDONLY open on a FIFO blocks in the kernel waiting
+            # for a writer (before the fstat regular-file check below), hanging
+            # ingestion and occupying a Gateway file-IO executor thread that
+            # coroutine cancellation cannot interrupt. O_NONBLOCK returns
+            # immediately; the S_ISREG check then skips the non-regular inode.
+            open_flags |= os.O_NONBLOCK
+        try:
+            fd = os.open(file_path, open_flags)
+        except OSError as exc:
+            # The path disappeared, stopped resolving, or became a symlink
+            # after lstat. Leave permissions untouched for these expected
+            # replacement races, but surface operational failures such as
+            # EACCES so callers cannot report an unreadable upload as ready.
+            if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                return
+            raise
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return
+            os.fchmod(fd, stat.S_IMODE(opened.st_mode) | extra_mode_bits)
+        finally:
+            os.close(fd)
+        return
+
+    # Windows / platforms without O_NOFOLLOW + fchmod: retain the lstat-guarded
+    # chmod fallback. Expected replacement races are no-ops; permission errors
+    # must still reach the caller.
+    try:
+        os.chmod(file_path, stat.S_IMODE(file_stat.st_mode) | extra_mode_bits)
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            return
+        raise
+
+
 def list_files_in_dir(directory: Path) -> dict:
     """List files (not directories) in *directory*.
 
@@ -434,14 +501,16 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     """Delete a file inside *base_dir* after path-traversal validation.
 
     If *convertible_extensions* is provided and the file's extension matches,
-    the converted-markdown companion is also removed (if it exists). The
-    companion path comes from the sidecar when present and still current.
-    Removal quarantines that directory entry and re-checks the moved inode
-    against the identity pin so a sandbox replacement of the basename is
-    preserved. A stale sidecar entry (companion deleted or replaced outside
-    this API) disables companion cleanup so no unrelated file is removed.
-    Without any sidecar evidence the legacy ``<stem>.md`` heuristic applies.
-    Evicted originals and the sticky overflow flag also skip that heuristic.
+    a converted-markdown companion is removed only when the sidecar still
+    proves this original wrote it. Removal quarantines that directory entry
+    and re-checks the moved inode against the identity pin so a sandbox
+    replacement of the basename is preserved. A stale sidecar entry
+    (companion deleted or replaced outside this API) disables companion
+    cleanup. Without sidecar evidence the companion is left in place: the
+    ``<stem>.md`` beside a document may belong to another document sharing
+    that stem, or to the user, and guessing destroyed the wrong file
+    (issue #5672). Unverified companions stay listed and can be deleted on
+    their own.
 
     Only regular files are deleted. Upload directories may be mounted into
     local sandboxes, so a sandbox process can plant a symlink under an upload
@@ -452,7 +521,7 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         base_dir: Directory containing the file.
         filename: Name of file to delete.
         convertible_extensions: Lowercase extensions (e.g. ``{".pdf", ".docx"}``)
-            whose companion markdown should be cleaned up.
+            whose sidecar-verified companion markdown should be cleaned up.
 
     Returns:
         Dict with success and message.
@@ -481,17 +550,6 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
             if entry is not None and matched:
                 unlink_verified_companion(base_dir, entry)
                 forget_companion_mapping(base_dir, companion=entry.name)
-            elif not state.blocks_legacy_fallback(safe_name):
-                companion_name = file_path.with_suffix(".md").name
-                if companion_name != safe_name:
-                    companion_path = file_path.with_name(companion_name)
-                    try:
-                        validate_path_traversal(companion_path.resolve(), base_dir)
-                    except PathTraversalError:
-                        companion_path = None
-                    if companion_path is not None:
-                        companion_path.unlink(missing_ok=True)
-                        forget_companion_mapping(base_dir, companion=companion_name)
 
         forget_companion_mapping(base_dir, original=safe_name)
         if file_path.suffix.lower() == ".md":

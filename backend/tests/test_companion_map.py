@@ -531,13 +531,14 @@ class TestDeleteUsesSidecar:
         assert not list(uploads.glob(".deer-flow-companions.quarantine.*"))
 
     def test_legacy_stem_companion_without_sidecar(self, tmp_path):
+        """Without sidecar evidence, do not guess ``<stem>.md`` (issue #5672)."""
         (tmp_path / "report.pdf").write_bytes(b"pdf-bytes")
         (tmp_path / "report.md").write_text("converted", encoding="utf-8")
 
         delete_file_safe(tmp_path, "report.pdf", convertible_extensions={".pdf"})
 
         assert not (tmp_path / "report.pdf").exists()
-        assert not (tmp_path / "report.md").exists()
+        assert (tmp_path / "report.md").read_text(encoding="utf-8") == "converted"
 
     def test_refuses_to_delete_sidecar(self, tmp_path):
         (tmp_path / "a.md").write_text("# pdf\n", encoding="utf-8")
