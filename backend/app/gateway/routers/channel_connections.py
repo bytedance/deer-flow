@@ -747,8 +747,9 @@ async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig
     # QR sessions and mutation locks live in one process. Reject every QR route
     # before session access when requests could land on different workers.
     # WEB_CONCURRENCY is Uvicorn's fallback when no worker count is supplied.
+    # A blank value means "unset", as the compose command's ${GATEWAY_WORKERS:-1} treats it.
     try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", os.environ.get("WEB_CONCURRENCY", "1")))
+        workers = int(os.environ.get("GATEWAY_WORKERS") or os.environ.get("WEB_CONCURRENCY") or "1")
     except ValueError:
         workers = 0
     if workers != 1:
