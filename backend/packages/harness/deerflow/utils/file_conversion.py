@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 
 # Backward-compat re-exports — outline extraction moved to file_outline.py.
 from deerflow.utils.file_outline import (  # noqa: F401
@@ -171,7 +171,16 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
             text = _do_convert(file_path, pdf_converter)
 
         md_path = output_path if output_path is not None else file_path.with_suffix(".md")
-        await run_file_io(md_path.write_text, text, encoding="utf-8")
+        # Drain the write-back across caller cancellation: run_file_io awaits
+        # run_in_executor, so a plain await would unwind while the worker is
+        # still writing and leave the partial output behind for the caller's
+        # scope to trip over. await_drained delivers the cancellation only
+        # after the worker finished, so the cleanup below sees a settled file.
+        try:
+            await await_drained(run_file_io(md_path.write_text, text, encoding="utf-8"))
+        except asyncio.CancelledError:
+            await await_drained(run_file_io(md_path.unlink, missing_ok=True))
+            raise
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path
