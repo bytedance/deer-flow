@@ -143,11 +143,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     ) -> str | None:
         """Read a validated host mirror and return a data URL, or None on failure.
 
-        ``actual_path`` is server-set by ``view_image_tool`` and held in
-        LangGraph-controlled state. The host path remains the compatibility path
-        for local execution and older checkpoints. Provenance-aware checkpoints
-        additionally verify the exact SHA-256 before a synchronized host copy can
-        stand in for bytes from an earlier sandbox generation.
+        Callers must first bind ``actual_path`` to the current run's user,
+        thread, and virtual image path. The host path remains the compatibility
+        path for local execution and older checkpoints. Provenance-aware
+        checkpoints additionally verify the exact SHA-256 before a synchronized
+        host copy can stand in for bytes from an earlier sandbox generation.
         """
         try:
             file_path = Path(actual_path)
@@ -177,6 +177,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         expected_size: int,
         expected_sha256: str | None,
         source_sandbox_id: str | None,
+        *,
+        allow_host_copy: bool = False,
     ) -> str | None:
         """Read the exact image bytes represented by ``viewed_images`` metadata.
 
@@ -204,7 +206,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 # image was originally read from the host). Reproduce the exact
                 # historical bytes rather than letting an unrelated same-path
                 # file in the replacement sandbox win.
-                if actual_path:
+                if actual_path and allow_host_copy:
                     host_data_url = cls._read_host_image_as_data_url(
                         actual_path,
                         mime_type,
@@ -248,7 +250,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_sha256,
             )
 
-        if not actual_path:
+        if not actual_path or not allow_host_copy:
             return None
         return cls._read_host_image_as_data_url(
             actual_path,
@@ -257,7 +259,12 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             expected_sha256,
         )
 
-    def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
+    def _create_image_details_message(
+        self,
+        state: ViewImageMiddlewareState,
+        *,
+        host_path_allowed: Callable[[str, str], bool] | None = None,
+    ) -> list[str | dict]:
         """Create a formatted message with all viewed image details.
 
         Reads image files on-demand from the active sandbox when available and
@@ -299,6 +306,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_size,
                 expected_sha256 if isinstance(expected_sha256, str) else None,
                 source_sandbox_id if isinstance(source_sandbox_id, str) else None,
+                allow_host_copy=host_path_allowed(image_path, actual_path) if host_path_allowed is not None else False,
             )
             if data_url:
                 content_blocks.append(
@@ -370,6 +378,52 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         context = getattr(request.runtime, "context", None)
         return context if isinstance(context, Mapping) else {}
 
+    @classmethod
+    def _host_path_matches_request(cls, request: ModelRequest, image_path: str, actual_path: str) -> bool:
+        """Bind a stored host copy to the authenticated run's user and thread."""
+        from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+        from deerflow.runtime.user_context import resolve_runtime_user_id
+        from deerflow.sandbox.tools import resolve_and_validate_user_data_path, validate_local_tool_path
+        from deerflow.tools.builtins.view_image_tool import _is_allowed_image_virtual_path
+
+        if not isinstance(image_path, str) or not isinstance(actual_path, str) or not _is_allowed_image_virtual_path(image_path):
+            return False
+
+        from langgraph.config import get_config
+
+        context_thread_id = cls._authorization_context(request).get("thread_id")
+        try:
+            configurable = get_config().get("configurable")
+            configured_thread_id = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
+        except RuntimeError:
+            configured_thread_id = None
+        if configured_thread_id and context_thread_id and configured_thread_id != context_thread_id:
+            return False
+        thread_id = configured_thread_id or context_thread_id
+        if not isinstance(thread_id, str) or not thread_id:
+            return False
+
+        try:
+            user_id = resolve_runtime_user_id(request.runtime)
+            thread_data = (request.state or {}).get("thread_data")
+            if isinstance(thread_data, Mapping):
+                # ThreadDataMiddleware may use a custom Paths base. Bind its
+                # selected root to this run before using it to resolve a host copy.
+                root_name = image_path.removeprefix(f"{VIRTUAL_PATH_PREFIX}/").split("/", 1)[0]
+                root_path = thread_data.get(f"{root_name}_path")
+                if not isinstance(root_path, str) or not root_path:
+                    return False
+                root = Path(root_path).resolve()
+                if root.parts[-6:] != ("users", user_id, "threads", thread_id, "user-data", root_name):
+                    return False
+                validate_local_tool_path(image_path, thread_data, read_only=True)
+                expected_path = Path(resolve_and_validate_user_data_path(image_path, thread_data))
+            else:
+                expected_path = get_paths().resolve_virtual_path(thread_id, image_path, user_id=user_id)
+            return Path(actual_path).resolve() == expected_path
+        except (OSError, PermissionError, TypeError, ValueError):
+            return False
+
     def _image_injection_plan(self, request: ModelRequest) -> tuple[list[AnyMessage], bool, bool]:
         """Share message cleanup and read eligibility across sync/async paths."""
         messages = [message for message in request.messages if not self._is_image_context_message(message)]
@@ -421,7 +475,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Mixed content (text + images) for the model only, so hide it from the
         # chat UI and IM channels (matches the other middleware-injected context
         # messages) even though it never leaves this request.
-        image_content = self._create_image_details_message(request.state or {})
+        image_content = self._create_image_details_message(
+            request.state or {},
+            host_path_allowed=lambda image_path, actual_path: self._host_path_matches_request(request, image_path, actual_path),
+        )
         logger.debug("Injecting image details message with images into the model request")
 
         return request.override(messages=[*messages, self._create_image_context_message(image_content)])

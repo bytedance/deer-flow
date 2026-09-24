@@ -1,10 +1,11 @@
 ### Data Flow
 
-Artifact state, upload metadata, and workspace changes carry raw filesystem
-paths. `urlOfArtifact` and `resolveArtifactURL` encode those paths without
-decoding literal percent sequences. Only Markdown destinations are URL inputs:
-`resolveMarkdownArtifactURL` decodes once at that boundary, and relative image
-resolution matches the decoded name against raw artifact paths before encoding.
+Answer details use `workspace/message-details` descriptors; skill run scoping
+is documented in `docs/skill-usage-ui.md`.
+
+Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
+Only Markdown destinations decode once; relative images match decoded names
+against raw artifact paths before encoding.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
@@ -162,46 +163,18 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Interaction Ownership
 
-- `src/components/workspace/model-picker-content.tsx` owns the compact model
-  list, favorite grouping, and the anchored non-modal picker shared by the main
-  composer and Side Chat. Each row keeps model selection and its inline
-  favorite star as sibling buttons. The picker deliberately follows the
-  pre-favorites two-line row density and does not add a search field. Favorites
-  are stored by
-  `core/models/favorites-store.ts` under a user-scoped browser key and only
-  reorder derived display arrays: never sort `useModels().models`, promote a
-  favorite to the default model, prune a temporarily unavailable favorite, or
-  merge the main and Side Chat selection callbacks. Keep favorite buttons out
-  of model-selection buttons; the two call sites continue to own their triggers
-  and their distinct mode/reasoning-effort transitions.
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
-- `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
-- `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` applies the same capability gate and additionally requires the Custom Agent's tool groups to be unrestricted or include `browser`. Default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
-- `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
-- `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
-- `src/components/workspace/browser-view/use-browser-stream.ts` requests binary JPEG
-  frames with `frame_format=binary`; status, URL, tabs, and navigation rejection
-  messages remain JSON. `LatestBrowserFrameBuffer` keeps only the newest pending
-  frame, publishes through `useSyncExternalStore` at most once per animation
-  frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
-  frame path for older clients.
+Model picker, chat entry pages, branch tree, and browser-control ownership are
+detailed in `frontend/docs/conversation-ui-ownership.md`.
+
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
-Clarification ToolMessages delimit completed runs for streaming message grouping,
-including continuations submitted with hidden human replies. Do not classify all
-messages after the last visible human as unresolved once a clarification result
-has arrived. The processing renderer keeps tool-calling messages intact for
-association and usage accounting, but renders text accompanying
-`ask_clarification` outside the execution panel (including mixed tool calls).
-
-`findCurrentTurnStartIndex` owns the boundary rule for both full and incremental
-message grouping. Incremental prefix/tail splitting applies only at human
-boundaries; clarification results also belong to the preceding processing group,
-so derive the full grouping and stabilize references at clarification boundaries.
+`ask_clarification` ToolMessages delimit runs despite hidden human replies; skill
+usage splits after the clarification group. Keep the tool call in its processing
+group and render accompanying text outside the execution panel, including mixed
+tool calls. `findCurrentTurnStartIndex` owns full and incremental grouping:
+split incremental prefix/tail only at human boundaries, then stabilize
+clarification references from full grouping.
 
 ### Knowledge source citations
 

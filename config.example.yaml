@@ -214,16 +214,53 @@ models:
   #       thinking:
   #         type: disabled
 
-  # Example: Z.AI GLM-5.3-Flash (required-thinking workaround)
+  # Reasoning capability contract (optional, per model)
+  #
+  # A mapping-valued `reasoning:` block opts into this contract. The existing
+  # Ollama `reasoning: true` / `false` boolean, and the `low` / `medium` / `high`
+  # level string gpt-oss style models take, remain native provider options and
+  # are still forwarded to ChatOllama.
+  #
+  # `supports_thinking` / `supports_reasoning_effort` only say whether a knob
+  # exists. Models whose provider contract differs from DeerFlow's generic
+  # assumptions can declare a `reasoning:` block instead; the two booleans are
+  # then derived from it and every model-creation path (chat, summarization,
+  # title generation, subagents) enforces the same normalized policy:
+  #
+  #   reasoning:
+  #     thinking: optional             # unsupported | optional | required
+  #     on_disable_request: keep_enabled   # required only: keep_enabled | reject
+  #     dialect: auto                  # auto | openai_extra_body | anthropic |
+  #                                    # vllm_chat_template | ollama | none
+  #     history: clear                 # preserve | clear (omit for provider default)
+  #     effort:
+  #       values: [low, medium, high]  # provider vocabulary, in display order
+  #       default: medium              # applied when the caller does not choose
+  #       aliases: {minimal: low}      # DeerFlow generic value -> provider value
+  #       path: reasoning_effort       # dotted identifier path (default)
+  #
+  # `required` thinking never receives a disable payload, unknown effort values
+  # never reach the provider (they map through `aliases` or fall back to
+  # `default`), and `dialect` lets the factory synthesize the on/off payload
+  # when `when_thinking_enabled` / `when_thinking_disabled` are absent
+  # (`auto` infers it from `when_thinking_enabled`). `default` also applies to
+  # callers that never choose an effort — summarization, title generation and
+  # subagents — so pick a level you are happy to pay for on every background
+  # call. Contradictory profiles fail at startup: `required` plus
+  # `when_thinking_disabled`, a `default` outside `values`, an effort value in
+  # the profile or in `when_thinking_*` templates that the contract rejects, a
+  # stale `reasoning_effort` beside a custom `effort.path`, or a `path` that
+  # would overwrite a whole mapping such as `extra_body`.
+  # Profiles without `reasoning:` behave exactly as before.
+
+  # Example: Z.AI GLM-5.3-Flash (required thinking, restricted effort)
   #
   # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
-  # DeerFlow's current generic UI may request disabled thinking or emit
-  # minimal/medium, so this profile keeps thinking enabled unconditionally and
-  # suppresses generic effort forwarding. Keep the thinking block in the base
-  # extra_body: moving it to when_thinking_enabled would let background calls
-  # synthesize the invalid thinking.type=disabled + reasoning_effort=minimal pair.
-  # clear_thinking=true is intentional for this compatibility workaround: it
-  # avoids requiring exact historical reasoning replay after summarization.
+  # The contract keeps thinking on for every foreground and background call,
+  # maps DeerFlow's generic minimal/medium presets onto low/high, and
+  # serializes clear_thinking=true so the model does not require exact
+  # reasoning replay after summarization. `default: high` keeps background
+  # calls off the provider's deepest budget; `max` stays selectable in the UI.
   #
   # - name: glm-5.3-flash
   #   display_name: GLM-5.3-Flash
@@ -237,14 +274,19 @@ models:
   #   top_p: 0.95
   #   max_tokens: 131072
   #   context_window: 1000000
-  #   supports_thinking: true
-  #   supports_reasoning_effort: false
   #   supports_vision: true
   #   stream_usage: false
+  #   reasoning:
+  #     thinking: required
+  #     dialect: openai_extra_body
+  #     history: clear
+  #     effort:
+  #       values: [low, high, max]
+  #       default: high
+  #       aliases:
+  #         minimal: low
+  #         medium: high
   #   extra_body:
-  #     thinking:
-  #       type: enabled
-  #       clear_thinking: true
   #     tool_stream: true
 
   # Example: OpenAI model
@@ -2859,8 +2901,9 @@ run_ownership:
 # ============================================================================
 # Optional pre-execution authorization for tool calls.
 # When enabled, every tool call passes through the configured provider
-# before execution. Three options: built-in allowlist, OAP policy provider,
-# or custom provider. See backend/docs/GUARDRAILS.md for full documentation.
+# before execution. Four options: built-in allowlist, OAP policy provider,
+# custom provider, or the TypeSafe (Jev) risk gate. See
+# backend/docs/GUARDRAILS.md for full documentation.
 #
 # Providers are loaded by class path via resolve_variable (same as models/tools).
 
@@ -2888,6 +2931,38 @@ run_ownership:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# --- Option 4: TypeSafe (Jev) pre-execution risk gate (network provider) ---
+#   Sends the tool name and its full argument JSON to POST /v1/systemone and
+#   denies calls whose risk probability reaches `threshold`. Requires an API
+#   key: export TYPESAFE_API_KEY=... (or set `api_key` below).
+#
+#   `tools: ["bash"]` is a SMOKE-TEST scope, not a production recommendation:
+#   the operation can move to an unprobed tool, an MCP tool or a subagent, and
+#   long heredocs / large write_file payloads are denied locally once the
+#   argument text exceeds max_state_chars. Probe every tool that can perform the
+#   risky work instead of narrowing the gate. Pointing `guardrails.provider` at
+#   TypeSafe REPLACES the allowlist/OAP provider: the allow half of an old
+#   allowlist moves into `allowed_tools` below, while deny rules still belong to
+#   `authorization.*` (see backend/docs/GUARDRAILS.md, Option 4).
+# guardrails:
+#   enabled: true
+#   fail_closed: true
+#   provider:
+#     use: deerflow.guardrails.typesafe:TypeSafeGuardrailProvider
+#     config:
+#       model: jev-latest           # pin an exact version (e.g. jev-1.13.0) when
+#                                   # decisions must stay traceable across releases
+#       threshold: 0.5              # example value; calibrate with the online evaluation
+#       tools: ["bash"]
+#       # allowed_tools: ["bash", "read_file", "write_file"]   # hard permission list:
+#       #   unlisted tools are refused locally before any state is built, and
+#       #   listed tools still have to pass the risk gate. Omit to enforce none;
+#       #   [] refuses every tool.
+#       # Optional: api_key / api_key_env (default TYPESAFE_API_KEY) / base_url /
+#       #           timeout / deadline_seconds / max_attempts / retry_backoff /
+#       #           max_state_chars / cache_size / cache_ttl_seconds /
+#       #           instructions / criteria
 
 # ============================================================================
 # Authorization Configuration

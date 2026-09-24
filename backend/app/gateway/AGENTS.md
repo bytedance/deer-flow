@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
+
 Studio retains sanitized creation metadata.
 
 Capability Center's `business` adapter validates bundled-provider credentials
