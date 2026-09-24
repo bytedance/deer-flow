@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 import uuid
@@ -21,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
@@ -32,10 +33,10 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
-from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
-    build_checkpoint_state_accessor,
+    abuild_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
@@ -46,7 +47,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
+from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -56,6 +57,8 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
+from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
+from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     build_goal_state,
@@ -79,6 +82,17 @@ router = APIRouter(prefix="/api/threads", tags=["threads"])
 _CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
 
 
+def _optional_run_event_store(request: Request) -> Any:
+    """Return the run event store, or ``None`` when the app has none wired.
+
+    Reads must not start depending on the feed: seq is placement metadata, and a
+    response without it degrades to the client's own ordering rule rather than
+    failing. ``get_run_event_store`` raises instead, which is right for the
+    endpoints that cannot work without a feed.
+    """
+    return getattr(request.app.state, "run_event_store", None)
+
+
 def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
     """Map checkpoint-mode guard failures to precise HTTP statuses.
 
@@ -99,7 +113,7 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -110,7 +124,9 @@ _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
 # parent's sandbox after its first run; the branch lazily acquires its own
 # sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
 # from the branch's thread_id by ThreadDataMiddleware on every run.
-_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
+# task_history binds source batches to the parent's archive scope. Notes may
+# carry over, but the branch must not advertise that archive as available.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data", "task_history"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 _BRANCH_TITLE_MAX_LENGTH = 256
@@ -125,9 +141,9 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
 
 
-def _is_pin_metadata_patch(metadata: dict[str, Any]) -> bool:
-    """Return True for the narrow pin/unpin PATCH shape."""
-    return set(metadata) == {THREAD_PINNED_METADATA_KEY} and isinstance(metadata.get(THREAD_PINNED_METADATA_KEY), bool)
+def _is_organization_metadata_patch(metadata: dict[str, Any]) -> bool:
+    """Recognize list-organization writes that must preserve activity time."""
+    return bool(metadata) and set(metadata) <= {THREAD_PINNED_METADATA_KEY, THREAD_ARCHIVED_METADATA_KEY} and all(isinstance(value, bool) for value in metadata.values())
 
 
 def _message_id(message: Any) -> str | None:
@@ -417,6 +433,10 @@ class _MetadataRedactingResponse(BaseModel):
 class ThreadResponse(_MetadataRedactingResponse):
     """Response model for a single thread."""
 
+    # ThreadMetaStore records include internal lifecycle fields such as
+    # ``incarnation``. Keep the HTTP response as an explicit public projection.
+    model_config = ConfigDict(extra="ignore")
+
     thread_id: str = Field(description="Unique thread identifier")
     status: str = Field(default="idle", description="Thread status: idle, busy, interrupted, error")
     created_at: str = Field(default="", description="ISO timestamp")
@@ -432,6 +452,7 @@ class ThreadCreateRequest(BaseModel):
     thread_id: ThreadId | None = Field(default=None, description="Optional thread ID (auto-generated if omitted)")
     assistant_id: str | None = Field(default=None, description="Associate thread with an assistant")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Initial metadata")
+    project_id: str | None = Field(default=None, description="Assign the new thread to this project (validated server-side)")
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
 
@@ -439,7 +460,9 @@ class ThreadCreateRequest(BaseModel):
 class ThreadSearchRequest(BaseModel):
     """Request body for searching threads."""
 
+    archived: bool | None = Field(default=None, strict=True, description="Archive filter; omitted includes all, false includes legacy unarchived threads")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata filter (exact match)")
+    project_id: str | None = Field(default=None, description="Filter by project; explicit null = unassigned threads; omit key for all")
     limit: int = Field(default=100, ge=1, le=1000, description="Maximum results")
     offset: int = Field(default=0, ge=0, description="Pagination offset")
     status: str | None = Field(default=None, description="Filter by thread status")
@@ -487,6 +510,13 @@ class ThreadPatchRequest(BaseModel):
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
 
+    @field_validator("metadata")
+    @classmethod
+    def validate_archive_flag(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if THREAD_ARCHIVED_METADATA_KEY in value and not isinstance(value[THREAD_ARCHIVED_METADATA_KEY], bool):
+            raise ValueError("deerflow_archived must be a boolean")
+        return value
+
 
 class ThreadStateUpdateRequest(BaseModel):
     """Request body for updating thread state (human-in-the-loop resume)."""
@@ -520,7 +550,7 @@ class ThreadCompactRequest(BaseModel):
 
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
-    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional legacy agent hint for model selection; memory policy is bound to checkpoint metadata")
     model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 
@@ -698,9 +728,32 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         ) from None
 
 
+def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str, str]:
+    """Pass owner scope only when an event store accepts that keyword.
+
+    Third-party ``RunEventStore`` implementations may still expose the legacy
+    ``delete_by_thread(thread_id)`` contract; they must keep deleting, just
+    without the owner filter (their storage is not user-scoped). An
+    uninspectable callable keeps the old call contract, and a ``TypeError``
+    raised inside the backend must never trigger a retry.
+    """
+    try:
+        parameters = inspect.signature(delete_by_thread).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "user_id" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"user_id": user_id}
+    return {}
+
+
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
+
+    # One owner identity for every cleanup step below: the filesystem bucket, the
+    # persisted runs/events/feedback and the thread_meta row all belong to the
+    # same owner, so they must not resolve their scope independently.
+    user_id = get_effective_user_id()
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -713,7 +766,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             message="Skipped local data cleanup for legacy thread ID",
         )
     else:
-        response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+        response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -724,11 +777,44 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
+    # are deleted, so the durable thread-operation reservation protecting this
+    # very request survives until ``reserve_thread_operation`` exits. Third-party
+    # RunStore implementations that predate the capability are skipped.
+    try:
+        delete_runs = getattr(get_run_store(request), "delete_by_thread", None)
+        if delete_runs is not None:
+            await delete_runs(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted run events (best-effort). These are the user-visible
+    # conversation history, not a cache: leaving them behind makes a deleted
+    # thread's feed readable again through GET /threads/{id}/messages. A legacy
+    # store that predates the owner-scoped signature is still called, with the
+    # old contract.
+    try:
+        delete_events = get_run_event_store(request).delete_by_thread
+        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
+    except Exception:
+        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted feedback best-effort. This cleans existing rows; fencing
+    # already-admitted writes across thread deletion is a separate lifecycle
+    # concern. The memory backend legitimately sets ``feedback_repo = None``, so
+    # the optional accessor is used here.
+    try:
+        feedback_repo = getattr(request.app.state, "feedback_repo", None)
+        if feedback_repo is not None:
+            await feedback_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
+        await thread_store.delete(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
@@ -762,11 +848,8 @@ async def _resolve_existing_thread(
     """
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and thread_owner_user_id:
-        unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
-            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+        await thread_store.claim_unowned(thread_id, thread_owner_user_id)
+        existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     return existing_record
 
 
@@ -806,21 +889,32 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         return _existing_thread_response(thread_id, existing_record)
 
     # Write thread_meta so the thread appears in /threads/search immediately
+    from deerflow.persistence.projects import ProjectNotAssignableError
+
     try:
-        await thread_store.create(
+        created_record = await thread_store.create(
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             **thread_owner_kwargs,
             metadata=body.metadata,
+            project_id=body.project_id,
         )
+    except ProjectNotAssignableError:
+        # Fail closed: missing, foreign, or archived projects are
+        # indistinguishable at the API surface.
+        raise HTTPException(status_code=404, detail="Project not found") from None
+    except ThreadOwnershipConflictError:
+        # Do not reveal that a caller-chosen id belongs to another user.
+        raise HTTPException(status_code=404, detail="Thread not found") from None
     except IntegrityError:
         # The idempotency read above and this insert are not atomic: a
         # concurrent request for the same thread_id can commit in between, so
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
-        # path does — instead of surfacing the conflict as a 500. (The memory
-        # store overwrites rather than raising, so it never reaches here.)
+        # path does — instead of surfacing the conflict as a 500. The memory
+        # store serializes same-id creates under its per-thread lock and keeps
+        # its historical overwrite behavior, so it does not reach this branch.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
@@ -849,13 +943,11 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         raise HTTPException(status_code=500, detail="Failed to create thread")
 
     logger.info("Thread created: %s", sanitize_log_param(thread_id))
-    return ThreadResponse(
-        thread_id=thread_id,
-        status="idle",
-        created_at=now,
-        updated_at=now,
-        metadata=body.metadata,
-    )
+    # Respond from the persisted record — the store stamps
+    # ``metadata.deerflow_project_id`` from the assigned project_id column, so
+    # echoing ``body.metadata`` here would omit the membership the retry path
+    # (``_existing_thread_response``) reports.
+    return _existing_thread_response(thread_id, created_record)
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
@@ -894,7 +986,7 @@ async def _branch_thread_with_reservation(
     source_metadata = source_record.get("metadata") or {}
     if source_metadata.get(_SIDECAR_METADATA_KEY) is True:
         raise HTTPException(status_code=409, detail="Branching is only available in the main conversation.")
-    source_accessor, source_config = build_checkpoint_state_accessor(
+    source_accessor, source_config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=source_record.get("assistant_id"),
@@ -932,6 +1024,15 @@ async def _branch_thread_with_reservation(
         "branch_parent_message_id": body.message_id,
         "branch_created_at": now,
     }
+    # A branch extends its source conversation, so the new row inherits the
+    # source thread's project membership — an unassigned branch would surface
+    # under Recent chats instead of the source thread's project group. The
+    # store re-validates the project inside the insert (same fail-closed path
+    # as create/move), and the inherited id may be stale only when the project
+    # was archived or deleted after the source read.
+    from deerflow.persistence.projects import ProjectNotAssignableError
+
+    source_project_id = (source_metadata or {}).get(THREAD_PROJECT_METADATA_KEY)
 
     if body.title:
         display_name = body.title
@@ -980,6 +1081,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
+        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1006,17 +1108,30 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
+    async def _write_branch_row(project_id: str | None) -> None:
+        try:
+            await thread_store.create(
+                new_thread_id,
+                assistant_id=source_record.get("assistant_id"),
+                display_name=display_name,
+                metadata=branch_metadata,
+                project_id=project_id,
+                **thread_owner_kwargs,
+            )
+        except ProjectNotAssignableError:
+            raise
+        except Exception:
+            logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
+            raise HTTPException(status_code=500, detail="Failed to create branch") from None
+
     try:
-        await thread_store.create(
-            new_thread_id,
-            assistant_id=source_record.get("assistant_id"),
-            display_name=display_name,
-            metadata=branch_metadata,
-            **thread_owner_kwargs,
-        )
-    except Exception:
-        logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create branch") from None
+        await _write_branch_row(source_project_id)
+    except ProjectNotAssignableError:
+        # The source project became unassignable (archived, or deleted in a
+        # race that cleared the source row's membership after our read): keep
+        # the branch usable as an unassigned thread — the pre-inheritance
+        # behavior for sources without an active project.
+        await _write_branch_row(None)
 
     # The thread feed (GET /messages, /messages/page) reads the run-event
     # store, not checkpoints, and a fresh branch has no run_events — so the
@@ -1067,10 +1182,15 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 
     repo = get_thread_store(request)
+    # Three-state project filter: key absent → no filter; explicit null →
+    # unassigned threads only; string → members of that project.
+    project_filter = body.project_id if "project_id" in body.model_fields_set else PROJECT_FILTER_UNSET
     try:
         rows = await repo.search(
             metadata=body.metadata or None,
             status=body.status,
+            **({"archived": body.archived} if body.archived is not None else {}),
+            project_id=project_filter,
             limit=body.limit,
             offset=body.offset,
         )
@@ -1105,10 +1225,10 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
-    # Pin/unpin is not conversation activity, so it must not bump ``updated_at``.
+    # Pin/unpin and archive/restore are not conversation activity, so it must not bump ``updated_at``.
     # Other metadata PATCH callers keep the public endpoint's existing recency
     # contract unless they get their own explicit no-touch API surface.
-    touch = not _is_pin_metadata_patch(body.metadata)
+    touch = not _is_organization_metadata_patch(body.metadata)
     try:
         await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
     except Exception:
@@ -1117,6 +1237,33 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
 
     # Re-read to get the merged metadata and the store's timestamp decision.
     record = await thread_store.get(thread_id) or record
+    return ThreadResponse(
+        thread_id=thread_id,
+        status=record.get("status", "idle"),
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
+        metadata=record.get("metadata", {}),
+    )
+
+
+class ThreadMoveRequest(BaseModel):
+    """Request body for moving a thread into/out of a project."""
+
+    project_id: str | None = Field(..., description="Target project id, or null to unassign")
+
+
+@router.post("/{thread_id}/move", response_model=ThreadResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Request) -> ThreadResponse:
+    """Move a thread between projects (or out). Organizational only: history,
+    run state, and per-thread files are untouched (RFC v2 §6)."""
+    from app.gateway.deps import get_thread_store
+
+    thread_store = get_thread_store(request)
+    moved = await thread_store.set_project(thread_id, body.project_id)
+    if not moved:
+        raise HTTPException(status_code=404, detail="Thread or project not found")
+    record = await thread_store.get(thread_id)
     return ThreadResponse(
         thread_id=thread_id,
         status=record.get("status", "idle"),
@@ -1136,7 +1283,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     checkpointer = get_checkpointer(request)
     record: dict | None = await thread_store.get(thread_id)
     try:
-        accessor, config = build_checkpoint_state_accessor(
+        accessor, config = await abuild_checkpoint_state_accessor(
             request,
             thread_id=thread_id,
             assistant_id=record.get("assistant_id") if record is not None else None,
@@ -1326,8 +1473,15 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
     tasks_raw = snapshot.tasks or ()
     tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
 
+    values = serialize_channel_values_for_api(snapshot.values)
+    messages = values.get("messages")
+    if isinstance(messages, list) and messages:
+        # Same reason as the history endpoint: a client reading the checkpoint
+        # over REST needs the feed position the stream would have stamped.
+        values["messages"] = await stamp_messages_with_seq(_optional_run_event_store(request), thread_id, messages)
+
     return ThreadStateResponse(
-        values=serialize_channel_values_for_api(snapshot.values),
+        values=values,
         next=list(snapshot.next or ()),
         metadata=metadata,
         checkpoint={"id": checkpoint_id, "ts": coerce_iso(created_at)},
@@ -1345,6 +1499,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    # Validate external roles before materializing a graph or reserving a write.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     if body.checkpoint_id is not None:
         if not body.checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
@@ -1372,12 +1528,6 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    # These values go straight into a checkpoint, so they need the same
-    # server-owned-metadata stripping the run path gets inside normalize_input.
-    # Without it an authenticated client can persist forged provenance and
-    # transform trails, which later readers are entitled to treat as facts
-    # about what the host itself did.
-    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)
@@ -1392,8 +1542,14 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            source_metadata = await accessor.aget_metadata(read_config)
+            update_config = {
+                **read_config,
+                "configurable": dict(read_config.get("configurable", {})),
+                "metadata": checkpoint_agent_binding_metadata(source_metadata),
+            }
             updated_config = await accessor.aupdate(
-                read_config,
+                update_config,
                 updates,
                 as_node=mutation_node,
             )
@@ -1718,7 +1874,15 @@ async def get_thread_history(
                     except Exception:
                         logger.warning("Failed to inject turn_duration for thread %s", sanitize_log_param(thread_id), exc_info=True)
 
-                    values["messages"] = serialized_msgs
+                    # The stream stamps `values` frames as they are published, but a
+                    # client that only opens a conversation never sees one — this is
+                    # the read it does instead, and without a seq a rescued early turn
+                    # has no absolute position to be placed at (#4666).
+                    values["messages"] = await stamp_messages_with_seq(
+                        _optional_run_event_store(request),
+                        thread_id,
+                        serialized_msgs,
+                    )
 
             is_latest_checkpoint = False
 

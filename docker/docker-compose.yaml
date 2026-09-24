@@ -150,7 +150,9 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3); raise SystemExit(0 if response.status == 200 else 1)"]
+      # /health/ready runs both probes concurrently within a 3s endpoint
+      # deadline; the client timeout must stay above that bound.
+      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s
       retries: 30

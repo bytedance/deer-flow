@@ -104,11 +104,12 @@ def test_join_routes_wire_sse_consumer_as_observers():
     from app.gateway.routers import thread_runs
 
     thread_runs_source = inspect.getsource(thread_runs)
-    # join_run + stream_existing_run (GET and POST share one handler)
+    # join_run + the shared existing-run stream implementation
     assert thread_runs_source.count("sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False)") == 2
-    # stream_run — the creator's create-and-stream endpoint
-    assert thread_runs_source.count("sse_consumer(bridge, record, request, run_mgr),") == 1
+    # stream_run — creating retry opts into missing-stream gap; first create does not
+    assert "emit_gap_on_missing_stream=record.idempotency_reused" in thread_runs_source
 
     runs_source = inspect.getsource(runs_router)
-    # stateless create-and-stream — also a creator stream
+    # stateless create-and-stream — creator on_disconnect policy, not the retry gap
     assert "sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False)" not in runs_source
+    assert "emit_gap_on_missing_stream" not in runs_source

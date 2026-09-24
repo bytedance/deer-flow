@@ -36,6 +36,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from pathlib import PurePosixPath
 
 import urllib3
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -107,16 +108,27 @@ if SANDBOX_SERVICE_TYPE not in {"NodePort", "ClusterIP"}:
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
+DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+DEFAULT_MAX_SHELL_SESSIONS = 10
 MAX_EXTRA_MOUNTS = 10
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
-    "/mnt/skills/custom",
-    "/mnt/skills/integrations",
     "/mnt/integrations/lark-cli/config",
     "/mnt/integrations/lark-cli/config/locks",
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
 }
+MANAGED_SKILL_CATEGORY_NAMES = (
+    "public",
+    "custom",
+    "legacy",
+    "integrations",
+)
+RESERVED_SANDBOX_MOUNT_PATHS = (
+    "/mnt/user-data",
+    "/mnt/acp-workspace",
+    "/mnt/integrations/lark-cli",
+)
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -171,16 +183,57 @@ def _is_path_under_base(path: str, base: str) -> bool:
         return False
 
 
-def _normalize_extra_mount_container_path(container_path: str) -> str:
+def _normalize_skills_container_path(container_path: str) -> str:
+    """Return a canonical skills root that cannot overlap platform mounts."""
+    if not container_path or not container_path.startswith("/") or container_path.startswith("//"):
+        raise HTTPException(status_code=400, detail="The skills container path must be an absolute non-root path")
+
+    normalized = posixpath.normpath(container_path)
+    if normalized == "/" or normalized != container_path:
+        raise HTTPException(
+            status_code=400,
+            detail="The skills container path must not be root or contain redundant separators, '.' or '..'",
+        )
+
+    root = PurePosixPath(normalized)
+    for reserved_path in RESERVED_SANDBOX_MOUNT_PATHS:
+        reserved = PurePosixPath(reserved_path)
+        if root == reserved or root.is_relative_to(reserved) or reserved.is_relative_to(root):
+            raise HTTPException(
+                status_code=400,
+                detail=f"The skills container path {normalized!r} overlaps reserved sandbox path {reserved_path!r}",
+            )
+    return normalized
+
+
+def _managed_skill_category_mount_paths(
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> set[str]:
+    root = _normalize_skills_container_path(skills_container_path)
+    return {posixpath.join(root, category) for category in MANAGED_SKILL_CATEGORY_NAMES}
+
+
+def _normalize_extra_mount_container_path(
+    container_path: str,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> str:
     normalized = posixpath.normpath(container_path)
     if not normalized.startswith("/"):
         raise HTTPException(status_code=400, detail=f"Extra mount path must be absolute: {container_path}")
-    if normalized not in ALLOWED_EXTRA_MOUNT_PATHS:
+    allowed_paths = ALLOWED_EXTRA_MOUNT_PATHS | _managed_skill_category_mount_paths(
+        skills_container_path
+    )
+    if normalized not in allowed_paths:
         raise HTTPException(status_code=400, detail=f"Unsupported extra mount path: {container_path}")
     return normalized
 
 
-def _validated_extra_mounts(extra_mounts: list["ExtraMount"] | None) -> list["ExtraMount"]:
+def _validated_extra_mounts(
+    extra_mounts: list["ExtraMount"] | None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> list["ExtraMount"]:
     """Validate extra mounts before converting them into K8s hostPath/PVC mounts."""
     if not extra_mounts:
         return []
@@ -197,7 +250,10 @@ def _validated_extra_mounts(extra_mounts: list["ExtraMount"] | None) -> list["Ex
         if not _is_path_under_base(host_path, host_base_dir):
             raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}")
 
-        container_path = _normalize_extra_mount_container_path(mount.container_path)
+        container_path = _normalize_extra_mount_container_path(
+            mount.container_path,
+            skills_container_path=skills_container_path,
+        )
         if container_path in seen_container_paths:
             raise HTTPException(status_code=400, detail=f"Duplicate extra mount path: {container_path}")
         seen_container_paths.add(container_path)
@@ -259,14 +315,21 @@ def _runtime_provided_extra_mounts(
     return [mount for mount in extra_mounts if posixpath.normpath(mount.container_path) not in dropped]
 
 
-def _lark_broker_credential_mounts(extra_mounts: list["ExtraMount"] | None) -> dict[str, "ExtraMount"]:
+def _lark_broker_credential_mounts(
+    extra_mounts: list["ExtraMount"] | None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> dict[str, "ExtraMount"]:
     """Extract the config/locks/data mounts the broker sidecar needs.
 
     Keyed by container path so the caller can wire each into the sidecar's fixed
     ``/var/lark/{config,config/locks,data}`` paths.
     """
     result: dict[str, ExtraMount] = {}
-    for mount in _validated_extra_mounts(extra_mounts):
+    for mount in _validated_extra_mounts(
+        extra_mounts,
+        skills_container_path=skills_container_path,
+    ):
         normalized = posixpath.normpath(mount.container_path)
         if normalized in (
             LARK_CLI_CONFIG_CONTAINER_PATH,
@@ -409,6 +472,8 @@ class CreateSandboxRequest(BaseModel):
     user_id: str = Field(default=DEFAULT_USER_ID, pattern=SAFE_USER_ID_PATTERN)
     extra_mounts: list[ExtraMount] = Field(default_factory=list)
     include_legacy_skills: bool = False
+    # Sent explicitly by new Gateways; the default keeps old Gateways compatible.
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH
     # When true (and LARK_CLI_INIT_IMAGE is configured), provision the sandbox
     # lark-cli runtime via an init container + emptyDir instead of a runtime
     # hostPath/PVC extra mount.
@@ -419,12 +484,16 @@ class CreateSandboxRequest(BaseModel):
     # mounted into the sidecar only, never the sandbox. Supersedes the runtime
     # binary + credential mounts when enabled.
     provision_lark_cli_broker: bool = False
+    # New Gateways size this from their process-wide subagent capacity. None
+    # keeps requests from older Gateways and custom provisioner callers working.
+    max_shell_sessions: int | None = Field(default=None, gt=0)
 
 
 class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str
     status: str
+    max_shell_sessions: int | None = None
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -447,9 +516,18 @@ def _sandbox_url(sandbox_id: str, node_port: int | None = None) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
-def _build_extra_volumes(extra_mounts: list[ExtraMount] | None = None) -> list[k8s_client.V1Volume]:
+def _build_extra_volumes(
+    extra_mounts: list[ExtraMount] | None = None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> list[k8s_client.V1Volume]:
     volumes: list[k8s_client.V1Volume] = []
-    for index, mount in enumerate(_validated_extra_mounts(extra_mounts)):
+    for index, mount in enumerate(
+        _validated_extra_mounts(
+            extra_mounts,
+            skills_container_path=skills_container_path,
+        )
+    ):
         if USERDATA_PVC_NAME:
             volumes.append(
                 k8s_client.V1Volume(
@@ -473,9 +551,18 @@ def _build_extra_volumes(extra_mounts: list[ExtraMount] | None = None) -> list[k
     return volumes
 
 
-def _build_extra_volume_mounts(extra_mounts: list[ExtraMount] | None = None) -> list[k8s_client.V1VolumeMount]:
+def _build_extra_volume_mounts(
+    extra_mounts: list[ExtraMount] | None = None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+) -> list[k8s_client.V1VolumeMount]:
     mounts: list[k8s_client.V1VolumeMount] = []
-    for index, mount in enumerate(_validated_extra_mounts(extra_mounts)):
+    for index, mount in enumerate(
+        _validated_extra_mounts(
+            extra_mounts,
+            skills_container_path=skills_container_path,
+        )
+    ):
         volume_mount = k8s_client.V1VolumeMount(
             name=_extra_mount_volume_name(index),
             mount_path=mount.container_path,
@@ -493,25 +580,42 @@ def _build_volumes(
     *,
     include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
 ) -> list[k8s_client.V1Volume]:
     """Build volume list: PVC when configured, otherwise hostPath.
 
     Skills are split into public, per-user custom, and legacy (global-custom)
-    volumes so that ``/mnt/skills/{public,custom,legacy}/`` paths resolve
+    volumes so that ``<skills-root>/{public,custom,legacy}/`` paths resolve
     correctly inside the sandbox — matching the hostPath layout produced by
     ``LocalSandboxProvider`` and ``AioSandboxProvider``.
     """
     volumes: list[k8s_client.V1Volume] = []
     del include_legacy_skills  # retained for request compatibility
+    skills_root = _normalize_skills_container_path(skills_container_path)
+    managed_skill_paths = _managed_skill_category_mount_paths(skills_root)
+    validated_extra_mounts = _validated_extra_mounts(
+        extra_mounts,
+        skills_container_path=skills_root,
+    )
+    skill_overrides = {
+        posixpath.normpath(mount.container_path)
+        for mount in validated_extra_mounts
+        if posixpath.normpath(mount.container_path)
+        in managed_skill_paths
+    }
+    all_skill_categories_overridden = managed_skill_paths <= skill_overrides
 
     # ── Skills volumes ────────────────────────────────────────────────
 
-    if SKILLS_PVC_NAME:
-        # PVC mode: three-way subPath not yet supported; fall back to
-        # single-volume mount for backward compatibility.
-        logger.warning("SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single /mnt/skills mount")
+    if SKILLS_PVC_NAME and not all_skill_categories_overridden:
+        # An unrestricted thread keeps the operator-provided skills PVC root.
+        logger.warning(
+            "SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; "
+            "falling back to single %s mount",
+            skills_root,
+        )
         volumes.append(
             k8s_client.V1Volume(
                 name="skills",
@@ -521,18 +625,19 @@ def _build_volumes(
                 ),
             )
         )
-    else:
+    elif not SKILLS_PVC_NAME:
         # hostPath mode: three-way layout
         public_path = join_host_path(DEER_FLOW_HOST_BASE_DIR, "skills_view", "public")
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-public",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=public_path,
-                    type="Directory",
-                ),
+        if posixpath.join(skills_root, "public") not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-public",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=public_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
         user_custom_path = join_host_path(
             DEER_FLOW_HOST_BASE_DIR,
@@ -541,28 +646,30 @@ def _build_volumes(
             "skills_view",
             "custom",
         )
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-custom",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=user_custom_path,
-                    type="Directory",
-                ),
+        if posixpath.join(skills_root, "custom") not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-custom",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=user_custom_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
         legacy_path = join_host_path(
             DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills_view", "legacy"
         )
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-legacy",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=legacy_path,
-                    type="Directory",
-                ),
+        if posixpath.join(skills_root, "legacy") not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-legacy",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=legacy_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
     # ── User-data volume ──────────────────────────────────────────────
 
@@ -586,10 +693,11 @@ def _build_volumes(
     volumes.extend(
         _build_extra_volumes(
             _runtime_provided_extra_mounts(
-                extra_mounts,
+                validated_extra_mounts,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
-            )
+            ),
+            skills_container_path=skills_root,
         )
     )
     # The runtime emptyDir is shared by the init container (writer) and the
@@ -603,7 +711,10 @@ def _build_volumes(
         )
     # Pattern B: config/locks/data volumes go to the broker sidecar only.
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
-        credential_mounts = _lark_broker_credential_mounts(extra_mounts)
+        credential_mounts = _lark_broker_credential_mounts(
+            validated_extra_mounts,
+            skills_container_path=skills_root,
+        )
         for container_path, volume_name in (
             (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME),
             (LARK_CLI_LOCKS_CONTAINER_PATH, LARK_BROKER_LOCKS_VOLUME_NAME),
@@ -640,23 +751,37 @@ def _build_volume_mounts(
     *,
     include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
 ) -> list[k8s_client.V1VolumeMount]:
     """Build volume mount list, mirroring three-way skills layout.
 
-    Skills are mounted to ``/mnt/skills/{public,custom,legacy}/`` so that
+    Skills are mounted to ``<skills-root>/{public,custom,legacy}/`` so that
     category-aware ``Skill.get_container_path()`` paths resolve correctly.
-    PVC mode falls back to a single ``/mnt/skills`` mount and can optionally
+    PVC mode falls back to a single ``<skills-root>`` mount and can optionally
     scope that mount with ``SKILLS_PVC_SUBPATH_TEMPLATE``.
     """
     mounts: list[k8s_client.V1VolumeMount] = []
     del include_legacy_skills  # retained for request compatibility
+    skills_root = _normalize_skills_container_path(skills_container_path)
+    managed_skill_paths = _managed_skill_category_mount_paths(skills_root)
+    validated_extra_mounts = _validated_extra_mounts(
+        extra_mounts,
+        skills_container_path=skills_root,
+    )
+    skill_overrides = {
+        posixpath.normpath(mount.container_path)
+        for mount in validated_extra_mounts
+        if posixpath.normpath(mount.container_path)
+        in managed_skill_paths
+    }
+    all_skill_categories_overridden = managed_skill_paths <= skill_overrides
 
-    if SKILLS_PVC_NAME:
+    if SKILLS_PVC_NAME and not all_skill_categories_overridden:
         skills_mount = k8s_client.V1VolumeMount(
             name="skills",
-            mount_path="/mnt/skills",
+            mount_path=skills_root,
             read_only=True,
         )
         if SKILLS_PVC_SUBPATH_TEMPLATE:
@@ -665,26 +790,25 @@ def _build_volume_mounts(
                 thread_id=thread_id,
             )
         mounts.append(skills_mount)
-    else:
-        mounts.extend(
-            [
-                k8s_client.V1VolumeMount(
-                    name="skills-public",
-                    mount_path="/mnt/skills/public",
-                    read_only=True,
-                ),
-                k8s_client.V1VolumeMount(
-                    name="skills-custom",
-                    mount_path="/mnt/skills/custom",
-                    read_only=True,
-                ),
-                k8s_client.V1VolumeMount(
-                    name="skills-legacy",
-                    mount_path="/mnt/skills/legacy",
-                    read_only=True,
-                ),
-            ]
-        )
+    elif not SKILLS_PVC_NAME:
+        default_skill_mounts = [
+            k8s_client.V1VolumeMount(
+                name="skills-public",
+                mount_path=posixpath.join(skills_root, "public"),
+                read_only=True,
+            ),
+            k8s_client.V1VolumeMount(
+                name="skills-custom",
+                mount_path=posixpath.join(skills_root, "custom"),
+                read_only=True,
+            ),
+            k8s_client.V1VolumeMount(
+                name="skills-legacy",
+                mount_path=posixpath.join(skills_root, "legacy"),
+                read_only=True,
+            ),
+        ]
+        mounts.extend(mount for mount in default_skill_mounts if mount.mount_path not in skill_overrides)
 
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",
@@ -697,10 +821,11 @@ def _build_volume_mounts(
     mounts.extend(
         _build_extra_volume_mounts(
             _runtime_provided_extra_mounts(
-                extra_mounts,
+                validated_extra_mounts,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
-            )
+            ),
+            skills_container_path=skills_root,
         )
     )
     # Sandbox reads the runtime dir (real binary in Pattern A, shim in Pattern B).
@@ -766,6 +891,8 @@ def _build_lark_cli_init_containers(
 def _build_lark_cli_broker_sidecars(
     provision_lark_cli_broker: bool,
     extra_mounts: list[ExtraMount] | None,
+    *,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> list[k8s_client.V1Container]:
     """Broker sidecar that holds lark-cli + the per-user credentials (Pattern B).
 
@@ -776,7 +903,10 @@ def _build_lark_cli_broker_sidecars(
     """
     if not _lark_cli_broker_enabled(provision_lark_cli_broker):
         return []
-    credential_mounts = _lark_broker_credential_mounts(extra_mounts)
+    credential_mounts = _lark_broker_credential_mounts(
+        extra_mounts,
+        skills_container_path=skills_container_path,
+    )
     volume_mounts: list[k8s_client.V1VolumeMount] = []
     for container_path, volume_name, sidecar_path in (
         (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME, LARK_BROKER_SIDECAR_CONFIG_PATH),
@@ -830,13 +960,30 @@ def _build_pod(
     *,
     include_legacy_skills: bool = False,
     extra_mounts: list[ExtraMount] | None = None,
+    skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
     provision_lark_cli_runtime: bool = False,
     provision_lark_cli_broker: bool = False,
+    max_shell_sessions: int | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     init_containers = (
         _build_lark_cli_init_containers(provision_lark_cli_runtime, provision_lark_cli_broker) or None
     )
+    sandbox_env: list[k8s_client.V1EnvVar] = []
+    if max_shell_sessions is not None:
+        sandbox_env.append(
+            k8s_client.V1EnvVar(
+                name="MAX_SHELL_SESSIONS",
+                value=str(max_shell_sessions),
+            )
+        )
+    if _lark_cli_broker_enabled(provision_lark_cli_broker):
+        sandbox_env.append(
+            k8s_client.V1EnvVar(
+                name="DEERFLOW_LARK_BROKER_URL",
+                value=LARK_BROKER_URL,
+            )
+        )
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -854,11 +1001,7 @@ def _build_pod(
                     name="sandbox",
                     image=SANDBOX_IMAGE,
                     image_pull_policy="IfNotPresent",
-                    env=(
-                        [k8s_client.V1EnvVar(name="DEERFLOW_LARK_BROKER_URL", value=LARK_BROKER_URL)]
-                        if _lark_cli_broker_enabled(provision_lark_cli_broker)
-                        else None
-                    ),
+                    env=sandbox_env or None,
                     ports=[
                         k8s_client.V1ContainerPort(
                             name="http",
@@ -903,6 +1046,7 @@ def _build_pod(
                         user_id=user_id,
                         include_legacy_skills=include_legacy_skills,
                         extra_mounts=extra_mounts,
+                        skills_container_path=skills_container_path,
                         provision_lark_cli_runtime=provision_lark_cli_runtime,
                         provision_lark_cli_broker=provision_lark_cli_broker,
                     ),
@@ -911,7 +1055,11 @@ def _build_pod(
                         allow_privilege_escalation=True,
                     ),
                 ),
-                *_build_lark_cli_broker_sidecars(provision_lark_cli_broker, extra_mounts),
+                *_build_lark_cli_broker_sidecars(
+                    provision_lark_cli_broker,
+                    extra_mounts,
+                    skills_container_path=skills_container_path,
+                ),
             ],
             init_containers=init_containers,
             volumes=_build_volumes(
@@ -919,6 +1067,7 @@ def _build_pod(
                 user_id=user_id,
                 include_legacy_skills=include_legacy_skills,
                 extra_mounts=extra_mounts,
+                skills_container_path=skills_container_path,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
             ),
@@ -997,6 +1146,24 @@ def _get_pod_phase(sandbox_id: str) -> str:
         return "NotFound"
 
 
+def _get_pod_shell_capacity(sandbox_id: str) -> int:
+    """Return the effective AIO shell capacity persisted in the sandbox Pod."""
+    pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    containers = getattr(getattr(pod, "spec", None), "containers", None) or []
+    sandbox_container = next((container for container in containers if getattr(container, "name", None) == "sandbox"), None)
+    for env_var in getattr(sandbox_container, "env", None) or []:
+        if getattr(env_var, "name", None) != "MAX_SHELL_SESSIONS":
+            continue
+        try:
+            value = int(env_var.value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value") from exc
+        if value <= 0:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value")
+        return value
+    return DEFAULT_MAX_SHELL_SESSIONS
+
+
 # ── API endpoints ────────────────────────────────────────────────────────
 
 
@@ -1032,27 +1199,49 @@ def create_sandbox(req: CreateSandboxRequest):
     thread_id = req.thread_id or sandbox_id
     user_id = req.user_id
     include_legacy_skills = req.include_legacy_skills
+    skills_container_path = _normalize_skills_container_path(
+        req.skills_container_path
+    )
     provision_lark_cli_runtime = req.provision_lark_cli_runtime
     provision_lark_cli_broker = req.provision_lark_cli_broker
+    max_shell_sessions = req.max_shell_sessions
 
     logger.info(
-        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s",
+        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s skills_container_path=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s max_shell_sessions=%s",
         sandbox_id,
         thread_id,
         user_id,
         include_legacy_skills,
+        skills_container_path,
         _lark_cli_runtime_enabled(provision_lark_cli_runtime),
         _lark_cli_broker_enabled(provision_lark_cli_broker),
+        max_shell_sessions,
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
-        return SandboxResponse(
-            sandbox_id=sandbox_id,
-            sandbox_url=existing_url,
-            status=_get_pod_phase(sandbox_id),
-        )
+        try:
+            existing_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+        except (ApiException, RuntimeError) as exc:
+            # A Service can outlive its old Pod during asynchronous replacement.
+            # Only a confirmed missing Pod may fall through to creation.
+            if not isinstance(exc, ApiException) or exc.status != 404:
+                raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
+        else:
+            if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
+                # Only the Gateway can fence replacement against active owners.
+                # A transient discovery failure can route a live Pod through create.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
+                )
+            return SandboxResponse(
+                sandbox_id=sandbox_id,
+                sandbox_url=existing_url,
+                status=_get_pod_phase(sandbox_id),
+                max_shell_sessions=existing_shell_capacity,
+            )
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
@@ -1064,8 +1253,10 @@ def create_sandbox(req: CreateSandboxRequest):
                 user_id=user_id,
                 include_legacy_skills=include_legacy_skills,
                 extra_mounts=req.extra_mounts,
+                skills_container_path=skills_container_path,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
+                max_shell_sessions=max_shell_sessions,
             ),
         )
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
@@ -1097,10 +1288,20 @@ def create_sandbox(req: CreateSandboxRequest):
     if not sandbox_url:
         raise HTTPException(status_code=500, detail="Service access URL was not available in time")
 
+    # A concurrent creator can win the 409 race with a lower-capacity Pod.
+    # Never claim that the requested value was applied without reading it back.
+    try:
+        actual_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+    except (ApiException, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
+    if max_shell_sessions is not None and actual_shell_capacity < max_shell_sessions:
+        raise HTTPException(status_code=409, detail="Existing sandbox shell capacity is below the requested value")
+
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=actual_shell_capacity,
     )
 
 
@@ -1142,6 +1343,7 @@ def get_sandbox(sandbox_id: str):
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=_get_pod_shell_capacity(sandbox_id),
     )
 
 
@@ -1164,11 +1366,20 @@ def list_sandboxes():
         sandbox_url = _url_from_service(svc, sid)
         if not sandbox_url:
             continue
+        try:
+            shell_capacity = _get_pod_shell_capacity(sid)
+        except (ApiException, RuntimeError) as exc:
+            if isinstance(exc, ApiException) and exc.status == 404:
+                continue
+            reason = getattr(exc, "reason", str(exc))
+            logger.warning("Skipping sandbox %s while inspecting shell capacity: %s", sid, reason)
+            continue
         sandboxes.append(
             SandboxResponse(
                 sandbox_id=sid,
                 sandbox_url=sandbox_url,
                 status=_get_pod_phase(sid),
+                max_shell_sessions=shell_capacity,
             )
         )
 

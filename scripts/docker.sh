@@ -16,12 +16,15 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Use a filename relative to DOCKER_DIR (we always `cd` there) so Windows
 # Docker Desktop does not receive a Git Bash `/c/...` path it cannot open.
 COMPOSE_FILE="docker-compose-dev.yaml"
+# Dev stack project name. `logs --prod` swaps both values for the production
+# stack started by `make up` (scripts/deploy.sh: project `deer-flow`).
+COMPOSE_PROJECT="deer-flow-dev"
 # Selected by require_compose_version: prefer the V2 plugin, else hyphenated binary.
 # Kept as an array so "docker compose" stays two words under set -u / quoting.
 COMPOSE_BIN=(docker compose)
 
 _refresh_compose_cmd() {
-    COMPOSE_CMD="${COMPOSE_BIN[*]} -p deer-flow-dev -f ${COMPOSE_FILE}"
+    COMPOSE_CMD="${COMPOSE_BIN[*]} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE}"
 }
 _refresh_compose_cmd
 
@@ -335,8 +338,14 @@ start() {
     if [ "$sandbox_mode" = "aio" ]; then
         local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
         if [ ! -S "$docker_socket" ]; then
-            echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
-            exit 1
+            # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+            # /var/run/docker.sock into containers even though no host socket file exists.
+            if [ "$docker_socket" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+                :
+            else
+                echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
+                exit 1
+            fi
         fi
         echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
         COMPOSE_CMD="$COMPOSE_CMD -f docker-compose.dood.yaml"
@@ -410,43 +419,73 @@ start() {
     echo ""
 }
 
-# View Docker development logs
+# View Docker logs. The dev stack (make docker-start) is the default;
+# `--prod` tails the production stack started by `make up` (scripts/deploy.sh).
 logs() {
     local service=""
+    local is_prod=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prod)
+                is_prod=1
+                ;;
+            --frontend|--gateway|--nginx|--redis|--provisioner)
+                if [ -n "$service" ]; then
+                    echo -e "${YELLOW}Only one service option is allowed (got --$service and $1).${NC}"
+                    exit 1
+                fi
+                service="${1#--}"
+                ;;
+            *)
+                echo -e "${YELLOW}Unknown option: $1${NC}"
+                echo "Usage: $0 logs [--prod] [--frontend|--gateway|--nginx|--redis|--provisioner]"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if [ "$is_prod" = 1 ]; then
+        # Target the same project deploy.sh started. Relative paths: this
+        # runs with cwd=$DOCKER_DIR.
+        COMPOSE_FILE="docker-compose.yaml"
+        COMPOSE_PROJECT="deer-flow"
+        # deploy.sh exports these before every compose invocation so the
+        # volume specs in docker-compose.yaml interpolate; without them even
+        # `logs` fails to parse the file on checkouts without a .env.
+        export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$PROJECT_ROOT/backend/.deer-flow}"
+        export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
+        export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
+        export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$PROJECT_ROOT}"
+        export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
+    elif [ -z "$service" ]; then
+        # The dev and production stacks use different compose projects, so
+        # `make docker-logs` after `make up` would exit with empty output;
+        # point at the production entry point instead of staying silent.
+        if [ -z "$(cd "$DOCKER_DIR" && $COMPOSE_CMD ps -q 2>/dev/null)" ]; then
+            echo -e "${YELLOW}No dev containers are running.${NC}"
+            echo "Started the production stack with 'make up'? View its logs with 'make prod-logs'."
+        fi
+    fi
 
     compose_preflight
 
-    case "$1" in
-        --frontend)
-            service="frontend"
-            echo -e "${BLUE}Viewing frontend logs...${NC}"
-            ;;
-        --gateway)
-            service="gateway"
-            echo -e "${BLUE}Viewing gateway logs...${NC}"
-            ;;
-        --nginx)
-            service="nginx"
-            echo -e "${BLUE}Viewing nginx logs...${NC}"
-            ;;
-        --redis)
-            service="redis"
-            echo -e "${BLUE}Viewing redis logs...${NC}"
-            ;;
-        --provisioner)
-            service="provisioner"
-            echo -e "${BLUE}Viewing provisioner logs...${NC}"
-            ;;
-        "")
-            echo -e "${BLUE}Viewing all logs...${NC}"
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--redis|--provisioner]"
-            exit 1
-            ;;
-    esac
-    
+    # Append --env-file only after compose_preflight(): its Compose detection
+    # may rebuild COMPOSE_CMD, which would drop anything appended before it.
+    if [ "$is_prod" = 1 ] && [ -f "$PROJECT_ROOT/.env" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --env-file ../.env"
+    fi
+
+    if [ -n "$service" ]; then
+        echo -e "${BLUE}Viewing $service logs...${NC}"
+    elif [ "$is_prod" = 1 ]; then
+        echo -e "${BLUE}Viewing production stack logs...${NC}"
+    else
+        echo -e "${BLUE}Viewing all logs...${NC}"
+    fi
+
     cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
 }
 
@@ -487,7 +526,8 @@ help() {
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
     echo "  restart           - Restart all running Docker services"
-    echo "  logs [option] - View Docker development logs"
+    echo "  logs [option] - View Docker logs (dev stack by default, production with --prod)"
+    echo "                  --prod       View production stack logs (containers from 'make up')"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
@@ -512,7 +552,8 @@ main() {
             restart
             ;;
         logs)
-            logs "$2"
+            shift
+            logs "$@"
             ;;
         stop)
             stop

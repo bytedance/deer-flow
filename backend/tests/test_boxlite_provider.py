@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +51,9 @@ class _FakeBox:
         # Health check: box.execute_command("echo ok") → exec("sh", "-lc", "echo ok")
         if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and argv[2] == "echo ok":
             return type("_FakeResult", (), {"stdout": "ok\n", "stderr": "", "exit_code": 0})()
+        if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and "__DF_SEARCH_STATUS__:" in argv[2]:
+            # A search that ran and found nothing (see sandbox/remote_search.py).
+            return type("_FakeResult", (), {"stdout": "\n__DF_SEARCH_STATUS__:1\n", "stderr": "", "exit_code": 0})()
         return _FakeResult()
 
     async def stop(self):
@@ -166,6 +172,19 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+    monkeypatch.setattr(
+        box,
+        "_exec",
+        lambda *argv, **kwargs: types.SimpleNamespace(exit_code=1, stdout="5 passed, 1 error\n", stderr=""),
+    )
+
+    assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -194,7 +213,7 @@ def test_grep_always_prints_filename_for_single_file_paths() -> None:
 
     box.grep("/mnt/user-data/uploads/report.md", "needle")
 
-    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and argv[0][2].startswith("grep ")]
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and "grep -r " in argv[0][2]]
     assert grep_commands
     assert "-H" in grep_commands[-1].split()
 
@@ -1289,3 +1308,238 @@ def test_sandbox_id_none_user_quirk_pinned():
     from deerflow.sandbox.identity import derive_sandbox_scope_token
 
     assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            marker = "__DF_SEARCH_STATUS__" if "__DF_SEARCH_STATUS__:" in argv[2] else "__DF_FIND_STATUS__"
+            return types.SimpleNamespace(stdout=f"/mnt/user-data/workspace/notes.txt \n\n{marker}:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
+def test_list_dir_classifies_empty_failure(marker, error) -> None:
+    class _EmptyBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
+
+    box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
+
+    with pytest.raises(error) as exc:
+        box.list_dir("/mnt/user-data/workspace")
+    assert type(exc.value) is error
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # 127 (no binary) must not look like a missing path.
+    class _MissingBinaryBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
+
+    box = BoxliteBox("box-id", box=_MissingBinaryBox(), run=_fake_run)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
+    captured: list[tuple] = []
+
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            captured.append(argv)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
+    assert any(len(argv) >= 3 and "find -H " in str(argv[2]) for argv in captured)
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> BoxliteBox:
+    box = BoxliteBox("box-id", box=_FakeBox(name="box-id"), run=_fake_run)
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None):
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return types.SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+def test_grep_glob_keeps_its_directory_prefix(tmp_path, monkeypatch) -> None:
+    # grep has no portable --include, so the glob is applied in Python. Matching
+    # only its basename broadened "src/*.js" to every *.js in the tree; the scope
+    # must follow the same relative-to-root semantics as glob() (Tenki, E2B).
+    for rel in ("src/a.js", "src/deep/b.js", "vendor/c.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("const needle = 1;\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    def grep_scope(glob: str) -> list[str]:
+        matches, _ = box.grep(str(tmp_path), "needle", glob=glob)
+        return sorted(os.path.relpath(m.path, tmp_path) for m in matches)
+
+    def glob_scope(glob: str) -> list[str]:
+        found, _ = box.glob(str(tmp_path), glob)
+        return sorted(os.path.relpath(path, tmp_path) for path in found)
+
+    assert grep_scope("src/*.js") == ["src/a.js"]
+    for glob in ("src/*.js", "src/**/*.js", "**/*.js", "*.js"):
+        assert grep_scope(glob) == glob_scope(glob), glob
+
+
+@_RS_POSIX
+def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("needle here\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, truncated = box.grep(str(target), "needle", glob="*.txt")
+
+    assert [m.path for m in matches] == [str(target)]
+    assert truncated is False
+    assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    loop_thread = _EventLoopThread()
+    started = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    release_holder: dict[str, asyncio.Event] = {}
+
+    async def blocking_operation() -> None:
+        release = asyncio.Event()
+        release_holder["event"] = release
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(FutureTimeoutError):
+            loop_thread.run(blocking_operation(), timeout=0.05)
+
+        assert started.wait(1.0)
+        assert cancelled.wait(1.0), "timed-out BoxLite coroutine kept running on the private loop"
+    finally:
+        release = release_holder.get("event")
+        if release is not None and loop_thread._loop is not None:
+            loop_thread._loop.call_soon_threadsafe(release.set)
+        finished.wait(1.0)
+        loop_thread.close()

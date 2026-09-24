@@ -17,6 +17,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -628,6 +629,14 @@ class DingTalkChannel(Channel):
         """
         content = await self._download_by_code(download_code)
         if not content:
+            # Neutral on purpose: None covers several reasons (non-200
+            # download exchange, missing downloadUrl, oversize abort,
+            # transport failure), each already logged with its accurate
+            # reason inside _download_by_code — the empty-bytes case lands
+            # here too. Logging here keeps the skip observable at the
+            # receive level instead of vanishing silently (the wechat
+            # channel's callers and the manager reader use the same shape).
+            logger.warning("[DingTalk] inbound file download returned no content, skipping: file=%s", filename or "(unnamed)")
             return ""
 
         paths = get_paths()
@@ -676,20 +685,21 @@ class DingTalkChannel(Channel):
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
         try:
-            sandbox_provider = get_sandbox_provider()
-            # acquire_async keeps provider lifecycle work (Docker discovery,
-            # readiness polls) off the event loop; update_file is blocking
-            # transport IO on remote sandboxes, so it is offloaded too.
-            sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-            if sandbox_id != "local":
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    # Mirror Feishu: the agent's non-local sandbox cannot see this
-                    # file, so returning the virtual path would hand the model a
-                    # path that reads as nothing — surface a failed-load marker.
-                    logger.warning("[DingTalk] sandbox %s not found after acquire, dropping attachment: %s", sandbox_id, virtual_path)
-                    return ""
-                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+            sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+            synced = await sync_file_to_thread_sandbox(
+                sandbox_provider,
+                thread_id=thread_id,
+                user_id=effective_user_id,
+                virtual_path=virtual_path,
+                content=content,
+                owner_prefix="dingtalk-upload",
+            )
+            if not synced:
+                # Mirror Feishu: the agent's non-local sandbox cannot see this
+                # file, so returning the virtual path would hand the model a
+                # path that reads as nothing — surface a failed-load marker.
+                logger.warning("[DingTalk] sandbox not found after acquire, dropping attachment: %s", virtual_path)
+                return ""
         except Exception:
             # Same failure mode as the sandbox-is-None branch: the bytes never
             # reached the agent's sandbox, so the virtual path would read as

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.runtime_paths import project_root, resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 
@@ -27,7 +28,10 @@ class SkillsConfig(BaseModel):
     )
     container_path: str = Field(
         default=DEFAULT_SKILLS_CONTAINER_PATH,
-        description="Path where skills are mounted in the sandbox container",
+        description=format_field_description(
+            "skills.container_path",
+            field_doc="Path where skills are mounted in the sandbox container.",
+        ),
     )
     deferred_discovery: bool = Field(
         default=False,

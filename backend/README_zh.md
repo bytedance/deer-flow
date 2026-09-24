@@ -441,8 +441,11 @@ make migrate-rev MSG="add foo column to runs"
 ### 测试
 
 ```bash
-# 离线后端测试套件（排除调用外部真实 API 的测试）
+# 默认离线后端测试套件（排除调用外部真实 API 和阻塞式 I/O 的测试）
 make test
+
+# 严格的阻塞式 I/O 测试套件
+make test-blocking-io
 
 # 显式运行使用真实 API 的 DeerFlowClient 集成测试套件
 make test-live

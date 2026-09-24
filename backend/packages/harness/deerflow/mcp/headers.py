@@ -14,11 +14,53 @@ The credential interceptors therefore write header names through
 :func:`apply_header_overrides`, which drops any key differing only in case and
 emits the spelling the connection already uses, so the adapter's merge replaces
 the static entry instead of duplicating it.
+
+Every path that writes a value into an MCP request header checks it with
+:func:`illegal_header_value_reason` first — both credential interceptors, the
+OAuth token manager, and ``build_server_params`` for the operator's static
+headers.
+
+The two halves of that boundary fail differently, and only one of them leaks.
+h11 rejects line breaks and surrounding whitespace with the *full value* in its
+message, ``ToolErrorHandlingMiddleware`` copies that into a model-visible
+ToolMessage, and the credential lands in the prompt, the checkpoint, and
+traces. That is the leak this check exists to stop. httpx encodes ``str``
+values as ASCII and raises ``UnicodeEncodeError``, whose message names only the
+offending character and its position, so at most one character escapes;
+refusing that value up front buys an actionable error rather than an encode
+failure raised from inside the client.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
+
+# What h11 refuses inside a field value (its field_vchar is ``[^\x00\s]``):
+# NUL and the vertical-whitespace characters. SP/HTAB are legal separators
+# *between* visible characters but not at either end.
+_FORBIDDEN_HEADER_VALUE_CHARS = re.compile(r"[\x00\n\x0b\x0c\r]")
+
+
+def illegal_header_value_reason(value: str) -> str | None:
+    """Explain why *value* cannot be sent as an HTTP header value, or ``None``.
+
+    Mirrors what the transport enforces — the MCP clients hand ``dict[str,
+    str]`` headers to ``httpx``, which encodes ``str`` values as ASCII (raising
+    ``UnicodeEncodeError`` before h11 ever sees the value), and h11 rejects
+    NUL/vertical whitespace and leading or trailing SP/HTAB — without
+    repeating the value, so callers can fail closed with a message that names
+    the credential instead of leaking it.
+    """
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return "contains characters outside ASCII"
+    if _FORBIDDEN_HEADER_VALUE_CHARS.search(value):
+        return "contains a line break or another forbidden control character"
+    if value != value.strip(" \t"):
+        return "has leading or trailing whitespace"
+    return None
 
 
 def header_spellings(names: Iterable[str] | None) -> dict[str, str]:

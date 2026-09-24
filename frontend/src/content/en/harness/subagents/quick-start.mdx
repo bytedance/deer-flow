@@ -1,0 +1,64 @@
+---
+title: Quick Start
+description: Your first delegation in five minutes. Turn subagents on, send a task that splits well, read the task card, and know what happens when you press stop.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Quick Start
+
+This chapter is for people using DeerFlow through the web interface. By the end you will know how to let the Lead Agent use subagents, how to read a task card, and where the result goes.
+
+## Prerequisites
+
+- DeerFlow is configured per [Quick Start](/docs/application/quick-start) and you can chat normally. The `subagents:` section in `config.yaml` can stay empty; the built-in defaults work.
+- To use the `bash` subagent you need a container sandbox, or `sandbox.allow_host_bash: true` under the local sandbox, which is only appropriate in a fully trusted local environment. Otherwise `bash` is hidden from the catalog.
+
+<Steps>
+
+### Turn subagents on
+
+Pick **Ultra** in the mode selector of the input box. The UI describes it as "Pro mode with subagents to divide work". Ultra mode sets `subagent_enabled` to `true` in the request context, enables plan mode, and defaults the reasoning effort to high. In Flash, Thinking, and Pro modes the Lead Agent does not see the `task` tool.
+
+If you are talking to a Custom Agent, the **Subagent access** option in that agent's settings may narrow or disable delegation further. See [Subagent Catalog](/docs/harness/subagents/catalog).
+
+### Send a task that splits well
+
+More delegation is not better. The Lead Agent defaults to direct execution and only delegates when parallelism, specialist capability, or context isolation gives a clear net benefit. A good candidate:
+
+> Research the pricing changes at companies A, B, and C over the last year, write one paragraph of conclusions for each, then combine them into a comparison table.
+
+The three investigations are independent, can run in parallel, and their browsing history does not need to pollute the main conversation.
+
+### Read the task card
+
+Every `task` call shows up in the conversation as a subtask card:
+
+- **Status icon**: a spinner while running, a check mark when completed, a red cross when failed. Cancelled, timed-out, and polling-timed-out runs all show as failed.
+- **Model label and token total**: the model the subagent actually used and its cumulative tokens. The token count updates after each completed subagent model call and is hidden when `token_usage.enabled` is `false`.
+- **Step timeline**: expand the card to see each step, with assistant reasoning interleaved with tool calls. After a page reload the steps are backfilled from run events, so nothing is lost.
+- **Result**: the card renders the final report when completed, or a red error line when failed.
+
+### How the result reaches the Lead Agent
+
+The subagent's final report returns as a tool result starting with `Task Succeeded. Result:`. If acceptance criteria were attached, an `Acceptance checklist` section follows. The Lead Agent continues from there and synthesizes the final reply.
+
+The report is the subagent's **self-report**. The runtime cross-checks the receipts it cites and marks unverified parts in the delegation ledger, and the Lead Agent uses that to decide whether to double-check. See [Results and Acceptance](/docs/harness/subagents/results).
+
+### Stopping
+
+Pressing stop while a subagent is running sends it a cancellation request. The card turns to the failed state because no tool result arrives, and the ledger entry is marked `cancelled` when the next run starts, so the Lead Agent is no longer told that the task is "already delegated, do not repeat".
+
+</Steps>
+
+<Callout type="tip">
+  A subagent cannot ask you questions: `ask_clarification` is not available to
+  it. Put the constraints, paths, and expected deliverable into your request to
+  the Lead Agent, which passes them on.
+</Callout>
+
+## Next steps
+
+- To see which subagents exist and how to add your own, read [Subagent Catalog](/docs/harness/subagents/catalog).
+- To give a subagent the parent conversation as background, or to attach automatically checked acceptance criteria, read [Delegating Work](/docs/harness/subagents/delegation).
+- If subagents run too long or cost too much, read [Limits, Budgets, and Capacity](/docs/harness/subagents/limits).

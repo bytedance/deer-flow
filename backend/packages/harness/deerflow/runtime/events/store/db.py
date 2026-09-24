@@ -9,13 +9,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -32,7 +35,14 @@ class DbRunEventStore(RunEventStore):
         # advisory lock guards cross-process races; this guards the common
         # single-process case where two coroutines interleave between the
         # max(seq) read and the INSERT and would otherwise collide on seq.
-        self._write_locks: dict[str, asyncio.Lock] = {}
+        #
+        # The weak registry preserves one lock generation while an admitted
+        # holder/waiter still references it. A separate pin keeps the historical
+        # one-lock-per-live-thread behavior until delete_by_thread() explicitly
+        # retires that thread; after retirement, outstanding users alone keep
+        # the generation alive until they drain.
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._write_lock_pins: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -40,6 +50,9 @@ class DbRunEventStore(RunEventStore):
         if lock is None:
             lock = asyncio.Lock()
             self._write_locks[thread_id] = lock
+        # A fresh caller after deletion makes the thread live again. Repin the
+        # current generation so normal live-thread registry lifetime is stable.
+        self._write_lock_pins[thread_id] = lock
         return lock
 
     @staticmethod
@@ -104,16 +117,46 @@ class DbRunEventStore(RunEventStore):
         user = get_current_user()
         return str(user.id) if user is not None else None
 
+    #: Characters json.dumps escapes in the stored content (``ensure_ascii``
+    #: is False, so non-ASCII survives verbatim and stays matchable).
+    _LIKE_UNSAFE_ID = re.compile(r'["\\\x00-\x1f]')
+
+    @classmethod
+    def _prefilter_substrings(cls, wanted: set[str]) -> list[str] | None:
+        """Return the raw ids to LIKE-match in ``content``, or ``None`` to full-scan.
+
+        An identity is ``kind:raw_id`` and the raw id appears verbatim in the
+        stored JSON string (``u1`` is a substring of a re-keyed ``u1__user``
+        copy too), so a row not containing any wanted id cannot resolve any
+        wanted identity. An id json.dumps would escape breaks that verbatim
+        guarantee — one such id falls the whole set back to the full scan
+        rather than silently missing it. LIKE wildcards are escaped, not
+        rejected.
+        """
+        ids = []
+        for identity in wanted:
+            _kind, _sep, raw_id = identity.partition(":")
+            if not raw_id or cls._LIKE_UNSAFE_ID.search(raw_id):
+                return None
+            ids.append(raw_id)
+        return ids
+
     @staticmethod
-    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+    async def _acquire_thread_mutation_fence(session: AsyncSession, thread_id: str) -> None:
+        """Take the cross-process thread mutation fence, if the dialect has one.
 
         PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
-        results are not lockable rows. As a release-safe workaround, take a
-        transaction-level advisory lock keyed by thread_id before reading the
-        aggregate. Other dialects keep the existing row-locking statement.
+        results are not lockable rows, so it serializes a thread's mutations with
+        a transaction-level advisory lock keyed by ``thread_id``. This is the
+        database half of the contract whose in-process half is
+        ``_get_write_lock()``: every thread mutation — ``put``, ``put_batch``,
+        ``put_if_absent`` and both deletions — takes this fence before touching
+        rows, so an admitted writer can never land a row between a deletion's
+        count and its commit.
+
+        Dialects without a cross-process fence (SQLite) rely on the in-process
+        per-thread lock alone, so this is a no-op there.
         """
-        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
         bind = session.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
@@ -122,6 +165,22 @@ class DbRunEventStore(RunEventStore):
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
                 {"thread_id": thread_id},
             )
+
+    @staticmethod
+    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+        """Return the current max seq while serializing writers per thread.
+
+        Takes the shared thread mutation fence before reading the aggregate, so
+        the read is ordered against every other mutation of the same thread.
+        Other dialects keep the existing row-locking statement.
+        """
+        await DbRunEventStore._acquire_thread_mutation_fence(session, thread_id)
+
+        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        bind = session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "postgresql":
             return await session.scalar(stmt)
 
         return await session.scalar(stmt.with_for_update())
@@ -388,31 +447,97 @@ class DbRunEventStore(RunEventStore):
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
+    async def get_message_seqs(
+        self,
+        thread_id,
+        identities,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        wanted = set(identities)
+        if not wanted:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
+        # ``content`` is a TEXT column holding a JSON *string* (see
+        # ``_content_to_db``), not a JSON column, so the identity fields cannot
+        # be projected in SQL — matching rows are decoded here instead. The
+        # ``content`` column carries full tool outputs, and a wanted identity
+        # absent from the feed (a message still streaming) defeats the early
+        # exit below — so without a prefilter a `/state`/`/history` read of a
+        # long thread pays a full fetch-and-decode of every message row. The
+        # LIKE prefilter keeps that cost in SQL: only rows containing a wanted
+        # id as a raw substring are fetched (false positives are re-checked by
+        # ``message_identity``; ids the prefilter cannot express fall back to
+        # the full scan).
+        stmt = select(RunEventRow.seq, RunEventRow.content).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message").order_by(RunEventRow.seq)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        prefilter_ids = self._prefilter_substrings(wanted)
+        if prefilter_ids is not None:
+            stmt = stmt.where(or_(*[RunEventRow.content.like(f"%{i.replace('%', '\\%').replace('_', '\\_')}%", escape="\\") for i in prefilter_ids]))
+
+        found: dict[str, int] = {}
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            for seq, raw in result:
+                # Plain-text content (never a message dict) is skipped without
+                # paying for a failed JSON parse.
+                if not isinstance(raw, str) or not raw.startswith("{"):
+                    continue
+                try:
+                    content = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(content, dict):
+                    continue
+                identity = message_identity(content)
+                # Earliest seq wins: a message re-persisted later keeps the
+                # position it first occupied in the feed.
+                if identity in wanted and identity not in found:
+                    found[identity] = seq
+                    # Later rows can only be re-persisted copies that already
+                    # lose that tiebreak, so the scan (and its JSON decoding)
+                    # ends with the last wanted seq instead of the thread's
+                    # full message count.
+                    if len(found) == len(wanted):
+                        break
+        return found
+
     async def delete_by_thread(
         self,
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete every event of *thread_id* inside the thread mutation fence.
+
+        Deletion takes the same critical section as the writers — the in-process
+        per-thread lock plus, on PostgreSQL, the transaction advisory lock — so a
+        writer admitted before this call can no longer land a row between the
+        count below and the commit, which would resurrect a deleted thread. The
+        JSONL store serializes deletion the same way (``_run_mutation``).
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_thread")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
-            # not grow unbounded over the (long-lived, singleton) store's
-            # lifetime. Only pop when no writer is mid-flight; a later write
-            # recreates the lock lazily and seq restarts correctly from the
-            # now-deleted thread.
-            lock = self._write_locks.get(thread_id)
-            if lock is not None and not lock.locked():
-                self._write_locks.pop(thread_id, None)
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+            # Retire the live-thread pin, but never remove the weak registry
+            # entry directly. asyncio.Lock.release() clears ``locked()`` before
+            # a queued waiter resumes, so an unlocked check can observe the
+            # handoff window and split one thread onto two lock generations.
+            # Holders/waiters keep the old generation alive until they drain; a
+            # later caller therefore resolves that same lock instead of racing
+            # it with a fresh one.
+            self._write_lock_pins.pop(thread_id, None)
+        return count
 
     async def delete_by_run(
         self,
@@ -421,14 +546,21 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete one run's events inside the thread mutation fence.
+
+        Shares ``delete_by_thread``'s critical section; deleting a single run
+        leaves the thread alive, so the write-lock pin is deliberately kept.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+        return count

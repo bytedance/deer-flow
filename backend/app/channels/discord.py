@@ -19,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
+# Bound for outbound work scheduled onto the Discord client's event loop.
+# Discord API calls normally return in well under a second; anything still
+# pending after this is a dead or wedged client, not a slow response.
+DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
+
+# File uploads carry an unbounded-size payload with no per-channel size cap
+# (unlike Feishu/Telegram's send_file limits), so they get their own, larger
+# bound: a 50 MB artifact over a ~5 Mbps uplink takes ~80 s to push, and a
+# large 429 retry-after inside discord.py can extend that further. Cancelling
+# a healthy upload mid-transfer would report it as failed, so the bound here
+# only exists to convert a wedged client into a logged failure.
+DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
+
 
 class DiscordChannel(Channel):
     """Discord bot channel.
@@ -58,6 +71,12 @@ class DiscordChannel(Channel):
         # Lock protecting _active_threads and the JSON file from concurrent access.
         # _run_client (Discord loop thread) and the main thread both read/write.
         self._thread_store_lock = threading.Lock()
+        # Set once _load_active_threads() has run: the in-memory map is then a
+        # faithful view of the file, so stop() may flush it. It stays False when
+        # start() bails before the load (missing bot_token, discord import
+        # error) — ChannelService then stops the instance, and an ungated flush
+        # would overwrite the persisted mappings with an empty snapshot (#2897).
+        self._thread_store_loaded = False
         store = config.get("channel_store")
         if store is not None:
             self._thread_store_path = store._path.parent / "discord_threads.json"
@@ -127,17 +146,24 @@ class DiscordChannel(Channel):
             try:
                 if not self._thread_store_path.exists():
                     logger.debug("[Discord] no thread mappings file at %s", self._thread_store_path)
-                    return
-                data = json.loads(self._thread_store_path.read_text())
-                self._active_threads.clear()
-                self._active_thread_ids.clear()
-                for channel_id, thread_id in data.items():
-                    self._active_threads[channel_id] = thread_id
-                    self._active_thread_ids.add(thread_id)
-                if self._active_threads:
-                    logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
+                else:
+                    data = json.loads(self._thread_store_path.read_text())
+                    self._active_threads.clear()
+                    self._active_thread_ids.clear()
+                    for channel_id, thread_id in data.items():
+                        self._active_threads[channel_id] = thread_id
+                        self._active_thread_ids.add(thread_id)
+                    if self._active_threads:
+                        logger.info("[Discord] restored %d thread mappings from %s", len(self._active_threads), self._thread_store_path)
             except Exception:
                 logger.exception("[Discord] failed to load thread mappings")
+                return
+            # The in-memory map is now a superset of the on-disk store (empty
+            # when the file is absent), so stop() may safely flush it. Until
+            # this point — a start() that bailed on a missing bot_token or a
+            # discord import error, which ChannelService then stops — the map is
+            # empty and flushing would clobber the file with {}.
+            self._thread_store_loaded = True
 
     def _record_thread_mapping(self, channel_id: str, thread_id: str) -> None:
         """Synchronously update the in-memory channel->thread mapping and its reverse-lookup set.
@@ -182,6 +208,20 @@ class DiscordChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+
+        # Best-effort durability: flush in-memory thread mappings so the most
+        # recent channel->thread mapping survives a hard shutdown (process
+        # killed between a thread creation and its background persistence
+        # write). The create path already persists off the event loop after
+        # each new thread, so this is a safety net, not the primary write path.
+        # Gated on _thread_store_loaded: a stop() taken before the initial load
+        # has an empty in-memory map, and flushing it would overwrite the file
+        # with {} — the #2897 data loss this PR exists to prevent.
+        if self._thread_store_loaded:
+            try:
+                await asyncio.to_thread(self._persist_thread_mappings)
+            except Exception:
+                logger.warning("[Discord] failed to flush thread mappings during shutdown")
 
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()
@@ -239,10 +279,46 @@ class DiscordChannel(Channel):
         self._discord_module = None
         logger.info("Discord channel stopped")
 
+    @property
+    def is_running(self) -> bool:
+        """Running means the client thread is still alive, not just started.
+
+        ``_run_client`` exits when discord.py gives up for good (invalidated
+        token, unrecoverable close) while ``_running`` stays True, so the base
+        flag alone would keep reporting a healthy channel forever. Mirrors
+        ``FeishuChannel.is_running`` so ``ChannelService.ensure_channel_ready``
+        can restart the channel after its client thread dies.
+        """
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
+    async def _run_on_discord_loop(self, coro, *, timeout: float = DISCORD_OUTBOUND_TIMEOUT_SECONDS):
+        """Schedule *coro* on the Discord loop and await it with a bound.
+
+        The Discord client runs on a dedicated thread whose loop is stopped but
+        not closed when the client dies, so ``call_soon_threadsafe`` keeps
+        queueing callbacks that never run and an unbounded ``wrap_future``
+        await would hang a ChannelManager worker forever. ``stop()`` already
+        bounds its identical cross-loop awaits with ``wait_for``; this extends
+        that pattern to the outbound path. Failing fast when the loop is
+        missing or not running turns a dead client into a logged send failure
+        instead of a wedged worker.
+        """
+        loop = self._discord_loop
+        if loop is None or not loop.is_running():
+            coro.close()
+            raise RuntimeError("Discord client event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
     async def send(self, msg: OutboundMessage) -> None:
         # Stop typing indicator once we're sending the response
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -251,12 +327,10 @@ class DiscordChannel(Channel):
 
         text = msg.text or ""
         for chunk in self._split_text(text):
-            send_future = asyncio.run_coroutine_threadsafe(target.send(chunk), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(chunk))
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -274,8 +348,7 @@ class DiscordChannel(Channel):
             # success and failure paths.
             data = await asyncio.to_thread(self._read_attachment_bytes, str(attachment.actual_path))
             file = self._discord_module.File(io.BytesIO(data), filename=attachment.filename)
-            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(file=file), timeout=DISCORD_UPLOAD_TIMEOUT_SECONDS)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -773,9 +846,8 @@ class DiscordChannel(Channel):
         except (TypeError, ValueError):
             return None
 
-        get_future = asyncio.run_coroutine_threadsafe(self._fetch_channel(target_id), self._discord_loop)
         try:
-            return await asyncio.wrap_future(get_future)
+            return await self._run_on_discord_loop(self._fetch_channel(target_id))
         except Exception:
             logger.exception("[Discord] failed to resolve target id=%s", raw_id)
             return None

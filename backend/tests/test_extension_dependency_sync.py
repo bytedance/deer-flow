@@ -86,6 +86,14 @@ def test_root_makefile_exposes_extension_management_commands() -> None:
     assert "uv run --frozen --no-group extensions" in install
     assert "--yes" not in install
 
+    upgrade = _make_recipe(makefile, "extension-upgrade")
+    assert "deerflow extensions upgrade" in upgrade
+    assert "--source-env __deerflow_extension_source__" in upgrade
+    assert "DEER_FLOW_EXTENSION_SOURCE" not in upgrade
+    assert "$(SOURCE)" not in upgrade
+    assert "uv run --frozen --no-group extensions" in upgrade
+    assert "--yes" not in upgrade
+
     for target, command in (
         ("extension-list", "deerflow extensions list"),
         ("extension-enable", "deerflow extensions enable"),
@@ -102,6 +110,7 @@ def test_extension_management_bootstrap_does_not_resolve_a_broken_extension_sour
 
     for target in (
         "extension-install",
+        "extension-upgrade",
         "extension-list",
         "extension-enable",
         "extension-disable",
@@ -180,6 +189,7 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
 
     for target in (
         "extension-install",
+        "extension-upgrade",
         "extension-enable",
         "extension-disable",
         "extension-remove",
@@ -189,12 +199,17 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
         assert "usage: make" in recipe, target
 
     assert "--yes" not in _make_recipe(makefile, "extension-install")
+    assert "--yes" not in _make_recipe(makefile, "extension-upgrade")
 
 
 def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None:
     environment = os.environ.copy()
 
-    for target, variable in (("extension-install", "SOURCE"), ("extension-enable", "NAME")):
+    for target, variable in (
+        ("extension-install", "SOURCE"),
+        ("extension-upgrade", "SOURCE"),
+        ("extension-enable", "NAME"),
+    ):
         environment[variable] = "ambient-value"
         result = subprocess.run(
             ["make", "--no-print-directory", "-n", target],
@@ -212,6 +227,7 @@ def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None
     ("target", "variable", "env_option"),
     [
         ("extension-install", "SOURCE", "--source-env __deerflow_extension_source__"),
+        ("extension-upgrade", "SOURCE", "--source-env __deerflow_extension_source__"),
         ("extension-enable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-disable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-remove", "NAME", "--name-env __deerflow_extension_name__"),
@@ -244,6 +260,7 @@ def test_root_extension_shortcuts_keep_command_line_arguments_out_of_the_shell_r
     ("target", "variable", "env_option"),
     [
         ("extension-install", "SOURCE", "--source-env __deerflow_extension_source__"),
+        ("extension-upgrade", "SOURCE", "--source-env __deerflow_extension_source__"),
         ("extension-enable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-disable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-remove", "NAME", "--name-env __deerflow_extension_name__"),

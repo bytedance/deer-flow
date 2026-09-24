@@ -7,6 +7,7 @@ import stat
 import sys
 import threading
 import weakref
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -15,6 +16,11 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    mcp_session_scope_key,
+    runtime_thread_incarnation,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +28,75 @@ def _reset_pool():
     reset_session_pool()
     yield
     reset_session_pool()
+
+
+def _legacy_tool_runtime(*, thread_id: str = "default"):
+    return SimpleNamespace(
+        context={"thread_id": thread_id, "thread_incarnation": None},
+        config={},
+    )
+
+
+def test_runtime_incarnation_matches_server_thread_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {"thread_incarnation": "incarnation-1"}},
+    )
+
+    assert runtime_thread_incarnation(runtime) == "incarnation-1"
+
+
+@pytest.mark.parametrize("metadata_value", ["incarnation-2", "", False, None])
+def test_runtime_incarnation_rejects_stale_or_invalid_server_thread_metadata(
+    metadata_value,
+):
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {"thread_incarnation": metadata_value}},
+    )
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        runtime_thread_incarnation(runtime)
+
+
+def test_runtime_incarnation_ignores_untrusted_metadata_without_server_guard():
+    runtime = SimpleNamespace(
+        context={"thread_incarnation": "incarnation-1"},
+        config={"metadata": {"thread_incarnation": "attacker"}},
+    )
+
+    assert runtime_thread_incarnation(runtime) == "incarnation-1"
+
+
+def test_guarded_versioned_incarnation_requires_persisted_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": "incarnation-1",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {}},
+    )
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        runtime_thread_incarnation(runtime)
+
+
+def test_guarded_legacy_incarnation_allows_missing_persisted_metadata():
+    runtime = SimpleNamespace(
+        context={
+            "thread_incarnation": None,
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        config={"metadata": {}},
+    )
+
+    assert runtime_thread_incarnation(runtime) is None
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +207,134 @@ async def test_lru_eviction():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_distinct_sessions_respect_capacity():
+    """Concurrent initializations must not permanently exceed the pool cap."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+    initialize_gate = asyncio.Event()
+    both_initializing = asyncio.Event()
+    initialize_count = 0
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def initialize(self):
+            nonlocal initialize_count
+            initialize_count += 1
+            if initialize_count == 2:
+                both_initializing.set()
+            await initialize_gate.wait()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: list[CmFactory] = []
+
+    def make_cm(*_args, **_kwargs):
+        cm = CmFactory()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        connection = {"transport": "stdio", "command": "x", "args": []}
+        first = asyncio.create_task(pool.get_session("s", "t1", connection))
+        second = asyncio.create_task(pool.get_session("s", "t2", connection))
+        await asyncio.wait_for(both_initializing.wait(), timeout=1)
+        assert len(pool._entries) == 0
+        assert len(pool._inflight) == 2
+        initialize_gate.set()
+        await asyncio.gather(first, second)
+
+    try:
+        assert len(cms) == 2
+        assert len(pool._entries) == pool.MAX_SESSIONS
+        assert len(pool._inflight) == 0
+        assert sum(cm.closed for cm in cms) == 1
+    finally:
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_mode", ["current", "disconnect", "all"])
+async def test_promoted_session_closes_while_evicted_owner_is_blocked(close_mode):
+    """An eviction victim must not hold the replacement's shutdown hostage."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+    started = [asyncio.Event(), asyncio.Event()]
+    initialize = [asyncio.Event(), asyncio.Event()]
+    exiting = [asyncio.Event(), asyncio.Event()]
+    release_victim = asyncio.Event()
+    owners = []
+
+    class Session:
+        def __init__(self, index):
+            self.index = index
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            owners.append(self.owner)
+            return self
+
+        async def initialize(self):
+            started[self.index].set()
+            await initialize[self.index].wait()
+
+        async def call_tool(self, *args, **kwargs):
+            raise anyio.EndOfStream
+
+        async def __aexit__(self, *args):
+            assert asyncio.current_task() is self.owner
+            exiting[self.index].set()
+            if self.index == 0:
+                await release_victim.wait()
+
+    sessions = [Session(0), Session(1)]
+    close_task = None
+    connection = {"transport": "stdio", "command": "unused", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=sessions):
+        first = asyncio.create_task(pool.get_session("s", "a", connection))
+        second = asyncio.create_task(pool.get_session("s", "b", connection))
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 2)
+            initialize[0].set()
+            await asyncio.wait_for(asyncio.shield(first), 2)
+            initialize[1].set()
+            replacement = await asyncio.wait_for(asyncio.shield(second), 2)
+            await asyncio.wait_for(exiting[0].wait(), 2)
+            assert len(pool._entries) == 1
+            if close_mode == "current":
+                close_task = asyncio.create_task(pool.close_session_if_current("s", "b", replacement))
+            elif close_mode == "disconnect":
+                close_task = asyncio.create_task(call_pooled_session_tool(replacement, pool, server_name="s", scope_key="b", tool_name="test", arguments={}, call_kwargs={}))
+            else:
+                close_task = asyncio.create_task(pool.close_all())
+            await asyncio.wait_for(exiting[1].wait(), 2)
+            if close_mode == "disconnect":
+                with pytest.raises(anyio.EndOfStream):
+                    await asyncio.wait_for(asyncio.shield(close_task), 2)
+            else:
+                await asyncio.wait_for(asyncio.shield(close_task), 2)
+            assert not owners[0].done()
+            assert pool._teardown_tasks
+        finally:
+            release_victim.set()
+            for event in initialize:
+                event.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+            await pool.close_all()
+            if close_task is not None:
+                await asyncio.gather(close_task, return_exceptions=True)
+            await asyncio.gather(*owners, return_exceptions=True)
+            await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+        assert not pool._teardown_tasks
+
+
+@pytest.mark.asyncio
 async def test_close_scope():
     """close_scope shuts down sessions for a specific scope key."""
     pool = MCPSessionPool()
@@ -164,7 +367,7 @@ async def test_close_scope():
     assert cms[1].closed is False
 
     # t2 session still exists.
-    assert ("s", "t2") in pool._entries
+    assert ("s", "t2") in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio
@@ -199,7 +402,7 @@ async def test_close_session_only_evicts_the_exact_server_scope_pair():
     assert cms[0].closed is True
     assert cms[1].closed is False
     assert cms[2].closed is False
-    assert set(pool._entries) == {("s2", "t1"), ("s1", "t2")}
+    assert {k[:2] for k in pool._entries} == {("s2", "t1"), ("s1", "t2")}
 
 
 @pytest.mark.asyncio
@@ -340,7 +543,7 @@ mcp.run(transport="stdio")
         "args": ["-c", server, str(marker)],
     }
     runtime = MagicMock()
-    runtime.context = {"thread_id": "thread", "user_id": "user"}
+    runtime.context = {"thread_id": "thread", "user_id": "user", "thread_incarnation": "incarnation-1"}
     runtime.config = {}
 
     with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
@@ -349,7 +552,12 @@ mcp.run(transport="stdio")
             await wrapped.coroutine(runtime=runtime)
 
         assert exc_info.value.error.code == CONNECTION_CLOSED
-        assert ("crash", "user:thread") not in get_session_pool()._entries
+        scope_key = mcp_session_scope_key(
+            user_id="user",
+            thread_id="thread",
+            thread_incarnation="incarnation-1",
+        )
+        assert ("crash", scope_key) not in {k[:2] for k in get_session_pool()._entries}
 
         content, _artifact = await wrapped.coroutine(runtime=runtime)
 
@@ -376,7 +584,7 @@ async def test_session_pool_tool_evicts_session_after_transport_disconnect(tmp_p
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(type(transport_error)),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
 
@@ -401,7 +609,7 @@ async def test_session_pool_tool_evicts_connection_closed_through_interceptor(tm
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match="Connection closed"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
 
@@ -425,7 +633,7 @@ async def test_session_pool_tool_keeps_session_after_nonfatal_mcp_error(tmp_path
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(McpError, match=str(error)),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -444,7 +652,7 @@ async def test_session_pool_tool_preserves_disconnect_error_when_eviction_fails(
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(anyio.ClosedResourceError) as exc_info,
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     assert exc_info.value is error
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
@@ -508,7 +716,7 @@ async def test_session_pool_tool_keeps_session_after_tool_error_result(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(ToolException, match="invalid input"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     pool.close_session_if_current.assert_not_awaited()
 
@@ -532,7 +740,7 @@ async def test_session_pool_tool_keeps_session_after_interceptor_error(tmp_path)
         patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
         pytest.raises(RuntimeError, match="interceptor failed"),
     ):
-        await wrapped.coroutine(value=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), value=1)
 
     session.call_tool.assert_not_awaited()
     pool.close_session_if_current.assert_not_awaited()
@@ -594,20 +802,21 @@ async def test_late_disconnect_from_old_session_does_not_evict_replacement(tmp_p
             "srv",
             {"transport": "stdio", "command": "x", "args": []},
         )
-        first_call = asyncio.create_task(wrapped.coroutine(value=1))
-        late_call = asyncio.create_task(wrapped.coroutine(value=2))
+        runtime = _legacy_tool_runtime()
+        first_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=1))
+        late_call = asyncio.create_task(wrapped.coroutine(runtime=runtime, value=2))
         await asyncio.wait_for(both_started.wait(), timeout=1)
 
         first_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await first_call
 
-        await wrapped.coroutine(value=3)
+        await wrapped.coroutine(runtime=runtime, value=3)
         late_failure.set()
         with pytest.raises(anyio.ClosedResourceError):
             await late_call
 
-    assert pool._entries[("srv", "test-user-autouse:default")][0] is replacement
+    assert pool._entries[("srv", "test-user-autouse:default", asyncio.get_running_loop())][0] is replacement
     await pool.close_all()
 
 
@@ -644,7 +853,7 @@ async def test_session_pool_tool_wrapping():
 
         # Simulate a tool call with a runtime context containing thread_id.
         mock_runtime = MagicMock()
-        mock_runtime.context = {"thread_id": "thread-42"}
+        mock_runtime.context = {"thread_id": "thread-42", "thread_incarnation": "incarnation-1"}
         mock_runtime.config = {}
 
         await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
@@ -655,6 +864,8 @@ async def test_session_pool_tool_wrapping():
 @pytest.mark.asyncio
 async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     """Stdio MCP subprocesses should write relative and temp outputs under user-data."""
+    import os
+
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
@@ -682,7 +893,7 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"KEEP": "1"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -702,12 +913,15 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     assert session_connection["env"]["TMP"] == str(tmp_dir)
     assert session_connection["env"]["TEMP"] == str(tmp_dir)
     assert tmp_dir.is_dir()
-    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio
 async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     """An operator-provided TMPDIR must win over our injected default."""
+    import os
+
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
@@ -735,7 +949,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"TMPDIR": "/operator/tmp"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -748,7 +962,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     session_connection = create_session.call_args.args[0]
     # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
     assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
-    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR)
+    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR.replace("/", os.sep))
 
 
 @pytest.mark.asyncio
@@ -782,7 +996,7 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": [], "cwd": operator_cwd}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -829,7 +1043,7 @@ async def test_session_pool_tool_skips_fs_work_for_non_stdio_transport(tmp_path)
     paths = Paths(tmp_path)
     connection = {"transport": "sse", "url": "http://localhost:9000/sse", "env": {"KEEP": "1"}}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -882,7 +1096,7 @@ async def test_session_pool_tool_skips_after_walk_when_no_text_content(tmp_path)
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": []}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -928,7 +1142,7 @@ async def test_session_pool_tool_runs_after_walk_when_text_content_present(tmp_p
     paths = Paths(tmp_path)
     connection = {"transport": "stdio", "command": "pw", "args": []}
     mock_runtime = MagicMock()
-    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7", "thread_incarnation": "incarnation-1"}
     mock_runtime.config = {}
 
     with (
@@ -980,7 +1194,7 @@ async def test_session_pool_tool_forwards_interceptor_headers():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1}, meta={"headers": {"X-User-Id": "u-42"}})
 
@@ -1029,7 +1243,7 @@ async def test_session_pool_interceptor_reads_request_scoped_secret():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[secret_header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with(
         "act",
@@ -1075,7 +1289,7 @@ async def test_session_pool_tool_no_headers_omits_meta():
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[passthrough_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
 
@@ -1119,7 +1333,7 @@ async def test_session_pool_tool_ignores_unsupported_header_type(caplog):
             {"transport": "stdio", "command": "x", "args": []},
             tool_interceptors=[invalid_header_interceptor],
         )
-        await wrapped.coroutine(runtime=None, x=1)
+        await wrapped.coroutine(runtime=_legacy_tool_runtime(), x=1)
 
     mock_session.call_tool.assert_awaited_once_with("act", {"x": 1})
     assert "unsupported type" in caplog.text
@@ -1154,16 +1368,20 @@ async def test_session_pool_tool_extracts_thread_id():
         wrapped = _make_session_pool_tool(original_tool, "server", {"transport": "stdio", "command": "x", "args": []})
 
         mock_runtime = MagicMock()
-        mock_runtime.context = {}
+        mock_runtime.context = {"thread_incarnation": "incarnation-1"}
         mock_runtime.config = {"configurable": {"thread_id": "from-config"}}
 
         await wrapped.coroutine(runtime=mock_runtime, x=1)
 
-    # Verify the session was created with the correct scope key.
-    # The scope key is "{user_id}:{thread_id}"; the autouse fixture sets
-    # the effective user to "test-user-autouse".
+    # Verify the session was created with the canonical versioned JSON scope;
+    # the autouse fixture sets the effective user to "test-user-autouse".
     pool = get_session_pool()
-    assert ("server", "test-user-autouse:from-config") in pool._entries
+    expected_scope = mcp_session_scope_key(
+        user_id="test-user-autouse",
+        thread_id="from-config",
+        thread_incarnation="incarnation-1",
+    )
+    assert ("server", expected_scope) in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio
@@ -1198,7 +1416,7 @@ async def test_session_pool_tool_default_scope():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "test-user-autouse:default") in pool._entries
+    assert ("server", "test-user-autouse:default") in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio
@@ -1238,7 +1456,7 @@ async def test_session_pool_tool_get_config_fallback():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "test-user-autouse:from-langgraph-config") in pool._entries
+    assert ("server", "test-user-autouse:from-langgraph-config") in {k[:2] for k in pool._entries}
 
 
 def test_session_pool_tool_sync_wrapper_path_is_safe():
@@ -1577,7 +1795,7 @@ async def test_close_scope_does_not_cross_tasks():
 
     assert cms[0].closed is True
     assert cms[1].closed is False
-    assert ("s", "t2") in pool._entries
+    assert ("s", "t2") in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio
@@ -1628,8 +1846,8 @@ def test_close_all_sync_across_loops_does_not_cross_tasks():
     assert len(pool._entries) == 0
 
 
-def test_get_session_replaces_session_from_closed_loop():
-    """A pooled session whose owning loop has closed is evicted and recreated."""
+def test_owner_loop_shutdown_retires_session_records():
+    """Loop shutdown closes the owner and removes records before the next call."""
     pool = MCPSessionPool()
     cms: list[_CancelScopeCm] = []
 
@@ -1643,15 +1861,14 @@ def test_get_session_replaces_session_from_closed_loop():
         # asyncio.run (mirrors the sync-tool path). asyncio.run cancels the
         # pending owner task and runs its __aexit__ on the same loop.
         asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
-        assert ("s", "t1") in pool._entries
+        assert not pool._entries
 
-        # Now request the same key from a fresh loop: the stale entry (closed
-        # loop) must be evicted and replaced with a fresh session.
+        # A fresh loop creates a session without retaining its predecessor.
         session = asyncio.run(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
 
     assert session is not None
     assert len(cms) == 2
-    assert pool._entries[("s", "t1")][0] is session
+    assert not pool._entries
 
 
 class _BlockingInitCm:
@@ -1748,7 +1965,7 @@ async def test_get_session_cancelled_during_eviction_teardown_does_not_leak():
 
     loop = asyncio.get_running_loop()
     victim_task = asyncio.create_task(victim_owner())
-    pool._entries[("victim", "scope")] = (MagicMock(), loop, victim_task, asyncio.Event())
+    pool._entries[("victim", "scope", asyncio.get_running_loop())] = (MagicMock(), loop, victim_task, asyncio.Event())
 
     gate = asyncio.Event()
     cms: list[_BlockingInitCm] = []
@@ -1765,10 +1982,10 @@ async def test_get_session_cancelled_during_eviction_teardown_does_not_leak():
             # The creator publishes its in-flight record before awaiting the
             # hung victim, so this is deterministic.
             for _ in range(100):
-                if ("srv", "scope-2") in pool._inflight:
+                if ("srv", "scope-2") in {k[:2] for k in pool._inflight}:
                     break
                 await asyncio.sleep(0.01)
-            assert ("srv", "scope-2") in pool._inflight
+            assert ("srv", "scope-2") in {k[:2] for k in pool._inflight}
             await asyncio.sleep(0.02)
 
             call.cancel()
@@ -1786,7 +2003,7 @@ async def test_get_session_cancelled_during_eviction_teardown_does_not_leak():
             await asyncio.sleep(0.01)
         assert cms, "owner task must have been created"
         assert cms[0].closed, "owner must run __aexit__ after Phase-2 cancellation"
-        assert ("srv", "scope-2") not in pool._inflight
+        assert ("srv", "scope-2") not in {k[:2] for k in pool._inflight}
 
         current = asyncio.current_task()
         leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
@@ -1827,7 +2044,7 @@ async def test_cancelled_creator_does_not_close_session_held_by_joiner():
 
     loop = asyncio.get_running_loop()
     victim_task = asyncio.create_task(victim_owner())
-    pool._entries[("victim", "scope")] = (MagicMock(), loop, victim_task, asyncio.Event())
+    pool._entries[("victim", "scope", asyncio.get_running_loop())] = (MagicMock(), loop, victim_task, asyncio.Event())
 
     gate = asyncio.Event()
     cms: list[_BlockingInitCm] = []
@@ -1845,10 +2062,10 @@ async def test_cancelled_creator_does_not_close_session_held_by_joiner():
             # The creator publishes its in-flight record before awaiting the
             # hung victim, so this is deterministic.
             for _ in range(100):
-                if ("srv", "scope-2") in pool._inflight:
+                if ("srv", "scope-2") in {k[:2] for k in pool._inflight}:
                     break
                 await asyncio.sleep(0.01)
-            assert ("srv", "scope-2") in pool._inflight
+            assert ("srv", "scope-2") in {k[:2] for k in pool._inflight}
 
             # The owner finishes initialize() and commits while its creator is
             # still parked on the victim's teardown. The second caller then
@@ -1867,9 +2084,9 @@ async def test_cancelled_creator_does_not_close_session_held_by_joiner():
 
             await asyncio.sleep(0.02)
             assert not cms[0].closed, "cancelling the creator must not close a session already handed to a caller"
-            assert ("srv", "scope-2") in pool._entries, "committed session must stay registered after creator cancellation"
-            assert pool._entries[("srv", "scope-2")][0] is session, "the joiner's session must be the registered one"
-            assert ("srv", "scope-2") not in pool._inflight
+            assert ("srv", "scope-2") in {k[:2] for k in pool._entries}, "committed session must stay registered after creator cancellation"
+            assert pool._entries[("srv", "scope-2", asyncio.get_running_loop())][0] is session, "the joiner's session must be the registered one"
+            assert ("srv", "scope-2") not in {k[:2] for k in pool._inflight}
 
         # Cleanup: close the pool so the parked owner finishes deterministically.
         await pool.close_all()
@@ -1915,10 +2132,10 @@ async def test_joiner_follows_creation_outcome_when_creator_is_cancelled():
         conn = {"transport": "stdio", "command": "x", "args": []}
         creator = asyncio.create_task(pool.get_session("s", "same", conn))
         for _ in range(100):
-            if ("s", "same") in pool._inflight:
+            if ("s", "same") in {k[:2] for k in pool._inflight}:
                 break
             await asyncio.sleep(0.01)
-        assert ("s", "same") in pool._inflight
+        assert ("s", "same") in {k[:2] for k in pool._inflight}
 
         # Second caller joins the in-flight creation instead of duplicating it.
         joiner = asyncio.create_task(pool.get_session("s", "same", conn))
@@ -1980,8 +2197,8 @@ async def test_eviction_teardown_completes_normally_then_session_is_returned():
 
     assert first is not second
     assert cms[0].closed, "evicted owner must complete teardown before the caller proceeds"
-    assert ("s", "t2") in pool._entries
-    assert ("s", "t1") not in pool._entries
+    assert ("s", "t2") in {k[:2] for k in pool._entries}
+    assert ("s", "t1") not in {k[:2] for k in pool._entries}
 
 
 @pytest.mark.asyncio
@@ -2037,8 +2254,8 @@ async def test_cancelling_close_scope_does_not_strand_other_removed_owners():
 
     first_task = asyncio.create_task(first_owner())
     second_task = asyncio.create_task(second_owner())
-    pool._entries[("s1", "scope")] = (MagicMock(), loop, first_task, first_close)
-    pool._entries[("s2", "scope")] = (MagicMock(), loop, second_task, second_close)
+    pool._entries[("s1", "scope", asyncio.get_running_loop())] = (MagicMock(), loop, first_task, first_close)
+    pool._entries[("s2", "scope", asyncio.get_running_loop())] = (MagicMock(), loop, second_task, second_close)
 
     closer = asyncio.create_task(pool.close_scope("scope"))
     # Let the closer reach its teardown await (both signals are already out).
@@ -2231,7 +2448,7 @@ async def test_queued_cancel_rechecks_failure_on_owning_loop():
     gate2 = holder["gate"]
 
     proxy = _DelayedLoop(loop2)
-    pool._inflight[("s", "t1")] = (proxy, holder["ready"], holder["task"], holder["close_evt"])
+    pool._inflight[("s", "t1", proxy)] = (proxy, holder["ready"], holder["task"], holder["close_evt"])
 
     # Snapshot moment: the owner has NOT failed yet. close_scope's signal phase
     # queues the (guarded) cancellation into the holding proxy; its await phase
@@ -2372,7 +2589,7 @@ async def test_close_all_during_in_flight_creation_does_not_resurrect_session():
         call = asyncio.create_task(pool.get_session("s", "t1", conn))
         # Let the owner task enter the CM and reach the blocking initialize().
         await asyncio.sleep(0.01)
-        assert ("s", "t1") in pool._inflight
+        assert ("s", "t1") in {k[:2] for k in pool._inflight}
 
         # Close everything while the creation is still in-flight.
         await pool.close_all()
@@ -2395,14 +2612,8 @@ async def test_close_all_during_in_flight_creation_does_not_resurrect_session():
     assert not leaked, "in-flight owner task must not leak after close_all"
 
 
-def test_get_session_cross_loop_in_flight_does_not_raise_assertion():
-    """A same-key request from another loop must not hit the in-flight assertion (#3379 CR P1).
-
-    Loop A starts (and leaves running) an in-flight creation, then loop B
-    requests the same key. The stale in-flight record (owned by loop A) must be
-    dropped and loop B must become a fresh creator — never fall through to an
-    AssertionError.
-    """
+def test_sequential_thread_loops_create_independent_sessions():
+    """Sequential sync callers each create and retire their own session."""
     pool = MCPSessionPool()
     cms: list[_CancelScopeCm] = []
 
@@ -2422,14 +2633,12 @@ def test_get_session_cross_loop_in_flight_does_not_raise_assertion():
             errors.append(e)
 
     with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
-        # First loop creates and registers an entry, then its loop is torn down
-        # by asyncio.run, leaving a stale (closed-loop) record behind.
+        # First loop creates a session, then asyncio.run tears its owner down.
         t1 = threading.Thread(target=run_in_own_loop)
         t1.start()
         t1.join()
 
-        # Second loop requests the same key. It must evict the stale record and
-        # create a fresh session instead of raising AssertionError.
+        # The second loop requests the same server/scope independently.
         t2 = threading.Thread(target=run_in_own_loop)
         t2.start()
         t2.join()
@@ -2439,14 +2648,8 @@ def test_get_session_cross_loop_in_flight_does_not_raise_assertion():
     assert all(r is not None for r in results)
 
 
-def test_cross_loop_preempting_blocked_in_flight_does_not_hang_owner():
-    """A foreign-loop request must not leave a still-initializing owner hung (#3379 CR P1).
-
-    Loop A starts a creation that blocks inside initialize() (the in-flight
-    record stays live). Loop B then requests the same key. B must tear A's owner
-    down — cancelling it, because close_evt alone cannot wake a task blocked in
-    initialize() — so that A's get_session unwinds instead of hanging forever.
-    """
+def test_cross_loop_caller_does_not_cancel_live_in_flight_owner():
+    """A sibling loop can finish while the first loop's handshake is blocked."""
     pool = MCPSessionPool()
     conn = {"transport": "stdio", "command": "x", "args": []}
     first_gate = threading.Event()
@@ -2506,13 +2709,18 @@ def test_cross_loop_preempting_blocked_in_flight_does_not_hang_owner():
 
         # B must complete without depending on A's blocked initialize().
         assert not tb.is_alive(), "foreign-loop request B must not hang"
-        # A must already be unwound (cancelled), not waiting on the dead gate.
-        ta.join(3)
-        assert not ta.is_alive(), "preempted owner A must not hang forever"
+        try:
+            assert ta.is_alive(), "B must not cancel A's live handshake"
+            assert not errors
+        finally:
+            first_gate.set()
+            ta.join(3)
+        assert not ta.is_alive()
 
-    assert [n for n, _ in results] == ["B"], "only B produces a usable session"
-    assert any(isinstance(e, asyncio.CancelledError) for _, e in errors), "preempted A must unwind via CancelledError"
-    assert "blocking" in closed, "preempted owner's __aexit__ must run on teardown"
+    assert sorted(n for n, _ in results) == ["A", "B"]
+    assert not errors
+    assert "blocking" in closed
+    assert not pool._entries and not pool._inflight
 
 
 @pytest.mark.asyncio

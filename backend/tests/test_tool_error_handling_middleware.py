@@ -67,6 +67,21 @@ def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
             self.args = args
             self.kwargs = kwargs
 
+    class FakeInputSanitizationMiddleware(FakeMiddleware):
+        pass
+
+    class FakeThreadDataMiddleware(FakeMiddleware):
+        pass
+
+    class FakeSandboxMiddleware(FakeMiddleware):
+        pass
+
+    class FakeDanglingToolCallMiddleware(FakeMiddleware):
+        pass
+
+    class FakeSandboxAuditMiddleware(FakeMiddleware):
+        pass
+
     class FakeLLMErrorHandlingMiddleware:
         def __init__(self, *, app_config):
             self.app_config = app_config
@@ -82,22 +97,34 @@ def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.thread_data_middleware",
-        _module("deerflow.agents.middlewares.thread_data_middleware", ThreadDataMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.thread_data_middleware",
+            ThreadDataMiddleware=FakeThreadDataMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.sandbox.middleware",
-        _module("deerflow.sandbox.middleware", SandboxMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.sandbox.middleware",
+            SandboxMiddleware=FakeSandboxMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.dangling_tool_call_middleware",
-        _module("deerflow.agents.middlewares.dangling_tool_call_middleware", DanglingToolCallMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.dangling_tool_call_middleware",
+            DanglingToolCallMiddleware=FakeDanglingToolCallMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.sandbox_audit_middleware",
-        _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.sandbox_audit_middleware",
+            SandboxAuditMiddleware=FakeSandboxAuditMiddleware,
+        ),
     )
 
 
@@ -108,6 +135,21 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
+
+    class FakeInputSanitizationMiddleware(FakeMiddleware):
+        pass
+
+    class FakeThreadDataMiddleware(FakeMiddleware):
+        pass
+
+    class FakeSandboxMiddleware(FakeMiddleware):
+        pass
+
+    class FakeDanglingToolCallMiddleware(FakeMiddleware):
+        pass
+
+    class FakeSandboxAuditMiddleware(FakeMiddleware):
+        pass
 
     class FakeLLMErrorHandlingMiddleware:
         def __init__(self, *, app_config):
@@ -126,29 +168,38 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.thread_data_middleware",
-        _module("deerflow.agents.middlewares.thread_data_middleware", ThreadDataMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.thread_data_middleware",
+            ThreadDataMiddleware=FakeThreadDataMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.sandbox.middleware",
-        _module("deerflow.sandbox.middleware", SandboxMiddleware=FakeMiddleware),
+        _module("deerflow.sandbox.middleware", SandboxMiddleware=FakeSandboxMiddleware),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.dangling_tool_call_middleware",
-        _module("deerflow.agents.middlewares.dangling_tool_call_middleware", DanglingToolCallMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.dangling_tool_call_middleware",
+            DanglingToolCallMiddleware=FakeDanglingToolCallMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.sandbox_audit_middleware",
-        _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.sandbox_audit_middleware",
+            SandboxAuditMiddleware=FakeSandboxAuditMiddleware,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
         _module(
             "deerflow.agents.middlewares.input_sanitization_middleware",
-            InputSanitizationMiddleware=FakeMiddleware,
+            InputSanitizationMiddleware=FakeInputSanitizationMiddleware,
             neutralize_untrusted_tags=lambda value: value,
         ),
     )
@@ -156,7 +207,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 9 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
+    # 10 baseline (InputSanitization, KnowledgeScope, ToolOutputBudget, ToolResultSanitization,
     # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
@@ -168,6 +219,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -176,9 +228,10 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 19
+    assert len(middlewares) == 20
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
-    assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
+    assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+    assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     # The receipt layer wraps ToolErrorHandlingMiddleware so receipts read the
     # deerflow_tool_meta status it stamps (guard-enforced, like ToolProgress).
@@ -201,6 +254,20 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
     assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
+
+
+def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:
+    from deerflow.extensions.registry import ExtensionRegistry
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=_make_app_config(),
+        available_skills={"allowed"},
+        extensions=ExtensionRegistry().build(),
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if isinstance(middleware, SandboxMiddleware))
+    assert sandbox_middleware._owns_agent_skill_projection is False
 
 
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -289,6 +356,63 @@ def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monke
     assert tool_middleware._app_config is app_config
 
 
+def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=object,
+            neutralize_untrusted_tags=lambda value: value,
+        ),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_lead_runtime_middlewares(
+        app_config=app_config,
+        available_skills={"allowed-skill"},
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if getattr(middleware, "kwargs", {}).get("available_skills") == {"allowed-skill"})
+    assert sandbox_middleware.kwargs == {
+        "lazy_init": True,
+        "available_skills": {"allowed-skill"},
+        "owns_agent_skill_projection": True,
+    }
+
+
+def test_lead_runtime_middlewares_can_delegate_skill_projection_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=object,
+            neutralize_untrusted_tags=lambda value: value,
+        ),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_lead_runtime_middlewares(
+        app_config=app_config,
+        available_skills={"bootstrap"},
+        owns_agent_skill_projection=False,
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if getattr(middleware, "kwargs", {}).get("available_skills") == {"bootstrap"})
+    assert sandbox_middleware.kwargs == {
+        "lazy_init": True,
+        "available_skills": {"bootstrap"},
+        "owns_agent_skill_projection": False,
+    }
+
+
 def test_build_lead_runtime_middlewares_orders_thread_data_before_uploads():
     """ThreadDataMiddleware must run before UploadsMiddleware so the uploads
     directory is guaranteed to exist when UploadsMiddleware scans it under
@@ -327,6 +451,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -343,6 +468,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     expected_order: list[tuple[str, type]] = [
         ("InputSanitizationMiddleware", InputSanitizationMiddleware),
         ("ToolOutputBudgetMiddleware", ToolOutputBudgetMiddleware),
+        ("ToolResultSanitizationMiddleware", ToolResultSanitizationMiddleware),
         ("ThreadDataMiddleware", ThreadDataMiddleware),
         ("UploadsMiddleware", UploadsMiddleware),
         ("SandboxMiddleware", SandboxMiddleware),
@@ -571,6 +697,8 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.mcp_metadata import tag_mcp_tool
 
@@ -588,9 +716,14 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
 
     filters = [m for m in middlewares if isinstance(m, DeferredToolFilterMiddleware)]
+    audits = [m for m in middlewares if isinstance(m, DeferredToolPromotionAuditMiddleware)]
     assert len(filters) == 1
+    assert len(audits) == 1
+    audit_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolPromotionAuditMiddleware))
+    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert audit_idx < policy_idx < filter_idx
     assert filter_idx < safety_idx
 
 
@@ -632,6 +765,7 @@ def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(m
 def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeypatch):
     """No deferred setup (disabled / no MCP tool) -> no DeferredToolFilterMiddleware."""
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
     app_config = _make_app_config()
@@ -640,6 +774,7 @@ def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeyp
     for setup in (None, DeferredToolSetup(None, frozenset(), None)):
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
         assert not any(isinstance(m, DeferredToolFilterMiddleware) for m in middlewares)
+        assert not any(isinstance(m, DeferredToolPromotionAuditMiddleware) for m in middlewares)
 
 
 def test_subagent_runtime_middlewares_attach_loop_detection_when_enabled(monkeypatch):
@@ -714,12 +849,14 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
         app_config=None,
         keep=None,
         skip_memory_flush=False,
+        archive_task_history=True,
         run_model_name=None,
         extensions=None,
     ):
         captured["app_config"] = app_config
         captured["keep"] = keep
         captured["skip_memory_flush"] = skip_memory_flush
+        captured["archive_task_history"] = archive_task_history
         captured["run_model_name"] = run_model_name
         captured["extensions"] = extensions
         return sentinel
@@ -740,6 +877,7 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     # skip_memory_flush=True so subagent-internal turns are not flushed into the
     # PARENT thread's durable memory (#3875 Phase 3 review).
     assert captured["skip_memory_flush"] is True
+    assert captured["archive_task_history"] is False
     # Model ownership: the subagent's own resolved model is threaded into the factory
     # so a distinct-model subagent summarizes with its model, not the parent's — the
     # subagent context/configurable never carries the child model.
@@ -759,9 +897,10 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     """A three-tool turn with ``keep=4`` must remain provider-valid.
 
     This reproduces the production failure shape: compaction preserves an
-    assistant tool-call plus three tool results while removing the original
-    system/user messages. The subagent chain must inject the generated summary
-    as durable human context before that tail reaches the model.
+    assistant tool-call plus three tool results and compresses the turn before
+    them. The subagent chain must inject the generated summary as durable human
+    context before that tail reaches the model, and keep the subagent's own
+    system prompt, which lives in state rather than in ``create_agent``.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models import BaseChatModel
@@ -798,6 +937,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
                 # outgoing request is provider-valid: a single leading SystemMessage.
                 system_indices = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
                 assert system_indices == [0], f"request must have exactly one leading SystemMessage, got {system_indices}"
+                assert "subagent instructions" in messages[0].content, "the subagent system prompt must survive compaction"
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
 
     summary_model = _StaticModel(text="COMPRESSED_SUBAGENT_HISTORY")
@@ -833,6 +973,8 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     seed = [
         SystemMessage(content="subagent instructions", id="system"),
         HumanMessage(content="research three regions", id="human"),
+        AIMessage(content="planning", tool_calls=[{"name": "web_search", "args": {"query": "overview"}, "id": "call_plan", "type": "tool_call"}], id="plan"),
+        ToolMessage(content="overview result", tool_call_id="call_plan", id="tool_plan"),
         AIMessage(content="searching", tool_calls=tool_calls, id="assistant"),
         *[ToolMessage(content=f"result {i}", tool_call_id=f"call_{i}", id=f"tool_{i}") for i in range(3)],
     ]
@@ -840,6 +982,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
     result = agent.invoke({"messages": seed})
 
     assert result["summary_text"] == "COMPRESSED_SUBAGENT_HISTORY"
+    assert result["messages"][0].id == "system"
     assert result["messages"][-1].content == "final answer"
 
 
@@ -1163,3 +1306,17 @@ def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeyp
     ai_finals = [m for m in final_messages if isinstance(m, AIMessage)]
     assert ai_finals, "the run must produce a final AIMessage after compaction"
     assert ai_finals[-1].content == "final answer after compaction"
+
+
+def test_build_lead_runtime_middlewares_passes_read_before_write_config():
+    """The gate's model-bound payload elision is configured from app_config.read_before_write."""
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+    app_config = _make_app_config().model_copy(update={"read_before_write": ReadBeforeWriteConfig(elide_min_chars=321)})
+    middlewares = build_lead_runtime_middlewares(app_config=app_config)
+
+    gates = [m for m in middlewares if isinstance(m, ReadBeforeWriteMiddleware)]
+    assert len(gates) == 1
+    # Only the wired value is under test; the full policy identity is covered by the middleware's own tests.
+    assert gates[0].release_policy_parameters()["config"]["elide_min_chars"] == 321

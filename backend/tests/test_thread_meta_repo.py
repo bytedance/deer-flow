@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
@@ -24,11 +25,13 @@ class TestThreadMetaRepository:
         record = await repo.create("t1")
         assert record["thread_id"] == "t1"
         assert record["status"] == "idle"
+        assert len(record["incarnation"]) == 32
         assert "created_at" in record
 
         fetched = await repo.get("t1")
         assert fetched is not None
         assert fetched["thread_id"] == "t1"
+        assert fetched["incarnation"] == record["incarnation"]
 
     @pytest.mark.anyio
     async def test_create_with_assistant_id(self, repo):
@@ -45,6 +48,46 @@ class TestThreadMetaRepository:
     async def test_create_with_metadata(self, repo):
         record = await repo.create("t1", metadata={"key": "value"})
         assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_duplicate_create_raises_integrity_error(self, repo):
+        await repo.create("t1", display_name="original")
+
+        with pytest.raises(IntegrityError):
+            await repo.create("t1", display_name="replacement")
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "original"
+
+    @pytest.mark.anyio
+    async def test_claim_unowned_only_updates_null_owner(self, repo):
+        legacy = await repo.create("legacy", user_id=None)
+        await repo.create("owned", user_id="original-owner")
+
+        assert await repo.claim_unowned("missing", "owner-a") is False
+        assert await repo.claim_unowned("owned", "owner-a") is False
+        assert await repo.claim_unowned("legacy", "owner-a") is True
+        assert await repo.claim_unowned("legacy", "owner-b") is False
+
+        owned = await repo.get("owned", user_id=None)
+        claimed = await repo.get("legacy", user_id=None)
+        assert owned["user_id"] == "original-owner"
+        assert claimed["user_id"] == "owner-a"
+        assert claimed["updated_at"] == legacy["updated_at"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_claim_unowned_has_exactly_one_winner(self, repo):
+        await repo.create("legacy-race", user_id=None)
+
+        outcomes = await asyncio.gather(
+            repo.claim_unowned("legacy-race", "owner-a"),
+            repo.claim_unowned("legacy-race", "owner-b"),
+        )
+
+        assert sorted(outcomes) == [False, True]
+        record = await repo.get("legacy-race", user_id=None)
+        assert record["user_id"] in {"owner-a", "owner-b"}
 
     @pytest.mark.anyio
     async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
@@ -467,6 +510,205 @@ class TestThreadMetaRepository:
 
         hits = {r["thread_id"] for r in await repo.search(metadata={"id": large})}
         assert hits == {"t1"}
+
+    @pytest.mark.anyio
+    async def test_membership_exposed_via_reserved_metadata_key(self, repo):
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        record = await repo.create("t1", user_id="u1")
+        assert THREAD_PROJECT_METADATA_KEY not in record["metadata"]
+        # membership is set in Task 4; the raw column must never leak top-level
+        assert "project_id" not in record
+
+    @pytest.mark.anyio
+    async def test_row_to_dict_does_not_leak_reserved_key_into_stored_metadata(self, repo):
+        """Regression (Task 3 review): ``_row_to_dict`` must copy ``metadata_json``
+        before injecting the reserved project key. Without the copy the injected
+        dict IS the ORM row's ``metadata_json`` object, so reading a member
+        thread mutates the row in place and a later update in the same session
+        persists ``deerflow_project_id`` into stored user metadata."""
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1", metadata={"keep": 1})
+        # Assign membership directly on the row (store-level assignment is Task 4).
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            row.project_id = p["id"]
+            await session.commit()
+
+        record = await repo.get("t1", user_id="u1")
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+
+        # The review's failure mode is same-session: converting a row for read
+        # must not dirty the ORM row's stored dict, or a later update in that
+        # session persists the reserved key. ``repo.get`` never exposes its
+        # session, so replicate its conversion on a row from this session.
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            repo._row_to_dict(row)  # same conversion repo.get performs
+            assert "deerflow_project_id" not in row.metadata_json
+
+        await repo.update_metadata("t1", {"new": 2}, user_id="u1")
+
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            assert "deerflow_project_id" not in row.metadata_json
+            assert row.metadata_json["keep"] == 1
+            assert row.metadata_json["new"] == 2
+
+    @pytest.mark.anyio
+    async def test_set_project_moves_and_preserves_updated_at(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1")
+        before = (await repo.get("t1", user_id="u1"))["updated_at"]
+
+        assert await repo.set_project("t1", p["id"], user_id="u1") is True
+        record = await repo.get("t1", user_id="u1")
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert record["updated_at"] == before  # G5: move must not bump recency
+
+        # move out
+        assert await repo.set_project("t1", None, user_id="u1") is True
+        assert "deerflow_project_id" not in (await repo.get("t1", user_id="u1"))["metadata"]
+
+    @pytest.mark.anyio
+    async def test_set_project_rejects_foreign_thread_foreign_project_archived(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        mine = await projects.create(name="mine", user_id="u1")
+        await projects.create(name="theirs", user_id="u2")  # a foreign-owned project exists
+        archived = await projects.create(name="arch", user_id="u1")
+        await projects.set_status(archived["id"], "archived", user_id="u1")
+        await repo.create("t1", user_id="u1")
+        await repo.create("t2", user_id="u2")
+
+        assert await repo.set_project("t1", mine["id"], user_id="u2") is False  # foreign thread
+        assert await repo.set_project("t2", mine["id"], user_id="u2") is False  # foreign project
+        assert await repo.set_project("t1", archived["id"], user_id="u1") is False  # archived
+        assert await repo.set_project("t1", "missing", user_id="u1") is False  # missing
+        assert (await repo.get("t1", user_id="u1"))["metadata"].get("deerflow_project_id") is None
+
+    @pytest.mark.anyio
+    async def test_run_admission_never_seeds_project_membership(self, repo):
+        """Negative contract: run admission never writes thread→project membership.
+
+        A run admitted with the reserved ``deerflow_project_id`` metadata key
+        must leave the row's ``project_id`` column NULL, and the key must not
+        persist into ``metadata_json`` either — membership is written only by
+        POST /api/threads (create) and /threads/{id}/move.
+        """
+        from app.gateway.services import _ensure_thread_metadata
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+        from deerflow.runtime.runs.manager import RunRecord
+        from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+        from deerflow.runtime.runs.worker import RunContext
+
+        projects = ProjectRepository(repo._sf)
+        project = await projects.create(name="P")
+        record = RunRecord(run_id="run-1", thread_id="t1", assistant_id="lead-agent", status=RunStatus.pending, on_disconnect=DisconnectMode.cancel, metadata={"deerflow_project_id": project["id"]})
+        run_ctx = RunContext(checkpointer=None, thread_store=repo)
+        await _ensure_thread_metadata(run_ctx, record, owner_user_id=None)
+
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+        assert row is not None and row.project_id is None
+        assert "deerflow_project_id" not in row.metadata_json
+
+    @pytest.mark.anyio
+    async def test_create_with_project_assignment_and_rejection(self, repo):
+        from deerflow.persistence.projects import ProjectNotAssignableError, ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        record = await repo.create("t1", user_id="u1", project_id=p["id"])
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert len(record["incarnation"]) == 32
+
+        with pytest.raises(ProjectNotAssignableError):
+            await repo.create("t2", user_id="u1", project_id="missing")
+        assert await repo.get("t2", user_id="u1") is None  # no partial row
+
+    @pytest.mark.anyio
+    async def test_search_project_filter_three_states(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1", project_id=p["id"])
+        await repo.create("t2", user_id="u1")
+
+        all_rows = await repo.search(user_id="u1", project_id=PROJECT_FILTER_UNSET)
+        assert {r["thread_id"] for r in all_rows} == {"t1", "t2"}
+        unassigned = await repo.search(user_id="u1", project_id=None)
+        assert [r["thread_id"] for r in unassigned] == ["t2"]
+        in_project = await repo.search(user_id="u1", project_id=p["id"])
+        assert [r["thread_id"] for r in in_project] == ["t1"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_move_vs_project_delete_never_dangles(self, repo):
+        """§5.2 race: move-vs-delete resolves to cleared membership or rejection."""
+        import asyncio
+
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        for i in range(10):
+            p = await projects.create(name=f"P{i}", user_id="u1")
+            tid = f"trace-{i}"
+            await repo.create(tid, user_id="u1")
+            moved, deleted = await asyncio.gather(
+                repo.set_project(tid, p["id"], user_id="u1"),
+                projects.delete(p["id"], user_id="u1"),
+            )
+            record = await repo.get(tid, user_id="u1")
+            membership = record["metadata"].get("deerflow_project_id")
+            if moved and not deleted:
+                # delete lost the race before our read: membership may still be
+                # set only if the project row still exists
+                assert membership is None or await projects.get(membership, user_id="u1") is not None
+            else:
+                assert membership is None
+
+    @pytest.mark.anyio
+    async def test_concurrent_create_vs_project_delete_never_dangles(self, repo):
+        """§14.14 race: create-with-assignment vs delete resolves to a
+        rejected create or cleared membership — never a thread whose
+        metadata references a deleted project."""
+        import asyncio
+
+        from deerflow.persistence.projects import ProjectNotAssignableError, ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+
+        async def create_in_project(tid: str, project_id: str) -> bool:
+            try:
+                await repo.create(tid, user_id="u1", project_id=project_id)
+            except ProjectNotAssignableError:
+                return False
+            return True
+
+        for i in range(10):
+            p = await projects.create(name=f"P{i}", user_id="u1")
+            tid = f"trace-{i}"
+            await asyncio.gather(
+                create_in_project(tid, p["id"]),
+                projects.delete(p["id"], user_id="u1"),
+            )
+            record = await repo.get(tid, user_id="u1")
+            if record is not None:
+                membership = record["metadata"].get("deerflow_project_id")
+                if membership is not None:
+                    # A carried key is only valid while the project row exists.
+                    assert await projects.get(membership, user_id="u1") is not None
 
 
 class TestJsonMatchCompilation:

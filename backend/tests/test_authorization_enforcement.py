@@ -335,7 +335,7 @@ def test_lead_agent_filters_all_model_visible_tools_and_reuses_provider(monkeypa
             enabled=True,
             provider=AuthorizationProviderConfig(
                 use="deerflow.authz.rbac:RbacAuthorizationProvider",
-                config={"roles": {"user": {"tools": {"allow": ["safe_tool"]}}}},
+                config={"roles": {"user": {"tools": {"allow": ["safe_tool", "history_read"]}}}},
             ),
         ),
         models=[
@@ -348,6 +348,7 @@ def test_lead_agent_filters_all_model_visible_tools_and_reuses_provider(monkeypa
         ],
     )
     config.skills.deferred_discovery = True
+    config.task_continuity.enabled = True
 
     monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda *args, **kwargs: "test-model")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
@@ -386,5 +387,5 @@ def test_lead_agent_filters_all_model_visible_tools_and_reuses_provider(monkeypa
         runtime_context["is_bootstrap"] = True
     result = lead_agent_module._make_lead_agent({"context": runtime_context}, app_config=config)
 
-    assert [tool.name for tool in result["tools"]] == ["safe_tool"]
+    assert [tool.name for tool in result["tools"]] == ["safe_tool", "history_read"]
     assert captured["authorization_provider"] is not None

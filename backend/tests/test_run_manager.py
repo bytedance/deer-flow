@@ -1,9 +1,11 @@
 """Tests for RunManager."""
 
 import asyncio
+import itertools
 import logging
 import re
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -616,8 +618,18 @@ async def test_cancel_not_inflight(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_list_by_thread(manager: RunManager):
+async def test_list_by_thread(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
     """Same thread should return multiple runs."""
+    # Advance the fake clock 1ms per call so r2 gets a strictly newer
+    # created_at than r1 even on hosts with coarse wall-clock granularity
+    # (Windows timestamps can repeat across consecutive creates).
+    base = datetime.now(UTC)
+    calls = itertools.count()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.manager._now_iso",
+        lambda: (base + timedelta(milliseconds=next(calls))).isoformat(),
+    )
+
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
     await manager.create("thread-2")
@@ -631,14 +643,14 @@ async def test_list_by_thread(manager: RunManager):
 
 @pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Ordering should be stable (insertion order) even when timestamps tie."""
+    """Timestamp ties break on run_id so keyset pagination has a total order."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
 
     runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r1.run_id, r2.run_id]
+    assert [run.run_id for run in runs] == sorted([r1.run_id, r2.run_id], reverse=True)
 
 
 @pytest.mark.anyio
@@ -662,13 +674,40 @@ async def test_has_inflight_ignores_checkpoint_write_reservation(manager: RunMan
 
 
 @pytest.mark.anyio
-async def test_cleanup(manager: RunManager):
-    """After cleanup, the run should be gone."""
+async def test_cleanup_evicts_with_store(manager_with_store: RunManager):
+    """With a store, cleanup releases the record and history stays readable."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    run_id = record.run_id
+    # Mirrors the production sequence: run_agent only schedules cleanup once
+    # the run is terminal and its store row has been finalized.
+    await mgr.set_status(run_id, RunStatus.success)
+
+    await mgr.cleanup(run_id, delay=0)
+    assert run_id not in mgr._runs
+    hydrated = await mgr.get(run_id, user_id=record.user_id)
+    assert hydrated is not None
+    assert hydrated.run_id == run_id
+    assert hydrated.status is RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_cleanup_without_store_preserves_history(manager: RunManager):
+    """Without a store there is no fallback, so cleanup must not erase history.
+
+    ``run_agent`` schedules cleanup for every terminal run. Evicting in
+    memory-only mode would drop the record from ``_runs`` with nothing left to
+    hydrate it from, making completed runs disappear from history instead of
+    being released from a durable copy.
+    """
     record = await manager.create("thread-1")
     run_id = record.run_id
+    await manager.set_status(run_id, RunStatus.success)
 
     await manager.cleanup(run_id, delay=0)
-    assert await manager.get(run_id) is None
+
+    assert await manager.get(run_id) is record
+    assert [r.run_id for r in await manager.list_by_thread("thread-1")] == [run_id]
 
 
 @pytest.mark.anyio
@@ -887,6 +926,108 @@ async def test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run()
     runs = await manager.list_by_thread("thread-1", limit=1)
 
     assert [run.run_id for run in runs] == ["new-store"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_returns_older_page():
+    """A (created_at, run_id) cursor walks past the newest page."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    for run_id, created_at in (
+        ("r1", "2026-01-01T00:00:00+00:00"),
+        ("r2", "2026-01-02T00:00:00+00:00"),
+        ("r3", "2026-01-03T00:00:00+00:00"),
+    ):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=created_at)
+
+    first = await manager.list_by_thread("thread-1", limit=2)
+    assert [run.run_id for run in first] == ["r3", "r2"]
+
+    second = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at=first[-1].created_at,
+        before_run_id=first[-1].run_id,
+    )
+    assert [run.run_id for run in second] == ["r1"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_is_stable_when_timestamps_tie():
+    """Tied created_at values must not skip or duplicate across pages."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    tied = "2026-01-01T00:00:00+00:00"
+    for run_id in ("a", "b", "c"):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=tied)
+
+    first = await manager.list_by_thread("thread-1", limit=2)
+    assert [run.run_id for run in first] == ["c", "b"]
+    second = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at=first[-1].created_at,
+        before_run_id=first[-1].run_id,
+    )
+    assert [run.run_id for run in second] == ["a"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_rejects_one_sided_keyset_cursor():
+    """A one-sided cursor would silently drop the bound; fail instead of paging from the start."""
+    manager = RunManager()
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread("thread-1", before_run_id="r2")
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+            before_run_id="",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at must be an ISO-8601 timestamp",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="not-a-timestamp",
+            before_run_id="r2",
+        )
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_accepts_space_decoded_offset():
+    """Query-decoded '+00:00' (a space) must still walk to the older page."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    for run_id, created_at in (
+        ("r1", "2026-01-01T00:00:00+00:00"),
+        ("r2", "2026-01-02T00:00:00+00:00"),
+        ("r3", "2026-01-03T00:00:00+00:00"),
+    ):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=created_at)
+
+    older = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at="2026-01-02T00:00:00 00:00",
+        before_run_id="r2",
+    )
+    assert [run.run_id for run in older] == ["r1"]
 
 
 @pytest.mark.anyio
@@ -1481,18 +1622,21 @@ async def test_thread_index_preserves_insertion_order(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager: RunManager):
-    a1 = await manager.create("thread-a")
-    a2 = await manager.create("thread-a")
+async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager_with_store: RunManager):
+    mgr = manager_with_store
+    a1 = await mgr.create("thread-a")
+    a2 = await mgr.create("thread-a")
 
-    await manager.cleanup(a1.run_id, delay=0)
-    assert a1.run_id not in manager._runs
-    assert set(manager._runs_by_thread["thread-a"]) == {a2.run_id}
+    await mgr.cleanup(a1.run_id, delay=0)
+    assert a1.run_id not in mgr._runs
+    assert set(mgr._runs_by_thread["thread-a"]) == {a2.run_id}
 
-    await manager.cleanup(a2.run_id, delay=0)
+    await mgr.cleanup(a2.run_id, delay=0)
     # Empty buckets are pruned so the index cannot grow without bound.
-    assert "thread-a" not in manager._runs_by_thread
-    assert await manager.list_by_thread("thread-a") == []
+    assert "thread-a" not in mgr._runs_by_thread
+    # Both records survive as store-only history; the store does not promise
+    # to preserve the in-memory insertion order.
+    assert {r.run_id for r in await mgr.list_by_thread("thread-a")} == {a1.run_id, a2.run_id}
 
 
 @pytest.mark.anyio
