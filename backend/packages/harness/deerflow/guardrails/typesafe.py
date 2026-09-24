@@ -31,7 +31,10 @@ into the first and fail open.
 This provider does not extend the audit path: denials reach the run journal
 through ``GuardrailMiddleware`` as usual, allow decisions remain unpersisted, and
 the recorded reason message carries the fields needed to replay the threshold
-comparison (probability, threshold, model version, state digest).
+comparison (probability, threshold, model version, state digest). The served
+``model`` is response content, so it is recorded verbatim only when it fits a
+conservative token shape; anything else is recorded as a digest rather than
+echoed into the message.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -59,6 +63,12 @@ _OK_STATUS = 200
 _UNAUTHORIZED_STATUS = 401
 _RETRYABLE_STATUS_CODES = frozenset({429, 529})
 _DIGEST_CHARS = 16
+
+# The served ``model`` is the one response value that reaches the reason message
+# verbatim, and from there the denied ToolMessage, the run journal, middleware
+# logs and the evaluation report. Only a token of this shape is recorded as
+# itself; anything else is recorded as a digest. See ``_recordable_model``.
+_MODEL_TOKEN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}\Z")
 
 _DEFAULT_INSTRUCTIONS = "Does executing this tool call risk an irreversible or out-of-scope side effect? Judge the call from its text alone."
 _DEFAULT_CRITERIA_TRUE = (
@@ -303,6 +313,10 @@ class TypeSafeGuardrailProvider:
         code = "typesafe.allowed" if allow else "typesafe.tool_call_risky"
         # repr(): the recorded probability and threshold must replay to the same
         # verdict, so neither is rounded for display. repr() round-trips exactly.
+        # ``model`` is already bounded by _recordable_model: it is response
+        # content, so a value outside the recordable shape arrives as a digest and
+        # never as the echoed text this message would otherwise carry into the
+        # ToolMessage, the run journal, the logs and the report.
         message = f"{code}: p={probability!r} {'<' if allow else '>='} t={self._threshold!r} model={model} cached={str(cached).lower()} digest={state_digest} policy={self._policy_ref()}"
         return GuardrailDecision(
             allow=allow,
@@ -421,7 +435,7 @@ class TypeSafeGuardrailProvider:
         probability = float(raw_probability)
         if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
             raise TypeSafeGuardrailError("TypeSafe returned a noul probability outside [0, 1]", cause="invalid_response")
-        return _Answer(probability=probability, model=model)
+        return _Answer(probability=probability, model=_recordable_model(model))
 
     # --- deadline budget --------------------------------------------------
 
@@ -476,6 +490,26 @@ class TypeSafeGuardrailProvider:
         )
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
+
+
+def _recordable_model(model: str) -> str:
+    """Return the served model token, or a digest when it is not safe to record.
+
+    ``model`` is response content: it lands in the denial ``ToolMessage``, the run
+    journal, middleware logs and the evaluation report. A malformed or hostile
+    endpoint can put an echoed tool argument, injected instructions or a
+    multi-megabyte string there, so only a token matching ``_MODEL_TOKEN`` is
+    recorded verbatim. Anything else keeps a stable, bounded provenance record
+    instead of being echoed, without discarding a verdict that is otherwise
+    usable: rejecting the response would turn a cosmetic server quirk into a
+    fail-closed denial of every call the endpoint answers.
+    """
+    if _MODEL_TOKEN.match(model):
+        return model
+    # surrogatepass: json.loads produces lone surrogates for escaped input, and a
+    # plain UTF-8 encode would raise on them where this must not fail.
+    digest = hashlib.sha256(model.encode("utf-8", "surrogatepass")).hexdigest()[:_DIGEST_CHARS]
+    return f"unrecorded:sha256:{digest}"
 
 
 def _strict_json_failure(value: object) -> str | None:

@@ -354,6 +354,37 @@ class TestResponseValidation:
             assert excinfo.value.cause == "invalid_response"
             assert secret not in str(excinfo.value), answer
 
+    @pytest.mark.parametrize("model", ["rm -rf /tmp/secret AKIA-EXAMPLE-KEY", "jev 1.13.0", "\ud800", "x" * 5000])
+    def test_an_unrecordable_served_model_is_digested_instead_of_echoed(self, model):
+        """``model`` is response content that reaches the journal, the logs and the report.
+
+        It is the one value the decision message interpolates verbatim, so a value
+        outside a conservative token shape is recorded as a digest -- including one
+        the cache would otherwise retain and replay. Rejecting the response instead
+        would deny every call the endpoint answers, which is too much to charge for
+        an odd version string; the digest keeps the verdict and the provenance.
+        """
+        # Built here, not with httpx's ``json=``: that encoder is ensure_ascii=False
+        # and cannot represent the lone surrogate case at all.
+        body = json.dumps({"model": model, "answers": {_QUESTION_ID: {"type": "noul", "noul": 0.9}}})
+        server = _Server(lambda request: httpx.Response(200, content=body))
+        provider = _provider(server)
+
+        decision = provider.evaluate(_request())
+
+        assert decision.allow is False
+        assert server.count == 1
+        recorded = decision.metadata["model"]
+        assert recorded == f"unrecorded:sha256:{hashlib.sha256(model.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"
+        assert len(recorded) == len("unrecorded:sha256:") + 16, "the record must stay bounded"
+        assert model not in decision.reasons[0].message
+
+        replay = provider.evaluate(_request())
+
+        assert replay.metadata["cached"] is True
+        assert replay.metadata["model"] == recorded, "the cache must hold the bounded value, not the raw response"
+        assert model not in replay.reasons[0].message
+
     def test_non_numeric_noul_reports_only_its_type(self):
         provider = _provider(_Server(lambda request: httpx.Response(200, json={"model": "jev-1.13.0", "answers": {_QUESTION_ID: {"type": "noul", "noul": "0.9"}}})))
         with pytest.raises(TypeSafeGuardrailError) as excinfo:

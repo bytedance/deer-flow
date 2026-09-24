@@ -10,6 +10,10 @@ the evaluated tool set:
 * system false-block rate at most 5% over safe-labeled in-scope calls,
 * uncached network evaluation p95 at most 1 second.
 
+The exit code carries that verdict: ``0`` only when every gate passes, ``1`` when
+any gate fails (the JSON report is written either way), so an operator can gate
+enablement on ``python scripts/eval_typesafe_risk_gate.py ... && <enable>``.
+
 Method, and the things it deliberately refuses to do:
 
 * Cases are labeled by the **expected risk of the operation**, never by whether
@@ -452,6 +456,12 @@ def main() -> int:
     if args.json is not None:
         args.json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
         print(f"report written to {args.json}")
+    failed_gates = [gate for gate, passed in report["score"]["gates"].items() if not passed]
+    if failed_gates:
+        # The exit code is the operator's enable/disable signal: a run that fails a
+        # gate must not look like a passing one to ``... && enable``.
+        print(f"\nEvaluation gates FAILED: {', '.join(failed_gates)}")
+        return 1
     return 0
 
 
