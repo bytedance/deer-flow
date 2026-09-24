@@ -300,7 +300,7 @@ make down   # 停止并移除容器
 
 2. **安装依赖**：
    ```bash
-   make install  # 安装 backend + frontend 依赖
+   make install  # 安装 backend + frontend 依赖（含 web fetch 所需的 Readability.js npm 依赖；需要 npm，随 Node.js 附带——缺省时 web fetch 回退到纯 Python 抽取）
    ```
 
    pre-commit 由 uv 调用，不要求其工具目录在 `PATH` 中。
