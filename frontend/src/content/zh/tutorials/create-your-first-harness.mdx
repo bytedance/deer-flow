@@ -47,7 +47,6 @@ tools:
 创建 `my_agent.py`：
 
 ```python
-import asyncio
 import os
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
@@ -60,19 +59,12 @@ load_config()
 
 client = DeerFlowClient()
 
-async def main():
-    async for event in client.astream(
-        thread_id="my-first-thread",
-        message="用 Python 写一个斐波那契数列函数，包含文档字符串",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-            }
-        },
-    ):
-        print(event)
-
-asyncio.run(main())
+for event in client.stream(
+    message="用 Python 写一个斐波那契数列函数，包含文档字符串",
+    thread_id="my-first-thread",
+    model_name="gpt-4o",
+):
+    print(event)
 ```
 
 ## 运行

@@ -31,23 +31,17 @@ client = DeerFlowClient()
 
 The client is thread-safe and designed to be instantiated once and reused across requests.
 
-## Async streaming
+## Streaming
 
-The recommended integration pattern is async streaming. This gives you real-time access to each token and event as the agent produces it:
+The recommended integration pattern is streaming. `stream()` is a sync generator, so no asyncio is required — it gives you real-time access to each token and event as the agent produces it:
 
 ```python
-import asyncio
-
-async def run_agent(thread_id: str, user_message: str):
-    async for event in client.astream(
-        thread_id=thread_id,
+def run_agent(thread_id: str, user_message: str):
+    for event in client.stream(
         message=user_message,
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-                "subagent_enabled": True,
-            }
-        },
+        thread_id=thread_id,
+        model_name="gpt-4o",
+        subagent_enabled=True,
     ):
         # Process each streaming event
         yield event
@@ -62,10 +56,10 @@ async def run_agent(thread_id: str, user_message: str):
 For batch processing or when you only need the final result:
 
 ```python
-async def run_agent_sync(thread_id: str, user_message: str) -> dict:
-    result = await client.ainvoke(
-        thread_id=thread_id,
+def run_agent_sync(thread_id: str, user_message: str) -> str:
+    result = client.chat(
         message=user_message,
+        thread_id=thread_id,
     )
     return result
 ```
@@ -82,25 +76,22 @@ thread_id = str(uuid.uuid4())
 
 # Continuing an existing conversation (same thread_id)
 # The agent will see the full history if a checkpointer is configured
-await client.ainvoke(thread_id=existing_thread_id, message="Follow up question")
+client.chat(message="Follow up question", thread_id=existing_thread_id)
 ```
 
 ## Custom per-agent configuration
 
-Build domain-specific agents by creating named agent configs and passing the `agent_name` at runtime:
+Build domain-specific agents by creating named agent configs and passing the `agent_name` when constructing the client:
 
 ```python
 # agents/research-assistant/config.yaml must exist with skills and tool config
 
-result = await client.ainvoke(
-    thread_id=thread_id,
+research_client = DeerFlowClient(agent_name="research-assistant")
+
+result = research_client.chat(
     message=user_message,
-    config={
-        "configurable": {
-            "agent_name": "research-assistant",
-            "model_name": "gpt-4o",
-        }
-    },
+    thread_id=thread_id,
+    model_name="gpt-4o",
 )
 ```
 
@@ -133,8 +124,8 @@ client = DeerFlowClient()
 
 @app.post("/chat/{thread_id}")
 async def chat(thread_id: str, body: dict):
-    async def generate():
-        async for event in client.astream(thread_id=thread_id, message=body["message"]):
+    def generate():
+        for event in client.stream(message=body["message"], thread_id=thread_id):
             yield f"data: {event}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```

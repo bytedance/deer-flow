@@ -53,7 +53,6 @@ tools:
 Create `my_agent.py` in the `backend/` directory:
 
 ```python
-import asyncio
 import os
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
@@ -65,19 +64,12 @@ load_config()
 
 client = DeerFlowClient()
 
-async def main():
-    async for event in client.astream(
-        thread_id="my-first-thread",
-        message="Write a Python fibonacci function with a docstring",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-            }
-        },
-    ):
-        print(event)
-
-asyncio.run(main())
+for event in client.stream(
+    message="Write a Python fibonacci function with a docstring",
+    thread_id="my-first-thread",
+    model_name="gpt-4o",
+):
+    print(event)
 ```
 
 ### Run it
