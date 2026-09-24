@@ -131,10 +131,13 @@ class ModelConfig(BaseModel):
     )
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")
-    reasoning: ReasoningCapabilities | None = Field(
+    reasoning: ReasoningCapabilities | bool | None = Field(
         default=None,
         description=(
-            "Declarative reasoning capability contract (thinking availability, accepted effort values, payload dialect, reasoning-history requirement). Optional; when set, supports_thinking / supports_reasoning_effort are derived from it."
+            "Declarative reasoning capability contract (thinking availability, accepted effort values, "
+            "payload dialect, reasoning-history requirement). A boolean preserves the legacy native "
+            "provider setting (e.g. ChatOllama reasoning: true); only a contract derives "
+            "supports_thinking / supports_reasoning_effort."
         ),
     )
     when_thinking_enabled: dict | None = Field(
@@ -180,7 +183,7 @@ class ModelConfig(BaseModel):
     def _validate_reasoning_contract(self) -> "ModelConfig":
         """Fail early on combinations the contract cannot honor, then project the legacy booleans."""
         contract = self.reasoning
-        if contract is None:
+        if not isinstance(contract, ReasoningCapabilities):
             return self
 
         if contract.thinking == "required" and self.when_thinking_disabled is not None:

@@ -4,7 +4,7 @@
 
 Implemented in the `feat-model-provider-reasoning-capability-contract` worktree
 for issue #5073, following option 1 from the issue discussion: an optional
-structured `reasoning:` block lives beside the legacy `supports_thinking` /
+structured, mapping-valued `reasoning:` block lives beside the legacy `supports_thinking` /
 `supports_reasoning_effort` booleans, both shapes normalize to one contract,
 and the normalized result is projected through the existing `/api/models`
 response during a deprecation window.
@@ -199,8 +199,10 @@ default such as `max` can be persisted.
 
 ## Compatibility
 
-- No existing `config.yaml` changes meaning. A model without `reasoning:` is
-  `source: legacy` and follows the pre-existing factory path.
+- No existing `config.yaml` changes meaning. A model without a mapping-valued
+  `reasoning:` contract is `source: legacy` and follows the pre-existing factory
+  path. In particular, boolean `reasoning: true` / `false` remains a native
+  ChatOllama constructor setting and is forwarded on that path.
 - `supports_thinking` / `supports_reasoning_effort` remain in the config
   schema, the API, and the frontend types. They are derived when a contract is
   present and are the deprecation-window projection.

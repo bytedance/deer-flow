@@ -11,6 +11,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.reflection import resolve_class
 
 # ---------------------------------------------------------------------------
@@ -1843,6 +1844,43 @@ def test_codex_still_strips_overridden_max_tokens(monkeypatch):
 # ---------------------------------------------------------------------------
 # Declarative reasoning capability contract (issue #5073)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider_name", ["ollama_qwen", "ollama_gemma"])
+def test_ollama_wizard_native_reasoning_survives_config_load_and_model_build(monkeypatch, provider_name):
+    import yaml
+    from wizard.providers import LLM_PROVIDERS
+    from wizard.writer import build_minimal_config
+
+    provider = next(item for item in LLM_PROVIDERS if item.name == provider_name)
+    content = build_minimal_config(
+        provider_use=provider.use,
+        model_name=provider.default_model,
+        display_name=provider.display_name,
+        api_key_field=provider.api_key_field,
+        env_var=provider.env_var,
+        extra_model_config=provider.extra_config,
+    )
+    config = AppConfig.model_validate(yaml.safe_load(content))
+    model = config.models[0]
+    assert model.reasoning is True
+    assert model.supports_thinking is True
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, config, model_class=_capturing_class(FakeChatModel, captured))
+    factory_module.create_chat_model(name=model.name, thinking_enabled=True)
+    assert captured["reasoning"] is True
+
+
+def test_native_provider_reasoning_false_is_forwarded(monkeypatch):
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="ollama", reasoning=False)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=False)
+
+    assert captured["reasoning"] is False
 
 
 def _glm_effort() -> dict:

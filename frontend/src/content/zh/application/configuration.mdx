@@ -136,7 +136,7 @@ Docker 部署时，`localhost` 指向 DeerFlow 容器本身。请改用容器能
 
 #### 推理能力契约
 
-`supports_thinking` 和 `supports_reasoning_effort` 只能表示"有没有这个开关"。当 provider 的约定与 DeerFlow 的通用假设不同——例如 thinking 无法关闭，或 effort 取值不是 `minimal/low/medium/high`——可以改为声明 `reasoning` 块。此时这两个布尔值会由契约推导，聊天界面只提供模型接受的取值，并且所有模型调用（对话、总结、标题生成、子代理）都遵循同一套策略。
+`supports_thinking` 和 `supports_reasoning_effort` 只能表示"有没有这个开关"。当 provider 的约定与 DeerFlow 的通用假设不同——例如 thinking 无法关闭，或 effort 取值不是 `minimal/low/medium/high`——可以改为声明映射形式的 `reasoning` 块。此时这两个布尔值会由契约推导，聊天界面只提供模型接受的取值，并且所有模型调用（对话、总结、标题生成、子代理）都遵循同一套策略。已有的 Ollama `reasoning: true` / `false` 仍是 ChatOllama 原生参数，不会启用此契约。
 
 ```yaml
 models:

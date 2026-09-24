@@ -397,6 +397,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
     model_settings_from_config = model_config.model_dump(exclude_none=True, exclude=set(_MODEL_METADATA_FIELDS))
+    if isinstance(model_config.reasoning, bool):
+        # Before the capability contract, ``reasoning`` was an unrestricted
+        # provider kwarg. ChatOllama uses the boolean form; keep forwarding it
+        # on the legacy path even though contract metadata is excluded above.
+        model_settings_from_config["reasoning"] = model_config.reasoning
     # Layer per-caller sampling overrides (e.g. a custom agent's temperature /
     # max_tokens) on top of the profile. Ignore None so an unset override never
     # clobbers a configured profile value. Applied here — before the thinking

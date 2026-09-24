@@ -19,13 +19,14 @@ while handing off to the wait queue.
 
 ### Reasoning Capability Contract (`packages/harness/deerflow/models/reasoning.py`)
 
-`ModelConfig.reasoning` (issue #5073) is an optional declarative contract beside
+Mapping-valued `ModelConfig.reasoning` (issue #5073) is an optional declarative contract beside
 the legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
 `unsupported | optional | required`, `on_disable_request` (`keep_enabled` or
 `reject`, required-thinking only), the payload `dialect` (`auto` infers it from
 `when_thinking_enabled`), the reasoning `history` requirement, and an `effort`
 vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
-When the block is present the booleans are derived from it and contradictory
+Boolean `reasoning: true` / `false` remains a native ChatOllama provider setting;
+the factory forwards it on the legacy path. When the block is present the booleans are derived from it and contradictory
 profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
 + an enable template, a `default` outside `values`, an explicit boolean that
 disagrees, an effort value at `effort.path` in the profile or in the
@@ -45,7 +46,7 @@ generic `thinking_enabled` / `reasoning_effort` to it, and
 subagents, summarization, title, one-shot utilities): a required-thinking model
 never enters the disable branch, effort is mapped through aliases or the default
 and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no `reasoning:`) keep the historical path
+template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
 byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
 OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
 the same policy first so run metadata reports the effective values. Design note:

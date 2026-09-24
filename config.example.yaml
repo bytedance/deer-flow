@@ -216,6 +216,10 @@ models:
 
   # Reasoning capability contract (optional, per model)
   #
+  # A mapping-valued `reasoning:` block opts into this contract. The existing
+  # Ollama `reasoning: true` / `false` boolean remains a native provider option
+  # and is still forwarded to ChatOllama.
+  #
   # `supports_thinking` / `supports_reasoning_effort` only say whether a knob
   # exists. Models whose provider contract differs from DeerFlow's generic
   # assumptions can declare a `reasoning:` block instead; the two booleans are
