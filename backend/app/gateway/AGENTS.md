@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-External runs/state writes must strip `sandbox`, `thread_data`, and `viewed_images`.
+Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
 

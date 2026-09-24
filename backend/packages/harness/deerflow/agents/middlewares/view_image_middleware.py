@@ -381,8 +381,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     @classmethod
     def _host_path_matches_request(cls, request: ModelRequest, image_path: str, actual_path: str) -> bool:
         """Bind a stored host copy to the authenticated run's user and thread."""
-        from deerflow.config.paths import get_paths
+        from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
         from deerflow.runtime.user_context import resolve_runtime_user_id
+        from deerflow.sandbox.tools import resolve_and_validate_user_data_path, validate_local_tool_path
         from deerflow.tools.builtins.view_image_tool import _is_allowed_image_virtual_path
 
         if not isinstance(image_path, str) or not isinstance(actual_path, str) or not _is_allowed_image_virtual_path(image_path):
@@ -403,13 +404,24 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return False
 
         try:
-            expected_path = get_paths().resolve_virtual_path(
-                thread_id,
-                image_path,
-                user_id=resolve_runtime_user_id(request.runtime),
-            )
+            user_id = resolve_runtime_user_id(request.runtime)
+            thread_data = (request.state or {}).get("thread_data")
+            if isinstance(thread_data, Mapping):
+                # ThreadDataMiddleware may use a custom Paths base. Bind its
+                # selected root to this run before using it to resolve a host copy.
+                root_name = image_path.removeprefix(f"{VIRTUAL_PATH_PREFIX}/").split("/", 1)[0]
+                root_path = thread_data.get(f"{root_name}_path")
+                if not isinstance(root_path, str) or not root_path:
+                    return False
+                root = Path(root_path).resolve()
+                if root.parts[-6:] != ("users", user_id, "threads", thread_id, "user-data", root_name):
+                    return False
+                validate_local_tool_path(image_path, thread_data, read_only=True)
+                expected_path = Path(resolve_and_validate_user_data_path(image_path, thread_data))
+            else:
+                expected_path = get_paths().resolve_virtual_path(thread_id, image_path, user_id=user_id)
             return Path(actual_path).resolve() == expected_path
-        except (OSError, TypeError, ValueError):
+        except (OSError, PermissionError, TypeError, ValueError):
             return False
 
     def _image_injection_plan(self, request: ModelRequest) -> tuple[list[AnyMessage], bool, bool]:

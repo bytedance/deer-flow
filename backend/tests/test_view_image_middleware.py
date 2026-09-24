@@ -674,3 +674,92 @@ def test_host_image_copy_is_scoped_to_current_user_and_thread(tmp_path, monkeypa
     alias_path.parent.mkdir(parents=True)
     alias_path.symlink_to(owner_path)
     assert model_payloads("user-a", "thread-a", alias_path) == []
+
+
+def _custom_base_view_request(tmp_path, monkeypatch):
+    """Use the real tool to record a host copy under a non-global Paths base."""
+    from deerflow.authz import sandbox_authz
+    from deerflow.tools.builtins.view_image_tool import _view_image_authorized
+
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution", lambda **kwargs: None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: None))
+
+    paths = Paths(tmp_path / "custom-base")
+    virtual_path = "/mnt/user-data/outputs/canary.png"
+    image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    actual_path = paths.sandbox_outputs_dir("thread-test", user_id="user-test") / "canary.png"
+    actual_path.parent.mkdir(parents=True)
+    actual_path.write_bytes(image_bytes)
+    thread_data = {
+        "workspace_path": str(paths.sandbox_work_dir("thread-test", user_id="user-test")),
+        "uploads_path": str(paths.sandbox_uploads_dir("thread-test", user_id="user-test")),
+        "outputs_path": str(actual_path.parent),
+    }
+    tool_runtime = SimpleNamespace(
+        state={"thread_data": thread_data},
+        context={"user_id": "user-test", "thread_id": "thread-test"},
+    )
+    result = _view_image_authorized(tool_runtime, virtual_path, "call-image")
+    metadata = result.update["viewed_images"][virtual_path]
+    assert metadata["actual_path"] == str(actual_path)
+
+    messages = [
+        AIMessage(content="", tool_calls=[_view_image_call("call-image", virtual_path)]),
+        ToolMessage(content="Successfully read image", tool_call_id="call-image"),
+    ]
+    request = _model_request(messages, {virtual_path: metadata})
+    request.state["thread_data"] = thread_data
+    request.runtime.context = tool_runtime.context
+    expected = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    return request, expected
+
+
+def _image_urls(request: ModelRequest) -> list[str]:
+    return [block["image_url"]["url"] for message in _image_context_messages(request.messages) for block in message.content if isinstance(block, dict) and block.get("type") == "image_url"]
+
+
+def test_custom_base_host_copy_reaches_sync_model(tmp_path, monkeypatch):
+    request, expected = _custom_base_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    ViewImageMiddleware().wrap_model_call(request, lambda value: prepared.append(value) or AIMessage(content="ok"))
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+@pytest.mark.anyio
+async def test_custom_base_host_copy_reaches_async_model(tmp_path, monkeypatch):
+    request, expected = _custom_base_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    async def handler(value: ModelRequest) -> AIMessage:
+        prepared.append(value)
+        return AIMessage(content="ok")
+
+    await ViewImageMiddleware().awrap_model_call(request, handler)
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+def test_custom_base_host_copy_still_requires_matching_user_and_thread(tmp_path, monkeypatch):
+    request, _ = _custom_base_view_request(tmp_path, monkeypatch)
+    middleware = ViewImageMiddleware()
+
+    for user_id, thread_id in (("other-user", "thread-test"), ("user-test", "other-thread"), ("user-test", None)):
+        request.runtime.context = {"user_id": user_id, "thread_id": thread_id}
+        assert _image_urls(middleware._inject(request)) == []
+
+
+def test_custom_base_host_copy_rejects_unscoped_thread_data_root(tmp_path, monkeypatch):
+    request, _ = _custom_base_view_request(tmp_path, monkeypatch)
+    virtual_path = "/mnt/user-data/outputs/canary.png"
+    unscoped_path = tmp_path / "unscoped" / "canary.png"
+    unscoped_path.parent.mkdir()
+    unscoped_path.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+    request.state["thread_data"] = {**request.state["thread_data"], "outputs_path": str(unscoped_path.parent)}
+    request.state["viewed_images"][virtual_path] = {
+        **request.state["viewed_images"][virtual_path],
+        "actual_path": str(unscoped_path),
+    }
+
+    assert _image_urls(ViewImageMiddleware()._inject(request)) == []
