@@ -2,6 +2,7 @@
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
+Durable batch specs store overlays as JSON and restore them before execution.
 
 **Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
 `regular file` and `regular empty file` as regular files. Empty files satisfy
