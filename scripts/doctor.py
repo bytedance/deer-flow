@@ -545,6 +545,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
+                "webz": "WEBZ_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
