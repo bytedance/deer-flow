@@ -19,7 +19,11 @@ implements blob/version handling slightly differently.
 Two further tests pin currently-unfixed upstream defects (langgraph #8382
 parallel-superstep replay order, #8448 Postgres paginated delta walk). They
 assert the correct contract and trip - skip, naming the issue - while the
-defect is present, becoming live gates once a dependency bump lands a fix.
+defect is present, becoming live gates once a dependency bump lands a fix. The
+#8448 trip is scoped to the Postgres parameter, the only backend that pages its
+stage-1 scan: on memory/sqlite it stays a live differential assertion against
+``InMemorySaver``, so a regression there fails instead of blaming the
+Postgres-only upstream issue.
 """
 
 from __future__ import annotations
@@ -411,7 +415,7 @@ async def test_long_chain_history_survives_pagination(saver_env: _SaverEnv, monk
     assert oracle[0] == (_expected_long_chain(_PAGINATION_STEPS), ())
     assert all(digest for digest, next_key in oracle if next_key != ("__start__",))
 
-    if got != oracle:
+    if saver_env.kind == "postgres" and got != oracle:
         pytest.skip("upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty")
     assert got == oracle
 
