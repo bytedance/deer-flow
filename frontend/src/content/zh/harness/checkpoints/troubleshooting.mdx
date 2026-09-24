@@ -131,7 +131,7 @@ Failed to list checkpoints for regenerate thread %s
 
 **症状**：在分叉线程里重新生成后，刷新页面时被替换掉的助手消息和新回答并列存在，且当种子行共用一个 run id 时分支历史可能损坏（[#4458](https://github.com/bytedance/deer-flow/issues/4458)）。
 
-**原因**：delta 不能分叉。从较旧的检查点恢复会分叉谱系，而 delta 历史回走会收集每条在路径上的祖先的**全部** `pending_writes` —— 但共享父级还带着被放弃的兄弟孩子的写入，于是这些写入被回放进分叉，run 从一份仍包含「本应被替换掉的回答」的消息列表开始。已在 Postgres、SQLite 与内存 saver 上复现；full 模式不受影响，因为它的检查点携带完整通道值。
+**原因**：delta 无法正确分叉 —— 分叉本身会被接受，坏的是读取。从较旧的检查点恢复会分叉谱系，而 delta 历史回走会收集每条在路径上的祖先的**全部** `pending_writes` —— 但共享父级还带着被放弃的兄弟孩子的写入，于是这些写入被回放进分叉，run 从一份仍包含「本应被替换掉的回答」的消息列表开始。已在 Postgres、SQLite 与内存 saver 上复现；full 模式不受影响，因为它的检查点携带完整通道值。
 
 **处理**：DeerFlow 改为线性化而不分叉。它物化所选检查点的状态，以替换语义写到当前 head（head 没有其他孩子），把只存在于较新 head 的通道重置为 schema 默认值或 `None`，消费掉选择器，然后线性续跑。当模式为 full、没有 checkpointer、选择器已经指向 head，或命名空间非根时，线性化是空操作；它**fail-closed**，绝不回退到分叉：
 

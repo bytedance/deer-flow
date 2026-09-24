@@ -159,7 +159,7 @@ The router states the rationale: a mismatch means the thread's persisted checkpo
 | --- | --- | --- | --- |
 | `GET /api/threads/{thread_id}` | `get_thread` | checked before the `404 Thread <id> not found` | `threads:1276,1291-1292,1298-1299,1303` |
 | `GET /api/threads/{thread_id}/state` | `get_thread_state` | | `threads:1446,1454-1455,1458-1459` |
-| `POST /api/threads/{thread_id}/state` | `update_thread_state` | | `threads:1495,1559-1560` |
+| `POST /api/threads/{thread_id}/state` | `update_thread_state` | a client-supplied `checkpoint_id` older than the head is applied as a delta fork with no linearization — see [Forks are accepted, not refused](/docs/harness/checkpoints/resume-and-rollback#forks-are-accepted-not-refused) | `threads:1495,1559-1560` |
 | `POST /api/threads/{thread_id}/history` | `get_thread_history` | | `threads:1695,1715-1716,1907-1908` |
 | `POST /api/threads/{thread_id}/branches` | `branch_thread` → `_branch_thread_with_reservation` | the detail names the source thread id; no test pins this route | `threads:953,231-232,298-299,1105-1106` |
 | `POST /api/threads/{thread_id}/compact` | `compact_thread` | `409` is also returned when compaction is disabled; no test pins this route | `threads:1399,1413-1414,1429-1430,1431-1432` |

@@ -159,7 +159,7 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | --- | --- | --- | --- |
 | `GET /api/threads/{thread_id}` | `get_thread` | 在 `404 Thread <id> not found` 之前检查 | `threads:1276,1291-1292,1298-1299,1303` |
 | `GET /api/threads/{thread_id}/state` | `get_thread_state` | | `threads:1446,1454-1455,1458-1459` |
-| `POST /api/threads/{thread_id}/state` | `update_thread_state` | | `threads:1495,1559-1560` |
+| `POST /api/threads/{thread_id}/state` | `update_thread_state` | 调用方传入的 `checkpoint_id` 若比 head 更旧，会作为一次增量分叉被直接应用，没有线性化 —— 见[分叉会被接受，而不是被拒绝](/docs/harness/checkpoints/resume-and-rollback#分叉会被接受而不是被拒绝) | `threads:1495,1559-1560` |
 | `POST /api/threads/{thread_id}/history` | `get_thread_history` | | `threads:1695,1715-1716,1907-1908` |
 | `POST /api/threads/{thread_id}/branches` | `branch_thread` → `_branch_thread_with_reservation` | detail 中的线程 id 是源线程；无测试覆盖该路由 | `threads:953,231-232,298-299,1105-1106` |
 | `POST /api/threads/{thread_id}/compact` | `compact_thread` | 压缩被禁用时同样返回 `409`；无测试覆盖该路由 | `threads:1399,1413-1414,1429-1430,1431-1432` |
