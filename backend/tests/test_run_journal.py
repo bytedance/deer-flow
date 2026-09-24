@@ -373,6 +373,281 @@ async def test_close_without_flush_detaches_when_cancellation_interrupts_pending
 
 
 @pytest.mark.anyio
+async def test_close_without_flush_retains_cleanup_when_cancelled_again():
+    """A lost-lease close must cancel/retain progress before its first cancellable wait.
+
+    The threshold wrapper is cancelled by ``close(flush=False)`` but suppresses
+    that cancellation and keeps running, and an independent best-effort progress
+    snapshot is in flight. Cancelling the close caller a second time must not
+    skip the progress cancel/retain -- which therefore has to happen before the
+    first await that can propagate the caller's cancellation -- and must not
+    abandon the still-running wrapper without supervision.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    reporter_cancellations = 0
+    reporter_started = asyncio.Event()
+    reporter_release = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        nonlocal reporter_cancellations
+        reporter_started.set()
+        while True:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                reporter_cancellations += 1
+                if reporter_release.is_set():
+                    raise
+
+    journal = RunJournal(
+        "r-close-repeat-cancel",
+        "t-close-repeat-cancel",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+
+    wrapper_cancellations = 0
+    wrapper_first_cancel = asyncio.Event()
+    wrapper_release = asyncio.Event()
+
+    async def stubborn_pending_flush() -> None:
+        nonlocal wrapper_cancellations
+        while True:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                wrapper_cancellations += 1
+                if wrapper_cancellations == 1:
+                    wrapper_first_cancel.set()
+                if wrapper_release.is_set():
+                    raise
+
+    pending_flush = asyncio.create_task(stubborn_pending_flush())
+    journal._pending_flush_tasks.add(pending_flush)
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(reporter_started.wait(), timeout=1)
+    reporter_task = journal._pending_progress_task
+    assert reporter_task is not None
+
+    close_task = asyncio.create_task(journal.close(flush=False))
+    try:
+        await asyncio.wait_for(wrapper_first_cancel.wait(), timeout=1)
+        close_task.cancel()
+        # Let the caller's cancellation reach ``close``; the wrapper keeps
+        # suppressing its own cancellation and stays running.
+        await asyncio.sleep(0)
+
+        assert journal._closed is True
+        assert journal._store is None
+        assert reporter_cancellations >= 1
+        assert reporter_task in journal_module._cancelling_progress_tasks
+        assert pending_flush in journal_module._retained_cleanup_tasks
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+    finally:
+        wrapper_release.set()
+        reporter_release.set()
+        if not close_task.done():
+            close_task.cancel()
+        if not pending_flush.done():
+            pending_flush.cancel()
+        if not reporter_task.done():
+            reporter_task.cancel()
+        await asyncio.gather(close_task, pending_flush, reporter_task, return_exceptions=True)
+        await asyncio.sleep(0)
+        # Global supervision discards a settled wrapper instead of leaking it.
+        assert pending_flush not in getattr(journal_module, "_retained_cleanup_tasks", set())
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_fences_threshold_wrapper_before_first_execution():
+    """Losing the lease must not let an already-scheduled wrapper write."""
+
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    store = TrackingRunEventStore()
+    journal = RunJournal("r-fence-pre-start", "t-fence-pre-start", store, flush_threshold=1)
+    journal._put(event_type="fenced.threshold", category="trace", content="buffered")
+    # The threshold wrapper is scheduled but has not run yet: the event loop has
+    # not advanced since ``_put``.
+    assert len(journal._pending_flush_tasks) == 1
+    assert journal._buffer == []
+
+    await journal.close(flush=False)
+    await asyncio.sleep(0)
+
+    assert store.put_batch_calls == 0
+    assert journal._closed is True
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+    assert await store.list_events("t-fence-pre-start", "r-fence-pre-start") == []
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_retires_late_detached_write_failure(monkeypatch):
+    """A late detached-write failure must not repopulate a lost-lease journal."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.fail = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.fail.wait()
+            raise RuntimeError("run event store lost its lease")
+
+    store = FailingStore()
+    journal = RunJournal("r-late-detached", "t-late-detached", store, flush_threshold=100)
+    journal._put(event_type="late.detached", category="trace", content="first")
+
+    flush_task = asyncio.create_task(journal.flush())
+    try:
+        await asyncio.wait_for(store.started.wait(), timeout=0.2)
+        assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+        assert len(journal._detached_write_tasks) == 1
+
+        await journal.close(flush=False)
+        assert journal._closed is True
+        assert journal._buffer == []
+
+        detached = tuple(journal._detached_write_tasks)
+        store.fail.set()
+        await asyncio.gather(*detached, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert store.attempts == [["late.detached"]]
+        assert journal._detached_write_tasks == {}
+        # The batch cannot be retried against a store this journal no longer
+        # owns, so the late failure retires it instead of rebuffering it.
+        assert journal._buffer == []
+        assert journal.feed_generation == 0
+    finally:
+        store.fail.set()
+        await asyncio.gather(flush_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_retires_late_threshold_wrapper_outcome():
+    """Both late-outcome resolvers must honour ``_closed`` before rebuffering."""
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-late-threshold", "t-late-threshold", store, flush_threshold=100)
+    journal._put(event_type="late.threshold", category="trace", content="buffered")
+    batch = list(journal._buffer)
+    journal._flush_sync()
+    assert journal._buffer == []
+    assert len(journal._pending_flush_tasks) == 1
+
+    await journal.close(flush=False)
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+
+    # A wrapper that never started reaches its terminal outcome after the lease
+    # was lost. Its batch has no store left to retry against, so the late
+    # ``_on_flush_done`` outcome must retire it rather than repopulate a closed
+    # journal's buffer.
+    late_unstarted = asyncio.create_task(asyncio.sleep(0))
+    late_unstarted.cancel()
+    await asyncio.gather(late_unstarted, return_exceptions=True)
+    assert late_unstarted.cancelled() is True
+    journal._on_flush_done(late_unstarted, detached=journal_module._DetachedFlush(batch))
+    assert journal._buffer == []
+
+    # An already-started wrapper likewise leaves the fenced journal empty.
+    late_started = asyncio.create_task(asyncio.sleep(0))
+    late_started.cancel()
+    await asyncio.gather(late_started, return_exceptions=True)
+    journal._on_flush_done(late_started, detached=journal_module._DetachedFlush(batch, started=True))
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_does_not_repopulate_from_inflight_wrapper_cancellation():
+    """An in-flight threshold wrapper must not repopulate a lost-lease journal.
+
+    The wrapper is already inside ``put_batch`` when ``close(flush=False)``
+    cancels it; ``wait_for_task_until`` swallows that cancellation, so the write
+    stays owned. A second cancellation of the close caller makes ``close``
+    re-raise and detach while that write is still in flight. When the write then
+    fails, the cancellation-drain path must retire its batch instead of returning
+    it to a journal that no longer has a store.
+    """
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.fail = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.fail.wait()
+            raise RuntimeError("run event store lost its lease")
+
+    store = FailingStore()
+    journal = RunJournal("r-inflight-wrapper", "t-inflight-wrapper", store, flush_threshold=1)
+    journal._put(event_type="inflight.wrapper", category="trace", content="first")
+    wrapper = next(iter(journal._pending_flush_tasks))
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+
+    close_task = asyncio.create_task(journal.close(flush=False))
+    try:
+        for _ in range(10):
+            if wrapper.cancelling() > 0:
+                break
+            await asyncio.sleep(0)
+        assert wrapper.cancelling() > 0
+        assert not wrapper.done()
+
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._buffer == []
+
+        # The in-flight write settles after the lease was lost.
+        store.fail.set()
+        await asyncio.gather(wrapper, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert store.attempts == [["inflight.wrapper"]]
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._active_write_tasks == {}
+        assert journal._buffer == []
+    finally:
+        store.fail.set()
+        if not close_task.done():
+            close_task.cancel()
+        if not wrapper.done():
+            wrapper.cancel()
+        await asyncio.gather(close_task, wrapper, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypatch):
     """Cancellation while ``close(flush=True)`` drains a detached write must still detach.
 
