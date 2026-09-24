@@ -378,13 +378,6 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
-### Tool-Execution Approval (Human in the Loop)
-
-`tools[].interrupt_on` gates a lead-agent tool behind a real LangGraph
-`interrupt()`. A caller with no human on the other end must carry
-`disable_tool_approval` or `non_interactive` in its run context, or the thread
-parks unresumable. See [docs/TOOL_APPROVAL.md](docs/TOOL_APPROVAL.md).
-
 ## Code Style
 
 - Uses `ruff` for linting and formatting

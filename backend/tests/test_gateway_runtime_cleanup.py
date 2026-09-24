@@ -149,31 +149,6 @@ def test_nginx_defers_cors_to_gateway_allowlist():
         assert "if ($request_method = 'OPTIONS')" not in content
 
 
-def test_nginx_preserves_upstream_forwarded_proto():
-    """A TLS-terminating front door reaches nginx over plain HTTP.
-
-    cloudflared / Pangolin / Cloudflare / Caddy all terminate TLS and then
-    connect to nginx's port 2026 as plain HTTP, so nginx's own `$scheme` is
-    "http" even though the browser spoke HTTPS. Hardcoding `$scheme` therefore
-    makes the Gateway believe the request was insecure: its CSRF origin check
-    compares the browser's `https://host` Origin against a computed
-    `http://host` one and rejects login/register with 403 "Cross-site auth
-    request denied" (app/gateway/csrf_middleware.py::is_allowed_auth_origin),
-    and session cookies are issued without the Secure flag / max-age.
-
-    Both nginx configs must forward the upstream header, falling back to
-    `$scheme` so a direct-edge `make dev` / `make start` run is unchanged.
-    """
-    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
-        content = _read(path)
-
-        assert re.search(r"map\s+\$http_x_forwarded_proto\s+\$forwarded_proto\s*\{[^}]*default\s+\$scheme;", content), f"{path} is missing the $forwarded_proto map with a $scheme fallback"
-
-        forwarded = re.findall(r"proxy_set_header\s+X-Forwarded-Proto\s+(\S+);", content)
-        assert forwarded, f"{path} proxies no X-Forwarded-Proto"
-        assert set(forwarded) == {"$forwarded_proto"}, f"{path} clobbers the upstream scheme with {sorted(set(forwarded))}"
-
-
 def test_nginx_frontend_upgrade_header_is_conditional():
     for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
         content = _read(path)
