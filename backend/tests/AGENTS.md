@@ -81,5 +81,6 @@ expand when escaped; preserving raw UTF-8 limits alone does not cover it.
 `test_jev_result_screening_extension.py` checks bounded requests and copying/failure
 semantics for the configured middleware. `test_jev_screening_pipeline.py` runs real
 lead/subagent graphs to a recording model; cover error metadata/receipts, budget,
-PII ordering and one-time annotation. Use offline transports. Detection is not
+PII ordering and one-time annotation, including valid empty-string message IDs.
+Only `None` awaits ID assignment. Use offline transports. Detection is not
 behavioral defense; do not infer the final model input from an isolated hook test.

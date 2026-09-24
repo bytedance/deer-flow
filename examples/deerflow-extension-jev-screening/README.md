@@ -54,7 +54,8 @@ The observational plugin contract remains unchanged. The tool hook copies a
 private pending flag into result metadata without changing the original text.
 This allows the host to classify errors, stamp receipts, redact and sanitize the
 result normally. The `before_model` lifecycle hook then consumes the flag and
-returns a new `ToolMessage` with the same ID and a fixed warning. Subsequent
+returns a new `ToolMessage` with the same ID (including a valid empty string)
+and a fixed warning. Subsequent
 model calls do not add the warning again.
 
 Original result objects are never modified. The screener itself does not remove

@@ -229,7 +229,7 @@ class ScreeningMiddleware(AgentMiddleware):
             # Tool error/progress/receipt processing must see the original
             # content. Add the advisory only once those hooks have finished,
             # using the messages reducer's replacement-by-ID contract.
-            updates = [_mark(message) for message in state.get("messages", []) if isinstance(message, ToolMessage) and message.id and message.additional_kwargs.get(_PENDING_MARKER) is True]
+            updates = [_mark(message) for message in state.get("messages", []) if isinstance(message, ToolMessage) and message.id is not None and message.additional_kwargs.get(_PENDING_MARKER) is True]
             return {"messages": updates} if updates else None
         except GraphBubbleUp:
             raise
