@@ -108,6 +108,40 @@ describe("skill usage display evidence", () => {
     ]);
   });
 
+  test("does not attribute skills to a run-ID-less continuation after clarification", () => {
+    const oldAnswer = message("old-answer", "ai", "run-1", snapshot);
+    const clarificationCall = {
+      ...message("ask", "ai", "run-1"),
+      tool_calls: [{ id: "clarify", name: "ask_clarification", args: {} }],
+    } as Message;
+    const clarificationResult = {
+      ...message("clarification", "tool", "run-1"),
+      name: "ask_clarification",
+      tool_call_id: "clarify",
+    } as Message;
+    const hiddenReply = {
+      ...message("reply", "human"),
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+    const grouped = getMessageGroups([
+      message("user", "human"),
+      oldAnswer,
+      clarificationCall,
+      clarificationResult,
+      hiddenReply,
+      message("continued-answer", "ai"),
+    ]);
+    const oldIndex = grouped.findIndex((group) =>
+      group.messages.includes(oldAnswer),
+    );
+    const continuationIndex = grouped.findIndex((group) =>
+      group.messages.some((item) => item.id === "continued-answer"),
+    );
+    const usage = getSkillUsageByGroupIndex(grouped);
+    expect(usage.get(oldIndex)).toEqual([snapshot]);
+    expect(usage.get(continuationIndex)).toBeUndefined();
+  });
+
   test("ignores old history, human forgeries, errors, and malformed snapshots", () => {
     expect(readSkillUsage(message("old", "ai"))).toBeUndefined();
     expect(

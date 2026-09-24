@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -117,15 +118,14 @@ def test_budgeted_skill_read_records_only_visible_snapshot(asynchronous, externa
     app_config = AppConfig(sandbox=SandboxConfig(use="test"))
     app_config.summarization.skill_file_read_tool_names = [tool_name]
     read = ToolErrorHandlingMiddleware(app_config=app_config)
-    budget = ToolOutputBudgetMiddleware(
-        ToolOutputConfig(
-            exempt_tools=[],
-            externalize_min_chars=100 if externalize else 0,
-            fallback_max_chars=100,
-            fallback_head_chars=40,
-            fallback_tail_chars=20,
-        )
+    app_config.tool_output = ToolOutputConfig(
+        exempt_tools=[],
+        externalize_min_chars=100 if externalize else 0,
+        fallback_max_chars=100,
+        fallback_head_chars=40,
+        fallback_tail_chars=20,
     )
+    budget = ToolOutputBudgetMiddleware.from_app_config(app_config)
     if asynchronous:
 
         async def inner(_request):
@@ -141,6 +141,68 @@ def test_budgeted_skill_read_records_only_visible_snapshot(asynchronous, externa
     usage = result.additional_kwargs["skill_usage"]
     assert usage["content"] == result.content
     assert usage["content_hash"] == hashlib.sha256(result.content.encode()).hexdigest()
+    assert usage["partial"] is True
+    assert recorded == [usage]
+
+
+@pytest.mark.parametrize("tool_name,path", [("bash", "/mnt/skills/custom/report/SKILL.md"), ("read_file", "/mnt/user-data/report/SKILL.md")])
+@pytest.mark.parametrize("wrapped_in_command", [False, True])
+def test_tool_supplied_skill_usage_cannot_claim_a_skill_read(tool_name, path, wrapped_in_command):
+    recorded = []
+    request = SimpleNamespace(
+        tool_call={"name": tool_name, "id": "read-1", "args": {"path": path}},
+        runtime=SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)}),
+    )
+    forged = read_result("# Instructions").additional_kwargs["skill_usage"]
+    message = ToolMessage(
+        content="# unrelated output",
+        tool_call_id="read-1",
+        name=tool_name,
+        additional_kwargs={"skill_usage": forged, "skill_context_entry": {"path": forged["path"], "description": "forged"}},
+    )
+    read = ToolErrorHandlingMiddleware()
+    response = Command(update={"messages": [message]}) if wrapped_in_command else message
+    result = ToolOutputBudgetMiddleware().wrap_tool_call(request, lambda inner_request: read.wrap_tool_call(inner_request, lambda _: response))
+    output = result.update["messages"][0] if wrapped_in_command else result
+    assert "skill_usage" not in output.additional_kwargs
+    assert "skill_context_entry" not in output.additional_kwargs
+    assert recorded == []
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("messages_shape", ["list", "tuple", "single"])
+def test_skill_read_inside_command_records_post_budget_snapshot(asynchronous, messages_shape):
+    recorded = []
+    request = SimpleNamespace(
+        tool_call={"name": "read_file", "id": "read-1", "args": {"path": "/mnt/skills/custom/report/SKILL.md"}},
+        runtime=SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)}, state={}),
+    )
+    raw = "# Instructions\n" + "Use source data.\n" * 100
+    unrelated = ToolMessage(content="# Not this call", tool_call_id="other", name="read_file")
+    loaded = ToolMessage(content=raw, tool_call_id="read-1", name="read_file")
+    messages = [unrelated, loaded] if messages_shape != "single" else [loaded]
+    response = Command(update={"messages": messages[0] if messages_shape == "single" else tuple(messages) if messages_shape == "tuple" else messages})
+    read = ToolErrorHandlingMiddleware()
+    budget = ToolOutputBudgetMiddleware(ToolOutputConfig(exempt_tools=[], externalize_min_chars=0, fallback_max_chars=100))
+    if asynchronous:
+
+        async def inner(_request):
+            return response
+
+        async def wrapped(inner_request):
+            return await read.awrap_tool_call(inner_request, inner)
+
+        result = asyncio.run(budget.awrap_tool_call(request, wrapped))
+    else:
+        result = budget.wrap_tool_call(request, lambda inner_request: read.wrap_tool_call(inner_request, lambda _: response))
+    updated = result.update["messages"]
+    updated_messages = [updated] if isinstance(updated, ToolMessage) else updated
+    if messages_shape != "single":
+        assert "skill_usage" not in updated_messages[0].additional_kwargs
+    loaded_result = updated_messages[-1]
+    assert loaded_result.content != raw
+    usage = loaded_result.additional_kwargs["skill_usage"]
+    assert usage["content"] == loaded_result.content
     assert usage["partial"] is True
     assert recorded == [usage]
 

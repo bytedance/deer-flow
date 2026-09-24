@@ -1,14 +1,11 @@
 ### Data Flow
 
-Answer details share `workspace/message-details`; add types through a
-`MessageDetail` descriptor. `core/skills/usage.ts` groups captured snapshots by
-run. See `docs/skill-usage-ui.md` for the full data and UI contract.
+Answer details use `workspace/message-details` descriptors; skill run scoping
+is documented in `docs/skill-usage-ui.md`.
 
-Artifact state, upload metadata, and workspace changes carry raw filesystem
-paths. `urlOfArtifact` and `resolveArtifactURL` encode those paths without
-decoding literal percent sequences. Only Markdown destinations are URL inputs:
-`resolveMarkdownArtifactURL` decodes once at that boundary, and relative image
-resolution matches the decoded name against raw artifact paths before encoding.
+Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
+Only Markdown destinations decode once; relative images match decoded names
+against raw artifact paths before encoding.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
@@ -172,17 +169,12 @@ detailed in `frontend/docs/conversation-ui-ownership.md`.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
-Clarification ToolMessages delimit completed runs for streaming message grouping,
-including continuations submitted with hidden human replies. Do not classify all
-messages after the last visible human as unresolved once a clarification result
-has arrived. The processing renderer keeps tool-calling messages intact for
-association and usage accounting, but renders text accompanying
-`ask_clarification` outside the execution panel (including mixed tool calls).
-
-`findCurrentTurnStartIndex` owns the boundary rule for both full and incremental
-message grouping. Incremental prefix/tail splitting applies only at human
-boundaries; clarification results also belong to the preceding processing group,
-so derive the full grouping and stabilize references at clarification boundaries.
+`ask_clarification` ToolMessages delimit runs despite hidden human replies; skill
+usage splits after the clarification group. Keep the tool call in its processing
+group and render accompanying text outside the execution panel, including mixed
+tool calls. `findCurrentTurnStartIndex` owns full and incremental grouping:
+split incremental prefix/tail only at human boundaries, then stabilize
+clarification references from full grouping.
 
 ### Knowledge source citations
 

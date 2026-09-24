@@ -8,11 +8,13 @@ are outside this evidence path. Messages without captured usage omit the entry.
 ## Capture and history
 
 `skill_usage.py` makes display-only snapshots after successful configured skill
-reads and explicit slash activation. The read boundary stamps its ToolMessage;
-the output-budget middleware updates and registers that snapshot after any
-externalization or truncation, so the bounded display snapshot and its hash
-describe the final model-visible output. Slash activation stamps the first AI
-response that received it.
+reads and explicit slash activation. The read boundary discards tool-supplied
+skill metadata and stamps only successful messages from the configured read
+tool and requested `SKILL.md` path, including matching ToolMessages inside a
+`Command`. The output-budget middleware checks that producer and path again,
+then updates and registers the snapshot after any externalization or truncation,
+so the bounded display snapshot and its hash describe the final model-visible
+output. Slash activation stamps the first AI response that received it.
 Each snapshot carries the canonical path, category, name, description, loaded
 content, SHA-256, activation mode, and a partial flag for range or truncated
 reads. Content is bounded to 100,000 characters. The snapshot never authorizes
@@ -33,7 +35,8 @@ and serialization/history must preserve the display kwargs.
 `core/skills/usage.ts` groups server-owned snapshots by run, deduplicating by
 path in first-load order. The terminal `skill_usages` aggregate takes precedence
 over singular snapshots. The menu anchors on the run's last assistant bubble;
-when live run IDs are absent, grouping falls back to the human-turn boundary.
+when live run IDs are absent, visible human and clarification-result boundaries
+separate runs, including continuations whose human replies are hidden.
 
 Answer details use the generic `workspace/message-details` menu, provider, and
 panel. Add later detail types with a descriptor (`id`, `title`, `content`,

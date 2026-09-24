@@ -14,6 +14,7 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
     SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_id,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
@@ -128,10 +129,33 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
     def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
-        if not isinstance(result, ToolMessage):
-            return result
         tool_name = str(request.tool_call.get("name") or "")
-        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
+        tool_call_id = _tool_call_id(request.tool_call)
+
+        def stamp(message: ToolMessage) -> None:
+            # Tool-returned kwargs are untrusted. Only this middleware may add
+            # skill evidence after checking the configured producer and path.
+            existing = dict(message.additional_kwargs or {})
+            existing.pop(SKILL_CONTEXT_ENTRY_KEY, None)
+            existing.pop(SKILL_USAGE_KEY, None)
+            message.additional_kwargs = existing
+            if tool_call_id is None or str(message.tool_call_id) == tool_call_id:
+                self._stamp_skill_read_metadata(message, request, tool_name=tool_name)
+
+        if isinstance(result, ToolMessage):
+            stamp(result)
+            return result
+        update = getattr(result, "update", None)
+        if not isinstance(update, dict):
+            return result
+        messages = update.get("messages")
+        if isinstance(messages, ToolMessage):
+            stamp(messages)
+        elif isinstance(messages, (list, tuple)):
+            for message in messages:
+                if isinstance(message, ToolMessage):
+                    stamp(message)
+        return result
 
     @override
     def wrap_tool_call(

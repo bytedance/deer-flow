@@ -44,8 +44,9 @@ function parseSkillUsage(raw: unknown): SkillUsage | undefined {
 }
 
 /** One menu on the last assistant bubble per run, in first-load order.
- * Live messages may not yet carry run ids; use their human-turn boundary until
- * history provides those ids. Never infer usage from answer text or the catalog.
+ * Live messages may not yet carry run ids; use visible human and clarification
+ * boundaries until history provides those ids. Never infer usage from answer
+ * text or the catalog.
  */
 export function getSkillUsageByGroupIndex(
   groups: MessageGroup[],
@@ -57,7 +58,12 @@ export function getSkillUsageByGroupIndex(
   let start = 0;
   while (start < groups.length) {
     let end = start + 1;
-    while (end < groups.length && groups[end]?.type !== "human") end++;
+    while (
+      end < groups.length &&
+      groups[end]?.type !== "human" &&
+      groups[end - 1]?.type !== "assistant:clarification"
+    )
+      end++;
     const runIds = new Set<string>();
     for (let i = start; i < end; i++) {
       for (const message of groups[i]!.messages) {
