@@ -857,8 +857,10 @@ class DeerFlowClient:
 
         Tool calls and tool results are still emitted once per logical
         message.  ``values`` events continue to carry full state snapshots
-        after each graph node finishes; AI text already delivered via the
-        ``messages`` stream is **not** re-synthesized from the snapshot to
+        after each graph node finishes. On resumed threads, historical messages
+        remain in those snapshots, but are not emitted again as per-message
+        events or counted in this turn's usage. AI text already delivered via
+        the ``messages`` stream is **not** re-synthesized from the snapshot to
         avoid duplicate deliveries. When a later node replaces a delivered AI
         message under the same id and appends to its text (a guard's stop
         notice), only the appended text is emitted, as one more delta for that
@@ -998,6 +1000,9 @@ class DeerFlowClient:
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
+        # A resumed thread's values snapshots include prior turns. They remain
+        # in the full-state event, but must not become new deltas or usage.
+        historical_message_ids: set[str] = set()
         # AI messages whose tool calls arrived as streamed fragments. The
         # arguments only parse once the message is complete, so their
         # tool_calls event is emitted from the values snapshot instead.
@@ -1075,6 +1080,8 @@ class DeerFlowClient:
                     msg_chunk = chunk
 
                 msg_id = getattr(msg_chunk, "id", None)
+                if msg_id and msg_id in historical_message_ids:
+                    continue
 
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
@@ -1119,8 +1126,17 @@ class DeerFlowClient:
             # mode == "values"
             messages = chunk.get("messages", [])
 
-            for msg in messages:
+            current_user_index = next(
+                (index for index, msg in enumerate(messages) if isinstance(msg, HumanMessage) and (getattr(msg, "additional_kwargs", None) or {}).get("run_id") == run_id),
+                None,
+            )
+            if current_user_index is not None:
+                historical_message_ids.update(msg_id for msg in messages[:current_user_index] if (msg_id := getattr(msg, "id", None)))
+
+            for index, msg in enumerate(messages):
                 msg_id = getattr(msg, "id", None)
+                if (current_user_index is not None and index < current_user_index) or (msg_id and msg_id in historical_message_ids):
+                    continue
                 if msg_id and msg_id in seen_messages:
                     if seen_messages[msg_id] is msg:
                         continue
