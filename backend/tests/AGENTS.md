@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+## Lark CLI blocking-I/O fixtures
+
+`blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
+script on Windows and an executable shell script on POSIX. Resolve it through
+the production PATH lookup, including a directory containing spaces. Seed fake
+app credentials so auth completion reaches the CLI instead of returning early,
+and keep fixture filesystem work behind `asyncio.to_thread`.
+
 ## Shared sandbox search contracts
 
 `test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
