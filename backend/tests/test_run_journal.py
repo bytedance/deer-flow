@@ -170,6 +170,113 @@ async def test_cross_thread_append_during_explicit_flush_is_not_flushed_concurre
 
 
 @pytest.mark.anyio
+async def test_cancelled_final_close_persists_cross_thread_event_accepted_before_barrier(caplog):
+    """A cross-thread producer accepted before its barrier survives the final close.
+
+    Characterization at this BASE: the parent-loop callback is accepted and
+    executed (the middleware event B is buffered) while a threshold batch A is
+    still in flight, and the producer then publishes its ``aclose()`` barrier.
+    Cancelling the final ``close(flush=True)`` caller must not abandon the owned
+    drain: A settles, then B is written, and only then does the caller observe
+    the cancellation. A producer offer made after the barrier is dropped without
+    another durable write and the barrier logs the drop.
+    """
+    from deerflow.tools.builtins.task_tool import _ParentLoopMiddlewareRecorderProxy
+
+    class BlockingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
+            self.active_writes = 0
+            self.max_active_writes = 0
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self.active_writes)
+            try:
+                if len(self.attempts) == 1:
+                    self.started.set()
+                    await self.release.wait()
+                return await super().put_batch(batch)
+            finally:
+                self.active_writes -= 1
+
+    store = BlockingStore()
+    journal = RunJournal("r-cross-close", "t-cross-close", store, flush_threshold=20)
+    proxy = _ParentLoopMiddlewareRecorderProxy(journal, asyncio.get_running_loop())
+
+    for index in range(20):
+        journal._put(event_type=f"test.step.{index}", category="steps", content={"index": index})
+    await asyncio.wait_for(store.started.wait(), timeout=1)
+    assert store.attempts == [[f"test.step.{index}" for index in range(20)]]
+
+    # A foreign-thread producer forwards onto the journal owner loop; the
+    # callback is accepted and executed while A is still in flight, so B is
+    # buffered rather than written concurrently.
+    await asyncio.to_thread(
+        proxy.record_middleware,
+        tag="tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={"to_phase": "warned"},
+    )
+    loop = asyncio.get_running_loop()
+    accept_deadline = loop.time() + 2
+    while not journal._buffer and loop.time() < accept_deadline:
+        await asyncio.sleep(0)
+    assert [event["event_type"] for event in journal._buffer] == ["middleware:tool_progress"]
+
+    # The producer barrier publishes that every accepted callback is ahead of it.
+    await proxy.aclose()
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        await asyncio.sleep(0)  # let the close caller own its drain before interrupting
+        close_task.cancel()
+        await asyncio.sleep(0)  # deliver the cancellation into the settled drain
+        assert not close_task.done()
+        store.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # A then B, each exactly once and in order, before the journal detached.
+        assert store.attempts == [
+            [f"test.step.{index}" for index in range(20)],
+            ["middleware:tool_progress"],
+        ]
+        assert store.max_active_writes == 1
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+
+        # After-close control: the barrier rejects a late producer offer without
+        # a new ``put_batch``, and records the drop.
+        attempts_before = list(store.attempts)
+        with caplog.at_level("DEBUG", logger="deerflow.tools.builtins.task_tool"):
+            await asyncio.to_thread(
+                proxy.record_middleware,
+                tag="tool_progress",
+                name="ToolProgressMiddleware",
+                hook="wrap_tool_call",
+                action="warn",
+                changes={},
+            )
+            await asyncio.sleep(0)
+        assert store.attempts == attempts_before
+        assert "Dropping subagent middleware event after parent loop shutdown" in caplog.text
+    finally:
+        store.release.set()
+        await asyncio.gather(close_task, return_exceptions=True)
+        pending = tuple(getattr(journal, "_pending_flush_tasks", ()))
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_close_flushes_and_detaches_runtime_dependencies():
     class ProgressReporter:
         async def __call__(self, snapshot):
@@ -1689,6 +1796,118 @@ class TestBufferFlush:
             await asyncio.wait_for(first_flush, timeout=0.2)
         finally:
             store.finish.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_threshold_flush_never_overlaps_blocked_explicit_write(self):
+        """Only one ``put_batch`` may be active while A is blocked.
+
+        Characterization at this BASE: the explicit flush owns A; the successor
+        event B added after A starts must stay buffered, and the threshold path
+        must not start a second concurrent write.
+        """
+
+        class BlockingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.attempts: list[list[str]] = []
+                self.active_writes = 0
+                self.max_active_writes = 0
+
+            async def put_batch(self, batch):
+                self.attempts.append([event["event_type"] for event in batch])
+                self.active_writes += 1
+                self.max_active_writes = max(self.max_active_writes, self.active_writes)
+                try:
+                    if len(self.attempts) == 1:
+                        self.started.set()
+                        await self.release.wait()
+                    return await super().put_batch(batch)
+                finally:
+                    self.active_writes -= 1
+
+        store = BlockingStore()
+        journal = RunJournal("r-threshold-a", "t-threshold-a", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.2)
+            journal._put(event_type="B", category="trace", content="second")
+            journal._flush_sync()  # threshold path must observe the in-flight write
+            await asyncio.sleep(0)
+            assert store.max_active_writes == 1
+            assert store.attempts == [["A"]]
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            store.release.set()
+            await asyncio.wait_for(first_flush, timeout=0.2)
+            # B was never written concurrently: it is written only after A
+            # settles, by the same explicit flush, so A precedes B.
+            assert store.max_active_writes == 1
+            assert store.attempts == [["A"], ["B"]]
+            assert store.max_active_writes == 1
+            assert journal._buffer == []
+            events = await store.list_events("t-threshold-a", "r-threshold-a")
+            assert [event["event_type"] for event in events] == ["A", "B"]
+        finally:
+            store.release.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_failed_blocked_write_rebuffers_before_successor_exactly_once(self):
+        """A failed blocked A must be retried as ``[A, B]``, exactly once, in order.
+
+        Characterization at this BASE: the explicit flush owns A; B is buffered
+        after A starts and never written concurrently. When A definitely fails,
+        its batch is re-buffered ahead of B, and the retry writes both events in
+        a single ordered batch.
+        """
+
+        class FailOneBlockingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.attempts: list[list[str]] = []
+
+            async def put_batch(self, batch):
+                self.attempts.append([event["event_type"] for event in batch])
+                if len(self.attempts) == 1:
+                    self.started.set()
+                    await self.release.wait()
+                    raise RuntimeError("write failed")
+                return await super().put_batch(batch)
+
+        store = FailOneBlockingStore()
+        journal = RunJournal("r-threshold-fail", "t-threshold-fail", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.2)
+            journal._put(event_type="B", category="trace", content="second")
+            journal._flush_sync()
+            await asyncio.sleep(0)
+            assert store.attempts == [["A"]]
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            store.release.set()
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(first_flush, timeout=0.2)
+            # The failed batch is re-buffered ahead of the successor, exactly once.
+            assert [event["event_type"] for event in journal._buffer] == ["A", "B"]
+            assert store.attempts == [["A"]]
+            assert (await journal.flush()) is True
+            assert store.attempts == [["A"], ["A", "B"]]
+            events = await store.list_events("t-threshold-fail", "r-threshold-fail")
+            assert [event["event_type"] for event in events] == ["A", "B"]
+        finally:
+            store.release.set()
             await asyncio.gather(first_flush, return_exceptions=True)
             detached = tuple(getattr(journal, "_detached_write_tasks", ()))
             if detached:

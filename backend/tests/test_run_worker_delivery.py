@@ -851,6 +851,116 @@ async def test_terminal_receipt_waits_for_bounded_flush_to_settle(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_cross_thread_middleware_accepted_before_producer_barrier_persists_before_receipt(monkeypatch):
+    """A foreign-thread producer accepted before its barrier lands before the receipt.
+
+    Characterization at this BASE: while the journal's first threshold batch A
+    is still in flight, a subagent-style producer forwards a middleware event
+    from another thread onto the journal owner loop. The callback is accepted
+    and executed (B is buffered) before the producer publishes its ``aclose()``
+    barrier, so the worker's pre-receipt barrier must settle A and then persist
+    B before ``run.delivery``.
+    """
+    from deerflow.tools.builtins.task_tool import _ParentLoopMiddlewareRecorderProxy
+
+    monkeypatch.setattr("deerflow.runtime.journal._CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
+    event_store = _BlockingJournalBatchStore()
+
+    bounded_flush_results: list[bool] = []
+    bounded_flush_done = asyncio.Event()
+    real_flush = RunJournal.flush
+
+    async def spy_flush(journal):
+        settled = await real_flush(journal)
+        bounded_flush_results.append(settled)
+        bounded_flush_done.set()
+        return settled
+
+    monkeypatch.setattr(RunJournal, "flush", spy_flush)
+
+    class OrderingRunStore(MemoryRunStore):
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            if status not in {"pending", "running"}:
+                assert await event_store.list_events("thread-1", run_id, event_types=["run.delivery"]), "durable terminal status landed before the delivery receipt"
+            return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
+
+    run_store = OrderingRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    accepted_buffer: list[list[str]] = []
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            producer = _ParentLoopMiddlewareRecorderProxy(journal, asyncio.get_running_loop())
+            # The default 20-event threshold makes A the first batch.
+            for index in range(20):
+                journal._put(event_type=f"test.step.{index}", category="steps", content={"index": index})
+            await asyncio.wait_for(event_store.batch_a_entered.wait(), timeout=2)
+
+            # The producer forwards from another thread; the callback is accepted
+            # and executed on the owner loop while A is still blocked.
+            await asyncio.to_thread(
+                producer.record_middleware,
+                tag="tool_progress",
+                name="ToolProgressMiddleware",
+                hook="wrap_tool_call",
+                action="warn",
+                changes={"to_phase": "warned"},
+            )
+            loop = asyncio.get_running_loop()
+            accept_deadline = loop.time() + 2
+            while not journal._buffer and loop.time() < accept_deadline:
+                await asyncio.sleep(0)
+            accepted_buffer.append([event["event_type"] for event in journal._buffer])
+
+            # Publish the producer barrier: every accepted callback is ahead of it.
+            await producer.aclose()
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            _make_bridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=lambda *, config: JournalingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    try:
+        await asyncio.wait_for(bounded_flush_done.wait(), timeout=2)
+        assert bounded_flush_results == [False]
+        assert accepted_buffer == [["middleware:tool_progress"]]
+        assert event_store.batches == [[f"test.step.{index}" for index in range(20)]]
+
+        # While A is unresolved the worker must not have attempted the receipt ...
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(event_store.receipt_attempted.wait()), timeout=0.2)
+        assert not task.done()
+    finally:
+        event_store.release_batch_a.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    # A, then the cross-thread middleware event B, then the receipt.
+    assert event_store.batches == [
+        [f"test.step.{index}" for index in range(20)],
+        ["middleware:tool_progress"],
+    ]
+    events = await event_store.list_events("thread-1", record.run_id)
+    step_seqs = [event["seq"] for event in events if event["event_type"].startswith("test.step.")]
+    middleware_seqs = [event["seq"] for event in events if event["event_type"] == "middleware:tool_progress"]
+    receipt_seqs = [event["seq"] for event in events if event["event_type"] == "run.delivery"]
+    assert len(step_seqs) == 20
+    assert len(middleware_seqs) == 1
+    assert len(receipt_seqs) == 1
+    assert max(step_seqs) < middleware_seqs[0] < receipt_seqs[0]
+    assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
 async def test_definite_journal_write_failure_never_publishes_success(caplog):
     """A journal write that definitely failed must not become a success run."""
 
