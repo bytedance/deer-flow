@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY
 from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
@@ -224,3 +225,59 @@ def test_original_user_content_redacted_in_compaction_flush_hook(monkeypatch):
     )
     assert EMAIL_TOKEN in queued[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
     assert "alice@example.com" not in queued[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+
+
+def _human_input_response(value: str) -> dict:
+    return {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "clarification",
+        "request_id": "req-1",
+        "response_kind": "text",
+        "value": value,
+    }
+
+
+def test_human_input_response_value_redacted(monkeypatch):
+    # Review round 13 on #5577: clarification replies keep the raw user answer
+    # in additional_kwargs.human_input_response.value (DeerMem reads that
+    # mapping), so the queued copy must redact the value while preserving the
+    # protocol fields. The same message also carries original_user_content —
+    # both rewrites must survive in one merged additional_kwargs update.
+    mw, manager = _middleware(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
+    original = HumanMessage(
+        "my email is alice@example.com",
+        additional_kwargs={
+            HUMAN_INPUT_RESPONSE_KEY: _human_input_response("my email is alice@example.com"),
+            ORIGINAL_USER_CONTENT_KEY: "my email is alice@example.com",
+        },
+    )
+    _run(mw, manager, monkeypatch, [original])
+    queued = manager.add.call_args.args[1][0]
+    assert EMAIL_TOKEN in queued.content and "alice@example.com" not in queued.content
+
+    queued_response = queued.additional_kwargs[HUMAN_INPUT_RESPONSE_KEY]
+    assert EMAIL_TOKEN in queued_response["value"] and "alice@example.com" not in queued_response["value"]
+    assert queued_response["version"] == 1
+    assert queued_response["kind"] == "human_input_response"
+    assert queued_response["source"] == "clarification"
+    assert queued_response["request_id"] == "req-1"
+    assert queued_response["response_kind"] == "text"
+    assert EMAIL_TOKEN in queued.additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+    assert "alice@example.com" not in str(queued.additional_kwargs)
+
+    assert original.additional_kwargs[HUMAN_INPUT_RESPONSE_KEY]["value"] == "my email is alice@example.com"
+    assert original.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "my email is alice@example.com"
+    assert original.content == "my email is alice@example.com"
+
+
+def test_human_input_response_redacted_in_compaction_flush_hook(monkeypatch):
+    # Same leak through the compaction-triggered hook, which shares
+    # redact_queued_messages: one fix must cover both enqueues.
+    queued = _flush_hook_call(
+        monkeypatch,
+        PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET),
+        [HumanMessage("my email is alice@example.com", additional_kwargs={HUMAN_INPUT_RESPONSE_KEY: _human_input_response("my email is alice@example.com")})],
+    )
+    assert EMAIL_TOKEN in queued[0].additional_kwargs[HUMAN_INPUT_RESPONSE_KEY]["value"]
+    assert "alice@example.com" not in str(queued[0].additional_kwargs[HUMAN_INPUT_RESPONSE_KEY])

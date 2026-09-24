@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
@@ -9,6 +10,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
+from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY
 from deerflow.agents.memory import get_memory_manager
 from deerflow.agents.middlewares.pii_redaction_middleware import _make_redactor, _redact_content, _Redactor
 from deerflow.config.memory_config import get_memory_config
@@ -32,9 +34,12 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     seams; message objects are rebuilt rather than mutated. Structured
     tool-call arguments are covered too — backends like OpenViking retain the full
     message object, including ``tool_calls`` and provider-format arguments in
-    ``additional_kwargs``. The ``original_user_content`` provenance field is
-    covered as well: UploadsMiddleware preserves the raw user turn there, so a
-    redacted ``content`` alone would still leak it to the memory backend.
+    ``additional_kwargs``. Text-bearing provenance metadata is covered as
+    well: UploadsMiddleware preserves the raw user turn in
+    ``original_user_content``, and clarification replies keep the raw answer
+    in ``human_input_response.value`` — DeerMem reads that mapping — so a
+    redacted ``content`` alone would still leak either one to the memory
+    backend.
     """
     redactor = _make_redactor(pii_redaction_config)
 
@@ -61,6 +66,11 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
                 redacted_original = redactor.redact(original_content)
                 if redacted_original != original_content:
                     new_additional_kwargs = {**new_additional_kwargs, ORIGINAL_USER_CONTENT_KEY: redacted_original}
+            human_input = additional_kwargs.get(HUMAN_INPUT_RESPONSE_KEY)
+            if isinstance(human_input, Mapping) and isinstance(human_input.get("value"), str) and human_input["value"]:
+                redacted_value = redactor.redact(human_input["value"])
+                if redacted_value != human_input["value"]:
+                    new_additional_kwargs = {**new_additional_kwargs, HUMAN_INPUT_RESPONSE_KEY: {**human_input, "value": redacted_value}}
             if new_additional_kwargs is not additional_kwargs:
                 updates["additional_kwargs"] = new_additional_kwargs
         redacted.append(message.model_copy(update=updates) if updates else message)
