@@ -16,10 +16,14 @@ DEFAULT_MAX_RESULTS = 5
 
 def _coerce_max_results(value: object) -> int:
     """Normalize config/parameter values before passing them to DDGS."""
-    try:
-        count = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, float) and not value.is_integer():
+        # int() would silently truncate a YAML value such as 3.5.
         count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
     if count <= 0:
         logger.warning("Invalid DDG image search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
         return DEFAULT_MAX_RESULTS

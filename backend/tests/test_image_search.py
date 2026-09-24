@@ -88,6 +88,7 @@ def test_image_search_omits_unset_filters():
         pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "abc", {"max_results": 2}, 5, True, id="invalid-env"),
         pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "", {"max_results": 2}, 5, True, id="empty-env"),
         pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "3.5", {"max_results": 2}, 5, True, id="fractional-env"),
+        pytest.param(3.5, "3", {"max_results": 2}, 5, True, id="fractional-config"),
         pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "0", {"max_results": 2}, 5, True, id="zero-env"),
         pytest.param(-2, "3", {}, 5, True, id="negative-config"),
         pytest.param(None, "3", {"max_results": 0}, 5, True, id="zero-call-argument"),
