@@ -9,7 +9,7 @@ on:
       - 'backend/packages/harness/deerflow/extensions/**'
       - '.github/workflows/jev-plugin-package.yml'
   push:
-    branches: [main, 2.0.x-dev]
+    branches: [main, *-dev]
     paths:
       - 'examples/deerflow-extension-jev-context/**'
       - 'backend/packages/extension-api/**'
