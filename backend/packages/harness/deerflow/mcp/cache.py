@@ -313,10 +313,9 @@ def _full_reset_plan() -> _McpReconciliationPlan:
 def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliationPlan | None:
     """Diff *incoming* against the applied baseline.
 
-    When the file signature changes but the effective MCP configuration does
-    not, this function adopts the new signature into ``_config_signature`` and
-    returns False. It is therefore not a read-only predicate; production callers
-    invoke it under ``_init_condition``, the same lock the mutating paths use.
+    This classifier does not mutate cache state. When only non-MCP fields
+    change, it returns ``None``; the lazy caller ``_plan_cache_transition()``
+    then adopts the new file signature under ``_init_condition``.
 
     Returns:
         ``None`` when the effective MCP slice is unchanged (PR1's
