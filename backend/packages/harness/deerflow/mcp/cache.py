@@ -300,6 +300,17 @@ def _clear_applied_revision() -> None:
     _mcp_applied_signature = None
 
 
+def _revision_matches_applied_baseline(revision: _McpIncomingRevision) -> bool:
+    """True when *revision* describes the same effective MCP slice as the baseline.
+
+    The applied baseline survives ``_reset_mcp_tools_cache_state()`` while the
+    published ``_mcp_config_snapshot`` does not, so equivalence must be decided
+    against the baseline: a selective reconcile can leave rediscovery pending
+    when the config path switches.
+    """
+    return revision.servers == (_mcp_applied_servers or {}) and revision.order == (_mcp_applied_order or ()) and revision.interceptors == _mcp_applied_interceptors
+
+
 def _full_reset_plan() -> _McpReconciliationPlan:
     """The conservative whole-pool reset plan."""
     return _McpReconciliationPlan(
@@ -431,7 +442,7 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
         logger.info("MCP config could not be read as a single stable revision; resetting the whole MCP cache")
         return _full_reset_plan()
 
-    if path_changed and incoming.snapshot != _mcp_config_snapshot:
+    if path_changed and not _revision_matches_applied_baseline(incoming):
         return _full_reset_plan()
 
     plan = _classify_against_applied(incoming)
@@ -471,7 +482,7 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
     if incoming is None:
         return _full_reset_plan()
     if current_path != _mcp_applied_path:
-        if incoming.snapshot != _mcp_config_snapshot:
+        if not _revision_matches_applied_baseline(incoming):
             return _full_reset_plan()
         # The new path names an equivalent MCP slice. Adopt its verified
         # revision and keep the current pool, as in the lazy detection path.
