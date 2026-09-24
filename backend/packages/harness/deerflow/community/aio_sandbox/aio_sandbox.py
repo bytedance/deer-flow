@@ -989,6 +989,8 @@ class AioSandbox(Sandbox):
 
         Args:
             path: The absolute path of the file to read.
+            start_line: Optional starting line number (1-indexed, inclusive).
+            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
             The content of the file.
