@@ -143,11 +143,12 @@ async function uploadAndProcess(threadId: string, file: File) {
 ### Python - 后端处理
 
 ```python
-from deerflow.config.paths import get_paths
+from deerflow.uploads.manager import get_uploads_dir
 
 def process_uploaded_file(thread_id: str, filename: str):
-    # 使用实际路径
-    base_dir = get_paths().sandbox_uploads_dir(thread_id)
+    # 使用实际路径：Gateway 的上传落在解析后用户的桶里，
+    # 即 .deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/
+    base_dir = get_uploads_dir(thread_id)
     file_path = base_dir / filename
 
     # 直接读取
