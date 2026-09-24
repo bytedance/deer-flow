@@ -34,7 +34,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -520,7 +520,7 @@ class RunJournal(BaseCallbackHandler):
                 with self._skill_usage_lock:
                     skill_usages = deepcopy(list(self._skill_usages.values()))
                 if skill_usages:
-                    content["additional_kwargs"] = {**content.get("additional_kwargs", {}), "skill_usages": skill_usages}
+                    content["additional_kwargs"] = {**content.get("additional_kwargs", {}), SKILL_USAGES_KEY: skill_usages}
 
             response_events.append(
                 self._make_event(

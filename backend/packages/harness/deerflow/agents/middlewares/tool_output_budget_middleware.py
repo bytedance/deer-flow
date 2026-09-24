@@ -24,6 +24,7 @@ read-before-write middleware's own policy; both rewrite through the shared
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import posixpath
@@ -40,6 +41,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGE_KEY, record_skill_usage
 from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
@@ -578,6 +580,26 @@ def _patch_result(
     return dc_replace(result, update={**update, "messages": new_messages})
 
 
+def _record_visible_skill_usage(result: ToolMessage | Command, runtime: object) -> ToolMessage | Command:
+    """Register the snapshot after output budgeting has determined model-visible content."""
+    if not isinstance(result, ToolMessage):
+        return result
+    usage = result.additional_kwargs.get(SKILL_USAGE_KEY)
+    if not isinstance(usage, dict) or not isinstance(result.content, str):
+        return result
+    visible_hash = hashlib.sha256(result.content.encode("utf-8")).hexdigest()
+    if visible_hash != usage.get("content_hash"):
+        usage = {
+            **usage,
+            "content": result.content[:MAX_SKILL_SNAPSHOT_CHARS],
+            "content_hash": visible_hash,
+            "partial": True,
+        }
+        result = result.model_copy(update={"additional_kwargs": {**result.additional_kwargs, SKILL_USAGE_KEY: usage}})
+    record_skill_usage(runtime, usage)
+    return result
+
+
 def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list[Any] | None:
     """Apply budget to historical ToolMessages in a model request. Returns ``None`` if unchanged.
 
@@ -747,13 +769,11 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         result = handler(request)
-        if not self._config.enabled:
-            return result
-        if not _needs_budget(result, self._config):
-            return result
-        outputs_path = _resolve_outputs_path(request)
-        sandbox = _resolve_sandbox(request)
-        return _patch_result(result, self._config, outputs_path, sandbox)
+        if self._config.enabled and _needs_budget(result, self._config):
+            outputs_path = _resolve_outputs_path(request)
+            sandbox = _resolve_sandbox(request)
+            result = _patch_result(result, self._config, outputs_path, sandbox)
+        return _record_visible_skill_usage(result, getattr(request, "runtime", None))
 
     @override
     async def awrap_tool_call(
@@ -762,17 +782,14 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         result = await handler(request)
-        if not self._config.enabled:
-            return result
-        if not _needs_budget(result, self._config):
-            return result
-        outputs_path = _resolve_outputs_path(request)
-        # _resolve_sandbox only touches runtime.state and the provider's
-        # in-memory sandbox registry, so it is safe to call on the event
-        # loop. The actual sandbox I/O (mkdir/write/test) happens inside
-        # _patch_result, which is offloaded to a worker thread below.
-        sandbox = _resolve_sandbox(request)
-        return await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+        if self._config.enabled and _needs_budget(result, self._config):
+            outputs_path = _resolve_outputs_path(request)
+            # _resolve_sandbox only touches runtime.state and the provider's
+            # in-memory sandbox registry, so it is safe to call on the event
+            # loop. The actual sandbox I/O happens in the worker thread.
+            sandbox = _resolve_sandbox(request)
+            result = await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+        return _record_visible_skill_usage(result, getattr(request, "runtime", None))
 
     # -- model call hooks (historical context budgeting) -------------------
 

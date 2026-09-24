@@ -29,6 +29,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { getMessageRunId } from "../messages/run-duration";
 import { isHiddenFromUIMessage } from "../messages/utils";
+import { SKILL_USAGES_KEY } from "../skills/usage";
 
 // Thread-global feed position, attached by the backend to history rows and to
 // `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
@@ -252,8 +253,14 @@ export function mergeMessages(
     if (identity && runId) {
       savedRunIds.set(identity, runId);
     }
-    if (identity && Array.isArray(message.additional_kwargs?.skill_usages)) {
-      savedSkillUsages.set(identity, message.additional_kwargs.skill_usages);
+    if (
+      identity &&
+      Array.isArray(message.additional_kwargs?.[SKILL_USAGES_KEY])
+    ) {
+      savedSkillUsages.set(
+        identity,
+        message.additional_kwargs[SKILL_USAGES_KEY],
+      );
     }
     if (identity && message.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
@@ -419,7 +426,7 @@ export function mergeMessages(
       message.additional_kwargs?.turn_duration === undefined;
     const shouldRestoreSkillUsages =
       savedSkillUsages.has(identity) &&
-      message.additional_kwargs?.skill_usages === undefined;
+      message.additional_kwargs?.[SKILL_USAGES_KEY] === undefined;
     if (
       !shouldRestoreSeq &&
       !shouldRestoreRunId &&
@@ -438,7 +445,7 @@ export function mergeMessages(
           ? { turn_duration: savedTurnDurations.get(identity) }
           : {}),
         ...(shouldRestoreSkillUsages
-          ? { skill_usages: savedSkillUsages.get(identity) }
+          ? { [SKILL_USAGES_KEY]: savedSkillUsages.get(identity) }
           : {}),
       },
     } as Message;

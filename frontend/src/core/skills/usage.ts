@@ -3,6 +3,8 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { getMessageRunId } from "@/core/messages/run-duration";
 import type { MessageGroup } from "@/core/messages/utils";
 
+export const SKILL_USAGES_KEY = "skill_usages";
+
 /** Display evidence captured at load time, never a catalog/authorization source. */
 export interface SkillUsage {
   name: string;
@@ -77,7 +79,8 @@ export function getSkillUsageByGroupIndex(
           run = { skills: new Map() };
           byRun.set(currentKey, run);
         }
-        const aggregate: unknown = message.additional_kwargs?.skill_usages;
+        const aggregate: unknown =
+          message.additional_kwargs?.[SKILL_USAGES_KEY];
         const usages =
           message.type === "ai" && Array.isArray(aggregate)
             ? aggregate.map(parseSkillUsage)

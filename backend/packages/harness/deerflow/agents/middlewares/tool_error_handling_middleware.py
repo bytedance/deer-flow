@@ -17,7 +17,7 @@ from deerflow.agents.middlewares.skill_context import (
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
-from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage, record_skill_usage
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
     TOOL_META_KEY,
     normalize_tool_result,
@@ -123,7 +123,6 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         )
         if usage is not None:
             existing[SKILL_USAGE_KEY] = usage
-            record_skill_usage(getattr(request, "runtime", None), usage)
         message.additional_kwargs = existing
         return message
 

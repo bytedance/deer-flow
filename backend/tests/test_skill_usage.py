@@ -8,6 +8,11 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+from deerflow.config.app_config import AppConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.sandbox.read_file_contract import READ_FILE_NO_CONTENT_RESULTS
 
 
 def read_result(content, *, path="/mnt/skills/custom/report/SKILL.md", status="success", args=None, asynchronous=False):
@@ -55,6 +60,11 @@ def test_failed_or_unrelated_reads_are_not_usage(content, status, path):
     assert "skill_usage" not in read_result(content, status=status, path=path).additional_kwargs
 
 
+@pytest.mark.parametrize("content", sorted(READ_FILE_NO_CONTENT_RESULTS))
+def test_read_file_no_content_markers_are_not_skill_usage(content):
+    assert "skill_usage" not in read_result(content).additional_kwargs
+
+
 def test_range_and_size_limited_snapshots_are_truthfully_marked_partial():
     assert read_result("A section", args={"start_line": 4}).additional_kwargs["skill_usage"]["partial"]
     content = "A" * 110_000
@@ -62,6 +72,11 @@ def test_range_and_size_limited_snapshots_are_truthfully_marked_partial():
     assert snapshot["partial"]
     assert len(snapshot["content"]) <= 100_000
     assert snapshot["content_hash"] == hashlib.sha256(content.encode()).hexdigest()
+
+
+def test_tiny_read_budget_marker_is_partial():
+    content = "... [truncated: 123 chars exceed the 80-char read limit; use start_line/end_line to read a smaller range] ..."
+    assert read_result(content).additional_kwargs["skill_usage"]["partial"]
 
 
 def test_external_messages_cannot_forge_skill_usage():
@@ -80,8 +95,54 @@ def test_successful_read_registers_snapshot_before_next_model_callback():
         tool_call={"name": "read_file", "id": "read-1", "args": {"path": "/mnt/skills/custom/report/SKILL.md"}},
         runtime=SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)}),
     )
-    result = ToolErrorHandlingMiddleware().wrap_tool_call(request, lambda _: ToolMessage(content="# Instructions", tool_call_id="read-1"))
+    read = ToolErrorHandlingMiddleware()
+    result = ToolOutputBudgetMiddleware().wrap_tool_call(request, lambda inner_request: read.wrap_tool_call(inner_request, lambda _: ToolMessage(content="# Instructions", tool_call_id="read-1")))
     assert recorded == [result.additional_kwargs["skill_usage"]]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("externalize", [False, True])
+@pytest.mark.parametrize("tool_name", ["read_file", "custom_read"])
+def test_budgeted_skill_read_records_only_visible_snapshot(asynchronous, externalize, tool_name, tmp_path):
+    recorded = []
+    request = SimpleNamespace(
+        tool_call={"name": tool_name, "id": "read-1", "args": {"path": "/mnt/skills/custom/report/SKILL.md"}},
+        runtime=SimpleNamespace(
+            context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)},
+            state={"thread_data": {"outputs_path": str(tmp_path)}} if externalize else {},
+        ),
+    )
+    raw = "# Instructions\n" + "Use the source data.\n" * 100
+    message = ToolMessage(content=raw, tool_call_id="read-1", name=tool_name)
+    app_config = AppConfig(sandbox=SandboxConfig(use="test"))
+    app_config.summarization.skill_file_read_tool_names = [tool_name]
+    read = ToolErrorHandlingMiddleware(app_config=app_config)
+    budget = ToolOutputBudgetMiddleware(
+        ToolOutputConfig(
+            exempt_tools=[],
+            externalize_min_chars=100 if externalize else 0,
+            fallback_max_chars=100,
+            fallback_head_chars=40,
+            fallback_tail_chars=20,
+        )
+    )
+    if asynchronous:
+
+        async def inner(_request):
+            return message
+
+        async def wrapped(inner_request):
+            return await read.awrap_tool_call(inner_request, inner)
+
+        result = asyncio.run(budget.awrap_tool_call(request, wrapped))
+    else:
+        result = budget.wrap_tool_call(request, lambda inner_request: read.wrap_tool_call(inner_request, lambda _: message))
+    assert result.content != raw
+    usage = result.additional_kwargs["skill_usage"]
+    assert usage["content"] == result.content
+    assert usage["content_hash"] == hashlib.sha256(result.content.encode()).hexdigest()
+    assert usage["partial"] is True
+    assert recorded == [usage]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

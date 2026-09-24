@@ -8,13 +8,15 @@ are outside this evidence path. Messages without captured usage omit the entry.
 ## Capture and history
 
 `skill_usage.py` makes display-only snapshots after successful configured skill
-reads and explicit slash activation. The read boundary stamps its ToolMessage
-before output budgeting; slash activation stamps the first AI response that
-received it. Each snapshot carries the canonical path, category, name,
-description, loaded content, SHA-256, activation mode, and a partial flag for
-range or truncated reads. Content is bounded to 100,000 characters. The
-snapshot never authorizes a tool or secret, and Gateway strips it from external
-messages.
+reads and explicit slash activation. The read boundary stamps its ToolMessage;
+the output-budget middleware updates and registers that snapshot after any
+externalization or truncation, so the bounded display snapshot and its hash
+describe the final model-visible output. Slash activation stamps the first AI
+response that received it.
+Each snapshot carries the canonical path, category, name, description, loaded
+content, SHA-256, activation mode, and a partial flag for range or truncated
+reads. Content is bounded to 100,000 characters. The snapshot never authorizes
+a tool or secret, and Gateway strips it from external messages.
 
 Both producers register with `runtime.context["__run_journal"]`. A tool-end
 callback can serialize output before middleware adds metadata, so the journal

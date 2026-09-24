@@ -11,8 +11,10 @@ import posixpath
 import yaml
 
 from deerflow.agents.middlewares.skill_context import _FRONT_MATTER_RE, build_skill_entry_metadata_from_read
+from deerflow.sandbox.read_file_contract import READ_FILE_NO_CONTENT_RESULTS, READ_FILE_TRUNCATION_PREFIX
 
 SKILL_USAGE_KEY = "skill_usage"
+SKILL_USAGES_KEY = "skill_usages"
 MAX_SKILL_SNAPSHOT_CHARS = 100_000
 logger = logging.getLogger(__name__)
 
@@ -42,18 +44,7 @@ def build_skill_usage(
     partial: bool = False,
 ) -> dict | None:
     entry = build_skill_entry_metadata_from_read(path, content, skills_root=skills_root)
-    if (
-        entry is None
-        or not content.strip()
-        or content.strip()
-        in {
-            "(empty)",
-            "(start_line exceeds file length)",
-            "(start_line must be >= 1)",
-            "(end_line must be >= 1)",
-            "(start_line > end_line — no lines in range)",
-        }
-    ):
+    if entry is None or not content.strip() or content.strip() in READ_FILE_NO_CONTENT_RESULTS:
         return None
     normalized_path = entry["path"]
     relative = posixpath.relpath(normalized_path, posixpath.normpath(skills_root))
@@ -73,5 +64,5 @@ def build_skill_usage(
         "content": content[:MAX_SKILL_SNAPSHOT_CHARS],
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "activation": activation,
-        "partial": partial or len(content) > MAX_SKILL_SNAPSHOT_CHARS or "... [truncated: showing first " in content,
+        "partial": partial or len(content) > MAX_SKILL_SNAPSHOT_CHARS or READ_FILE_TRUNCATION_PREFIX in content,
     }
