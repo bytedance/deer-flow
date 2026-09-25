@@ -1037,10 +1037,14 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert response.json()["enabled"] is False
     # Only skill states are seeded; the cached model is never serialized because
     # its $VAR values are already resolved.
-    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["mcpLifecycle"]["lifecycleId"]
+    written["mcpLifecycle"]["lifecycleId"] = "lineage"
+    assert written == {
         "skills": {"public-skill": {"enabled": False}},
         "mcpLifecycle": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "lifecycleId": "lineage",
             "configRevision": 1,
             "globalGeneration": 0,
             "serverGenerations": {},

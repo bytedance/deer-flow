@@ -40,6 +40,7 @@ from deerflow.mcp.commit import (
     MCPCommittedTaskConfigConflictError,
     MCPConfigWriteError,
     commit_extensions_config,
+    safe_error_summary,
     validate_previous_config_lenient,
 )
 from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
@@ -1747,8 +1748,10 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+        # Only the type is safe: config validation resolves ``$VAR`` first, so
+        # the exception message and traceback can carry a resolved credential.
+        logger.error("Failed to update MCP configuration (%s)", safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration ({safe_error_summary(e)})") from e
 
 
 @router.post(
@@ -1769,8 +1772,8 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to add MCP servers: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add MCP servers: {str(e)}")
+        logger.error("Failed to add MCP servers (%s)", safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to add MCP servers ({safe_error_summary(e)})") from e
 
 
 @router.put(
@@ -1794,8 +1797,8 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to update MCP server %s: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server: {str(e)}")
+        logger.error("Failed to update MCP server %s (%s)", body.server_name, safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP server ({safe_error_summary(e)})") from e
 
 
 @router.delete(
@@ -1815,8 +1818,8 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to delete MCP server %s: %s", server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete MCP server: {str(e)}")
+        logger.error("Failed to delete MCP server %s (%s)", server_name, safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete MCP server ({safe_error_summary(e)})") from e
 
 
 @router.patch(
@@ -1836,5 +1839,5 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")
+        logger.error("Failed to update MCP server %s state (%s)", body.server_name, safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state ({safe_error_summary(e)})") from e

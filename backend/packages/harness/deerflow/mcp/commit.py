@@ -32,7 +32,10 @@ than acquiring the config locks again underneath it.
 
 The protocol, in full:
 
-* Three independent counters. ``configRevision`` counts every committed write and is **not** a lifecycle version.
+* A lineage id plus three counters. ``lifecycleId`` is the identity of the trusted baseline: it is carried over on
+  every ordinary commit and regenerated only when there is no verifiable previous block (first initialization, or
+  recovery from a malformed/partial/schema-1 block), so a worker that missed the intervening history still
+  detects the re-base even when the counters collide. ``configRevision`` counts every committed write and is **not** a lifecycle version.
   ``serverGenerations[name]`` advances only on a real per-server resource event — delete, disable, re-enable, re-add,
   or a changed base stdio connection (``transport``/``command``/``args``/``cwd``/``env``) — and entries are never
   pruned, because that history is what makes a delete followed by an identical re-add observable. ``globalGeneration``
@@ -45,7 +48,8 @@ The protocol, in full:
   the same atomic write as the configuration.
 * Migration: the first valid block is a trusted common baseline adopted under lock without retiring anything; the
   guarantee begins only after that initialization completes, so "absent" is never treated as generation zero while
-  another worker advances. A block that is present but malformed, or a previous document that cannot be
+  another worker advances. Version 1 blocks are unverifiable (they carry no lineage id) and are upgraded to a fresh
+  version-2 baseline, so a version-1 writer must not run concurrently against the same file. A block that is present but malformed, or a previous document that cannot be
   validated, resets to a fresh baseline and bumps every enabled server plus ``globalGeneration`` so the write
   is fail-closed without blocking a repair.
 * Deployment scope: the cross-process guarantee presupposes every supported writer follows this protocol **and** sees
@@ -192,6 +196,17 @@ class CommittedMcpRevision:
     interceptors: object
 
 
+def safe_error_summary(exc: BaseException) -> str:
+    """A log- and response-safe label for a failure that may carry credentials.
+
+    Config validation resolves ``$VAR`` placeholders before validating, so a
+    ``ValidationError`` can embed a resolved secret in its message *and* its
+    traceback. Anything that reports such a failure to a log or an HTTP response
+    must use this instead of ``str(exc)`` or ``exc_info=True``.
+    """
+    return type(exc).__name__
+
+
 def validate_previous_config_lenient(raw_data: Mapping[str, Any]) -> ExtensionsConfig | None:
     """Validate a pre-mutation raw document, or ``None`` when it is unverifiable.
 
@@ -204,9 +219,12 @@ def validate_previous_config_lenient(raw_data: Mapping[str, Any]) -> ExtensionsC
     try:
         return validate_raw_extensions_config(copy.deepcopy(dict(raw_data)))
     except Exception as exc:
+        # Only the exception *type* is safe here: validation resolves ``$VAR``
+        # placeholders first, so a ValidationError can embed a resolved
+        # credential in its message, its ``input`` and its traceback.
         logger.warning(
-            "Stored extensions config could not be validated; treating the previous effective state as unverifiable for this write: %s",
-            exc,
+            "Stored extensions config could not be validated (%s); treating the previous effective state as unverifiable for this write",
+            type(exc).__name__,
         )
         return None
 

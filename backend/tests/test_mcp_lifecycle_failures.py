@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ from deerflow.mcp.commit import (
     MCPCommittedNotReconciledError,
     MCPCommittedReloadFailedError,
     commit_extensions_config,
+    validate_previous_config_lenient,
 )
 from deerflow.mcp.session_pool import (
     StaleMCPBindingError,
@@ -94,8 +96,9 @@ _CLEARED_GLOBALS = (
 )
 
 _INVALID_BLOCK_CASES = {
-    "unsupported-schema": {"schemaVersion": 2, "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
-    "negative-counter": {"schemaVersion": 1, "configRevision": -1, "globalGeneration": 0, "serverGenerations": {}},
+    "unsupported-schema": {"schemaVersion": 3, "lifecycleId": "x", "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
+    "missing-field": {"schemaVersion": 2, "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
+    "negative-counter": {"schemaVersion": 2, "lifecycleId": "x", "configRevision": -1, "globalGeneration": 0, "serverGenerations": {}},
     "non-object": ["not", "an", "object"],
 }
 
@@ -109,6 +112,11 @@ def _write_config(path: Path, servers: dict, *, skills: dict | None = None, life
     if lifecycle is not _MISSING:
         payload["mcpLifecycle"] = lifecycle
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _without_lifecycle_id(block: dict) -> dict:
+    """Drop the lineage id so a fresh-baseline assertion can ignore its value."""
+    return {key: value for key, value in block.items() if key != "lifecycleId"}
 
 
 def _lifecycle(path: Path) -> dict:
@@ -269,7 +277,8 @@ def test_first_write_over_a_legacy_file_does_not_bump_preexisting_servers(tmp_pa
     assert committed.lifecycle.server_generations == {"A": 0, "B": 0}
     assert committed.lifecycle.config_revision == 1
     on_disk = _lifecycle(cfg)
-    assert on_disk["schemaVersion"] == 1
+    assert on_disk["schemaVersion"] == 2
+    assert on_disk["lifecycleId"]
     assert on_disk["serverGenerations"] == {"A": 0, "B": 0}
 
 
@@ -312,7 +321,8 @@ def test_router_write_over_a_legacy_file_keeps_live_sessions(cache_globals, monk
     assert _entry(pool, "A", owner_loop)[0] is session_a
     assert session_a.closed is False
     on_disk = _lifecycle(cfg)
-    assert on_disk["schemaVersion"] == 1
+    assert on_disk["schemaVersion"] == 2
+    assert on_disk["lifecycleId"]
     assert on_disk["configRevision"] == 1
     assert on_disk["globalGeneration"] == 0
     assert on_disk["serverGenerations"] == {"A": 0, "B": 0}
@@ -346,12 +356,14 @@ def test_invalid_block_is_replaced_and_every_enabled_server_bumped(tmp_path: Pat
 
     _commit(cfg, raw, previous_config, new_config)
 
-    assert _lifecycle(cfg) == {
-        "schemaVersion": 1,
+    fresh = _lifecycle(cfg)
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1, "B": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_explicit_null_lifecycle_block_is_malformed_not_legacy(tmp_path: Path) -> None:
@@ -363,12 +375,14 @@ def test_explicit_null_lifecycle_block_is_malformed_not_legacy(tmp_path: Path) -
 
     _commit(cfg, raw, previous_config, previous_config)
 
-    assert _lifecycle(cfg) == {
-        "schemaVersion": 1,
+    fresh = _lifecycle(cfg)
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1, "B": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tmp_path) -> None:
@@ -376,7 +390,7 @@ def test_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tmp_p
     _write_config(
         cfg,
         {"A": _stdio("npx"), "B": _stdio("uvx")},
-        lifecycle={"schemaVersion": 2, "configRevision": 4, "globalGeneration": 1, "serverGenerations": {"A": 3}},
+        lifecycle={"schemaVersion": 3, "configRevision": 4, "globalGeneration": 1, "serverGenerations": {"A": 3}},
     )
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
     _install_discovery(monkeypatch)
@@ -385,12 +399,14 @@ def test_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tmp_p
 
     asyncio.run(update_mcp_server_state(None, McpServerStateUpdateRequest(server_name="A", enabled=True)))
 
-    assert _lifecycle(cfg) == {
-        "schemaVersion": 1,
+    fresh = _lifecycle(cfg)
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1, "B": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
@@ -407,7 +423,7 @@ def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
     # (b) malformed block -> fresh baseline whose global generation advances
     malformed = tmp_path / "malformed.json"
     malformed.write_text(
-        json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 2, "configRevision": 4, "globalGeneration": 9, "serverGenerations": {"A": 3}}}),
+        json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 3, "configRevision": 4, "globalGeneration": 9, "serverGenerations": {"A": 3}}}),
         encoding="utf-8",
     )
     raw = read_raw_extensions_config(malformed)
@@ -418,7 +434,7 @@ def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
     # (c) unverifiable previous document, block present and valid -> +1
     unverifiable = tmp_path / "unverifiable.json"
     unverifiable.write_text(
-        json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 1, "configRevision": 5, "globalGeneration": 4, "serverGenerations": {"A": 2}}}),
+        json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 2, "lifecycleId": "lineage-old", "configRevision": 5, "globalGeneration": 4, "serverGenerations": {"A": 2}}}),
         encoding="utf-8",
     )
     raw = read_raw_extensions_config(unverifiable)
@@ -449,12 +465,14 @@ def test_delete_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp
 
     written = read_raw_extensions_config(cfg)
     assert "broken" not in written["mcpServers"]
-    assert written["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = written["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_full_put_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
@@ -473,12 +491,14 @@ def test_full_put_repairs_an_invalid_stored_server(cache_globals, monkeypatch, t
 
     written = read_raw_extensions_config(cfg)
     assert set(written["mcpServers"]) == {"A", "B"}
-    assert written["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = written["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1, "B": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_full_put_can_replace_an_invalid_stored_server_by_name(cache_globals, monkeypatch, tmp_path) -> None:
@@ -512,12 +532,14 @@ def test_skills_write_survives_an_unverifiable_previous_document(monkeypatch, tm
 
     written = read_raw_extensions_config(cfg)
     assert written["skills"]["demo-skill"] == {"enabled": True}
-    assert written["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = written["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_client_mcp_write_survives_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
@@ -556,12 +578,14 @@ def test_client_skill_write_survives_an_unverifiable_previous_document(monkeypat
 
     written = read_raw_extensions_config(cfg)
     assert written["skills"]["demo-skill"] == {"enabled": True}
-    assert written["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = written["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"A": 1},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_lenient_previous_config_swallows_non_http_errors(monkeypatch) -> None:
@@ -853,3 +877,120 @@ def test_task_config_conflict_escaping_the_fence_still_invalidates(cache_globals
     assert get_session_pool() is not pool
     assert session_a.closed is True
     assert session_b.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Skills writes: no-op vs repair vs indeterminate outcome
+# ---------------------------------------------------------------------------
+
+
+def _patch_skills_writer(monkeypatch, cfg: Path) -> None:
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _path=None: cfg))
+    monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: ExtensionsConfig())
+
+
+def test_skill_write_keeps_sessions_and_advances_only_config_revision(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """An ordinary skills edit is not an MCP lifecycle event."""
+    cfg = tmp_path / "extensions_config.json"
+    pool, session_a, _session_b = _publish_with_sessions(monkeypatch, cfg, owner_loop)
+    binding_a = pool.active_binding("A")
+    _patch_skills_writer(monkeypatch, cfg)
+
+    skills_router._write_extensions_skill_state(None, "demo-skill", True, rebuild_public_projection=False)
+
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") == binding_a
+    assert _entry(pool, "A", owner_loop)[0] is session_a
+    assert session_a.closed is False
+    on_disk = _lifecycle(cfg)
+    assert on_disk["configRevision"] == 1
+    assert on_disk["globalGeneration"] == 0
+    assert on_disk["serverGenerations"] == {"A": 0, "B": 0}
+
+
+def test_skill_write_repairing_an_invalid_block_fences_local_state(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """A skills write that re-bases the lifecycle must fence the writing process."""
+    cfg = tmp_path / "extensions_config.json"
+    _publish(
+        monkeypatch,
+        cfg,
+        {"A": _stdio("npx"), "B": _stdio("uvx")},
+        lifecycle={
+            "schemaVersion": 2,
+            "lifecycleId": "lineage-1",
+            "configRevision": 5,
+            "globalGeneration": 0,
+            "serverGenerations": {"A": 0, "B": 0},
+        },
+    )
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    binding_a = pool.active_binding("A")
+    applied_id_before = cache_module._mcp_applied_lifecycle.lifecycle_id
+    assert applied_id_before == "lineage-1"
+
+    # Corrupt the block out of band; the skills write is what repairs it.
+    raw = read_raw_extensions_config(cfg)
+    raw["mcpLifecycle"] = {"schemaVersion": 2, "configRevision": 1, "globalGeneration": 1, "serverGenerations": {"A": 1, "B": 1}}
+    cfg.write_text(json.dumps(raw), encoding="utf-8")
+    _patch_skills_writer(monkeypatch, cfg)
+
+    skills_router._write_extensions_skill_state(None, "demo-skill", True, rebuild_public_projection=False)
+
+    # The repair established a new lineage, so the local ownership transfer ran.
+    assert _lifecycle(cfg)["lifecycleId"] != applied_id_before
+    assert get_session_pool() is not pool
+    _assert_stale(pool, owner_loop, "A", binding_a)
+    assert session_a.closed is True
+
+
+def test_skill_write_indeterminate_outcome_invalidates_local_state(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """An EBUSY-style partial write must not be reported as "state unchanged"."""
+    cfg = tmp_path / "extensions_config.json"
+    pool, session_a, _session_b = _publish_with_sessions(monkeypatch, cfg, owner_loop)
+    binding_a = pool.active_binding("A")
+    _patch_skills_writer(monkeypatch, cfg)
+
+    def _truncate_then_raise(path, data):
+        Path(path).write_text("", encoding="utf-8")
+        raise OSError("simulated EBUSY in-place overwrite failure")
+
+    monkeypatch.setattr("deerflow.mcp.commit.atomic_write_extensions_config", _truncate_then_raise)
+
+    with pytest.raises(MCPCommitOutcomeUnknownError) as exc_info:
+        skills_router._write_extensions_skill_state(None, "demo-skill", True, rebuild_public_projection=False)
+
+    assert cfg.read_text(encoding="utf-8") == ""
+    message = str(exc_info.value).lower()
+    assert "unknown" in message
+    assert "sessions were retired" not in message
+    assert get_session_pool() is not pool
+    _assert_stale(pool, owner_loop, "A", binding_a)
+    assert session_a.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Resolved credentials must never reach the logs
+# ---------------------------------------------------------------------------
+
+_LEAK_SECRET = "ghp_do_not_log_me_1234567890"
+
+
+def test_lenient_validation_failure_never_logs_resolved_secrets(monkeypatch, tmp_path, caplog) -> None:
+    """The lenient previous-config path must not echo a resolved $VAR value."""
+    monkeypatch.setenv("DEERFLOW_LEAK_PROBE", _LEAK_SECRET)
+    cfg = tmp_path / "extensions_config.json"
+    # ``enabled`` is a boolean, so the resolved secret becomes the failing input.
+    cfg.write_text(
+        json.dumps({"mcpServers": {"A": {"enabled": "$DEERFLOW_LEAK_PROBE"}}, "skills": {}}),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert validate_previous_config_lenient(read_raw_extensions_config(cfg)) is None
+
+    assert caplog.records, "the unverifiable previous config should be reported"
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert _LEAK_SECRET not in joined
+    assert "ValidationError" in joined

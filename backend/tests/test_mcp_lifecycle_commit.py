@@ -74,12 +74,13 @@ def test_legacy_file_gains_schema_version_without_counting_existing_servers(tmp_
 
     assert isinstance(committed, CommittedMcpRevision)
     on_disk = read_raw_extensions_config(config_path)["mcpLifecycle"]
-    assert on_disk == {
-        "schemaVersion": 1,
+    assert _without_lifecycle_id(on_disk) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 0,
         "serverGenerations": {"alpha": 0, "beta": 1},
     }
+    assert on_disk["lifecycleId"]
     assert committed.lifecycle.model_dump(by_alias=True) == on_disk
 
 
@@ -87,7 +88,8 @@ def test_caller_supplied_lifecycle_block_is_replaced_by_computed_counters(tmp_pa
     config_path = tmp_path / "extensions_config.json"
     raw_data = _base_raw()
     raw_data["mcpLifecycle"] = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 40,
         "globalGeneration": 7,
         "serverGenerations": {"alpha": 9, "retired": 4},
@@ -101,11 +103,17 @@ def test_caller_supplied_lifecycle_block_is_replaced_by_computed_counters(tmp_pa
     on_disk = read_raw_extensions_config(config_path)["mcpLifecycle"]
     assert on_disk == committed.lifecycle.model_dump(by_alias=True)
     assert on_disk == {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 41,
         "globalGeneration": 7,
         "serverGenerations": {"alpha": 9, "beta": 0, "retired": 4},
     }
+
+
+def _without_lifecycle_id(block: dict) -> dict:
+    """Drop the lineage id so a fresh-baseline assertion can ignore its value."""
+    return {key: value for key, value in block.items() if key != "lifecycleId"}
 
 
 def test_var_placeholders_and_unknown_top_level_keys_survive_the_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,8 +139,9 @@ def test_var_placeholders_and_unknown_top_level_keys_survive_the_write(tmp_path:
 @pytest.mark.parametrize(
     "malformed_block",
     [
+        {"schemaVersion": 3, "lifecycleId": "x", "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
         {"schemaVersion": 2, "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
-        {"schemaVersion": 1, "configRevision": -1, "globalGeneration": 0, "serverGenerations": {}},
+        {"schemaVersion": 2, "lifecycleId": "x", "configRevision": -1, "globalGeneration": 0, "serverGenerations": {}},
         ["not", "an", "object"],
     ],
 )
@@ -147,13 +156,15 @@ def test_malformed_existing_block_is_replaced_by_a_fresh_baseline(tmp_path: Path
 
     committed = _commit(config_path, raw_data, previous_config, new_config)
 
-    assert read_raw_extensions_config(config_path)["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = read_raw_extensions_config(config_path)["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 1,
         "serverGenerations": {"alpha": 1, "beta": 1},
     }
-    assert committed.lifecycle == parse_mcp_lifecycle(read_raw_extensions_config(config_path)["mcpLifecycle"])
+    assert fresh["lifecycleId"]
+    assert committed.lifecycle == parse_mcp_lifecycle(fresh)
 
 
 def test_interceptor_change_advances_only_global_generation(tmp_path: Path) -> None:
@@ -161,7 +172,8 @@ def test_interceptor_change_advances_only_global_generation(tmp_path: Path) -> N
     raw_data = _base_raw()
     raw_data["mcpInterceptors"] = ["pkg.before:Interceptor"]
     raw_data["mcpLifecycle"] = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 9,
         "globalGeneration": 3,
         "serverGenerations": {"alpha": 2, "beta": 1},
@@ -176,7 +188,8 @@ def test_interceptor_change_advances_only_global_generation(tmp_path: Path) -> N
     on_disk = read_raw_extensions_config(config_path)
     assert on_disk["mcpInterceptors"] == ["pkg.after:Interceptor"]
     assert on_disk["mcpLifecycle"] == {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 10,
         "globalGeneration": 4,
         "serverGenerations": {"alpha": 2, "beta": 1},
@@ -213,12 +226,14 @@ def test_skills_only_write_advances_only_config_revision(tmp_path: Path) -> None
     assert enabled_stdio_fingerprints(previous_config) == enabled_stdio_fingerprints(new_config)
     _commit(config_path, mutated, previous_config, new_config)
 
-    assert read_raw_extensions_config(config_path)["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    fresh = read_raw_extensions_config(config_path)["mcpLifecycle"]
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 0,
         "serverGenerations": {"alpha": 0, "beta": 0},
     }
+    assert fresh["lifecycleId"]
 
 
 def test_enabled_stdio_fingerprints_skips_disabled_remote_and_unbuildable_servers() -> None:

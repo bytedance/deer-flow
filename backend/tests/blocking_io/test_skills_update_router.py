@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -35,6 +36,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
 
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers import skills as skills_router
@@ -112,13 +114,16 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     written = json.loads(config_text)
     # A new file is seeded with the cached skill states only. The cached model
     # holds $VAR-resolved values, so none of its other fields are serialized.
+    assert written["mcpLifecycle"]["lifecycleId"]
+    written["mcpLifecycle"]["lifecycleId"] = "lineage"
     assert written == {
         "skills": {
             "existing-skill": {"enabled": True},
             "demo-skill": {"enabled": False},
         },
         "mcpLifecycle": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "lifecycleId": "lineage",
             "configRevision": 1,
             "globalGeneration": 0,
             "serverGenerations": {},
@@ -328,8 +333,11 @@ async def test_update_skill_advances_only_config_revision_and_preserves_raw_keys
 
     assert result.name == "demo-skill"
     written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["mcpLifecycle"]["lifecycleId"]
+    written["mcpLifecycle"]["lifecycleId"] = "lineage"
     assert written["mcpLifecycle"] == {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage",
         "configRevision": 1,
         "globalGeneration": 0,
         "serverGenerations": {"A": 0},
@@ -338,3 +346,33 @@ async def test_update_skill_advances_only_config_revision_and_preserves_raw_keys
     assert written["mcpServers"]["A"]["env"]["TOKEN"] == "$DEERFLOW_TEST_SKILL_TOKEN"
     assert written["mcpInterceptors"] == ["pkg.before:Interceptor"]
     assert written["customTopLevel"] == {"keep": [1, 2, 3]}
+
+
+async def test_update_skill_does_not_leak_resolved_secrets(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A validation failure must not echo a resolved ``$VAR`` value.
+
+    Config validation resolves placeholders before validating, so the failure
+    carries the resolved credential in its message and traceback. Neither the
+    HTTP detail nor the log may reproduce it.
+    """
+    secret = "ghp_do_not_log_me_1234567890"
+    monkeypatch.setenv("DEERFLOW_LEAK_PROBE", secret)
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"A": {"enabled": "$DEERFLOW_LEAK_PROBE"}},
+                "skills": {"demo-skill": {"enabled": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_config_infra(monkeypatch, config_path)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException) as exc_info:
+            await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+
+    assert exc_info.value.status_code == 500
+    assert secret not in str(exc_info.value.detail)
+    assert secret not in caplog.text

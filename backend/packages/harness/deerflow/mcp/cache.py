@@ -24,7 +24,12 @@ from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
-from deerflow.config.mcp_lifecycle import McpLifecycle, McpLifecycleError, parse_mcp_lifecycle
+from deerflow.config.mcp_lifecycle import (
+    McpLifecycle,
+    McpLifecycleError,
+    lifecycle_covers_servers,
+    parse_mcp_lifecycle,
+)
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import (avoids a cycle)
@@ -264,6 +269,13 @@ def _lifecycle_from_config(config) -> tuple[McpLifecycle | None, bool]:
         parsed = parse_mcp_lifecycle(extra["mcpLifecycle"])
         if parsed is None:
             raise McpLifecycleError("mcpLifecycle must be an object, got null")
+        # The block and the effective configuration must describe the same
+        # revision: every enabled stdio server the writer would have recorded a
+        # generation for must be present. A block missing one cannot be trusted
+        # as a version.
+        enabled_stdio = {name for name, server in config.get_enabled_mcp_servers().items() if _stdio_connection_fingerprint(name, server) is not None}
+        if not lifecycle_covers_servers(parsed, enabled_stdio):
+            raise McpLifecycleError("mcpLifecycle does not cover every enabled stdio server")
     except McpLifecycleError:
         # Never echo the raw value: it can carry operator-controlled content.
         logger.info("Persisted mcpLifecycle block is present but unverifiable; treating this revision as unverifiable")
@@ -287,6 +299,7 @@ def _lifecycle_identity(lifecycle: McpLifecycle | None, invalid: bool) -> tuple[
     return (
         invalid,
         lifecycle.schema_version,
+        lifecycle.lifecycle_id,
         lifecycle.global_generation,
         tuple(sorted(lifecycle.server_generations.items())),
     )
@@ -325,6 +338,37 @@ def _revision_from_config(config, *, path: Path | None, signature: _ConfigSignat
     """Build the revision view for an already-parsed extensions config."""
     lifecycle, lifecycle_invalid = _lifecycle_from_config(config)
     return _compose_revision(config, path=path, signature=signature, lifecycle=lifecycle, lifecycle_invalid=lifecycle_invalid)
+
+
+def _previous_lifecycle_of_committed_revision(committed: CommittedMcpRevision) -> tuple[McpLifecycle | None, bool]:
+    """The *previous* lifecycle block a committed candidate still carries.
+
+    ``commit_extensions_config`` validates the candidate before overwriting
+    ``mcpLifecycle``, so ``committed.config.model_extra`` still holds the block
+    that was on disk *before* this write. Parsing it is what lets a writer tell a
+    pure ``configRevision`` advance from a real lifecycle change.
+    """
+    extra = committed.config.model_extra or {}
+    if "mcpLifecycle" not in extra:
+        return None, False
+    try:
+        parsed = parse_mcp_lifecycle(extra["mcpLifecycle"])
+        if parsed is None:
+            raise McpLifecycleError("mcpLifecycle must be an object, got null")
+    except McpLifecycleError:
+        return None, True
+    return parsed, False
+
+
+def lifecycle_changed_in_committed_revision(committed: CommittedMcpRevision) -> bool:
+    """Whether one committed revision changed the MCP resource lifecycle identity.
+
+    A skills-only or middleware-only write advances only ``configRevision``, so
+    its lifecycle identity is unchanged. Writers use this to avoid voiding an
+    in-flight first discovery for a write that cannot affect MCP.
+    """
+    previous, previous_invalid = _previous_lifecycle_of_committed_revision(committed)
+    return _lifecycle_identity(committed.lifecycle, False) != _lifecycle_identity(previous, previous_invalid)
 
 
 def _revision_from_committed_revision(committed: CommittedMcpRevision) -> _McpIncomingRevision:
@@ -489,6 +533,11 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
     if incoming_lifecycle is None:
         # The block disappeared after this process adopted the protocol: the
         # version can no longer be verified.
+        return True, frozenset()
+    if incoming_lifecycle.lifecycle_id != applied.lifecycle_id:
+        # The trusted baseline was re-established, so the intervening history
+        # cannot be proven even when the counters happen to match the applied
+        # ones. Fail closed for the whole pool.
         return True, frozenset()
     if incoming_lifecycle.global_generation != applied.global_generation:
         # Whole-pool advance, and a regression is equally unverifiable.
@@ -1168,7 +1217,11 @@ def prepare_mcp_reconciliation(changed: Collection[str] | None) -> _PendingTeard
         return _apply_reconciliation_locked(plan)
 
 
-def prepare_mcp_reconciliation_from_revision(committed: CommittedMcpRevision) -> _PendingTeardown | None:
+def prepare_mcp_reconciliation_from_revision(
+    committed: CommittedMcpRevision,
+    *,
+    fence_in_flight_initialization: bool = True,
+) -> _PendingTeardown | None:
     """Fence from one in-memory committed revision (no second disk parse).
 
     The writer already holds the exact validated candidate and the counters it
@@ -1185,7 +1238,7 @@ def prepare_mcp_reconciliation_from_revision(committed: CommittedMcpRevision) ->
     """
     incoming = _revision_from_committed_revision(committed)
     with _init_condition:
-        plan = _plan_from_incoming_revision(incoming, fence_in_flight_initialization=True)
+        plan = _plan_from_incoming_revision(incoming, fence_in_flight_initialization=fence_in_flight_initialization)
         if plan is None:
             return None
         return _apply_reconciliation_locked(plan)

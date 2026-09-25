@@ -82,9 +82,12 @@ def _lifecycle(
     config_revision: int,
     global_generation: int,
     server_generations: dict[str, int],
+    *,
+    lifecycle_id: str = "lineage-1",
 ) -> dict:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": lifecycle_id,
         "configRevision": config_revision,
         "globalGeneration": global_generation,
         "serverGenerations": server_generations,
@@ -309,7 +312,16 @@ def test_applied_valid_and_incoming_block_absent_resets_the_whole_pool(cache_glo
     assert cache_module._classify_cache_transition() == cache_module._McpCacheTransition(frozenset(), None)
 
 
-@pytest.mark.parametrize("invalid_block", [None, "not-an-object", {"schemaVersion": 2}, {"serverGenerations": {"A": -1}}])
+@pytest.mark.parametrize(
+    "invalid_block",
+    [
+        None,
+        "not-an-object",
+        {"schemaVersion": 2},
+        {"schemaVersion": 3, "lifecycleId": "x", "configRevision": 0, "globalGeneration": 0, "serverGenerations": {}},
+        {"serverGenerations": {"A": -1}},
+    ],
+)
 def test_applied_valid_and_incoming_block_invalid_resets_the_whole_pool(cache_globals, monkeypatch, tmp_path, invalid_block):
     cfg = tmp_path / "extensions_config.json"
     servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
@@ -357,3 +369,56 @@ def test_both_blocks_absent_is_legacy_and_stays_a_noop(cache_globals, monkeypatc
     _write_config(cfg, servers, lifecycle=None)
 
     assert cache_module._classify_cache_transition() is None
+
+
+def test_rebased_lineage_with_identical_counters_resets_the_whole_pool(cache_globals, monkeypatch, tmp_path):
+    """A regenerated ``lifecycleId`` must win over byte-identical counters.
+
+    A repaired or re-initialized block restarts the counters, so a worker that
+    missed the intervening history would otherwise read the block as unchanged.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
+    _publish(monkeypatch, cfg, servers, lifecycle=_lifecycle(1, 1, {"A": 1, "B": 1}, lifecycle_id="lineage-1"))
+
+    _write_config(
+        cfg,
+        servers,
+        lifecycle=_lifecycle(1, 1, {"A": 1, "B": 1}, lifecycle_id="lineage-2"),
+        lifecycle_present=True,
+    )
+
+    assert cache_module._classify_cache_transition() == cache_module._McpCacheTransition(frozenset(), None)
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {},
+        {"schemaVersion": 2},
+        {"configRevision": 3},
+        {"schemaVersion": 2, "lifecycleId": "lineage-1", "configRevision": 3},
+        {"schemaVersion": 2, "lifecycleId": "lineage-1", "globalGeneration": 0, "serverGenerations": {}},
+    ],
+)
+def test_partial_persisted_block_is_unverifiable(cache_globals, monkeypatch, tmp_path, partial):
+    """A truncated block must not be completed with defaults into a version."""
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
+    _publish(monkeypatch, cfg, servers, lifecycle=_lifecycle(1, 0, {"A": 0, "B": 0}))
+
+    _write_config(cfg, servers, lifecycle=partial, lifecycle_present=True)
+
+    assert cache_module._classify_cache_transition() == cache_module._McpCacheTransition(frozenset(), None)
+
+
+def test_block_missing_an_enabled_server_is_unverifiable(cache_globals, monkeypatch, tmp_path):
+    """The block and the effective configuration must describe the same revision."""
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
+    _publish(monkeypatch, cfg, servers, lifecycle=_lifecycle(1, 0, {"A": 0, "B": 0}))
+
+    # B is enabled but has no recorded generation.
+    _write_config(cfg, servers, lifecycle=_lifecycle(2, 0, {"A": 0}), lifecycle_present=True)
+
+    assert cache_module._classify_cache_transition() == cache_module._McpCacheTransition(frozenset(), None)

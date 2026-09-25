@@ -10,10 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from deerflow.config.mcp_lifecycle import McpLifecycle
+from deerflow.config.mcp_lifecycle import (
+    SUPPORTED_SCHEMA_VERSION,
+    McpLifecycle,
+    new_lifecycle_id,
+)
 
 #: Serialized lifecycle schema version; the rules never advance it.
-LIFECYCLE_SCHEMA_VERSION = 1
+LIFECYCLE_SCHEMA_VERSION = SUPPORTED_SCHEMA_VERSION
 
 
 def _lifecycle_event(name: str, old_servers: Mapping[str, str], new_servers: Mapping[str, str]) -> bool:
@@ -47,7 +51,14 @@ def compute_next_lifecycle(
     server generation advances only on a real per-server lifecycle event; names
     that are only present in the previous history are carried over unchanged and
     are never pruned.
+
+    ``lifecycleId`` is the lineage of the trusted baseline. It is carried over
+    unchanged on every ordinary commit and regenerated *only* when there is no
+    verifiable previous block (first initialization, or recovery from an
+    unverifiable block). That is what lets a worker that missed the intervening
+    history tell a re-based counter set from the one it already applied.
     """
+    lifecycle_id = previous.lifecycle_id if previous is not None else new_lifecycle_id()
     previous_generations = dict(previous.server_generations) if previous is not None else {}
     generations: dict[str, int] = {}
     for name in sorted(set(old_servers) | set(new_servers) | set(previous_generations)):
@@ -56,6 +67,7 @@ def compute_next_lifecycle(
 
     return McpLifecycle(
         schema_version=LIFECYCLE_SCHEMA_VERSION,
+        lifecycle_id=lifecycle_id,
         config_revision=(previous.config_revision if previous is not None else 0) + 1,
         global_generation=(previous.global_generation if previous is not None else 0) + (1 if interceptors_changed else 0),
         server_generations=generations,
