@@ -273,12 +273,15 @@ class DeerFlowClient:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _write_skill_enabled_state(cls, config_path: Path, name: str, enabled: bool) -> None:
-        """Persist one skill state and reload; callers hold the extensions config locks.
+    def _write_skill_enabled_state(cls, config_path: Path, name: str, enabled: bool) -> Any:
+        """Persist one skill state inside the config locks; callers hold them.
 
         Works on the raw file so ``$VAR`` placeholders are never written back as
-        resolved secrets.
+        resolved secrets. Returns the detached-owner teardown the caller must
+        finish *after* releasing the config locks.
         """
+        from deerflow.mcp.cache import lifecycle_changed_in_committed_revision, prepare_mcp_reconciliation_from_revision
+
         config_data = read_raw_extensions_config(config_path)
         # A skills edit changes no enabled server and no interceptor, so the
         # shared commit advances only ``configRevision`` -- the block must still
@@ -288,13 +291,53 @@ class DeerFlowClient:
         previous_config = validate_previous_config_lenient(config_data)
         set_raw_skill_enabled(config_data, name, enabled)
         new_config = validate_raw_extensions_config(config_data)
-        commit_extensions_config(
+        committed = commit_extensions_config(
             config_path=config_path,
             raw_data=config_data,
             previous_config=previous_config,
             new_config=new_config,
         )
-        reload_extensions_config()
+        # A skills write normally changes no MCP resource, so it must not void an
+        # in-flight first discovery; only a write that re-establishes the shared
+        # lifecycle identity (a repair of an unverifiable block) is a lifecycle
+        # change. Fence from the exact committed revision, never a re-read.
+        try:
+            pending = prepare_mcp_reconciliation_from_revision(
+                committed,
+                fence_in_flight_initialization=lifecycle_changed_in_committed_revision(committed),
+            )
+        except Exception as exc:
+            raise MCPCommittedNotReconciledError(
+                "Extensions config was committed to disk but the local MCP reconciliation fence failed; the caller must conservatively invalidate local MCP state",
+            ) from exc
+        try:
+            reload_extensions_config()
+        except Exception as exc:
+            raise MCPCommittedReloadFailedError(
+                "Extensions config was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
+            ) from exc
+        return pending
+
+    @classmethod
+    def _commit_skill_enabled_state(cls, config_path: Path, name: str, enabled: bool) -> None:
+        """Write one skill state, fence the shared lifecycle, and reap detached owners.
+
+        Takes both extensions-config locks itself so that an indeterminate write
+        or a failed fence is followed by conservative local invalidation with
+        every config lock already released.
+        """
+        from deerflow.mcp.cache import finish_mcp_reconciliation, force_local_mcp_invalidation
+
+        pending_reconciliation = None
+        try:
+            with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                pending_reconciliation = cls._write_skill_enabled_state(config_path, name, enabled)
+        except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+            # The locks are released here; never wait for teardown holding them.
+            force_local_mcp_invalidation()
+            raise
+        finally:
+            finish_mcp_reconciliation(pending_reconciliation)
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
         """Build a RunnableConfig for agent invocation."""
@@ -1527,10 +1570,10 @@ class DeerFlowClient:
 
             removal_names = (name,) if not enabled else ()
             with skill_projection_mutation(storage, "public", remove_names=removal_names):
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
-                    # The projection lock is cross-process, but the singleton
-                    # cache is not. Reload raw from disk under the config lock.
-                    self._write_skill_enabled_state(config_path, name, enabled)
+                # The projection lock is cross-process, but the singleton cache
+                # is not. The config locks and the raw re-read live inside the
+                # helper so recovery runs with every config lock released.
+                self._commit_skill_enabled_state(config_path, name, enabled)
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
@@ -1542,8 +1585,7 @@ class DeerFlowClient:
                 config_path = ExtensionsConfig.resolve_config_path()
                 if config_path is None:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
-                    self._write_skill_enabled_state(config_path, name, enabled)
+                self._commit_skill_enabled_state(config_path, name, enabled)
 
         # Invalidate the prompt cache for this caller (and for all users if
         # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors

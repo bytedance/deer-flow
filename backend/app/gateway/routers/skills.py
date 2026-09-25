@@ -30,7 +30,20 @@ from deerflow.config.extensions_config import (
     set_raw_skill_enabled,
     validate_raw_extensions_config,
 )
-from deerflow.mcp.commit import commit_extensions_config, validate_previous_config_lenient
+from deerflow.mcp.cache import (
+    finish_mcp_reconciliation,
+    force_local_mcp_invalidation,
+    lifecycle_changed_in_committed_revision,
+    prepare_mcp_reconciliation_from_revision,
+)
+from deerflow.mcp.commit import (
+    MCPCommitOutcomeUnknownError,
+    MCPCommittedNotReconciledError,
+    MCPCommittedReloadFailedError,
+    commit_extensions_config,
+    safe_error_summary,
+    validate_previous_config_lenient,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
@@ -749,34 +762,64 @@ def _write_extensions_skill_state(
         config_path = Path.cwd().parent / "extensions_config.json"
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-    with projection_update:
-        with extensions_config_write_lock, extensions_config_file_lock(config_path):
-            # The projection lock is cross-process, but the singleton cache is
-            # not. Existing files are therefore re-read under the lock, raw, so
-            # $VAR placeholders are not persisted as resolved secrets. A new
-            # file starts from the cached skill states only: the cached model
-            # holds resolved values and must never be serialized.
-            if config_path.exists():
-                raw_config = read_raw_extensions_config(config_path)
-            else:
-                raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
-            # Capture the pre-mutation effective config so the shared commit can
-            # prove that a skills toggle changes no server or interceptor. This
-            # is lenient: an unverifiable stored document must not block
-            # the write, and a skills toggle can itself repair a bad skills entry.
-            previous_config = validate_previous_config_lenient(raw_config)
-            set_raw_skill_enabled(raw_config, skill_name, enabled)
+    pending_reconciliation = None
+    try:
+        with projection_update:
+            with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                # The projection lock is cross-process, but the singleton cache is
+                # not. Existing files are therefore re-read under the lock, raw, so
+                # $VAR placeholders are not persisted as resolved secrets. A new
+                # file starts from the cached skill states only: the cached model
+                # holds resolved values and must never be serialized.
+                if config_path.exists():
+                    raw_config = read_raw_extensions_config(config_path)
+                else:
+                    raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
+                # Capture the pre-mutation effective config so the shared commit can
+                # prove that a skills toggle changes no server or interceptor. This
+                # is lenient: an unverifiable stored document must not block
+                # the write, and a skills toggle can itself repair a bad skills entry.
+                previous_config = validate_previous_config_lenient(raw_config)
+                set_raw_skill_enabled(raw_config, skill_name, enabled)
 
-            new_config = validate_raw_extensions_config(raw_config)
-            commit_extensions_config(
-                config_path=config_path,
-                raw_data=raw_config,
-                previous_config=previous_config,
-                new_config=new_config,
-            )
+                new_config = validate_raw_extensions_config(raw_config)
+                committed = commit_extensions_config(
+                    config_path=config_path,
+                    raw_data=raw_config,
+                    previous_config=previous_config,
+                    new_config=new_config,
+                )
+                # A skills write normally changes no MCP resource, so it must not
+                # void an in-flight first discovery; only a write that re-establishes
+                # the shared lifecycle identity (a repair of an unverifiable block)
+                # is an MCP lifecycle change. Fence from the exact committed
+                # revision so the ownership transfer cannot race a later writer.
+                try:
+                    pending_reconciliation = prepare_mcp_reconciliation_from_revision(
+                        committed,
+                        fence_in_flight_initialization=lifecycle_changed_in_committed_revision(committed),
+                    )
+                except Exception as exc:
+                    # Do not invalidate here: this is inside the config critical
+                    # section and the conservative invalidation waits for the
+                    # retired pool's teardown. The writer does it below.
+                    raise MCPCommittedNotReconciledError(
+                        "Extensions config was committed to disk but the local MCP reconciliation fence failed; the caller must conservatively invalidate local MCP state",
+                    ) from exc
 
-            logger.info(f"Skills configuration updated and saved to: {config_path}")
-            reload_extensions_config()
+                logger.info(f"Skills configuration updated and saved to: {config_path}")
+                try:
+                    reload_extensions_config()
+                except Exception as exc:
+                    raise MCPCommittedReloadFailedError(
+                        "Extensions config was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
+                    ) from exc
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+        # The locks are released here; never wait for teardown holding them.
+        force_local_mcp_invalidation()
+        raise
+    finally:
+        finish_mcp_reconciliation(pending_reconciliation)
 
 
 @router.put(
@@ -863,5 +906,8 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update skill {skill_name}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update skill: {str(e)}")
+        # Never echo the exception: config validation resolves ``$VAR`` first, so
+        # a ValidationError can carry a resolved credential in its message and its
+        # traceback. Only the type is safe for the log and the response.
+        logger.error("Failed to update skill %s (%s)", skill_name, safe_error_summary(e))
+        raise HTTPException(status_code=500, detail=f"Failed to update skill ({safe_error_summary(e)})") from e

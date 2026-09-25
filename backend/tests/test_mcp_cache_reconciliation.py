@@ -1189,7 +1189,8 @@ def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monke
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
     raw = read_raw_extensions_config(cfg)
     injected = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 500,
         "globalGeneration": 9,
         "serverGenerations": {"ghost": 3},
@@ -1207,7 +1208,8 @@ def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monke
     lifecycle = _lifecycle(cfg)
     assert lifecycle != injected
     assert lifecycle == {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": 501,
         "globalGeneration": 9,
         "serverGenerations": {"A": 1, "B": 0, "ghost": 3},

@@ -449,11 +449,80 @@ def test_legacy_upgrade_initializes_versions_and_preserves_placeholders(spawn):
     reply = w1.send({"cmd": "commit", "mutation": {"op": "noop"}})
     raw = reply["raw"] if "raw" in reply else w1.send({"cmd": "read_raw"})["raw"]
 
-    assert raw["mcpLifecycle"] == {
-        "schemaVersion": 1,
+    assert raw["mcpLifecycle"]["lifecycleId"]
+    assert {key: value for key, value in raw["mcpLifecycle"].items() if key != "lifecycleId"} == {
+        "schemaVersion": 2,
         "configRevision": 1,
         "globalGeneration": 0,
         "serverGenerations": {"A": 0},
     }
     assert raw["mcpServers"]["A"]["env"]["TOKEN"] == "$DEERFLOW_LEGACY_TOKEN"
     assert raw["customTopLevel"] == {"keep": [1, 2, 3]}
+
+
+# ---------------------------------------------------------------------------
+# Corrupted version history, then repaired
+# ---------------------------------------------------------------------------
+
+
+def test_repaired_version_history_never_collides_with_a_prior_baseline(spawn):
+    """A repair that recreates the same counters must still be detectable.
+
+    W1 applies a baseline, then the persisted block is corrupted out of band and
+    W2 deletes and identically re-adds A. The repair re-establishes a fresh
+    baseline whose *counters* are identical to W1's, so only the regenerated
+    ``lifecycleId`` can tell W1 that the history was interrupted. Its next check
+    must therefore still retire A rather than treat the block as unchanged.
+    """
+    spawn_workers, config_path = spawn
+    servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
+    w1 = spawn_workers("w1")
+    w2 = spawn_workers("w2")
+
+    # An interceptor edit makes W1's baseline globalGeneration=1, which is
+    # exactly what the repair path regenerates from a corrupted block.
+    publish = w1.send({"cmd": "publish", "servers": servers, "interceptors": ["pkg.before:Interceptor"]})
+    assert publish["cache_initialized"] is True
+    baseline = publish["applied_lifecycle"]
+    assert baseline["globalGeneration"] == 1
+    assert baseline["serverGenerations"] == {"A": 1, "B": 1}
+    assert baseline["lifecycleId"]
+
+    opened_a = w1.send({"cmd": "open", "server": "A", "scope": "t1"})
+    epoch_a_before = opened_a["bindings"]["A"]["epoch"]
+
+    # Corrupt the block out of band: no supported writer produces this shape.
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["mcpLifecycle"] = {
+        "schemaVersion": 2,
+        "configRevision": 1,
+        "globalGeneration": 1,
+        "serverGenerations": {"A": 1, "B": 1},
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    # W2's delete repairs the block; the identical re-add then advances A again.
+    w2.send({"cmd": "commit", "mutation": {"op": "delete", "server": "A"}})
+    w2.send(
+        {
+            "cmd": "commit",
+            "mutation": {"op": "add", "server": "A", "server_config": _stdio("npx"), "index": 0},
+        }
+    )
+
+    final = w2.send({"cmd": "read_raw"})["raw"]["mcpLifecycle"]
+    # The counters collide with W1's baseline; only the lineage id distinguishes them.
+    assert final["globalGeneration"] == baseline["globalGeneration"]
+    assert final["serverGenerations"] == baseline["serverGenerations"]
+    assert final["lifecycleId"] != baseline["lifecycleId"]
+
+    check = w1.send({"cmd": "check"})
+    assert check["retired"] is True
+    # A re-based lineage is a whole-pool event: every binding is dropped and the
+    # session A held is detached, so the superseded wrapper is fenced.
+    assert check["bindings"] == {}
+    assert check["sessions"]["A|t1"] is True
+    assert epoch_a_before > 0
+
+    held = w1.send({"cmd": "probe_held", "server": "A", "scope": "t1"})
+    assert held["stale"] is True

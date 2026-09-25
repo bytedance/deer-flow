@@ -1436,7 +1436,8 @@ class TestLazyInitializationFailure:
 
 def _lifecycle_block(config_revision: int, global_generation: int, server_generations: dict[str, int]) -> dict:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-1",
         "configRevision": config_revision,
         "globalGeneration": global_generation,
         "serverGenerations": server_generations,

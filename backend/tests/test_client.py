@@ -2357,17 +2357,21 @@ class TestMcpConfig:
             client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
 
         written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == {
+        written = json.loads(written_text)
+        expected = {
             "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
             "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
             "skills": {"kept": {"enabled": False}},
             "mcpLifecycle": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "configRevision": 1,
                 "globalGeneration": 0,
                 "serverGenerations": {"new": 1, "old": 1},
             },
         }
+        # A fresh baseline mints a new lineage id, so only its presence is fixed.
+        expected["mcpLifecycle"]["lifecycleId"] = written["mcpLifecycle"]["lifecycleId"]
+        assert written == expected
         assert "ghp_live_secret_value" not in written_text
 
     def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
@@ -2505,13 +2509,15 @@ class TestSkillsManagement:
         expected = self._config_with_placeholders()
         expected["skills"]["test-skill"] = {"enabled": False}
         expected["mcpLifecycle"] = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "configRevision": 1,
             "globalGeneration": 0,
             "serverGenerations": {"github": 0},
         }
         written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == expected
+        written = json.loads(written_text)
+        expected["mcpLifecycle"]["lifecycleId"] = written["mcpLifecycle"]["lifecycleId"]
+        assert written == expected
         assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
