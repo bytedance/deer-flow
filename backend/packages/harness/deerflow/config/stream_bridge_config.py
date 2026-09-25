@@ -2,11 +2,12 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 StreamBridgeType = Literal["memory", "redis"]
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
 MAX_HEARTBEAT_INTERVAL_SECONDS = 86_400.0
+MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS = 86_400.0
 
 
 class StreamBridgeConfig(BaseModel):
@@ -54,15 +55,19 @@ class StreamBridgeConfig(BaseModel):
     recovered_stream_cleanup_delay_seconds: float = Field(
         default=60.0,
         ge=0,
-        description=("Seconds to wait after publishing an END marker for a recovered orphaned run before deleting the stream key. Gives reconnecting SSE clients time to drain the end signal. Only applies to the redis bridge."),
+        le=MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS,
+        allow_inf_nan=False,
+        description=(
+            "Seconds to wait after publishing an END marker for a recovered orphaned run before deleting the stream key (maximum 86400). Gives reconnecting SSE clients time to drain the end signal. Only applies to the redis bridge."
+        ),
     )
 
-    @field_validator("heartbeat_interval_seconds", mode="before")
+    @field_validator("heartbeat_interval_seconds", "recovered_stream_cleanup_delay_seconds", mode="before")
     @classmethod
-    def reject_boolean_heartbeat_interval(cls, value: Any) -> Any:
+    def reject_boolean_seconds(cls, value: Any, info: ValidationInfo) -> Any:
         """Reject booleans before Pydantic coerces them to floats."""
         if isinstance(value, bool):
-            raise ValueError("heartbeat_interval_seconds must be a number, not a boolean")
+            raise ValueError(f"{info.field_name} must be a number, not a boolean")
         return value
 
 
