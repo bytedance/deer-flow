@@ -17,10 +17,20 @@ The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
-success; failures print Compose status and recent Gateway logs.
-
-Root `make install` runs pre-commit through uv, so uv's tool bin directory
+success; failures print Compose status and recent Gateway logs. Root
+`make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
+
+`scripts/wait-for-port.sh <port> [timeout_seconds] [service_name] [child_pid]`
+owns the wait for a service's listening port. It checks the watched process's
+liveness (`kill -0`) before each port probe, so a launcher that already exited
+is reported without paying a port-probe cycle. With `child_pid` set, a watched
+process that exits before the port opens aborts the wait immediately with exit
+code 2; `scripts/serve.sh` reports it as
+`✗ <name> exited before listening on port <port>` plus the log tail. Exit code
+1 still means the timeout elapsed. Launchers passed as `child_pid` must stay in
+the foreground until their port is listening: a launcher that backgrounds
+itself and exits early aborts startup instead of hanging until the timeout.
 
 ## Shell Script Invocation Contract
 

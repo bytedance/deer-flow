@@ -2,20 +2,27 @@
 #
 # wait-for-port.sh - Wait for a TCP port to become available
 #
-# Usage: ./scripts/wait-for-port.sh <port> [timeout_seconds] [service_name]
+# Usage: ./scripts/wait-for-port.sh <port> [timeout_seconds] [service_name] [child_pid]
 #
 # Arguments:
 #   port             - TCP port to wait for (required)
 #   timeout_seconds  - Max seconds to wait (default: 60)
 #   service_name     - Display name for messages (default: "Service")
+#   child_pid        - Optional PID to watch: if that process exits before the
+#                      port opens, give up immediately instead of waiting out
+#                      the full timeout (a dead launcher never opens a port).
+#                      Liveness is checked before each port probe, so a dead
+#                      watcher is reported even when the port already listens
 #
 # Exit codes:
 #   0 - Port is listening
 #   1 - Timed out waiting
+#   2 - The process watched via child_pid exited before the port opened
 
-PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
+PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name] [child_pid]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
+CHILD_PID="${4:-}"
 
 case "$PORT" in
     ''|*[!0-9]*)
@@ -60,7 +67,20 @@ is_port_listening() {
     return 1
 }
 
-while ! is_port_listening; do
+while true; do
+    # Liveness before the port probe: `kill -0` is a shell builtin, while the
+    # probe can cost seconds per call (powershell.exe + Get-NetTCPConnection
+    # on Windows), so a launcher that already exited is reported without
+    # paying a probe cycle. A dead watched process also wins over "something
+    # else holds the port": the process this caller started is gone, so exit 2
+    # is the truthful diagnosis even when the port happens to be listening.
+    if [ -n "$CHILD_PID" ] && ! kill -0 "$CHILD_PID" 2>/dev/null; then
+        printf "\r  %-60s\r" ""   # clear the waiting line
+        exit 2
+    fi
+    if is_port_listening; then
+        break
+    fi
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
         echo ""
         echo "✗ $SERVICE failed to start on port $PORT after ${TIMEOUT}s"
