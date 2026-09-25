@@ -140,6 +140,24 @@ class TestCoerceMaxResults:
         assert _coerce_max_results(0) == 5
         assert _coerce_max_results(-3) == 5
 
+    def test_rejects_boolean_and_fractional_float(self):
+        from deerflow.community.sofya.tools import _coerce_max_results
+
+        # int(True) == 1 and int(3.5) == 3 would both silently change the requested count.
+        assert _coerce_max_results(True) == 5
+        assert _coerce_max_results(False) == 5
+        assert _coerce_max_results(3.5) == 5
+
+    def test_rejects_out_of_range_float(self):
+        from deerflow.community.sofya.tools import _coerce_max_results
+
+        assert _coerce_max_results(float("inf")) == 5
+
+    def test_accepts_integral_float(self):
+        from deerflow.community.sofya.tools import _coerce_max_results
+
+        assert _coerce_max_results(4.0) == 4
+
 
 class TestMissingKeyMessage:
     def test_warns_once_per_tool_name(self, caplog):
@@ -297,6 +315,12 @@ class TestWebSearchTool:
         assert _coerce_content_limit(-5) == 2000
         assert _coerce_content_limit(0) == 0
         assert _coerce_content_limit("150") == 150
+        # int(True) == 1 and int(10.5) == 10 would silently change the configured limit.
+        assert _coerce_content_limit(True) == 2000
+        assert _coerce_content_limit(False) == 2000
+        assert _coerce_content_limit(10.5) == 2000
+        assert _coerce_content_limit(float("inf")) == 2000
+        assert _coerce_content_limit(4.0) == 4
 
     def test_default_search_stays_under_the_externalize_threshold(self, mock_config_with_key):
         """Five capped results must stay inline rather than being persisted to disk."""

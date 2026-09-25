@@ -44,9 +44,13 @@ def _get_api_key(tool_name: str) -> str | None:
 
 def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOFYA_MAX_RESULTS) -> int:
     """Coerce config/parameter input into a bounded positive result count."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5;
+        # int() on an out-of-range float (e.g. YAML .inf) raises OverflowError.
+        return default
     try:
         count = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if count <= 0:
         return default
@@ -55,9 +59,13 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOF
 
 def _coerce_content_limit(value: object, default: int = _DEFAULT_CONTENTS_MAX_CHARACTERS) -> int:
     """Coerce the per-result content limit. 0 means no limit; anything invalid falls back to the default."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5;
+        # int() on an out-of-range float (e.g. YAML .inf) raises OverflowError.
+        return default
     try:
         limit = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return limit if limit >= 0 else default
 
