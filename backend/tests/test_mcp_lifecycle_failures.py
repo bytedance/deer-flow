@@ -994,3 +994,24 @@ def test_lenient_validation_failure_never_logs_resolved_secrets(monkeypatch, tmp
     joined = "\n".join(record.getMessage() for record in caplog.records)
     assert _LEAK_SECRET not in joined
     assert "ValidationError" in joined
+
+
+def test_config_load_failure_never_embeds_resolved_secrets(monkeypatch, tmp_path) -> None:
+    """``from_file`` must not chain a ValidationError that carries a secret."""
+    import traceback
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    monkeypatch.setenv("DEERFLOW_LEAK_PROBE", _LEAK_SECRET)
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"A": {"enabled": "$DEERFLOW_LEAK_PROBE"}}, "skills": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ExtensionsConfig.from_file(str(cfg))
+
+    rendered = "".join(traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__))
+    assert _LEAK_SECRET not in str(exc_info.value)
+    assert _LEAK_SECRET not in rendered

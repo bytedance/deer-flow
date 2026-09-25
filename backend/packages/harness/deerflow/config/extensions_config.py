@@ -521,7 +521,10 @@ class ExtensionsConfig(BaseModel):
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
-            raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
+            # Do not embed the cause message or chain it: validation resolves
+            # ``$VAR`` placeholders first, so a ValidationError can carry a
+            # resolved credential in its message *and* in its traceback.
+            raise RuntimeError(f"Failed to load extensions config from {resolved_path} ({type(e).__name__})") from None
 
     @classmethod
     def resolve_env_variables(cls, config: Any) -> Any:

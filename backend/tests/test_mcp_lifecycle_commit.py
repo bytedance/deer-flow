@@ -87,12 +87,14 @@ def test_legacy_file_gains_schema_version_without_counting_existing_servers(tmp_
 def test_caller_supplied_lifecycle_block_is_replaced_by_computed_counters(tmp_path: Path) -> None:
     config_path = tmp_path / "extensions_config.json"
     raw_data = _base_raw()
+    # A complete block (every enabled server recorded); the writer still
+    # recomputes rather than trusting the supplied counters.
     raw_data["mcpLifecycle"] = {
         "schemaVersion": 2,
         "lifecycleId": "lineage-1",
         "configRevision": 40,
         "globalGeneration": 7,
-        "serverGenerations": {"alpha": 9, "retired": 4},
+        "serverGenerations": {"alpha": 9, "beta": 0, "retired": 4},
     }
     _write_raw(config_path, raw_data)
     previous_config = validate_raw_extensions_config(copy.deepcopy(raw_data))
@@ -165,6 +167,34 @@ def test_malformed_existing_block_is_replaced_by_a_fresh_baseline(tmp_path: Path
     }
     assert fresh["lifecycleId"]
     assert committed.lifecycle == parse_mcp_lifecycle(fresh)
+
+
+def test_block_missing_an_enabled_server_is_rebased_not_carried_forward(tmp_path: Path) -> None:
+    """The writer applies the same coverage rule as the reader."""
+    config_path = tmp_path / "extensions_config.json"
+    raw_data = _base_raw()
+    raw_data["mcpLifecycle"] = {
+        "schemaVersion": 2,
+        "lifecycleId": "lineage-old",
+        "configRevision": 9,
+        "globalGeneration": 4,
+        "serverGenerations": {"alpha": 3},  # ``beta`` is enabled but has no entry
+    }
+    _write_raw(config_path, raw_data)
+    previous_config = validate_raw_extensions_config(copy.deepcopy(raw_data))
+    new_config = validate_raw_extensions_config(copy.deepcopy(raw_data))
+
+    committed = _commit(config_path, raw_data, previous_config, new_config)
+
+    fresh = read_raw_extensions_config(config_path)["mcpLifecycle"]
+    assert fresh["lifecycleId"] != "lineage-old"
+    assert _without_lifecycle_id(fresh) == {
+        "schemaVersion": 2,
+        "configRevision": 1,
+        "globalGeneration": 1,
+        "serverGenerations": {"alpha": 1, "beta": 1},
+    }
+    assert committed.lifecycle.lifecycle_id == fresh["lifecycleId"]
 
 
 def test_interceptor_change_advances_only_global_generation(tmp_path: Path) -> None:
