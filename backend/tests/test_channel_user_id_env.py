@@ -9,9 +9,24 @@ Two halves:
   switches execution to the ``bash.exec`` API, which requires image >= 1.9.3
   and abandons the persistent shell session — that channel is reserved for
   request-scoped secrets.
+
+NOTE: ``bash_tool`` also injects the authenticated ``DEERFLOW_USER_ID`` env
+var, but ONLY on the local-sandbox code path (``is_local_sandbox(runtime)``
+is True). The non-local / AioSandbox path does not inject it. On the local
+path the observed command order is::
+
+    export DEERFLOW_USER_ID=...; export DEERFLOW_CHANNEL_USER_ID=...; cd ... && <original command>
+
+i.e. the DEERFLOW_USER_ID prefix is applied *last*, wrapping the already
+identity-prefixed command, so it appears first in the final string. The
+``_mock_user_id`` autouse fixture below pins ``resolve_runtime_user_id`` to a
+fixed value so the local-sandbox command-string assertions in this file stay
+exact and deterministic.
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 from deerflow.sandbox.tools import (
     CHANNEL_USER_ID_ENV,
@@ -24,6 +39,19 @@ _THREAD_DATA = {
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+# Fixed stand-in for the authenticated user id so DEERFLOW_USER_ID assertions
+# (local-sandbox tests only) are deterministic regardless of the runtime
+# shape constructed by each test.
+_FIXED_USER_ID = "test-user-autouse"
+
+
+@pytest.fixture(autouse=True)
+def _mock_user_id(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.resolve_runtime_user_id",
+        lambda runtime: _FIXED_USER_ID,
+    )
 
 
 def _aio_runtime(context: dict) -> SimpleNamespace:
@@ -104,7 +132,10 @@ class TestBashToolChannelIdentityPrefix:
     def test_identity_exported_and_env_stays_none(self, monkeypatch):
         """The id rides the command string; env must stay None so AioSandbox
         keeps the legacy persistent-shell path (regression guard for the
-        #3921/#3922 bash.exec capability gap)."""
+        #3921/#3922 bash.exec capability gap).
+
+        This runs through the non-local (AioSandbox) path, which does not
+        inject DEERFLOW_USER_ID — only the local-sandbox path does."""
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "ou_feishu_123"}))
 
         assert len(sandbox.calls) == 1
@@ -183,7 +214,8 @@ class TestBashToolChannelIdentityPrefix:
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):
         """On Windows the local sandbox may execute via PowerShell/cmd.exe where
         POSIX ``export`` is not valid syntax — skip injection rather than break
-        every IM-channel command."""
+        every IM-channel command. This must also cover DEERFLOW_USER_ID, which
+        is injected via the same `export` mechanism on the local-sandbox path."""
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
             context={"channel_user_id": "ou_1", "thread_id": "t1"},
@@ -198,8 +230,12 @@ class TestBashToolChannelIdentityPrefix:
 
         assert len(sandbox.calls) == 1
         assert "export" not in sandbox.calls[0]["command"]
+        assert "DEERFLOW_USER_ID" not in sandbox.calls[0]["command"]
 
     def test_posix_local_sandbox_gets_prefix(self, monkeypatch):
+        """Local sandbox (POSIX): DEERFLOW_USER_ID wraps the already
+        identity-prefixed command, so it appears first in the final string,
+        followed by DEERFLOW_CHANNEL_USER_ID, then the cwd-prefixed command."""
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
             context={"channel_user_id": "ou_1", "thread_id": "t1"},
@@ -214,5 +250,26 @@ class TestBashToolChannelIdentityPrefix:
 
         assert len(sandbox.calls) == 1
         command = sandbox.calls[0]["command"]
-        assert command.startswith(f"export {CHANNEL_USER_ID_ENV}=ou_1; ")
+        assert command.startswith(f"export DEERFLOW_USER_ID={_FIXED_USER_ID}; export {CHANNEL_USER_ID_ENV}=ou_1; ")
+        assert command.endswith("echo hi")
+
+    def test_local_sandbox_user_id_present_without_channel_id(self, monkeypatch):
+        """Local sandbox with no channel_user_id in context: DEERFLOW_USER_ID
+        should still be injected on its own (isolates the user-id prefix from
+        the channel-identity prefix, which is independently optional)."""
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+            context={"thread_id": "t1"},
+        )
+        sandbox = _CapturingSandbox()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+        bash_tool.func(runtime=runtime, description="test", command="echo hi")
+
+        assert len(sandbox.calls) == 1
+        command = sandbox.calls[0]["command"]
+        assert command.startswith(f"export DEERFLOW_USER_ID={_FIXED_USER_ID}; ")
+        assert CHANNEL_USER_ID_ENV not in command
         assert command.endswith("echo hi")
