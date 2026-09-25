@@ -1243,6 +1243,30 @@ This release closes that milestone with **181 merged pull requests**.
   some later edit. The loader now reads once through a shared
   `file_signature.read_config_with_signature()` helper that signs exactly the
   returned bytes; a racing edit can only cost one extra reload. ([#5848])
+- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
+  worktree whose path contains spaces. `serve.sh` built its worktree-root list
+  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
+  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
+  frontend started from that worktree was never recognised as deer-flow's and
+  the start aborted with "port already in use". The whole path is kept now. ([#5856])
+- **uploads:** A malformed `files[*].size` in a run's message metadata no
+  longer fails the whole run. `UploadsMiddleware` validated every other field
+  of a client-supplied file entry fail-soft but passed `size` straight to
+  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
+  before the model was called — and again on every edit or regenerate of that
+  message, since the entry is carried over verbatim. The size only feeds the
+  human-readable line in `<current_uploads>`; unusable values now fall back to
+  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
+- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
+  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
+  and the Helm chart, but the lockfile records the root package's own version too
+  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
+  documented release step therefore produced a commit whose lock CI rejects:
+  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
+  tree, and with pre-commit installed it broke a step earlier on the
+  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
+  before editing anything when `uv` is missing, instead of leaving a half-bumped
+  working tree behind. Only the root package's version line moves. ([#5859])
 
 ### Security
 
@@ -2404,71 +2428,6 @@ This release closes that milestone with **772 merged pull requests**.
 
 ### Fixed
 
-- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
-  worktree whose path contains spaces. `serve.sh` built its worktree-root list
-  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
-  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
-  frontend started from that worktree was never recognised as deer-flow's and
-  the start aborted with "port already in use". The whole path is kept now. ([#5856])
-- **uploads:** A malformed `files[*].size` in a run's message metadata no
-  longer fails the whole run. `UploadsMiddleware` validated every other field
-  of a client-supplied file entry fail-soft but passed `size` straight to
-  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
-  before the model was called — and again on every edit or regenerate of that
-  message, since the entry is carried over verbatim. The size only feeds the
-  human-readable line in `<current_uploads>`; unusable values now fall back to
-  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
-- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
-  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
-  and the Helm chart, but the lockfile records the root package's own version too
-  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
-  documented release step therefore produced a commit whose lock CI rejects:
-  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
-  tree, and with pre-commit installed it broke a step earlier on the
-  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
-  before editing anything when `uv` is missing, instead of leaving a half-bumped
-  working tree behind. Only the root package's version line moves. ([#5859])
-- **config:** A `config.yaml` edit that lands while the previous edit is still
-  being loaded is no longer lost until the next edit. `get_app_config()`'s
-  loader parsed the file and then hashed it again to record the cache
-  signature, so a write between those two reads left the cache holding the
-  older content under the newer content's signature — a state the signature
-  comparison can never detect. The loader now reads the file once and signs
-  the bytes it parsed; a write that races the load just triggers one more
-  reload on the next call. ([#5848])
-- **config:** `request_admission.requests_per_minute` and `max_queue_size` now
-  accept `$VAR` environment references like every other field. Both are strict
-  integers so a bool or float is still rejected, but `$VAR` substitution always
-  produces a string, so `requests_per_minute: $RPM` failed the whole config load
-  with "Input should be a valid integer" even when `RPM=60`. A decimal literal
-  delivered as a string is now converted before the strict check; any other
-  string is still rejected. ([#5838])
-- **scheduler:** Pausing a scheduled task no longer loses the pause when a
-  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
-  owner — which pausing clears — but read the row without taking SQLite's
-  writer, so a stale read passed the guard and wrote the task back to
-  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
-  the API had reported as paused. The read now takes the writer first, as every
-  other mutating path in that repository does. PostgreSQL was unaffected.
-  ([#5777])
-- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
-  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
-  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
-  `get_event_loop()` failing, but it also caught discovery errors and
-  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
-  up; inside a running loop it also logged a misleading "asyncio.run() cannot
-  be called from a running event loop" traceback instead of the real cause.
-- **uploads:** Deleting an uploaded document no longer deletes the converted
-  Markdown beside it. Conversion names a companion after the document's stem
-  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
-  a document can belong to another document sharing the stem, or to the user:
-  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
-  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
-  document, stay listed, and can be deleted on their own. ([#5673])
-- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
-  acceptance checks. Readable empty files now satisfy `exists` and
-  `file_written` and deterministically fail `non-empty`, instead of remaining
-  UNVERIFIED. ([#5559])
 - **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
   sidebar. In the sidebar's grouped Projects mode the indented nested menus
   kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
