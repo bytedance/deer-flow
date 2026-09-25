@@ -343,6 +343,38 @@ class TestSymlinkEscapes:
         with pytest.raises(FileNotFoundError):
             sandbox.list_dir("/mnt/data/missing")
 
+    def test_list_dir_raises_when_only_nested_virtual_mount_exists(self, tmp_path):
+        nested_mount = tmp_path / "nested"
+        nested_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/deep/child",
+                    local_path=str(nested_mount),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_raises_when_direct_virtual_mount_is_missing(self, tmp_path):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/child",
+                    local_path=str(tmp_path / "missing"),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
     def test_list_dir_empty_directory_returns_empty(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
