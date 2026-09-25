@@ -1945,11 +1945,26 @@ async def start_run(
         #
         # Assigned (not ``setdefault``) and placed after ``strip_internal_context_keys``
         # so a client copy of this internal-only key cannot pre-empt the server's
-        # value with ``False``. Unconditional: ``build_run_config`` rejects a
-        # non-mapping ``context`` and turns ``null`` into ``{}``, so this is always a
-        # dict by here — an ``isinstance`` guard would silently skip the downgrade if
-        # that ever stopped holding, which is the failure this must not have.
-        config.setdefault("context", {})[DISABLE_TOOL_APPROVAL_KEY] = True
+        # value with ``False``. Unconditional within this branch:
+        # ``build_run_config`` rejects a non-mapping ``context`` and turns ``null``
+        # into ``{}``, so this is always a dict by here — an ``isinstance`` guard
+        # would silently skip the downgrade if that ever stopped holding, which is
+        # the failure this must not have.
+        #
+        # Skipped for a resume, and that exclusion is load-bearing rather than an
+        # optimization. Downgrading a resume does not auto-approve it — it makes
+        # the middleware return before re-entering ``interrupt()``, so LangGraph
+        # discards the posted ``decisions`` with no error, leaves the gated
+        # ``tool_calls`` on the original ``AIMessage`` unanswered, and lets the
+        # tools node run them with pre-review args. A ``reject`` would execute.
+        # A caller posting decisions is by definition the human on the other end,
+        # which is exactly the client this downgrade exists to protect from a park
+        # it cannot answer. Reachable because a thread parked by an embedded
+        # ``DeerFlowClient`` on a shared checkpointer is visible here, and
+        # ``GET /threads/{id}.interrupts`` plus ``docs/API.md`` tell clients to
+        # resume it this way.
+        if not isinstance(graph_input, Command):
+            config.setdefault("context", {})[DISABLE_TOOL_APPROVAL_KEY] = True
 
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")

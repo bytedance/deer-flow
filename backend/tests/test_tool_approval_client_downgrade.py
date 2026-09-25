@@ -131,6 +131,43 @@ async def test_gateway_run_auto_approves_when_context_is_null(_stub_app_config):
     assert config["context"][DISABLE_TOOL_APPROVAL_KEY] is True
 
 
+@pytest.mark.asyncio
+async def test_a_resume_is_not_downgraded(_stub_app_config):
+    """Posting decisions must keep approval on, or the decisions are discarded.
+
+    Downgrading a resume does not auto-approve it: the middleware returns before
+    re-entering ``interrupt()``, so LangGraph drops the posted ``decisions`` with
+    no error and leaves the gated calls on the original ``AIMessage``
+    unanswered — the tools node then runs them with pre-review args, turning a
+    ``reject`` into an execution. A caller posting decisions is the human this
+    downgrade exists to protect, so the downgrade must not apply.
+    """
+    config = await _capture_start_run_config(_run_request(command={"resume": {"decisions": [{"type": "reject"}]}}))
+
+    assert DISABLE_TOOL_APPROVAL_KEY not in config.get("context", {})
+
+
+@pytest.mark.asyncio
+async def test_a_resume_with_no_decisions_is_still_not_downgraded(_stub_app_config):
+    """Any ``command.resume`` becomes a ``Command``, whatever it carries."""
+    config = await _capture_start_run_config(_run_request(command={"resume": "plain-value"}))
+
+    assert DISABLE_TOOL_APPROVAL_KEY not in config.get("context", {})
+
+
+@pytest.mark.asyncio
+async def test_an_empty_command_still_downgrades(_stub_app_config):
+    """``command`` without ``resume`` is an ordinary run, not a resume.
+
+    ``start_run`` only builds a ``Command`` when ``command["resume"]`` is not
+    ``None``, so the exclusion must key off the resolved graph input rather than
+    the mere presence of a ``command`` field.
+    """
+    config = await _capture_start_run_config(_run_request(command={"resume": None}))
+
+    assert config["context"][DISABLE_TOOL_APPROVAL_KEY] is True
+
+
 @pytest.mark.parametrize("bad_context", ["not-a-mapping", 123, [1, 2]])
 def test_non_mapping_context_is_rejected_before_the_downgrade(_stub_app_config, bad_context):
     """A non-mapping ``context`` never reaches the downgrade — the run is refused.

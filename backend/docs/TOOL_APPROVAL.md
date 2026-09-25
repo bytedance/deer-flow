@@ -1,9 +1,14 @@
 # Tool-execution approval (human in the loop)
 
 Read this guide before changing tool approval, its middleware ordering, or the
-REST/stream surfaces that carry a pending approval. It supplements the
-[middlewares guide](../packages/harness/deerflow/agents/middlewares/AGENTS.md)
-(entry 37) and the [Gateway module guide](../app/gateway/AGENTS.md).
+REST/stream surfaces that carry a pending approval. It is the depth for entry 37
+of the
+[middlewares guide](../packages/harness/deerflow/agents/middlewares/AGENTS.md),
+which only names the middleware and links here: that chain sits 15 bytes under
+`scripts/check_agent_guidance.py`'s hard limit and `app/gateway/AGENTS.md` 26
+under its own, so neither has room for more than a pointer. Anything that would
+have gone in those guides belongs here, and the middleware's own docstrings
+carry the load-bearing invariants.
 
 A `tools[]` entry may add `interrupt_on` to gate that tool behind a real
 LangGraph `interrupt()`. The run parks in the checkpoint as a pending task and
@@ -52,6 +57,27 @@ and the TUI's own run sites (`tui/app.py::_stream_worker` for the interactive ap
 `tui/cli.py` for the `--print` / `--json` one-shots). A new client that grows an
 approval surface removes its own downgrade; a new client without one must add it.
 Pinned by `tests/test_tool_approval_client_downgrade.py`.
+
+### Never downgrade a resume
+
+A downgrade must not be applied to a run that carries `Command(resume=...)`, and
+this is a correctness rule rather than a tidiness one. Downgrading a resume does
+**not** auto-approve it: `_approval_disabled` makes
+`_last_reviewable_ai_message` return `None`, so `after_model` returns before
+re-entering `interrupt()`. LangGraph then discards the posted resume value with
+no error at all — the gated `tool_calls` stay on the original `AIMessage` with
+nothing answering them, and the `model → tools` edge dispatches exactly those
+unanswered calls with their pre-review args. A `reject` silently becomes an
+execution.
+
+`start_run` therefore skips its assignment when the resolved `graph_input` is a
+`Command`, keyed off the graph input rather than the presence of a `command`
+field (`command: {"resume": null}` is an ordinary run). A caller posting
+decisions is by definition the human this downgrade exists to protect. The path
+is reachable: a thread parked by an embedded `DeerFlowClient` on a shared
+checkpointer is visible over HTTP, and `GET /threads/{id}.interrupts` plus
+`docs/API.md` tell clients to resume it this way. Pinned by
+`test_a_resume_is_not_downgraded` and its two siblings.
 
 ## Middleware placement
 
