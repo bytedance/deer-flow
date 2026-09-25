@@ -181,7 +181,7 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
     ) -> tuple[list[ActionRequest], list[ReviewConfig], list[int]]:
         """Decide which of *tool_calls* need human review, and build their requests.
 
-        Called through :meth:`_run_review_batch`, which wraps it in a
+        Called through :meth:`_review_batch_future`, which wraps it in a
         ``@task`` while inside a real graph run. LangGraph replays
         ``after_model`` from the top on every resume, but only re-derives
         this decision from whatever ``state``/``runtime.context`` looks like

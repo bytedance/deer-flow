@@ -10,6 +10,16 @@ send ``Command(resume=...)``.
 Covered here: the Gateway HTTP path (the web UI, which does not consume
 ``__interrupt__``) and both TUI entry points (interactive + headless). IM
 channels have their own coverage alongside ``ChannelManager._apply_channel_policy``.
+
+Lifetime: each downgrade is temporary, so the test that pins it retires with the
+client that grows an approval surface — the Gateway/web-UI tests when the browser
+consumes ``__interrupt__``, the TUI tests when the app gains an approval prompt
+and a resume submission. Two tests are not tied to a client and stay:
+``test_non_mapping_context_is_rejected_before_the_downgrade`` (why the Gateway
+assigns unconditionally instead of guarding on ``isinstance``) and
+``test_gateway_downgrade_stays_out_of_configurable`` (runtime-only keys belong in
+``context``, not in the checkpoint-persisted ``configurable``). Delete this file
+only once nothing it covers is left.
 """
 
 from __future__ import annotations
@@ -20,12 +30,26 @@ import pytest
 
 from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY
 from deerflow.client import StreamEvent
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.tui.app import DeerFlowTUI
 from deerflow.tui.cli import LaunchPlan
 
 # ----------------------------------------------------------------------
 # Gateway HTTP path
 # ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def _stub_app_config():
+    """Keep the Gateway path independent of a developer-local ``config.yaml``.
+
+    ``start_run`` resolves an ``AppConfig`` per request and turns any failure
+    into a 503, so without this these tests only pass on a machine that happens
+    to have a config file — CI has none, since it is gitignored.
+    """
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+    yield
+    reset_app_config()
 
 
 async def _capture_start_run_config(body, *, auth_source=None):
@@ -78,14 +102,14 @@ def _run_request(**kwargs):
 
 
 @pytest.mark.asyncio
-async def test_gateway_run_auto_approves_by_default():
+async def test_gateway_run_auto_approves_by_default(_stub_app_config):
     config = await _capture_start_run_config(_run_request())
 
     assert config["context"][DISABLE_TOOL_APPROVAL_KEY] is True
 
 
 @pytest.mark.asyncio
-async def test_gateway_run_auto_approves_on_the_context_path():
+async def test_gateway_run_auto_approves_on_the_context_path(_stub_app_config):
     """A caller driving the run via ``context`` gets the same downgrade."""
     config = await _capture_start_run_config(_run_request(config={"context": {"model_name": "gpt-4o"}}))
 
@@ -93,14 +117,14 @@ async def test_gateway_run_auto_approves_on_the_context_path():
 
 
 @pytest.mark.asyncio
-async def test_gateway_run_auto_approves_on_the_configurable_path():
+async def test_gateway_run_auto_approves_on_the_configurable_path(_stub_app_config):
     config = await _capture_start_run_config(_run_request(config={"configurable": {"model_name": "gpt-4o"}}))
 
     assert config["context"][DISABLE_TOOL_APPROVAL_KEY] is True
 
 
 @pytest.mark.asyncio
-async def test_gateway_run_auto_approves_when_context_is_null():
+async def test_gateway_run_auto_approves_when_context_is_null(_stub_app_config):
     """``context: null`` becomes ``{}`` upstream, so the downgrade still lands."""
     config = await _capture_start_run_config(_run_request(config={"context": None}))
 
@@ -108,7 +132,7 @@ async def test_gateway_run_auto_approves_when_context_is_null():
 
 
 @pytest.mark.parametrize("bad_context", ["not-a-mapping", 123, [1, 2]])
-def test_non_mapping_context_is_rejected_before_the_downgrade(bad_context):
+def test_non_mapping_context_is_rejected_before_the_downgrade(_stub_app_config, bad_context):
     """A non-mapping ``context`` never reaches the downgrade — the run is refused.
 
     This is why the downgrade assigns unconditionally instead of guarding on
@@ -123,7 +147,7 @@ def test_non_mapping_context_is_rejected_before_the_downgrade(bad_context):
 
 @pytest.mark.parametrize("section", ["context", "configurable"])
 @pytest.mark.asyncio
-async def test_client_cannot_re_enable_gateway_tool_approval(section):
+async def test_client_cannot_re_enable_gateway_tool_approval(_stub_app_config, section):
     """A client asking for approval does not get it; the server value wins.
 
     The key is internal-only, so a client copy is scrubbed for external callers.
@@ -136,7 +160,7 @@ async def test_client_cannot_re_enable_gateway_tool_approval(section):
 
 
 @pytest.mark.asyncio
-async def test_gateway_downgrade_stays_out_of_configurable():
+async def test_gateway_downgrade_stays_out_of_configurable(_stub_app_config):
     """``configurable`` is persisted in checkpoints; runtime flags do not belong.
 
     Mirrors the placement rule for the other context-only runtime keys.
