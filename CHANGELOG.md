@@ -964,7 +964,7 @@ This release closes that milestone with **765 merged pull requests**.
   older content under the newer content's signature — a state the signature
   comparison can never detect. The loader now reads the file once and signs
   the bytes it parsed; a write that races the load just triggers one more
-  reload on the next call.
+  reload on the next call. ([#5848])
 - **scheduler:** Pausing a scheduled task no longer loses the pause when a
   dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
   owner — which pausing clears — but read the row without taking SQLite's
@@ -4428,4 +4428,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
+[#5848]: https://github.com/bytedance/deer-flow/pull/5848
 
