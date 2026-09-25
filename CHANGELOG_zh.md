@@ -731,7 +731,7 @@
   `UploadsMiddleware` 对客户端提供的文件条目的其他字段都做了容错校验，唯独把 `size` 直接交给
   `int()`，因此 `"abc"` 或列表这样的值会在调用模型之前从 `before_agent` 抛出——而且由于该条目
   会被原样带入，之后每次编辑或重新生成这条消息都会再次失败。该字段只用于 `<current_uploads>`
-  里的可读大小；现在无法使用的值会回退为 `0`，与缺失时一致，数字字符串仍然有效。
+  里的可读大小；现在无法使用的值会回退为 `0`，与缺失时一致，数字字符串仍然有效。([#5855])
 - **配置：** 在上一次编辑仍在加载时落盘的 `config.yaml` 编辑，不再要等到下一次编辑才生效。
   `get_app_config()` 的加载器先解析文件，再重新读取一遍来计算缓存签名，因此夹在两次读取
   之间的写入会让缓存以较新内容的签名保存较旧的内容，而签名比较永远无法发现这种状态。
@@ -3589,3 +3589,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
 [#5838]: https://github.com/bytedance/deer-flow/pull/5838
 [#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5855]: https://github.com/bytedance/deer-flow/pull/5855

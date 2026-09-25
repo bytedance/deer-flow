@@ -964,7 +964,7 @@ This release closes that milestone with **765 merged pull requests**.
   before the model was called — and again on every edit or regenerate of that
   message, since the entry is carried over verbatim. The size only feeds the
   human-readable line in `<current_uploads>`; unusable values now fall back to
-  `0`, the same as a missing size, while numeric strings keep working.
+  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
 - **config:** A `config.yaml` edit that lands while the previous edit is still
   being loaded is no longer lost until the next edit. `get_app_config()`'s
   loader parsed the file and then hashed it again to record the cache
@@ -4445,4 +4445,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
 [#5838]: https://github.com/bytedance/deer-flow/pull/5838
 [#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5855]: https://github.com/bytedance/deer-flow/pull/5855
 
