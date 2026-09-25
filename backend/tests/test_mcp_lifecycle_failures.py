@@ -75,6 +75,8 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_mcp_applied_lifecycle",
+    "_mcp_applied_lifecycle_invalid",
 )
 
 _CLEARED_GLOBALS = (
@@ -88,6 +90,7 @@ _CLEARED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_mcp_applied_lifecycle",
 )
 
 _INVALID_BLOCK_CASES = {
@@ -122,6 +125,7 @@ def cache_globals():
     for name in _CLEARED_GLOBALS:
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
+    cache_module._mcp_applied_lifecycle_invalid = False
     cache_module._init_lock = threading.RLock()
     cache_module._init_condition = threading.Condition(cache_module._init_lock)
     cache_module._initializing_generation = None
@@ -621,10 +625,10 @@ def test_committed_but_not_reconciled_retires_local_state(cache_globals, monkeyp
     pool, session_a, _session_b = _publish_with_sessions(monkeypatch, cfg, owner_loop)
     binding_a = pool.active_binding("A")
 
-    def _boom(_changed):
+    def _boom(_committed):
         raise RuntimeError("fence exploded")
 
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", _boom)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _boom)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
     _allow_router_admin(monkeypatch)
 
@@ -799,10 +803,10 @@ def test_fence_failure_invalidates_outside_the_config_lock(cache_globals, monkey
     session_a = _open_session(owner_loop, pool, "A")
     binding_a = pool.active_binding("A")
 
-    def _boom(_changed):
+    def _boom(_committed):
         raise RuntimeError("fence exploded")
 
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", _boom)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _boom)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
 
     errors = _run_writer_and_probe_config_lock(

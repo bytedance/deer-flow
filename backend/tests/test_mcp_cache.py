@@ -60,6 +60,9 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    # Stage 2 lifecycle baseline: same isolation requirement as the PR2 slice.
+    "_mcp_applied_lifecycle",
+    "_mcp_applied_lifecycle_invalid",
 )
 
 
@@ -69,10 +72,13 @@ def _write_extensions_config(
     *,
     skills: dict | None = None,
     interceptors: list | str | None = None,
+    lifecycle: dict | None = None,
 ) -> None:
     payload: dict = {"mcpServers": servers, "skills": skills or {}}
     if interceptors is not None:
         payload["mcpInterceptors"] = interceptors
+    if lifecycle is not None:
+        payload["mcpLifecycle"] = lifecycle
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -99,9 +105,11 @@ def cache_globals():
         "_mcp_applied_interceptors",
         "_mcp_applied_path",
         "_mcp_applied_signature",
+        "_mcp_applied_lifecycle",
     ):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
+    cache_module._mcp_applied_lifecycle_invalid = False
     # threading.Lock is safe across threads and does not bind to event loops,
     # so each test gets fresh coordination state for isolation.
     cache_module._init_lock = threading.RLock()
@@ -1419,3 +1427,233 @@ class TestLazyInitializationFailure:
 
         assert len(calls) == 1
         assert cache_module._cache_initialized is True
+# ---------------------------------------------------------------------------
+# Stage 2 / Task 7: shared lifecycle publish gate
+# ---------------------------------------------------------------------------
+
+
+def _lifecycle_block(config_revision: int, global_generation: int, server_generations: dict[str, int]) -> dict:
+    return {
+        "schemaVersion": 1,
+        "configRevision": config_revision,
+        "globalGeneration": global_generation,
+        "serverGenerations": server_generations,
+    }
+
+
+class _RecordingSessionPool:
+    """Fake pool that records the sessions discovery opened and its teardown."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.sessions: list[object] = []
+
+    async def get_session(self, server_name, scope_key, connection):
+        session = object()
+        self.sessions.append(session)
+        return session
+
+    def retire_all(self) -> None:
+        self.retired = True
+
+    def close_all_sync(self) -> None:
+        self.closed = True
+
+
+def _install_lifecycle_discovery_pool(monkeypatch, session_pool_module) -> object:
+    """Swap in the recording pool and return the pool installed right now."""
+    real_reset = session_pool_module.reset_session_pool
+    monkeypatch.setattr(session_pool_module, "MCPSessionPool", _RecordingSessionPool)
+    real_reset()
+    return session_pool_module.get_session_pool()
+
+
+def test_lifecycle_advance_during_discovery_discards_and_retires_the_pool(cache_globals, monkeypatch, tmp_path):
+    """A lifecycle bump during discovery must void a byte-identical discovery result.
+
+    The publish gate must compare against the version captured *before*
+    discovery; reading a version only after discovery completes and treating it
+    as the start identity would publish tools built under the superseded
+    generation (spec section 12 D5).
+    """
+    from deerflow.mcp import session_pool as session_pool_module
+
+    old_pool = _install_lifecycle_discovery_pool(monkeypatch, session_pool_module)
+
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"srv1": _server()}
+    _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(1, 0, {"srv1": 0}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        pool = session_pool_module.get_session_pool()
+        await pool.get_session("srv1", "thread-1", {"transport": "stdio", "command": "npx", "args": []})
+        # Advance the shared generation during discovery, leaving the effective
+        # MCP content byte-identical.
+        _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(2, 0, {"srv1": 1}))
+        return ["stale-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        result = asyncio.run(cache_module.initialize_mcp_tools())
+        assert result == []
+        assert cache_module._cache_initialized is False
+        assert cache_module._mcp_tools_cache is None
+        assert old_pool.closed is True
+        assert session_pool_module.get_session_pool() is not old_pool
+    finally:
+        session_pool_module.reset_session_pool()
+
+
+def test_global_generation_advance_during_discovery_discards_the_result(cache_globals, monkeypatch, tmp_path):
+    """A whole-pool generation bump during discovery must also void the result."""
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"srv1": _server()}
+    _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(1, 0, {"srv1": 0}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls = 0
+
+    async def _fake_tools(**_kwargs):
+        nonlocal calls
+        calls += 1
+        _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(2, 1, {"srv1": 0}))
+        return ["stale-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+    assert result == []
+    assert cache_module._cache_initialized is False
+    assert calls == 1
+
+
+def test_unchanged_lifecycle_during_discovery_still_publishes(cache_globals, monkeypatch, tmp_path):
+    """A discovery whose lifecycle is unchanged must still publish (including both None)."""
+    cfg = tmp_path / "extensions_config.json"
+    block = _lifecycle_block(1, 0, {"srv1": 0})
+    _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": True}}, lifecycle=block)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls = 0
+
+    async def _fake_tools(**_kwargs):
+        nonlocal calls
+        calls += 1
+        _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": False}}, lifecycle=block)
+        return ["loaded-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+    assert result == ["loaded-tools"]
+    assert cache_module._cache_initialized is True
+    assert calls == 1
+
+
+def test_legacy_none_lifecycle_during_discovery_still_publishes(cache_globals, monkeypatch, tmp_path):
+    """Both-None (legacy) is an unchanged lifecycle and must publish."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": True}})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        _write_extensions_config(cfg, {"srv1": _server()}, skills={"skill-a": {"enabled": False}})
+        return ["loaded-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+    assert result == ["loaded-tools"]
+    assert cache_module._cache_initialized is True
+
+
+def test_config_revision_only_commit_during_discovery_still_publishes(cache_globals, monkeypatch, tmp_path):
+    """``configRevision`` is not lifecycle identity (spec section 12 D3-2).
+
+    A concurrent skills-router commit during discovery advances only
+    ``configRevision``: the effective MCP content and the lifecycle identity are
+    unchanged, so the discovery result must still publish and the pool must not
+    be retired.
+    """
+    from deerflow.config.extensions_config import validate_raw_extensions_config
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.commit import commit_extensions_config
+
+    old_pool = _install_lifecycle_discovery_pool(monkeypatch, session_pool_module)
+
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"srv1": _server()}
+    _write_extensions_config(
+        cfg,
+        servers,
+        skills={"skill-a": {"enabled": True}},
+        lifecycle=_lifecycle_block(1, 0, {"srv1": 0}),
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        # A real commit with identical servers and interceptors: only
+        # ``configRevision`` moves.
+        raw = json.loads(cfg.read_text(encoding="utf-8"))
+        previous = validate_raw_extensions_config(dict(raw))
+        raw["skills"]["skill-a"]["enabled"] = False
+        new_config = validate_raw_extensions_config(dict(raw))
+        commit_extensions_config(
+            config_path=cfg,
+            raw_data=raw,
+            previous_config=previous,
+            new_config=new_config,
+        )
+        pool = session_pool_module.get_session_pool()
+        await pool.get_session("srv1", "thread-1", {"transport": "stdio", "command": "npx", "args": []})
+        return ["loaded-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        result = asyncio.run(cache_module.initialize_mcp_tools())
+        assert result == ["loaded-tools"]
+        assert cache_module._cache_initialized is True
+        assert old_pool.closed is False, "a configRevision-only commit must not retire the pool"
+        assert session_pool_module.get_session_pool() is old_pool
+        assert json.loads(cfg.read_text(encoding="utf-8"))["mcpLifecycle"]["configRevision"] == 2
+    finally:
+        session_pool_module.reset_session_pool()
+
+
+def test_introduced_lifecycle_block_during_discovery_discards_the_result(cache_globals, monkeypatch, tmp_path):
+    """A block introduced mid-discovery is a new identity and must not publish."""
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"srv1": _server()}
+    _write_extensions_config(cfg, servers)  # legacy: no block yet
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(1, 0, {"srv1": 0}))
+        return ["stale-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+    assert result == []
+    assert cache_module._cache_initialized is False
+
+
+def test_lifecycle_becoming_invalid_during_discovery_discards_the_result(cache_globals, monkeypatch, tmp_path):
+    """A block that becomes unverifiable mid-discovery must not publish."""
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"srv1": _server()}
+    _write_extensions_config(cfg, servers, lifecycle=_lifecycle_block(1, 0, {"srv1": 0}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        _write_extensions_config(cfg, servers, lifecycle="not-an-object")
+        return ["stale-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+    assert result == []
+    assert cache_module._cache_initialized is False
