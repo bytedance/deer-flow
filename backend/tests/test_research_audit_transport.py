@@ -181,8 +181,9 @@ def test_redirects_keep_the_validated_address_boundary(companion, network, entry
     assert degraded is (redirect in {"private", "get-private"})
     if redirect in {"same", "cross"}:
         target = HOST if redirect == "same" else OTHER_HOST
-        # urllib follows a 302 from HEAD with GET; both redirected stages
-        # must still use the validated address and original Host header.
+        # urllib follows a 302 from HEAD with GET. Every hop must dial only
+        # the validated address; on a cross-host hop, the Host header is
+        # the redirect target's host.
         assert network.public == [("HEAD", "/source", HOST), ("GET", "/final", target), ("GET", "/source", HOST), ("GET", "/final", target)]
         assert all(count == 1 for count in network.resolutions.values())
 
