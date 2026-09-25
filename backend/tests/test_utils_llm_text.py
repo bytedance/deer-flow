@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from deerflow.utils.llm_text import (
     extract_response_text,
     strip_markdown_code_fence,
@@ -63,6 +67,16 @@ def test_strip_think_blocks_removes_complete_then_truncates_dangling() -> None:
 def test_strip_think_blocks_removes_complete_and_keeps_dangling_when_disabled() -> None:
     result = strip_think_blocks("<think>done</think>keep<think>trunc", truncate_unclosed=False)
     assert result == "keep<think>trunc"
+
+
+@pytest.mark.parametrize("tag", ["<think>", "<think"])
+@pytest.mark.parametrize("truncate_unclosed", [True, False])
+def test_strip_think_blocks_handles_many_unclosed_tags_in_bounded_time(tag: str, truncate_unclosed: bool) -> None:
+    text = "answer" + tag * 12_000
+    expected = "answer" if tag.endswith(">") and truncate_unclosed else text
+    start = time.perf_counter()
+    assert strip_think_blocks(text, truncate_unclosed=truncate_unclosed) == expected
+    assert time.perf_counter() - start < 1.0
 
 
 # ---------------------------------------------------------------------------
