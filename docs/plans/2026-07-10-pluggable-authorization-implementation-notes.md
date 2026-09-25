@@ -642,7 +642,37 @@ Phase 1 最低验证要求：
 - **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻风险已记录但未改：同一文件里的
   `_get_route_authorization_config()`（model / skill / sandbox 路由门）对读取失败仍一律回退到
   disabled，存在同类窗口；如需同样收紧应另开一条（影响面覆盖全部路由门，超出本轮范围）。
-- **延期：** 不变（工具链路 PR2、页面切片 PR3）。
+
+### 2026-09-25 — Phase 5 / PR1 review round 3（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`a891e704`）追加一条 P3 —— round 2 的 P2 修复只挡住了
+  「`reasons` 不是 `Iterable`」，遍历本身仍在 provider 校验的 `try` 之外：生成器或自定义可迭代
+  对象可以满足 `isinstance(reasons, Iterable)`，却在 `__iter__`/`__next__` 中抛错，于是一次明确
+  拒绝仍会以未捕获错误（500）逃逸，而不是按配置的授权失败退化为 `authz.denied`。
+- **决策（采纳审查建议的第一种修法）：** `_deny_reason_code` 的**整段提取**（取属性、`Iterable`
+  判定、遍历）包进一个窄 `try/except Exception`，任何异常都降级为 `authz.denied`，并记一条
+  `logger.debug(..., exc_info=True)`；函数签名、返回值域与「拒绝仍是拒绝」的语义不变。
+  不采纳第二种修法（把 `reasons` 校验成声明的具体 list 形状）：合法 provider 返回 tuple 或生成器
+  形态的 `AuthzReason` 时，那会把**本来可读**的拒绝码一并降级为 `authz.denied`，属无谓的行为收窄；
+  「`Iterable` 判定 + 全函数提取」既保留合法可迭代对象，又对抛错对象收敛。
+- **证据：** 红先验证（修复前必须变红）——管理器层
+  `test_malformed_reasons_keep_the_denial[True|False-reasons2|reasons3]`（4 项）与异步
+  `test_async_malformed_reasons_keep_the_denial[reasons2|reasons3]`（2 项）修复前抛
+  `RuntimeError: reasons.__iter__ failed` / `RuntimeError: reasons.__next__ failed`
+  （`plugin_authz.py:127`），修复后降级为
+  `PluginAuthorizationError(reason_code="authz.denied")`；新增的 `_ExplodingReasons` 覆盖两种形态：
+  `__iter__` 直接抛，以及先产出一个非 `AuthzReason` 再从 `__next__` 抛。路由层
+  `test_unreadable_reasons_deny_instead_of_erroring[True|False]` 修复前让异常穿出路由（未捕获），
+  修复后 `403` 且 handler 未被调用——两种 `fail_closed` 取值下都保持拒绝
+  （`fail_closed: false` 不得把明确拒绝翻成放行）。验证：两个插件测试文件 115 项、
+  `tests/blocking_io` 163 项、`ruff check` 与 `ruff format --check` 全绿。
+- **兼容性：** 拒绝码提取的返回值域不变（`str`，无法读取时为 `authz.denied`）；只有「可迭代对象在
+  遍历时抛错」这一种输入从 500 变为降级后的 403。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻同类风险已记录但未改：
+  `deerflow/authz/adapter.py` 的 `_to_guardrail` 仍直接遍历 `d.reasons`，而消费它的
+  `GuardrailMiddleware` 把 provider 异常按 `fail_closed` 处理，因此 `fail_closed: false` 时
+  「显式拒绝 + reasons 遍历抛错」可能被翻成放行；该文件不在本 PR 面内（工具链路），
+  如需同样收敛应随 PR2 一并处理。
 
 ### 新记录模板
 

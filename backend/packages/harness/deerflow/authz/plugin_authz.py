@@ -26,9 +26,10 @@ Semantics, uniform across every function here:
   :class:`AuthzDecision`, or one whose ``allow`` is not a real ``bool``) or a
   missing principal follows ``fail_closed``: raise the same error, or log a
   warning and allow. This mirrors the sandbox / route-scoped semantics — not the
-  tool filter's silent-set behavior. A denial whose ``reasons`` cannot be read is
-  *not* malformed: the verdict stands and only its ``reason_code`` degrades to
-  ``authz.denied``, so a bad reason list can never turn a deny into an allow.
+  tool filter's silent-set behavior. A denial whose ``reasons`` cannot be read —
+  non-iterable, or an iterable that raises while consumed — is *not* malformed:
+  the verdict stands and only its ``reason_code`` degrades to ``authz.denied``, so
+  a bad reason list can never turn a deny into an allow or into a ``500``.
 
 Execution placement: provider *discovery* is offloaded on the async path while
 provider *construction* stays on the calling loop, because a valid async
@@ -115,18 +116,24 @@ def _deny_reason_code(decision: AuthzDecision) -> str:
     """Extract the provider's machine-readable denial code, tolerating bad ``reasons``.
 
     ``AuthzDecision`` is a plain dataclass, so a provider can return a verdict
-    whose ``reasons`` is not an iterable of :class:`AuthzReason`. The verdict is
-    still a valid denial (``allow`` is a real ``bool``, and this runs only after
-    that check), so the denial stands and only the informative code degrades:
-    extraction must never raise, or a denial would escape as an unhandled error
-    instead of the configured authorization failure (a ``403``).
+    whose ``reasons`` is not an iterable of :class:`AuthzReason` — or is an
+    iterable that raises from ``__iter__``/``__next__`` while being consumed. The
+    verdict is still a valid denial (``allow`` is a real ``bool``, and this runs
+    only after that check), so the denial stands and only the informative code
+    degrades: extraction must never raise, or a denial would escape as an
+    unhandled error instead of the configured authorization failure (a ``403``).
     """
-    reasons = decision.reasons
-    if not isinstance(reasons, Iterable):
-        return "authz.denied"
-    for reason in reasons:
-        if isinstance(reason, AuthzReason) and isinstance(reason.code, str) and reason.code:
-            return reason.code
+    try:
+        reasons = decision.reasons
+        if not isinstance(reasons, Iterable):
+            return "authz.denied"
+        for reason in reasons:
+            if isinstance(reason, AuthzReason) and isinstance(reason.code, str) and reason.code:
+                return reason.code
+    except Exception:
+        # A generator or custom iterable passes the ``Iterable`` check and can
+        # still raise while iterated; the verdict stays a denial.
+        logger.debug("Authorization denial carried unreadable reasons", exc_info=True)
     return "authz.denied"
 
 

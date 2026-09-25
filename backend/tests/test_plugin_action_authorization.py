@@ -39,9 +39,10 @@ class _RecordingProvider:
 
     name = "recording"
 
-    def __init__(self, *, allow: bool = True, fail: bool = False) -> None:
+    def __init__(self, *, allow: bool = True, fail: bool = False, reasons: object = None) -> None:
         self._allow = allow
         self._fail = fail
+        self._reasons = reasons
 
     def authorize(self, request):  # pragma: no cover - an async route must not use this
         raise AssertionError("the async plugin path must not call authorize()")
@@ -50,10 +51,19 @@ class _RecordingProvider:
         if self._fail:
             raise RuntimeError("provider failed")
         _DECISIONS.append(request)
-        return AuthzDecision(allow=self._allow, reasons=[] if self._allow else [AuthzReason(code="authz.denied")])
+        reasons = self._reasons if self._reasons is not None else ([] if self._allow else [AuthzReason(code="authz.denied")])
+        return AuthzDecision(allow=self._allow, reasons=reasons)
 
     def filter_resources(self, principal, resource_type, candidates):  # pragma: no cover
         raise AssertionError("the action path must not batch-filter")
+
+
+class _ExplodingReasons:
+    """An iterable that passes the decision layer's ``Iterable`` check, then raises while read."""
+
+    def __iter__(self):
+        yield "not-a-reason"
+        raise RuntimeError("reasons.__next__ failed")
 
 
 @pytest.fixture(autouse=True)
@@ -352,6 +362,25 @@ def test_malformed_allow_follows_fail_open(plugin_app, monkeypatch):
 
     assert http.post(ACTION_URL, json={"text": "hello"}).status_code == 200
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fail_closed", [True, False])
+def test_unreadable_reasons_deny_instead_of_erroring(plugin_app, monkeypatch, fail_closed: bool):
+    """Review P3: a denial whose ``reasons`` raise while being read is still a denial.
+
+    The verdict is a valid deny; only the informative ``reason_code`` cannot be
+    read. Extracting it must not let the error escape as an unhandled 500, and
+    must not let ``fail_closed: false`` turn the explicit deny into an allow.
+    """
+    http, calls, _ = plugin_app
+    class_path = _recording_provider_class_path(monkeypatch, "plugin_action_exploding_reasons_provider")
+    _use_authorization(fail_closed=fail_closed, provider_use=class_path, provider_config={"allow": False, "reasons": _ExplodingReasons()})
+
+    response = http.post(ACTION_URL, json={"text": "hello"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Plugin action not permitted for your role."}
+    assert calls == []
 
 
 def _extensions(*, enabled: bool) -> object:

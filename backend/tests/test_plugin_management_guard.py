@@ -91,6 +91,27 @@ class _RecordingProvider:
         return [candidate for candidate in candidates if self._allow]
 
 
+class _ExplodingReasons:
+    """An iterable that satisfies ``isinstance(reasons, Iterable)`` and raises while consumed.
+
+    Two ``__iter__`` shapes: raising outright, or yielding a non-``AuthzReason``
+    and then raising from ``__next__``. Both are reusable — every ``__iter__``
+    call builds a fresh generator.
+    """
+
+    def __init__(self, *, raises_while_iterating: bool = False) -> None:
+        self._raises_while_iterating = raises_while_iterating
+
+    def __iter__(self):
+        if not self._raises_while_iterating:
+            raise RuntimeError("reasons.__iter__ failed")
+        return self._explode()
+
+    def _explode(self):
+        yield "not-a-reason"
+        raise RuntimeError("reasons.__next__ failed")
+
+
 def _authorization_config(*, enabled: bool = True, fail_closed: bool = True, roles: dict | None = None, provider_use: str = RBAC, provider_config: dict | None = None, default_role: str = "user") -> AuthorizationConfig:
     if provider_config is None:
         provider_config = {"roles": roles or {}} if provider_use == RBAC else {}
@@ -406,15 +427,17 @@ def test_a_non_bool_allow_is_a_malformed_decision(monkeypatch, allow, fail_close
         enforce_plugin_management(principal=_principal(), app_config=config, namespace=NAMESPACE, write=True)
 
 
-@pytest.mark.parametrize("reasons", [None, 5])
+@pytest.mark.parametrize("reasons", [None, 5, _ExplodingReasons(), _ExplodingReasons(raises_while_iterating=True)])
 @pytest.mark.parametrize("fail_closed", [True, False])
 def test_malformed_reasons_keep_the_denial(monkeypatch, reasons, fail_closed):
-    """Review P2: a denied verdict with unusable ``reasons`` still denies.
+    """Review P2/P3: a denied verdict with unusable ``reasons`` still denies.
 
-    ``AuthzDecision`` is a plain dataclass, so ``reasons`` can be any object.
-    The verdict is a valid denial (``allow`` is a real ``bool``), so the denial
-    stands and only the informative code degrades: extracting it must not raise,
-    or a denial would escape as an unhandled error instead of ``403``.
+    ``AuthzDecision`` is a plain dataclass, so ``reasons`` can be any object —
+    including one that passes the ``Iterable`` check and then raises from
+    ``__iter__``/``__next__``. The verdict is a valid denial (``allow`` is a
+    real ``bool``), so the denial stands and only the informative code degrades:
+    extracting it must not raise, or a denial would escape as an unhandled error
+    instead of ``403``.
     """
     _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=False, reasons=reasons)))
 
@@ -426,7 +449,7 @@ def test_malformed_reasons_keep_the_denial(monkeypatch, reasons, fail_closed):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reasons", [None, 5])
+@pytest.mark.parametrize("reasons", [None, 5, _ExplodingReasons(), _ExplodingReasons(raises_while_iterating=True)])
 async def test_async_malformed_reasons_keep_the_denial(monkeypatch, reasons):
     _use_provider(monkeypatch, _RecordingProvider(decision=AuthzDecision(allow=False, reasons=reasons)))
 
