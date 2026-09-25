@@ -80,6 +80,29 @@ class TestThreadDataMiddleware:
         assert result is not None
         assert runtime.context is None
 
+    def test_before_agent_preserves_human_message_fields_beyond_run_metadata(self, tmp_path):
+        # Regression for #5822: before_agent rebuilt the trailing HumanMessage from
+        # content/id/name/additional_kwargs only, silently dropping response_metadata
+        # (and any other field the caller set).
+        from langchain_core.messages import HumanMessage
+
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        message = HumanMessage(
+            content="hello",
+            id="message-1",
+            response_metadata={"source": "gateway"},
+        )
+
+        result = middleware.before_agent(
+            state={"messages": [message]},
+            runtime=Runtime(context={"thread_id": "thread-1", "run_id": "run-1"}),
+        )
+
+        updated = result["messages"][-1]
+        assert updated.response_metadata == {"source": "gateway"}
+        assert updated.additional_kwargs["run_id"] == "run-1"
+        assert updated.name == "user-input"
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(
