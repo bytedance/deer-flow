@@ -22,6 +22,7 @@ directly and catch ``NotImplementedError`` for unsupported backends -- no more
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import threading
@@ -239,6 +240,25 @@ class DeerMem(MemoryManager):
         except QueueFull as e:
             logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
+    async def aadd(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        """Offload enqueue (including the uncached manifest peek) off the event loop."""
+        await asyncio.to_thread(
+            self.add,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
+
     def add_nowait(
         self,
         thread_id: str,
@@ -270,6 +290,23 @@ class DeerMem(MemoryManager):
             )
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
+
+    async def aadd_nowait(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        """Offload the summarization emergency flush off the event loop."""
+        await asyncio.to_thread(
+            self.add_nowait,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
 
     def _prepare_update(
         self,
@@ -543,14 +580,49 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        # Cancel same-scope pending extraction before and after clearing so a
-        # stale debounce timer cannot rewrite facts during/after the clear.
-        self.cancel_by_agent(agent_name, user_id=user_id)
-        if agent_name is None:
-            memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
+        # Snapshot pending work first, then consume it only after the durable
+        # clear commits. Cancelling/consuming first would make a failed clear
+        # (lock timeout, exhausted retries) drop retryable facts. A debounce
+        # worker can still dequeue and fail the LLM while storage is in
+        # flight; that failure does not consume until a newer generation
+        # exists, so we consume this snapshot after commit even if the queue
+        # is already empty. In-flight pre-clear writes are fenced by the
+        # generation bump. The consume, queue cancel, exclusion promote, and
+        # consume of in-flight admits (sequence assigned, peek not finished)
+        # run in the same locked publish as that bump -- before sidecar
+        # metadata cleanup -- so a concurrent add cannot peek the new
+        # generation while exclusions are still empty, and a waiter that
+        # later observes the new generation cannot enqueue pre-clear
+        # messages as post-clear work.
+        resolved_agent = None if agent_name is None else _resolve_agent_name(agent_name)
+        published = False
+
+        def publish_pre_clear_coverage() -> None:
+            nonlocal published
+            if not published:
+                published = True
+                self._queue.consume_pre_clear_feeds(pending)
+                self.cancel_by_agent(agent_name, user_id=user_id)
+                if resolved_agent is None:
+                    self._updater.promote_clear_exclusions(user_id=user_id, all_agents=True)
+                else:
+                    self._updater.promote_clear_exclusions(user_id=user_id, agent_name=resolved_agent)
+            # Always run, including the second publish before the lock drops,
+            # so a caller that registered after the first consume is still
+            # caught while peek is blocked.
+            if resolved_agent is None:
+                self._queue.consume_inflight_enqueues(user_id=user_id, all_agents=True)
+            else:
+                self._queue.consume_inflight_enqueues(resolved_agent, user_id=user_id, all_agents=False)
+
+        if resolved_agent is None:
+            pending = self._queue.snapshot_by_agent(user_id=user_id, all_agents=True)
+            memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id, after_commit=publish_pre_clear_coverage))
         else:
-            memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
-        self.cancel_by_agent(agent_name, user_id=user_id)
+            pending = self._queue.snapshot_by_agent(resolved_agent, user_id=user_id, all_agents=False)
+            memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=resolved_agent, user_id=user_id, after_commit=publish_pre_clear_coverage))
+        if not published:
+            publish_pre_clear_coverage()
         return _compat_document(memory_data)
 
     def import_memory(

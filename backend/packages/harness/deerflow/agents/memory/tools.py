@@ -121,7 +121,7 @@ def memory_add_tool(
         # Fast-path duplicate rejection to spare a write attempt in the common
         # case. The authoritative check lives in the backend's create critical
         # section (DeerMem re-checks against a fresh snapshot on every
-        # revision-conflict retry in create_memory_fact), so concurrent tool
+        # revision or clear-generation retry in create_memory_fact), so concurrent tool
         # calls for the same user cannot both store the same content.
         if any(_memory_content_key(str(fact.get("content", ""))) == content_key for fact in existing_facts):
             return json.dumps({"error": "Duplicate fact"})
