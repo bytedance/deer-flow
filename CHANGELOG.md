@@ -493,6 +493,22 @@ This release closes that milestone with **765 merged pull requests**.
 
 #### Models & integrations
 
+- **models:** Optional per-model `reasoning:` capability contract beside the
+  legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
+  `unsupported | optional | required`, the accepted effort `values` with
+  `aliases`, `default`, and serialization `path`, the payload `dialect`, and the
+  reasoning `history` requirement. Every model-creation path enforces one
+  normalized policy, so required-thinking models never receive a synthesized
+  disable payload and unsupported effort values never reach the provider;
+  `/api/models` projects the contract as `reasoning`, the composer derives its
+  effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
+  `low/high/max` effort control. Custom effort paths reject leftover generic
+  effort keys, and the chat UI drops remembered contract-only levels when
+  switching to legacy models. Existing Ollama `reasoning: true` / `false` and
+  `low|medium|high` settings remain native provider options and stay in the
+  assembly fingerprint. Profiles without a mapping contract keep their existing
+  provider behavior.
+  ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
   screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
@@ -941,6 +957,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** Pausing a scheduled task no longer loses the pause when a
+  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
+  owner — which pausing clears — but read the row without taking SQLite's
+  writer, so a stale read passed the guard and wrote the task back to
+  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
+  the API had reported as paused. The read now takes the writer first, as every
+  other mutating path in that repository does. PostgreSQL was unaffected.
+  ([#5777])
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
@@ -2792,6 +2816,13 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
+- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
+  first-boot requests both create an admin. The handler counted admins in one
+  session and created the account in another, so two requests with different
+  emails both saw an empty system; the loser now gets the documented
+  `409 system_already_initialized`. The count and the insert share one
+  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
+  PostgreSQL advisory lock). ([#5776])
 - **uploads:** Document conversion no longer re-opens the upload by name. The
   Gateway converted the committed file and the embedded client converted the
   copy it had just placed in the thread's uploads directory, so a sandbox that
@@ -4167,6 +4198,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5066]: https://github.com/bytedance/deer-flow/pull/5066
 [#5069]: https://github.com/bytedance/deer-flow/pull/5069
 [#5071]: https://github.com/bytedance/deer-flow/pull/5071
+[#5073]: https://github.com/bytedance/deer-flow/issues/5073
 [#5074]: https://github.com/bytedance/deer-flow/pull/5074
 [#5076]: https://github.com/bytedance/deer-flow/pull/5076
 [#5077]: https://github.com/bytedance/deer-flow/pull/5077
@@ -4371,3 +4403,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5776]: https://github.com/bytedance/deer-flow/pull/5776
+[#5777]: https://github.com/bytedance/deer-flow/pull/5777
+

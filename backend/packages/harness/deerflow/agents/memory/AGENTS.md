@@ -1,5 +1,11 @@
 ### Memory System
 
+DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
+`memory_update` after formatting, without touching its human data message or
+cached templates. This is the live summary/fact extraction path; do not wire
+extensions only to the legacy `FACT_EXTRACTION_PROMPT` alias. Settings belong
+to the constructed backend and require backend recreation to change.
+
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
 #### Main components

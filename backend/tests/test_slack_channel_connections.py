@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
@@ -133,5 +134,137 @@ def test_slack_http_events_mode_is_rejected(monkeypatch, caplog):
         assert channel._running is False
         assert channel._web_client is None
         assert "Slack HTTP Events mode is not supported" in caplog.text
+
+    anyio.run(go)
+
+
+def test_slack_socket_mode_connect_failure_is_logged(monkeypatch, caplog):
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    class FailingSocketModeClient:
+        def __init__(self, *, app_token, web_client):
+            self.socket_mode_request_listeners = []
+
+        def connect(self):
+            raise RuntimeError("apps.connections.open failed: invalid_auth")
+
+        def close(self):
+            pass
+
+    slack_sdk = ModuleType("slack_sdk")
+    slack_sdk.WebClient = MagicMock
+    socket_mode = ModuleType("slack_sdk.socket_mode")
+    socket_mode.SocketModeClient = FailingSocketModeClient
+    response = ModuleType("slack_sdk.socket_mode.response")
+    response.SocketModeResponse = object
+    monkeypatch.setitem(sys.modules, "slack_sdk", slack_sdk)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", socket_mode)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode.response", response)
+
+    async def go():
+        channel = SlackChannel(
+            bus=MessageBus(),
+            config={
+                "bot_token": "xoxb-operator",
+                "app_token": "xapp-token",
+                # A configured bot user id skips the auth_test lookup, so the
+                # only background work start() schedules is the connect.
+                "bot_user_id": "UBOT",
+                "connection_repo": MagicMock(),
+            },
+        )
+
+        # start() drops the future for the executor-backed connect; capture it
+        # here so the test can wait for the connect attempt to finish.
+        loop = asyncio.get_running_loop()
+        real_run_in_executor = loop.run_in_executor
+        connect_futures = []
+
+        def capture_run_in_executor(executor, func, *args):
+            future = real_run_in_executor(executor, func, *args)
+            connect_futures.append(future)
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", capture_run_in_executor)
+
+        with caplog.at_level("ERROR", logger="app.channels.slack"):
+            await channel.start()
+            assert len(connect_futures) == 1
+            await asyncio.gather(*connect_futures, return_exceptions=True)
+        await channel.stop()
+
+        assert "Socket Mode connection failed" in caplog.text
+
+    anyio.run(go)
+
+
+def test_slack_socket_mode_queued_connect_does_not_target_replacement_client(monkeypatch):
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    clients = []
+
+    class RecordingSocketModeClient:
+        def __init__(self, *, app_token, web_client):
+            self.socket_mode_request_listeners = []
+            self.connect_calls = 0
+            clients.append(self)
+
+        def connect(self):
+            self.connect_calls += 1
+
+        def close(self):
+            pass
+
+    slack_sdk = ModuleType("slack_sdk")
+    slack_sdk.WebClient = MagicMock
+    socket_mode = ModuleType("slack_sdk.socket_mode")
+    socket_mode.SocketModeClient = RecordingSocketModeClient
+    response = ModuleType("slack_sdk.socket_mode.response")
+    response.SocketModeResponse = object
+    monkeypatch.setitem(sys.modules, "slack_sdk", slack_sdk)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", socket_mode)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode.response", response)
+
+    async def go():
+        channel = SlackChannel(
+            bus=MessageBus(),
+            config={
+                "bot_token": "xoxb-operator",
+                "app_token": "xapp-token",
+                "bot_user_id": "UBOT",
+                "connection_repo": MagicMock(),
+            },
+        )
+        queued_callbacks = []
+        loop = asyncio.get_running_loop()
+
+        def queue_run_in_executor(executor, func, *args):
+            queued_callbacks.append((func, args))
+            return loop.create_future()
+
+        monkeypatch.setattr(loop, "run_in_executor", queue_run_in_executor)
+
+        await channel.start()
+        await channel.stop()
+        await channel.start()
+
+        assert len(clients) == 2
+        assert len(queued_callbacks) == 2
+
+        stale_func, stale_args = queued_callbacks[0]
+        stale_func(*stale_args)
+        assert clients[0].connect_calls == 0
+        assert clients[1].connect_calls == 0
+
+        current_func, current_args = queued_callbacks[1]
+        current_func(*current_args)
+        assert clients[0].connect_calls == 0
+        assert clients[1].connect_calls == 1
+
+        await channel.stop()
 
     anyio.run(go)

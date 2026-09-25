@@ -1564,3 +1564,46 @@ def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):
     lead_agent_module._make_lead_agent({"context": {"model_name": "safe-model"}}, app_config=app_config)
 
     assert captured["model_overrides"] is None
+
+
+def test_internal_make_lead_agent_applies_the_required_thinking_contract(monkeypatch):
+    """A required-thinking model (issue #5073) turns a ``thinking_enabled=False`` request
+    back on and maps the generic effort through the contract *before* the factory
+    runs, so the assembly metadata and the model see the same effective policy."""
+    model = ModelConfig(
+        name="glm-5.3-flash",
+        display_name="GLM-5.3-Flash",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="glm-5.3-flash",
+        supports_vision=False,
+        reasoning={
+            "thinking": "required",
+            "dialect": "openai_extra_body",
+            "effort": {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}},
+        },
+    )
+    app_config = _make_app_config([model])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config: dict = {"configurable": {"model_name": "glm-5.3-flash", "thinking_enabled": False, "reasoning_effort": "minimal"}}
+    lead_agent_module._make_lead_agent(config, app_config=app_config)
+
+    assert captured == {"thinking_enabled": True, "reasoning_effort": "low"}
+    assert config["metadata"]["thinking_enabled"] is True
+    assert config["metadata"]["reasoning_effort"] == "low"

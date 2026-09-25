@@ -145,14 +145,23 @@ You can change the storage path with the `storage_path` field. Relative paths ar
 
 ## Custom storage backend
 
-The `storage_class` field allows you to replace the default file-based storage with a custom implementation. Any class that extends `MemoryStorage` and implements `load()`, `reload()`, and `save()` methods can be used:
+The `storage_class` field allows you to replace the default file-based storage with a custom implementation. Any class that extends `MemoryStorage` (`deerflow.agents.memory.backends.deermem.deermem.core.storage`) and implements `load()`, `reload()`, and `save()` methods can be used:
 
 ```yaml
 memory:
-  storage_class: mypackage.storage.RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
 
-If the configured class cannot be loaded, the system falls back to the default `FileMemoryStorage` and logs an error.
+The value is a dotted `module.Class` path and the class is constructed as `cls(config)` — see "Custom memory storage" under Customization for the full interface.
+
+If the configured class cannot be imported, is not a `MemoryStorage` subclass, or cannot be constructed, memory does **not** fall back to `FileMemoryStorage`. Building the memory manager raises instead:
+
+```
+ValueError: backend_config.storage_class='mypackage.storage.NotThere' failed to load: No module named 'mypackage'. Refusing to silently fall back because memory is persistent state.
+```
+
+surfaced as a pydantic `ValidationError` from `DeerMem`'s constructor, because storage is wired in `model_post_init()`.
 
 ## Disabling memory
 

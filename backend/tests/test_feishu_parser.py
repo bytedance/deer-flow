@@ -563,6 +563,8 @@ def _make_file_event(
 def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
     async def go():
         monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        # Keep both callbacks inside the batch window even on a busy CI runner.
+        monkeypatch.setattr("app.channels.feishu.time.time", lambda: 1_000.0)
         bus = MessageBus()
         channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
         channel._main_loop = asyncio.get_running_loop()

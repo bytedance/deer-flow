@@ -17,6 +17,10 @@ sidebar entry. The [bookmarks example](../examples/deerflow-extension-bookmarks/
 uses all three: save the last visible answer, then search, rename or delete it under
 **My bookmarks**. Existing notification and Markdown/JSON export behavior is unchanged.
 
+The [Jev context pruning example](../examples/deerflow-extension-jev-context/README.md)
+combines a catalog contribution with public middleware hooks to shorten old read-only
+tool results. It requires deployment opt-in and a separate Jev API key.
+
 ## Registration and execution
 
 `registry.plugin(...)` returns `True` when accepted. Its default public protocol
@@ -43,6 +47,13 @@ Tool names are namespace-derived and collision-checked. Tool inputs are bounded 
 256 KiB, outputs to 64 KiB and execution to 30 seconds. Backend actions accept object
 inputs up to 256 KiB and have a 30-second timeout. Cancellation does not guarantee
 rollback of external effects or already-running worker-thread operations.
+
+A plugin can also contribute tools alone. The
+[text classification example](../examples/deerflow-extension-jev-classify/README.md)
+registers one model tool and a status action, no browser code: the agent labels a
+list of texts through a deployment-configured Jev or chat-model backend, and the
+plugin keeps the whole call inside those bounds with its own batch and deadline
+limits. It requires deployment opt-in and a separate backend API key.
 
 Durable `batch_task` workers pin the Gateway app's extension snapshot at startup
 and use it for both plugin tools and subagent execution. Recovered items use the

@@ -64,6 +64,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
 )
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
@@ -989,9 +990,23 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
-    if thinking_enabled and not model_config.supports_thinking:
+    # Normalize the request against the model's reasoning contract (issue #5073)
+    # so the run metadata, the assembly descriptor and the factory agree on the
+    # effective policy: required-thinking models turn the flag back on, an
+    # unsupported model turns it off, and a restricted effort vocabulary maps
+    # the generic value onto the provider's own.
+    reasoning_contract = resolve_reasoning_contract(model_config)
+    resolved_reasoning = resolve_reasoning_request(reasoning_contract, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort)
+    if "thinking_unsupported" in resolved_reasoning.adjustments:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
-        thinking_enabled = False
+    elif resolved_reasoning.adjustments:
+        logger.info("Model '%s': reasoning request adjusted by its capability contract (%s)", model_name, ", ".join(resolved_reasoning.adjustments))
+    thinking_enabled = resolved_reasoning.thinking_enabled
+    if reasoning_contract.source == "contract":
+        # Legacy profiles keep forwarding the raw request (the factory strips
+        # what the profile cannot honor, exactly as before); declared
+        # contracts hand the factory the provider value they resolved to.
+        reasoning_effort = resolved_reasoning.reasoning_effort
 
     logger.info(
         "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s, max_total_subagents: %s",

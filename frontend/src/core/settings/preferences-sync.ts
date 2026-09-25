@@ -4,7 +4,13 @@ const fields = {
   notification_enabled: z.boolean().nullable(),
   model_name: z.string().max(200).nullable(),
   mode: z.enum(["flash", "thinking", "pro", "ultra"]).nullable(),
-  reasoning_effort: z.enum(["minimal", "low", "medium", "high"]).nullable(),
+  // Provider contracts may add values such as `max`; the Gateway validates
+  // the token against the selected model (issue #5073).
+  reasoning_effort: z
+    .string()
+    .max(32)
+    .regex(/^[A-Za-z0-9_.-]+$/)
+    .nullable(),
 };
 const schema = z.object(fields).partial();
 export type Preferences = z.infer<typeof schema>;
