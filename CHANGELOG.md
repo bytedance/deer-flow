@@ -957,6 +957,16 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
+  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
+  and the Helm chart, but the lockfile records the root package's own version too
+  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
+  documented release step therefore produced a commit whose lock CI rejects:
+  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
+  tree, and with pre-commit installed it broke a step earlier on the
+  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
+  before editing anything when `uv` is missing, instead of leaving a half-bumped
+  working tree behind. Only the root package's version line moves. ([#5859])
 - **scheduler:** Pausing a scheduled task no longer loses the pause when a
   dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
   owner — which pausing clears — but read the row without taking SQLite's
@@ -4420,4 +4430,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
+[#5859]: https://github.com/bytedance/deer-flow/pull/5859
 
