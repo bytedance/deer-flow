@@ -1,0 +1,212 @@
+---
+title: 运维检查点
+description: 后端无关性、增量模式下的保留与裁剪约束、仅存的一个导入期补丁、依赖下限、两个检查点基准的跑法，以及 TUI 与内嵌路径的差异。
+---
+
+import { Callout } from "nextra/components";
+
+# 运维检查点
+
+增量模式改变的是线程状态存放的位置，而不是由哪个后端存放。本章讲它的运维后果：后端选择、保留与裁剪约束、仅存的一个兼容补丁、挡住上游缺陷的依赖下限、如何测量两种模式，以及运维在 TUI 与内嵌路径上看到的差异。
+
+## 后端
+
+模式是编译后图的通道表属性，不是 saver 的属性，因此三个后端都能跑两种模式：
+
+| `database.backend` | Saver | 支持两种模式 | 说明 |
+| --- | --- | --- | --- |
+| `memory` | `InMemorySaver` | 是 | 进程内、重启即丢；模式语义完全相同 |
+| `sqlite` | SQLite saver | 是 | 通道值内嵌在序列化后的检查点负载里，没有独立的 blob 表 |
+| `postgres` | Postgres saver | 是 | `checkpoints` 加独立的 `checkpoint_blobs` 表；写入放在 `checkpoint_writes` |
+
+有两条进程级规则与后端无关，且都不由后端来约束：
+
+- **模式必须一致。** 共享同一个检查点数据库的所有进程必须使用相同的 `database.checkpoint_channel_mode`。模式被编译进每个图的通道表，不随检查点存储。
+- **节奏必须一致。** `database.checkpoint_delta.snapshot_frequency` 同样被编译进通道表。它被刻意不写入检查点元数据，因此逐检查点无法检测不一致，这属于运维责任。失败关闭的门只约束*模式*，运行时不做节奏比对。
+
+增量模式在所有后端上都改变存储形态：逐步检查点不再携带整份 `messages` 负载，因此单步的边际成本不再随历史增长。但保留的存储里仍然有每 `snapshot_frequency` 次写入落下的整份 `_DeltaSnapshot`，所以 N 轮之后总量按 O(N²/K + N) 增长（K 为 `snapshot_frequency`）——是按 K 大致缩小，而不是线性。请按保留总量做容量规划，见[检查点与增量通道](/docs/harness/checkpoints)与[通道模式](/docs/harness/checkpoints/modes)。
+
+## 保留与裁剪
+
+### writes 行是重放状态，不是垃圾
+
+`full` 模式下每个检查点都会重新快照累计消息，丢弃中间检查点至少在概念上可行。`delta` 模式下逐步负载放在 **writes** 表里，它们是承重的重放状态：删掉就会切断后续物化所依赖的祖先链。
+
+| 模式 | 逐步负载存放位置 |
+| --- | --- |
+| `full` | 重新快照进检查点负载 |
+| `delta` | writes 表；每 `snapshot_frequency` 步才把完整值快照一次 |
+
+保留契约测试套件直接钉住了这个形态：其增长基线断言增量线程最终 `write_rows > 0`（"delta mode must land per-step payloads in writes"），而 full 模式把所有内容重新快照进检查点负载。两者的字节对比依赖节奏与后端，因此只断言形态。
+
+### 朴素裁剪的失败方式
+
+<Callout type="warning">
+  朴素的 `keep_latest` 若删掉中间检查点及其 writes，就会切断这条链：幸存的
+  「最新」检查点本身很少是快照点，于是它的增量通道会被静默重建为**空**。
+  不会报错——`get_delta_channel_history` 只是返回不了 `seed`。
+</Callout>
+
+上游为使用 `DeltaChannel` 的图给出三种安全做法：
+
+- 从每个保留的检查点往回走，把沿途所有祖先（连同其 writes）一直保留到最近一个 `channel_values` 里已包含每个增量通道 `_DeltaSnapshot` 的祖先。
+- 删祖先之前，先在被保留的检查点上强制落一份新快照，对每个增量通道 `k` 重写 `channel_values[k] = _DeltaSnapshot(value)`。
+- 在上述任一做法实现之前，跳过对使用 `DeltaChannel` 的线程做裁剪。
+
+同样的警告也适用于 `adelete_for_runs` 与 `copy_thread`：删除某个 run 的祖先 writes（或唯一的 `_DeltaSnapshot` blob），会破坏任何依赖这些行的增量通道的重建。
+
+### 保护集
+
+| # | 不得删除，除非满足所述补偿条件 |
+| --- | --- |
+| 1 | **显式恢复目标**——客户端可能仍会恢复到的任意 `checkpoint_id`。策略可以让其过期，但必须先就有明确的 TTL 语义达成一致 |
+| 2 | **分支祖先**——从可分叉 head 回溯到最旧可分支消息之前的那个检查点（含）为止的整条父链。删掉这条链上任何节点都会破坏分支与重新生成，而且是响亮失败而非静默失败 |
+| 3 | **待处理写入**——writes 表里的行是未提交或在途状态，不是垃圾 |
+| 4 | **仅耗时链环**——后续 run 已从中分叉的仅耗时检查点是链环；删除它必须在同一次变更中把分叉嫁接到祖父节点上。孤立叶子是安全的，链环不是 |
+| 5 | **每线程最新的可恢复状态**——最新检查点必须始终可寻址，线程才能一直续跑 |
+
+### 目前真正允许删除的形态
+
+只有两种形态被证明安全，保留服务也只实现这两种：
+
+| 形态 | 默认 | 为什么安全 |
+| --- | --- | --- |
+| 尾部仅耗时叶子 | 开启 | `persist_run_durations` 在 run 结束后追加仅元数据检查点；在后续 run 尚未从中分叉时，它不属于任何人的祖先 |
+| 叶子兄弟分支 | 关闭（需显式开启） | 从较旧轮次分叉且没有子节点的检查点。之所以默认关闭，是因为被取代的那条线上的检查点可能仍是客户端持有的显式恢复目标，因此提供了 `protect_checkpoint_ids` 逃生口 |
+
+删除还带两条机械约束：
+
+- **联合表删除、先算孤儿。** 删除检查点行时必须判定哪些 writes 与 blob 行成了孤儿；只有当**幸存**检查点都不再引用某行时它才算孤儿，且要在整线程范围内计算。真实的仅耗时叶子并非没有负载——它会物化父节点的值——在 Postgres 上它的 blob 行与支撑父节点的正是同一批行。
+- **要么全做，要么不做。** 留下悬空父链接的部分删除会把一次清理变成线程级故障：此后每一轮的分支与重新生成都会响亮失败。
+
+还有一条历史快路径需要排期：尾部的仅耗时叶子同时承载 `run_durations` 与 `run_message_ids` 映射，`get_thread_history` 会从最新检查点读取它们。删掉该叶子会让下一次历史读取退化为扫描事件存储并重新落一份新叶子，因此接线时必须把保留动作与历史读错开，或采用会保留「带缓存的叶子」的策略。
+
+### 策略默认值
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `prune_trailing_duration_leaves` | `True` | 删除没有后续 run 分叉过的仅耗时叶子 |
+| `prune_leaf_sibling_branches` | `False` | 删除叶子兄弟分支（需显式开启） |
+| `protect_checkpoint_ids` | `frozenset()` | 永不删除的显式 id 集合 |
+| `strict_pending_write_guard` | `True` | 仍持有 writes 行的检查点一律视为受保护 |
+| `max_delete_per_run` | `None` | 单次 run 删除数量的可选上限 |
+
+### 目前没有生产触发点
+
+保留服务（`backend/app/gateway/checkpoint_retention.py`）**没有生产触发点**：保留动作从哪里调用——run 结束后钩子、调度器还是显式管理操作——是维护者随契约一起决定的。DeerFlow 中没有任何地方调用它；`prune` 与 `aprune` 也没有生产调用方：在锁定环境中只有基类实现定义了它们，而基类实现直接抛 `NotImplementedError`。
+
+请把它当作未完成的工作，而不是安全默认值。可执行契约只在 **full 模式**的状态 schema 上证明了分支祖先、显式恢复目标、待处理写入、叶子耗时、叶子兄弟这几类场景；只有增长基线是增量形态的。增量专属的裁剪安全性既未被测试套件证明，也未被实现。
+
+## 仅存的一个补丁
+
+只剩一个兼容补丁，它在模块自身导入时应用。该模块位于包根目录，以便从 `deerflow.agents.thread_state` 导入时不必拉进更重的 `deerflow.runtime` 包；补丁锚定在那里，因此所有会构建 DeerFlow 图的进程——网关、worker、进程内 LangGraph 运行时、测试——都带着该修复运行。
+
+| 方面 | 细节 |
+| --- | --- |
+| 对象 | `BinaryOperatorAggregate` 把写入空（MISSING）通道的首个 `Overwrite` 解开 |
+| 跟踪 issue | DeerFlow **#4380** |
+| 它避免的症状 | 类型为 Union 的通道（`SandboxState \| None`、`GoalState \| None` 等）没有可构造默认值，因此以 MISSING 起始。此时对全新线程做替换式写入（线程分叉）或对从未写过的通道做状态更新，会把 `Overwrite` 包装本身持久化进检查点，下一个消费者就读到崩溃：`TypeError: 'Overwrite' object is not subscriptable` |
+| 作用范围 | 只拦截「空通道 + 首个 `Overwrite`」这一种情况。后续的普通值被忽略；同一个 super-step 里的第二个 `Overwrite` 抛出 `InvalidUpdateError`，消息为 `Can receive only one Overwrite value per super-step.`。其余情况全部委托给上游实现 |
+| 一致性副作用 | `DeltaChannel.update` 在同样情况下本来就会解开，因此该补丁同时消除了两类归并器通道之间的行为差异 |
+
+它的守卫是**行为探针，不是版本钉**。探针构造一个 Union 类型的 `BinaryOperatorAggregate`（通道因此以 MISSING 起始），再读取它判断是否得到 `Overwrite` 包装；若上游已经解开，探针就会报告缺陷不存在，补丁自动退场。应用是幂等的；意外失败时记录 `Failed to apply the BinaryOperatorAggregate Overwrite first-write patch; leaving the upstream implementation untouched.` 并保持上游实现不变。
+
+<Callout type="warning">
+  不要重新引入版本守卫式的 saver 补丁。此前这里的守卫读取的是 `langgraph` 的
+  版本，但 `InMemorySaver` 属于独立发布的 `langgraph-checkpoint` 包，那样
+  的守卫看不到真正的依赖。前一个 `InMemorySaver` 增量历史补丁是被**删除**
+  而非加守卫的：上游在 `langgraph-checkpoint` 4.2.0 修掉了迁移后首个写入
+  丢失的问题（上游 #8526），同时保留了自己的 override，行为探针无法察觉。
+</Callout>
+
+## 依赖下限与回归门禁
+
+依赖下限正是挡住已删除的 saver 缺陷的东西，因此这些下限是承重的，不是装饰：
+
+| 发行包 | 下限 | 原因 |
+| --- | --- | --- |
+| `langgraph-checkpoint` | `>=4.2.0,<5.0` | 4.2.0 修掉了迁移后首个写入丢失（上游 #8526）。解析到 4.1.x 会静默重新引入该缺陷，而 `langgraph` 自己的 `langgraph-checkpoint>=4.1.0` 约束并不排除该版本 |
+| `langgraph-checkpoint-postgres` | `>=3.1.2,<3.2` | 3.1.2 能找到纯值形式的增量种子（上游 #8535）；3.1.1 会越过它一路走到线程根 |
+| `langgraph-checkpoint-sqlite` | `>=3.1.1,<3.2` | 与其他 saver 一同锁定 |
+
+回归门禁是 `backend/tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`：当 4.2.0 的修复缺失时它会失败，保证 full→delta 迁移仍能在同一线程上回放。锁定环境解析到 `langgraph 1.2.9`、`langgraph-checkpoint 4.2.0`、`langgraph-checkpoint-postgres 3.1.2`。
+
+运行时没有版本检查，也没有告警。运维能看到的唯一版本信号，是一条带有锁定版本号的触发式跳过测试，例如 `#8448` 的 Postgres 跳过或 `#8382` 的回放顺序跳过。
+
+## 如何跑基准
+
+两个脚本覆盖两层，各有一个汇总脚本。它们输出的比例一律是 `delta/full`，且时间阈值不是 CI 门禁。
+
+| 脚本 | 层次 | 测什么 |
+| --- | --- | --- |
+| `scripts/benchmark/checkpoint/bench_channels.py` | 通道层 | 每个用例在全新的子进程里跑成对的 `full` / `delta` 纯消息 StateGraph，使用同步 `InMemorySaver` 或 `SqliteSaver`，从而把归并器、序列化与 saver 的成本同网关调度分开。Postgres 用例需通过 `TEST_POSTGRES_URI` 显式开启 |
+| `scripts/benchmark/checkpoint/bench_production.py` | 生产层 | 在真实 Lead Agent 图上跑图层级 `ainvoke`（脚本化确定性模型、真实 `AsyncSqliteSaver`），再经真实网关路由栈测 `GET /threads/{id}/state` 与 `POST /threads/{id}/history`，区分冷/热样本 |
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
+  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
+  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
+  /tmp/checkpoint-bench.jsonl
+```
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
+  --turns 10,100,500,1000,2000 --payload-bytes 128 \
+  --snapshot-frequencies 10,50,100,500,1000 \
+  --repetitions 7 --output /tmp/production-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
+  /tmp/production-bench.jsonl
+```
+
+通道层控制器会在用例之间交替模式顺序，并在成对模式物化出不同状态时拒绝性能数据；生产层控制器把每个增量频率与同一行 full 配对，一旦物化摘要或线上摘要不一致就把这一对两行都判失败。
+
+### 仓库中仅有的实测数字
+
+已提交的实测值只有三个，都来自首次基准运行的运维限制记录：
+
+| 观测 | 数值 |
+| --- | --- |
+| 增量模式、`snapshot_frequency=1000`、500 轮 | 约 1100–1200 秒墙钟，因此默认的 `--timeout-seconds 900` 不够。任何大规模矩阵都要显式传超时 |
+| 增量模式、`snapshot_frequency=1000`、2000 轮 | 约 45 分钟；2000 轮这个角落只在较小快照频率下才实际可行 |
+| full 模式、2000 轮、SQLite | 约 33 GB 的数据库文件。把 `TMPDIR` 指向真实磁盘而非 tmpfs，否则用例中途就会挂掉 |
+
+另有一条常被误当成基准限制的路由约束：历史路由把 `limit` 截到 100，因此大于 100 的 `--history-limits` 实际是按截断后的上限测量并上报的。
+
+<Callout type="warning">
+  有两类数字不得当作实测呈现。**合成测试夹具**——汇总器单测里喂进去的比例字面量，
+  例如 `ratio_write_total_ms: 0.5`、`ratio_logical_checkpoint_bytes: 0.2`、
+  `delta_snapshot_write_spike: 5.0`、`delta_cache_effect_ms: 45.0`——描述的是夹具
+  输入，不是真实运行。另外，未跟踪 worktree RFC 中针对 200 轮的某个存储缩减倍数
+  来自上游、并非本地实测，且本地后续计划明确禁止在当前配置下引用它——不要把它
+  写进性能结论。仓库里完全没有提交过任何基准结果文件。
+</Callout>
+
+## TUI 与内嵌路径的差异
+
+`deerflow` 控制台脚本是 `deerflow.tui.cli:main`；`--print` 与 `--json` 是它的无界面变体，其余情况是 Textual TUI。两者都使用内嵌客户端，而内嵌客户端与网关的差异在增量模式下有实际影响。
+
+| 方面 | 网关（异步） | TUI / 内嵌（同步） |
+| --- | --- | --- |
+| Checkpointer | 异步 provider 按进程构建并包装 saver | `get_checkpointer()` 返回进程级**同步**单例 |
+| 历史缓存后端 | `memory` 与 `redis` | 仅 `memory` |
+| Agent 构建失败 | `full` 模式降级为原始 checkpointer 读取；`delta` 原样抛出 | 完全没有降级路径 |
+| 跨模式不一致 | 状态与历史路由返回 HTTP 409；run 以 SSE `error` 帧或 error 运行记录失败 | 在构建 Agent 或开始流的图之前就在进程内抛出 |
+| 冻结 | 在网关启动时按启动配置快照冻结 | `DeerFlowClient.__init__` 按自己的 `AppConfig` 冻结模式与节奏，重启要求语义相同 |
+
+有三点后果值得直说：
+
+- **同步路径拒绝 redis。** 选择 `database.checkpoint_cache.type: redis` 会在构建 checkpointer 时抛出 `ValueError("database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.")`，因此对网关合法的配置可能让 TUI 起不来。这是诚实的拒绝而非降级：同步路径本来就是进程内的。
+- **没有降级读取路径。** 增量物化需要图的通道表，TUI 没有网关那种退回原始 checkpointer 读取的等价物。
+- **未捕获的模式不一致在无头入口上会变成 traceback。** 内嵌客户端在进程内抛出 `CheckpointModeMismatchError`——没有 HTTP 状态码、没有运行记录、没有 SSE 帧——而 CLI 直接分派到它的 print 或 JSON 入口且没有处理器，于是 `--print`、`--json` 在 stderr 上打印一段 Python traceback。Textual TUI 是例外：它的 `stream_actions()` 会捕获来自 `client.stream()` 的每个异常并发出 `AssistantError` 与 `RunEnded`，所以交互用户是在界面里看到这次失败。
+
+第三方嵌入者还会撞上相关守卫：`create_deerflow_agent` 在 `checkpoint_channel_mode="delta"` **且**传入 checkpointer 时抛出 `ValueError`，因为在那里构建的图绕过了检查点模式标记注入与失败关闭的兼容门，混合模式的存储会静默损坏线程状态。不带 checkpointer 的 delta 是临时的，允许使用；需要持久化的增量图必须走受守卫的应用路径（`make_lead_agent` 或 `DeerFlowClient`）。
+
+## 相关章节
+
+- [通道模式](/docs/harness/checkpoints/modes) —— 模式标记、失败关闭的门以及 HTTP 边界。
+- [快照节奏](/docs/harness/checkpoints/cadence) —— `snapshot_frequency` 如何在检查点体积与物化成本之间取舍。
+- [历史缓存](/docs/harness/checkpoints/history-cache) —— 纯性能缓存，其策略允许在各 worker 之间不同。
+- [故障排查](/docs/harness/checkpoints/troubleshooting) —— 上述每种失败特征对应的症状索引。

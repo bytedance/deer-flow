@@ -86,16 +86,24 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
     return graph, findings
 
 
+# Trailing sentence punctuation a resource path can legitimately be followed
+# by in prose (".", "?", "!") but that is never part of a package-relative
+# path. "." in particular is also a valid path character, so it must only be
+# stripped from the very end — e.g. "references/setup.md." -> "references/setup.md"
+# while "references/config.yaml" keeps its extension.
+_TRAILING_SENTENCE_PUNCTUATION = ".?!"
+
+
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
     for match in _MARKDOWN_LINK_RE.finditer(content):
-        refs.add(match.group(1).split("#", 1)[0])
+        refs.add(match.group(1).split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:
-            refs.add(token)
+            refs.add(token.rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     for match in _PATH_TOKEN_RE.finditer(content):
-        refs.add(match.group(0))
+        refs.add(match.group(0).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     return refs
 
 

@@ -1,6 +1,11 @@
 import json
+import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from deerflow.community.image_search import tools
 from deerflow.community.image_search.tools import image_search_tool
 
 
@@ -70,3 +75,70 @@ def test_image_search_omits_unset_filters():
     assert kwargs["layout"] == "Square"
     assert kwargs.get("color") is None
     assert kwargs.get("license_image") is None
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "env_value", "call_args", "expected_count", "warns"),
+    [
+        pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "3", {"max_results": 2}, 3, False, id="environment-variable"),
+        pytest.param("3", "3", {"max_results": 2}, 3, False, id="numeric-string"),
+        pytest.param(3, "3", {"max_results": 2}, 3, False, id="integer-config"),
+        pytest.param(None, "3", {"max_results": 2}, 2, False, id="call-argument"),
+        pytest.param(None, "3", {}, 5, False, id="default"),
+        pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "abc", {"max_results": 2}, 5, True, id="invalid-env"),
+        pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "", {"max_results": 2}, 5, True, id="empty-env"),
+        pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "3.5", {"max_results": 2}, 5, True, id="fractional-env"),
+        pytest.param(3.5, "3", {"max_results": 2}, 5, True, id="fractional-config"),
+        pytest.param(True, "3", {"max_results": 2}, 5, True, id="boolean-config"),
+        pytest.param("$IMAGE_SEARCH_TEST_MAX_RESULTS", "0", {"max_results": 2}, 5, True, id="zero-env"),
+        pytest.param(-2, "3", {}, 5, True, id="negative-config"),
+        pytest.param(None, "3", {"max_results": 0}, 5, True, id="zero-call-argument"),
+    ],
+)
+def test_image_search_max_results_with_real_ddgs(monkeypatch, caplog, configured_limit, env_value, call_args, expected_count, warns):
+    """Exercise DDGS image count arithmetic and slicing without contacting search engines.
+
+    Environment substitution keeps `max_results: $VAR` as a string; DDGS then raised
+    `TypeError` while sizing its workers and the tool reported "No images found".
+    """
+    from ddgs.ddgs import DDGS
+    from ddgs.results import ImagesResult
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.tool_config import ToolConfig
+
+    monkeypatch.setenv("IMAGE_SEARCH_TEST_MAX_RESULTS", env_value)
+    caplog.set_level(logging.WARNING, logger=tools.__name__)
+    raw_config = {"name": "image_search", "group": "web", "use": "deerflow.community.image_search.tools:image_search_tool"}
+    if configured_limit is not None:
+        raw_config["max_results"] = configured_limit
+    tool_config = ToolConfig.model_validate(AppConfig.resolve_env_variables(raw_config))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: tool_config))
+
+    rows = [
+        ImagesResult(
+            title=f"Image {i}",
+            image=f"https://example.com/{i}.jpg",
+            thumbnail=f"https://example.com/{i}-thumb.jpg",
+            url=f"https://example.com/{i}",
+            height=100,
+            width=100,
+            source="offline",
+        )
+        for i in range(10)
+    ]
+    engine = SimpleNamespace(provider="offline", name="offline", search=MagicMock(return_value=rows))
+    monkeypatch.setattr(DDGS, "_get_network_client", lambda self: None)
+    monkeypatch.setattr(DDGS, "_get_engines", lambda self, category, backend: [engine])
+
+    parsed = json.loads(image_search_tool.invoke({"query": "Image", **call_args}))
+
+    assert "error" not in parsed
+    assert parsed["total_results"] == len(parsed["results"]) == expected_count
+    assert all(result["image_url"].startswith("https://example.com/") for result in parsed["results"])
+    engine.search.assert_called_once()
+    warnings = [record for record in caplog.records if record.name == tools.__name__ and record.levelno == logging.WARNING]
+    assert len(warnings) == int(warns)
+    if warns:
+        assert "max_results" in warnings[0].getMessage()
+        assert "using default 5" in warnings[0].getMessage()

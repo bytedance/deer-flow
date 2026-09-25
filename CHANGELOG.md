@@ -493,6 +493,22 @@ This release closes that milestone with **765 merged pull requests**.
 
 #### Models & integrations
 
+- **models:** Optional per-model `reasoning:` capability contract beside the
+  legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
+  `unsupported | optional | required`, the accepted effort `values` with
+  `aliases`, `default`, and serialization `path`, the payload `dialect`, and the
+  reasoning `history` requirement. Every model-creation path enforces one
+  normalized policy, so required-thinking models never receive a synthesized
+  disable payload and unsupported effort values never reach the provider;
+  `/api/models` projects the contract as `reasoning`, the composer derives its
+  effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
+  `low/high/max` effort control. Custom effort paths reject leftover generic
+  effort keys, and the chat UI drops remembered contract-only levels when
+  switching to legacy models. Existing Ollama `reasoning: true` / `false` and
+  `low|medium|high` settings remain native provider options and stay in the
+  assembly fingerprint. Profiles without a mapping contract keep their existing
+  provider behavior.
+  ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
   screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
@@ -941,6 +957,21 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** Pausing a scheduled task no longer loses the pause when a
+  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
+  owner — which pausing clears — but read the row without taking SQLite's
+  writer, so a stale read passed the guard and wrote the task back to
+  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
+  the API had reported as paused. The read now takes the writer first, as every
+  other mutating path in that repository does. PostgreSQL was unaffected.
+  ([#5777])
+- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
+  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
+  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
+  `get_event_loop()` failing, but it also caught discovery errors and
+  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
+  up; inside a running loop it also logged a misleading "asyncio.run() cannot
+  be called from a running event loop" traceback instead of the real cause.
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
@@ -3002,6 +3033,14 @@ This release closes that milestone with **765 merged pull requests**.
   with a per-user route example; and plugin troubleshooting and operations
   notes. Also correct the plugin `mount` return value in
   `docs/full-stack-plugins.md`.
+- **docs:** Add a checkpoint storage manual under `harness/checkpoints/` in both
+  languages, covering the `full` and `delta` channel modes: concepts, quick
+  start, the mode marker and its fail-closed gate, the snapshot cadence, the
+  delta history cache, resume and rollback linearization, operating and
+  retention constraints, observability, troubleshooting by symptom, and a
+  reference of every configuration key, error message, and pinned upstream
+  defect. The section is a new directory rather than a restructured page, so
+  the existing checkpointer documentation is unchanged.
 
 ### Internal
 
@@ -4174,6 +4213,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5066]: https://github.com/bytedance/deer-flow/pull/5066
 [#5069]: https://github.com/bytedance/deer-flow/pull/5069
 [#5071]: https://github.com/bytedance/deer-flow/pull/5071
+[#5073]: https://github.com/bytedance/deer-flow/issues/5073
 [#5074]: https://github.com/bytedance/deer-flow/pull/5074
 [#5076]: https://github.com/bytedance/deer-flow/pull/5076
 [#5077]: https://github.com/bytedance/deer-flow/pull/5077
@@ -4379,3 +4419,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
+[#5777]: https://github.com/bytedance/deer-flow/pull/5777
+

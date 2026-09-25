@@ -31,6 +31,7 @@ from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.app_config import AppConfig
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.guardrails.provider import GuardrailRequest
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -41,13 +42,21 @@ IMAGE_PATH = "/mnt/user-data/uploads/synthetic.gif"
 
 
 def _setup(root: Path, monkeypatch: pytest.MonkeyPatch, *, sandbox_allowed: bool):
-    uploads = root / "uploads"
-    uploads.mkdir()
+    context = {"thread_id": "synthetic-thread", "user_id": "synthetic-user", "user_role": "reviewer"}
+    paths = Paths(root)
+    thread_id, user_id = context["thread_id"], context["user_id"]
+    uploads = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+    uploads.mkdir(parents=True)
     image_file = uploads / "synthetic.gif"
     image_file.write_bytes(GIF_BYTES)
-    context = {"thread_id": "synthetic-thread", "user_id": "synthetic-user", "user_role": "reviewer"}
     runtime = SimpleNamespace(
-        state={"thread_data": {"workspace_path": str(root / "workspace"), "uploads_path": str(uploads), "outputs_path": str(root / "outputs")}},
+        state={
+            "thread_data": {
+                "workspace_path": str(paths.sandbox_work_dir(thread_id, user_id=user_id)),
+                "uploads_path": str(uploads),
+                "outputs_path": str(paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
+            }
+        },
         context=context,
         config={},
     )
@@ -81,7 +90,7 @@ def _model_request(runtime, viewed_images: dict, tool_message: ToolMessage | Non
         tool_choice=None,
         tools=[],
         response_format=None,
-        state={"messages": messages, "viewed_images": viewed_images},
+        state={"messages": messages, "viewed_images": viewed_images, "thread_data": runtime.state["thread_data"]},
         runtime=SimpleNamespace(context=runtime.context),
         model_settings={},
     )

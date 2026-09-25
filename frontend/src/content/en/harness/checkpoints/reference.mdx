@@ -1,0 +1,388 @@
+---
+title: Reference
+description: Every configuration key, constant, exception, HTTP status, public and internal symbol, load-bearing test anchor, pinned upstream defect, and change-log entry behind dual-mode checkpoint storage.
+---
+
+import { Callout } from "nextra/components";
+
+# Reference
+
+Every name, key, string, and test anchor behind `database.checkpoint_channel_mode`. This page is for looking things up, not for learning the model; start with [Channel Modes](/docs/harness/checkpoints/modes) if you need the concepts.
+
+Evidence column values are repo-relative `path:line` references using the aliases below. A fact that appears here is traceable to one of those lines.
+
+| Alias | Path |
+| --- | --- |
+| `dbcfg` | `backend/packages/harness/deerflow/config/database_config.py` |
+| `appcfg` | `backend/packages/harness/deerflow/config/app_config.py` |
+| `reload` | `backend/packages/harness/deerflow/config/reload_boundary.py` |
+| `cmode` | `backend/packages/harness/deerflow/runtime/checkpoint_mode.py` |
+| `cstate` | `backend/packages/harness/deerflow/runtime/checkpoint_state.py` |
+| `tstate` | `backend/packages/harness/deerflow/agents/thread_state.py` |
+| `factory` | `backend/packages/harness/deerflow/agents/factory.py` |
+| `client` | `backend/packages/harness/deerflow/client.py` |
+| `worker` | `backend/packages/harness/deerflow/runtime/runs/worker.py` |
+| `agent` | `backend/packages/harness/deerflow/agents/lead_agent/agent.py` |
+| `goalsrc` | `backend/packages/harness/deerflow/runtime/goal.py` |
+| `checkpoint_patches` | `backend/packages/harness/deerflow/checkpoint_patches.py` |
+| `syncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/provider.py` |
+| `asyncprov` | `backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py` |
+| `cacheprov` | `backend/packages/harness/deerflow/runtime/checkpoint_cache/provider.py` |
+| `threads` | `backend/app/gateway/routers/threads.py` |
+| `thread_runs` | `backend/app/gateway/routers/thread_runs.py` |
+| `runs` | `backend/app/gateway/routers/runs.py` |
+| `services` | `backend/app/gateway/services.py` |
+| `deps` | `backend/app/gateway/deps.py` |
+| `context_usage` | `backend/app/gateway/context_usage.py` |
+| `example` | `config.example.yaml` |
+
+The pinned dependency set referenced by the defect table is `langgraph 1.2.9`, `langgraph-checkpoint 4.2.0`, and `langgraph-checkpoint-postgres 3.1.2`.
+
+## Configuration keys
+
+Every `database.*` key related to checkpoints, with the constraint the loader actually enforces. "Restart" means the running process captured the value at startup — frozen into process state, compiled into a channel table, or bound when a singleton such as the checkpointer and its history cache was constructed — so an edit does not take effect until that process restarts.
+
+| Key | Type | Default | Range | Restart | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `database.backend` | `Literal["memory", "sqlite", "postgres"]` | `"memory"` (pydantic); `sqlite` when the key is absent from `config.yaml` | `memory` \| `sqlite` \| `postgres` | Yes | `dbcfg:143-146`, `appcfg:67-70`, `appcfg:519-527` |
+| `database.checkpoint_channel_mode` | `CheckpointChannelMode` = `Literal["full", "delta"]` | `"full"` | `full` \| `delta` | Yes — frozen on first use; a later different value raises `CheckpointModeReconfigurationError` | `dbcfg:59`, `dbcfg:147-155`, `cmode:39-45` |
+| `database.checkpoint_delta.snapshot_frequency` | `int` | `10` (`DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY`) | `ge=1` (no upper bound) | Yes — frozen alongside the mode | `dbcfg:61`, `dbcfg:74-84`, `cmode:53-69` |
+| `database.checkpoint_graph_cache.accessor_graph_max` | `int` | `64` | `ge=1` | No — hot-reloadable, re-read on every eviction check | `dbcfg:96-99`, `services:1133-1138` |
+| `database.checkpoint_cache.type` | `Literal["memory", "redis"]` | `"memory"` | `memory` \| `redis`; `redis` is async/Gateway only | Yes — captured when the checkpointer is built | `dbcfg:113-116`, `syncprov:181-182`, `asyncprov:250-254` |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0`; `0` disables the cache entirely | Yes — captured when the checkpointer is built | `dbcfg:117-121`, `cacheprov:76-84`, `deps:463` |
+| `database.checkpoint_cache.redis_url` | `str \| None` | `None` | any redis URL; when omitted, `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0` | Yes — captured when the checkpointer is built | `dbcfg:122-125`, `cacheprov:19-23` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0`; `0` explicitly disables expiry | Yes — captured when the checkpointer is built | `dbcfg:126-135` |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | any string; empty derives a hash of the database identity | Yes — captured when the checkpointer is built | `dbcfg:136-139`, `cacheprov:60-64` |
+| `database.checkpoint_delta_snapshot_frequency` (deprecated, flat) | `int` | none — carried onto the nested key | `ge=1` after migration | n/a | `dbcfg:218-254` |
+
+### What each key affects
+
+- `database.checkpoint_channel_mode` selects how the `messages` channel is stored: whole-value checkpoints (`full`) or a LangGraph `DeltaChannel` sentinel plus per-step writes (`delta`). It affects every read and write of a thread.
+- `database.checkpoint_delta.snapshot_frequency` is the cadence at which delta mode writes a full messages snapshot every N per-step writes. Higher means smaller checkpoints and slower materialization. It is ignored in `full` mode.
+- `database.checkpoint_graph_cache.accessor_graph_max` caps the compiled thread-state accessor graphs a process caches, keyed per assistant, channel mode, and snapshot cadence. Unlike the mode and cadence it is not restart-required, because a different cap only changes when the cache evicts, never graph semantics.
+- `database.checkpoint_cache.*` configures the delta-mode materialized-history cache only. It is performance-only and never frozen — no correctness invariant requires cross-process agreement, and results are identical with it disabled — but it is **not hot-reloadable**: the cache object is constructed with the checkpointer at startup (`deps:463`, `asyncprov:250-254`), inside a `database` section that `reload` registers as startup-only (`reload:47`), so changing any of these fields needs a restart. The memory backend is bounded by `max_entries`, the redis backend by `ttl_seconds` and the server's own maxmemory policy.
+- `database.backend` selects which saver serves the threads (`InMemorySaver`, SQLite, or Postgres). Mode semantics live in the compiled channel table rather than in the saver, so both modes work on all three backends.
+
+The verbatim `Field(description=...)` text for the two frozen keys is worth reading once, because it states the cross-process rule:
+
+```text
+"Checkpoint representation for accumulating channels. 'full' preserves full-value message checkpoints;
+'delta' uses LangGraph DeltaChannel for messages. Restart is required, and all processes sharing one
+checkpoint database must use the same value."
+```
+
+```text
+"DeltaChannel snapshot cadence: a full messages snapshot is stored every N per-step writes
+(higher = smaller checkpoints, slower materialization). Restart is required, and all processes
+sharing one checkpoint database must use the same value."
+```
+
+### Validation
+
+| Input | Result | Evidence |
+| --- | --- | --- |
+| `checkpoint_channel_mode` set to anything outside `full`/`delta` (for example `auto`) | pydantic `ValidationError` at config load | `backend/tests/test_app_config_reload.py:118-120` |
+| `snapshot_frequency` set to `0` or `-1` | pydantic `ValidationError` (constraint `ge=1`) | `dbcfg:76`, `backend/tests/test_app_config_reload.py:131-134` |
+| Deprecated flat key set to `0` or `-1` | pydantic `ValidationError` after the value is carried onto the nested key | `backend/tests/test_app_config_reload.py:154-157` |
+| Unknown keys under `database:` | ignored (pydantic `extra="ignore"`), which is why the legacy-key shim exists | `dbcfg:224-227` |
+| Both the flat key and `checkpoint_delta.snapshot_frequency` set | the nested key wins, with a warning | `dbcfg:218-240` |
+
+### Deprecated flat key and migration warnings
+
+The old top-level `database.checkpoint_delta_snapshot_frequency` is still honored by the pydantic `@model_validator(mode="before")` named `_migrate_legacy_snapshot_frequency`. It logs one of exactly three strings, all operator-visible:
+
+| Condition | Verbatim string | Evidence |
+| --- | --- | --- |
+| Both keys set, `checkpoint_delta` is a dict | `Both database.checkpoint_delta_snapshot_frequency (deprecated) and database.checkpoint_delta.snapshot_frequency are set; the nested key wins.` | `dbcfg:236-238` |
+| `checkpoint_delta` is an already-built `CheckpointDeltaConfig` object | `Ignoring deprecated database.checkpoint_delta_snapshot_frequency because database.checkpoint_delta is already set.` | `dbcfg:246-248` |
+| Legacy value carried forward | `database.checkpoint_delta_snapshot_frequency is deprecated; use database.checkpoint_delta.snapshot_frequency instead. Carried the legacy value (%r) forward.` | `dbcfg:250-253` |
+
+### Environment variables
+
+No environment variable selects the checkpoint mode or its cadence. Both come only from `config.yaml`. The only mode-feature environment variables are the history-cache redis URL fallbacks (`DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`, then `REDIS_URL`, then `redis://localhost:6379/0`) at `cacheprov:19-23`. `$VAR` interpolation in config values is resolved centrally by `AppConfig.resolve_env_variables()` before `DatabaseConfig` is constructed, so `DatabaseConfig` itself does no environment processing (`dbcfg:13-22`, `appcfg:442`).
+
+### Config version
+
+The schema change shipped with `config_version 27`; `config.example.yaml` is currently `config_version: 47` and a missing version counts as `0` (`example:23`, `appcfg:531-575`). An outdated `config.yaml` logs:
+
+```text
+Your config.yaml (version %d) is outdated — the latest version is %d. Run `make config-upgrade` to merge new fields into your config.
+```
+
+`make config-upgrade` merges the new key with the safe default `full` (`appcfg:570-575`, `backend/tests/test_config_version.py:151-203`). See [Configuration](/docs/harness/configuration) for the general upgrade flow.
+
+## Constants and keys
+
+| Symbol | Value | Where it lives | Evidence |
+| --- | --- | --- | --- |
+| `CheckpointChannelMode` | `Literal["full", "delta"]` | `deerflow.config.database_config` | `dbcfg:59` |
+| `DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY` | `10` | `deerflow.config.database_config` | `dbcfg:61` |
+| `INTERNAL_CHECKPOINT_MODE_KEY` | `"__deerflow_checkpoint_channel_mode"` (a `RunnableConfig` `configurable` key) | `deerflow.runtime.checkpoint_mode` | `cmode:18` |
+| `CHECKPOINT_MODE_METADATA_KEY` | `"deerflow_checkpoint_channel_mode"` (a checkpoint metadata key; the value written is `"delta"`) | `deerflow.runtime.checkpoint_mode` | `cmode:19`, `cmode:86` |
+| `counters_since_delta_snapshot` | LangGraph's own metadata key; a dict containing `"messages"` is treated as delta even without the DeerFlow marker | upstream `langgraph-checkpoint`; detected in `deerflow.runtime.checkpoint_mode` | `cmode:97-98` |
+
+Marker semantics, in one place: `inject_checkpoint_mode(config, mode)` always sets `config["configurable"]["__deerflow_checkpoint_channel_mode"]`. In delta mode it additionally sets `config["metadata"]["deerflow_checkpoint_channel_mode"] = "delta"`; in full mode it **removes** that metadata key, so absence means full and pre-feature checkpoints need no migration (`cmode:81-88`). The snapshot cadence is deliberately **not** stamped into checkpoint metadata, because the mode marker contract and the full-to-delta migration semantics are unchanged by the frequency value (`cmode:53-60`).
+
+## Exceptions and HTTP status
+
+| Class | Base | Docstring | Evidence |
+| --- | --- | --- | --- |
+| `CheckpointModeMismatchError` | `RuntimeError` | `"Raised before a full-mode graph reads a Delta checkpoint."` | `cmode:22-23` |
+| `CheckpointModeReconfigurationError` | `RuntimeError` | `"Raised when a process attempts to hot-switch its persistence mode."` | `cmode:26-27` |
+
+Verbatim messages raised by the mode machinery and its guards:
+
+| Message (verbatim) | Raised by | Evidence |
+| --- | --- | --- |
+| `checkpoint_channel_mode is restart-required and cannot change in a running process` | `freeze_checkpoint_channel_mode` → `CheckpointModeReconfigurationError` | `cmode:44` |
+| `checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process` | `freeze_checkpoint_snapshot_frequency` → `CheckpointModeReconfigurationError` | `cmode:68` |
+| `snapshot frequency must be positive` | `freeze_checkpoint_snapshot_frequency` → `ValueError`, when a non-positive value bypasses pydantic | `cmode:63-64` |
+| `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` | `CheckpointModeMismatchError`, from `raise_if_snapshot_incompatible` and `raise_if_checkpoint_tuple_incompatible`, and duplicated in the degraded gateway accessor | `cmode:123`, `cmode:129`, `services:1229` |
+| `database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.` | `ValueError` in `_wrap_sync_if_delta` | `syncprov:181-182` |
+| `f"Unknown checkpoint cache type: {config.type!r}"` | `ValueError` in `make_checkpoint_cache` | `cacheprov:102` |
+| `create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: persisted graphs built here bypass checkpoint mode marker injection and the fail-closed compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would silently corrupt thread state.  Use the guarded application paths (make_lead_agent or DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed.` | `ValueError` in `create_deerflow_agent` | `factory:135-141` |
+
+### HTTP status mapping
+
+Only the threads router imports these errors. It registers the gate tuple `_CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)` (`threads:82`) and maps it as follows. Bodies are FastAPI's default `{"detail": "<string>"}`.
+
+| Condition | Status | `detail` | Evidence |
+| --- | --- | --- | --- |
+| `CheckpointModeMismatchError` | `409` | `f"Thread {thread_id}: {exc}"`, i.e. `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.` | `threads:105-106` |
+| `CheckpointModeReconfigurationError` | `503` | `str(exc)` | `threads:107` |
+
+The router states the rationale: a mismatch means the thread's persisted checkpoints conflict with the process's frozen mode (operator-actionable, 409); a reconfiguration means the process itself is mid mode-flip (transient, 503) (`threads:99-102`). The `503` half is defensive — nothing in these routes can raise it. The freeze helpers are called only by Gateway startup (`deps:451-452`), `agent:835,839`, and `client:230-231`, and no state, history, or thread route builds an agent: a `checkpoint_channel_mode` edit is injected over by the run worker (`worker:1018-1019`, preferred at `agent:831-835`) and ignored until a restart, and a `snapshot_frequency` edit makes the next run fail with the message (`worker:1450-1462`) instead of returning a status.
+
+### Routes that return 409
+
+| Route | Handler | Notes | Evidence |
+| --- | --- | --- | --- |
+| `GET /api/threads/{thread_id}` | `get_thread` | checked before the `404 Thread <id> not found` | `threads:1276,1291-1292,1298-1299,1303` |
+| `GET /api/threads/{thread_id}/state` | `get_thread_state` | | `threads:1446,1454-1455,1458-1459` |
+| `POST /api/threads/{thread_id}/state` | `update_thread_state` | a client-supplied `checkpoint_id` older than the head is applied as a delta fork with no linearization — see [Forks are accepted, not refused](/docs/harness/checkpoints/resume-and-rollback#forks-are-accepted-not-refused) | `threads:1495,1559-1560` |
+| `POST /api/threads/{thread_id}/history` | `get_thread_history` | | `threads:1695,1715-1716,1907-1908` |
+| `POST /api/threads/{thread_id}/branches` | `branch_thread` → `_branch_thread_with_reservation` | the detail names the source thread id; no test pins this route | `threads:953,231-232,298-299,1105-1106` |
+| `POST /api/threads/{thread_id}/compact` | `compact_thread` | `409` is also returned when compaction is disabled; no test pins this route | `threads:1399,1413-1414,1429-1430,1431-1432` |
+
+### Routes where the mismatch fails asynchronously
+
+| Route | Immediate response | Failure payload | Evidence |
+| --- | --- | --- | --- |
+| `POST /api/threads/{thread_id}/runs` | `200` run record, no pre-gate — but `500` when the thread's run-event feed is empty, so `ensure_checkpoint_history_seeded` materializes the head inside `start_run` first | the run record later has `status: error` and the mismatch text as `error` | `thread_runs:945-960`, `worker:1018-1030,1044-1047`, `worker:1450-1462`, `services:1503-1520,2055` |
+| `POST /api/threads/{thread_id}/runs/stream` | `200` `text/event-stream` | an `event: error` frame whose `data` is `{"message": <mismatch text>, "name": "CheckpointModeMismatchError"}` | `worker:1466-1472`, `services:2374-2378` |
+| `POST /api/threads/{thread_id}/runs/wait` | `200` JSON, never `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}` | `thread_runs:1018-1076` |
+| `POST /api/runs/stream`, `POST /api/runs/wait` (stateless) | same as above | same `{"status", "error"}` body | `runs:59-91` |
+
+### Routes with no mode mapping
+
+| Route | Actual behaviour | Evidence |
+| --- | --- | --- |
+| `POST /api/threads/{thread_id}/runs/regenerate/prepare` | `500` with `detail: "Failed to read latest checkpoint"` — the accessor build sits outside any `try` | `thread_runs:747,749-752` |
+| same route, lineage/history scan | `500` with `detail: "Failed to inspect checkpoint history"` | `thread_runs:679-681` |
+| `POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` | the same two `500` paths | `thread_runs:838-841`, `thread_runs:633-697` |
+| `POST /api/threads/{thread_id}/runs`, `/runs/stream`, `/runs/wait`, and the stateless `/api/runs/*` routes, when the thread's run-event feed is empty and a checkpoint head exists | `500`: `ensure_checkpoint_history_seeded` reads that head through the gated accessor before admission, and `start_run` maps only `ConflictError` (`409`) and `UnsupportedStrategyError` (`501`) | `services:1503-1520`, `services:2055`, `services:2126-2129` |
+| `GET /api/threads/{thread_id}/token-usage` | `200` with `context_usage: null` and a warning log only | `context_usage.py:73-78`, `thread_runs:1872-1873` |
+| `GET` / `PUT` / `DELETE /api/threads/{thread_id}/goal` | not gated at all: raw `checkpointer.aget_tuple` / `aput` on `channel_values["goal"]` | `threads:1329-1383`, `goalsrc:442-453,468-477,480-542` |
+| `DELETE /api/threads/{thread_id}`, `POST /search`, `PATCH`, `POST /move` | metadata store only, so mode-blind | `threads:706,1173,1216,1255` |
+
+### No reporting surface
+
+No health, readiness, features, capabilities, or console field reports the mode or cadence. No response model, header, or event field carries it either: the only custom SSE headers are `Cache-Control`, `Connection`, `X-Accel-Buffering`, and `Content-Location`. The mode is consumed server-side only, through `app.state.checkpoint_channel_mode`, `app.state.checkpoint_snapshot_frequency`, and `RunContext` (`deps:451-452,767-768`, `services:1093,1283-1312`). A latent exception is that the response `metadata` on `GET /api/threads/{thread_id}` and on `POST /api/threads/{thread_id}/history` strips other internal keys but not the delta marker or `counters_since_delta_snapshot`, so those can pass through to a client (`threads:1308-1315`, `threads:1890-1900`). The SSE `metadata` frame carries only `{"run_id", "thread_id"}` (`worker:1067-1074`). See [Observability](/docs/harness/checkpoints/observability).
+
+## Public symbols
+
+Import paths a consumer may rely on. Everything listed here is a Python import; the route contracts are in the HTTP status mapping section above.
+
+| Symbol | Import path | Role | Evidence |
+| --- | --- | --- | --- |
+| `CheckpointChannelMode` | `deerflow.config.database_config` | mode literal | `dbcfg:59` |
+| `DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY` | `deerflow.config.database_config` | default cadence, `10` | `dbcfg:61` |
+| `CheckpointDeltaConfig` | `deerflow.config.database_config` | delta tuning model (`snapshot_frequency`) | `dbcfg:64` |
+| `CheckpointGraphCacheConfig` | `deerflow.config.database_config` | graph-cache cap model (`accessor_graph_max`) | `dbcfg:86` |
+| `CheckpointCacheConfig` | `deerflow.config.database_config` | history-cache policy model | `dbcfg:103` |
+| `DatabaseConfig` | `deerflow.config.database_config` | the whole `database:` section | `dbcfg:142` |
+| `resolve_checkpoint_graph_cache_max(database_config, field_name, default)` | `deerflow.config.database_config` | tolerant hot-reloadable cap reader | `dbcfg:45-57` |
+| `INTERNAL_CHECKPOINT_MODE_KEY` | `deerflow.runtime.checkpoint_mode` | configurable key | `cmode:18` |
+| `CHECKPOINT_MODE_METADATA_KEY` | `deerflow.runtime.checkpoint_mode` | checkpoint metadata key | `cmode:19` |
+| `CheckpointModeMismatchError` | `deerflow.runtime.checkpoint_mode` | fail-closed cross-mode error | `cmode:22` |
+| `CheckpointModeReconfigurationError` | `deerflow.runtime.checkpoint_mode` | restart-required violation error | `cmode:26` |
+| `frozen_checkpoint_channel_mode()` | `deerflow.runtime.checkpoint_mode` | read the frozen mode or `None` | `cmode:34-36` |
+| `freeze_checkpoint_channel_mode(mode)` | `deerflow.runtime.checkpoint_mode` | freeze on first call, reject changes | `cmode:39-45` |
+| `frozen_checkpoint_snapshot_frequency()` | `deerflow.runtime.checkpoint_mode` | read the frozen cadence or `None` | `cmode:48-50` |
+| `freeze_checkpoint_snapshot_frequency(n)` | `deerflow.runtime.checkpoint_mode` | freeze cadence; `ValueError` if non-positive | `cmode:53-69` |
+| `resolve_checkpoint_snapshot_frequency(n=None)` | `deerflow.runtime.checkpoint_mode` | explicit → frozen → default | `cmode:72-78` |
+| `inject_checkpoint_mode(config, mode)` | `deerflow.runtime.checkpoint_mode` | stamp the configurable key and metadata marker | `cmode:81-88` |
+| `checkpoint_metadata_uses_delta(metadata)` | `deerflow.runtime.checkpoint_mode` | marker/counters detection | `cmode:91-98` |
+| `checkpoint_tuple_uses_delta(tuple)` | `deerflow.runtime.checkpoint_mode` | tuple-level detection | `cmode:101-104` |
+| `state_snapshot_uses_delta(snapshot)` | `deerflow.runtime.checkpoint_mode` | snapshot-level detection | `cmode:107-111` |
+| `raise_if_snapshot_incompatible(snapshot, mode)` | `deerflow.runtime.checkpoint_mode` | read gate | `cmode:114-123` |
+| `raise_if_checkpoint_tuple_incompatible(tuple, mode)` | `deerflow.runtime.checkpoint_mode` | raw-tuple gate | `cmode:126-129` |
+| `ensure_checkpoint_mode_compatible(checkpointer, config, mode)` | `deerflow.runtime.checkpoint_mode` | sync pre-write gate | `cmode:132-140` |
+| `aensure_checkpoint_mode_compatible(checkpointer, config, mode)` | `deerflow.runtime.checkpoint_mode` | async pre-write gate | `cmode:143-146` |
+| `ThreadState` | `deerflow.agents.thread_state` | full-mode state schema | `tstate:280` |
+| `DeltaThreadState` | `deerflow.agents.thread_state` | delta schema at the default cadence | `tstate:396-397,423-426` |
+| `delta_messages_field(snapshot_frequency=DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY)` | `deerflow.agents.thread_state` | `Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=…)]` | `tstate:385-390` |
+| `DELTA_MESSAGES_FIELD` | `deerflow.agents.thread_state` | module-level default-cadence delta field | `tstate:393` |
+| `merge_message_writes(state, writes)` | `deerflow.agents.thread_state` | linear-time `add_messages`-equivalent reducer | `tstate:328-382` |
+| `get_thread_state_schema(mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | `ThreadState` for non-delta, cached delta schema otherwise | `tstate:416-419` |
+| `adapt_state_schema_for_mode(schema, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | middleware/state schema adaptation | `tstate:437-440` |
+| `normalize_middleware_state_schemas(middleware, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | middleware list with adapted `state_schema` copies | `tstate:454-467` |
+| `THREAD_STATE_REDUCER_FIELDS` | `deerflow.agents.thread_state` | frozenset of reducer channels (including `"messages"`), used to decide `Overwrite` wrapping | `tstate:400-413`, `threads:1065-1066` |
+| `create_deerflow_agent(..., checkpoint_channel_mode="full", checkpoint_snapshot_frequency=None, ...)` | `deerflow.agents.factory` | public agent factory; delta plus a checkpointer is rejected | `factory:66-77`, `factory:135-141` |
+| `CheckpointStateAccessor`, `build_state_mutation_graph` | `deerflow.runtime` (package re-export) | accessor choke point and mutation graph | `deerflow/runtime/__init__.py:8,21-22` |
+| `ThreadState`, `DeltaThreadState`, `SandboxState` | `deerflow.agents` (package re-export) | lazily exported state schemas | `agents/__init__.py:14-16,40-47` |
+| `CheckpointStateAccessor.bind(graph, checkpointer, *, store=None, mode="full")` | `deerflow.runtime.checkpoint_state` | bind graph, saver, and mode | `cstate:112-134` |
+| `build_state_mutation_graph(as_node, mode, state_schema=None, *, snapshot_frequency=None)` | `deerflow.runtime.checkpoint_state` | state-only writer graph for `Overwrite`-style writes | `cstate:39-65` |
+
+<Callout type="warning">
+  In delta mode a raw saver read sees sentinels, not messages. Consumers must read
+  state through `CheckpointStateAccessor` instead of calling the checkpointer
+  directly; the accessor docstring says so explicitly.
+</Callout>
+
+## Internal symbols
+
+These are implementation details. Do not import them, and do not build on their names or shapes.
+
+| Symbol | Why it is not API | Evidence |
+| --- | --- | --- |
+| `_frozen_checkpoint_channel_mode`, `_frozen_checkpoint_snapshot_frequency` | module globals, only touched through the freeze/frozen helpers; tests monkeypatch them | `cmode:30-31`, `backend/tests/conftest.py:96-111` |
+| `_delta_thread_state_schema` | `@cache`-decorated internal builder; generates `DeltaThreadState_f{freq}` | `tstate:422-434` |
+| `_adapt_state_schema_for_delta` | `@cache`-decorated internal adapter; generates `Delta{module_underscored}_{Name}_f{freq}` | `tstate:443-451` |
+| `_resolve_snapshot_frequency` | internal lazy-import resolver | `tstate:25-33` |
+| `_STATE_ACCESSOR_GRAPH_CACHE_MAX` | in-code fallback constant `64`, used only when the configured value is unusable | `services:1127,1133-1138` |
+| `_RawCheckpointReadAccessor`, `_RawCheckpointSnapshot` | degraded full-mode read-only fallback | `services:1199-1263` |
+| `_checkpoint_mode_http_error`, `_CHECKPOINT_MODE_ERRORS` | router-internal HTTP mapping | `threads:82,96-107` |
+| `_wrap_sync_if_delta` | sync provider internal | `syncprov:164-192` |
+| `_migrate_legacy_snapshot_frequency` | pydantic `mode="before"` validator, labelled `-- Legacy key migration (not user-configured) --` | `dbcfg:216-254` |
+| `_finish_state_mutation` | no-op writer node | `cstate:32-33` |
+
+## Load-bearing tests
+
+Tests a reader can run or cite as the executable contract. All paths are under `backend/tests/`.
+
+### Mode gate, freezing, and configuration
+
+- `test_checkpoint_mode.py` (freeze, detection, gate) — the module named as the mode gate in `backend/packages/harness/deerflow/runtime/AGENTS.md:133`
+- `test_checkpoint_mode.py::test_yaml_mode_change_is_rejected_when_graph_is_reconstructed`
+- `test_checkpoint_mode.py::test_delta_mode_accepts_plain_full_checkpoint`
+- `test_checkpoint_mode.py::test_gateway_runtime_rejects_mode_different_from_frozen_process`
+- `test_threads_checkpoint_mode.py` (router-level mode behaviour)
+- `test_threads_checkpoint_mode.py::test_delta_snapshot_frequency_controls_snapshot_cadence`
+- `test_gateway_checkpoint_mode.py` (dual-mode end-to-end parity)
+- `test_app_config_reload.py::test_checkpoint_channel_mode_rejects_unknown_value`
+- `test_config_version.py` (config-version migration)
+
+### Materialization, storage shape, and migration
+
+- `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`
+- `test_delta_channel_checkpointers.py::test_materialization_is_deterministic_and_message_ids_are_stable`
+- `test_delta_channel_checkpointers.py::test_delta_storage_shape_and_snapshot_cadence`
+- `test_delta_channel_checkpointers.py::test_non_delta_writers_preserve_delta_messages_and_markers`
+- `test_delta_channel_checkpointers.py::test_long_chain_history_survives_pagination`
+- `test_delta_channel_checkpointers.py::test_parallel_superstep_replay_matches_live_write_order`
+- `test_delta_channel_state.py::test_mode_selects_expected_state_schema`
+- `test_delta_channel_state.py::test_compiled_delta_graph_bakes_configured_snapshot_frequency`
+- `test_delta_channel_state.py::test_production_message_forms_keep_assigned_ids_across_delta_replay`
+- `test_delta_channel_state.py::test_delta_normalization_compiles_stable_channel_without_mutating_middleware`
+
+`test_long_chain_history_survives_pagination` and `test_parallel_superstep_replay_matches_live_write_order` assert the correct contract and trigger-skip while the pinned dependency still has the defect; they are the gates that flip live on a dependency bump.
+
+### History cache
+
+- `test_cached_history_saver.py::test_composition_matches_full_walk_and_avoids_it`
+- `test_cached_history_saver.py::test_latest_config_caches_under_resolved_checkpoint_id`
+- `test_cached_history_saver.py::test_recursive_resolve_caches_intermediate_levels`
+- `test_cached_history_saver.py::test_deep_cold_chain_delegates_one_inner_walk_at_depth_limit`
+- `test_cached_history_saver.py::test_cold_resolve_never_delegates_to_inner_history`
+- `test_cached_history_saver.py::test_sync_cold_resolve_never_delegates_to_inner_history`
+- `test_cached_history_saver.py::test_snapshot_parent_composes_without_parent_history_lookup`
+- `test_cached_history_saver.py::test_root_checkpoint_history_is_empty_writes`
+- `test_cached_history_saver.py::test_eviction_falls_back_to_walk_but_stays_correct`
+- `test_cached_history_saver.py::test_sync_path_matches_async`
+- `test_cached_history_saver.py::test_stats_expose_composition_counters`
+- `test_cached_history_saver.py::test_adelete_thread_purges_only_that_threads_cache_entries`
+- `test_cached_history_saver.py::test_sync_delete_thread_purges_cache_entries`
+- `test_cached_history_saver.py::test_prune_purges_rewritten_threads_cache_entries`
+- `test_cached_history_saver.py::test_delete_for_runs_delegates_without_cache_purge`
+- `test_cached_history_saver_integration.py::test_sequential_run_composes_without_inner_walks`
+- `test_cached_history_saver_integration.py::test_cache_disabled_parity`
+- `test_cached_history_saver_integration.py::test_branch_divergence_no_cross_contamination`
+- `test_cached_history_saver_integration.py::test_interrupt_resume_appended_head_writes`
+- `test_cached_history_saver_integration.py::test_eviction_only_costs_performance`
+- `test_cached_history_saver_integration.py::test_rollback_supersede_does_not_pollute`
+- `test_cached_history_saver_integration.py::test_full_to_delta_migration_under_cache_states`
+
+### Resume linearization and rollback
+
+- `test_run_worker_delta_resume.py::test_linearizes_a_delta_resume_onto_the_head`
+- `test_run_worker_delta_resume.py::test_linearization_restores_all_selected_state_and_clears_newer_channels`
+- `test_run_worker_delta_resume.py::test_linearized_resume_preserves_selected_checkpoint_agent_binding`
+- `test_run_worker_delta_resume.py::test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answer`
+- `test_run_worker_delta_resume.py::test_run_agent_streams_from_the_linearized_delta_resume`
+- `test_run_worker_delta_resume.py::test_run_agent_serializes_resume_preparation_with_checkpoint_writes`
+- `test_run_worker_delta_resume.py::test_cancelled_delta_resume_rolls_back_to_pre_linearization_head`
+- `test_run_worker_delta_resume.py::test_full_mode_keeps_the_fork`
+- `test_run_worker_delta_resume.py::test_ordinary_run_without_a_checkpoint_selector_is_untouched`
+- `test_run_worker_delta_resume.py::test_selecting_the_head_is_already_linear`
+- `test_run_worker_delta_resume.py::test_unmaterializable_resume_state_fails_closed`
+- `test_run_worker_rollback.py::test_rollback_linearizes_delta_restore_onto_cancelled_head`
+- `test_run_worker_rollback.py::test_rollback_linearizes_delta_restore_sqlite_reopen`
+- `test_run_worker_rollback.py::test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints`
+- `test_run_worker_rollback.py::test_rollback_preserves_middleware_contributed_channels[delta]`
+- `test_run_worker_rollback.py::test_rollback_preserves_agent_binding_for_manual_compaction[delta]`
+- `test_run_worker_rollback.py::test_run_agent_marks_rollback_unusable_when_capture_fails`
+
+### Retention
+
+- `test_checkpoint_retention_contract.py::test_growth_baseline_full_vs_delta`
+- `test_checkpoint_retention_contract.py::test_deleting_branch_ancestor_breaks_lineage_loudly`
+- `test_checkpoint_retention_contract.py::test_deleting_explicit_resume_target_breaks_resume`
+- `test_checkpoint_retention_contract.py::test_pending_writes_are_retained_state_not_garbage`
+- `test_checkpoint_retention_contract.py::test_leaf_duration_checkpoint_deletion_is_safe`
+- `test_checkpoint_retention_contract.py::test_leaf_sibling_branch_deletion_is_safe`
+
+### Patches
+
+- `test_checkpoint_patches.py::test_binop_overwrite_patch_is_active`
+- `test_checkpoint_patches.py::test_binop_overwrite_patch_stands_down_when_upstream_fixed`
+
+## Pinned upstream defects
+
+State at the pinned set (`langgraph 1.2.9`, `langgraph-checkpoint 4.2.0`, `langgraph-checkpoint-postgres 3.1.2`). Each local test asserts the correct contract and trigger-skips while the defect is present, so a later dependency bump flips it into a live gate; the buggy behaviour is never asserted as correct.
+
+| id | Kind / status | Scenario that breaks | Local handling | Pinned version | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `#4380` | DeerFlow issue; patched locally | A replace-style write into an empty Union-typed `BinaryOperatorAggregate` channel persists the `Overwrite` wrapper; the next read crashes with `TypeError: 'Overwrite' object is not subscriptable` | Probe-guarded patch in `checkpoint_patches.py`; patch tests; branch/state-update anchors in `test_threads_router.py` | `langgraph 1.2.9` | `checkpoint_patches:91-107`, `backend/tests/test_checkpoint_patches.py:31-95` |
+| `#8526` (fixes upstream `#8384`), plus postgres `#8535` | upstream langgraph PR; merged 2026-08-07; fixed in `langgraph-checkpoint` 4.2.0 | After switching a thread from `BinaryOperatorAggregate` to `DeltaChannel`, the first post-migration write survives the live `invoke` return value but disappears from every subsequent read; on postgres, with no seed the walk runs to the root and replays everything | Local `InMemorySaver` patch deleted; dependency floor `langgraph-checkpoint>=4.2.0,<5.0`; regression gate `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`; a version-guarded saver patch must not be re-added | `langgraph-checkpoint 4.2.0` | `checkpoint_patches:11-17`, `backend/packages/harness/pyproject.toml:49-56`, `CHANGELOG.md:3040-3048` |
+| `#8382` | upstream langgraph issue; **open**; fix PR `#8544` unmerged, no released version | Delta replay order diverges from live execution order for parallel-superstep writes: live `invoke` returns path-sorted `[a..h]`, `get_state` replays `[f,b,g,h,a,c,d,e]` (a pure permutation); reproduced on memory, sqlite, and postgres | Trigger-skip naming the issue; `test_delta_channel_checkpointers.py::test_parallel_superstep_replay_matches_live_write_order` | `langgraph-checkpoint 4.2.0` | `test_delta_channel_checkpointers.py:419,440-460` |
+| `#8448` | upstream langgraph issue; **open**; fix PR `#8556` unmerged | `PostgresSaver.get_delta_channel_history` permanently poisons the walk cursor when the target checkpoint is not in the first pagination page, so old checkpoints hydrate empty; only Postgres pages its stage-1 scan | Assertion stays live on memory/sqlite (differential against an `InMemorySaver` oracle); Postgres trigger-skips; `test_delta_channel_checkpointers.py::test_long_chain_history_survives_pagination` | `langgraph-checkpoint-postgres 3.1.2` | `test_delta_channel_checkpointers.py:459` |
+| `#8548` | upstream langgraph PR; **open**; fixes upstream `#8443`, with related issue `#8551` still waiting on it | Does not replay an abandoned branch into a `DeltaChannel` fork | While unmerged the local linearization cannot be removed: `_linearize_delta_checkpoint_resume` is retained | `langgraph 1.2.9` | `worker:2267-2279`, `test_run_worker_delta_resume.py::test_linearizes_a_delta_resume_onto_the_head` |
+| `#4458` | DeerFlow issue; the user-visible symptom of the fork bug | Regenerating in a branched thread resurrected the old assistant message beside the new one after a reload; reproduced on postgres, sqlite, and the in-memory saver, and it also broke branch history when seeded rows shared one run id | Linearization plus per-turn seeded run ids; `test_run_worker_delta_resume.py::test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answer` | `langgraph 1.2.9` | `worker:2267-2289`, `test_run_worker_delta_resume.py:204` |
+| `#4189` item 3 | DeerFlow design discussion | Retention and deletion of checkpoint rows; what may be deleted | `backend/docs/checkpoint-retention-contract.md`, `backend/tests/test_checkpoint_retention_contract.py`, `backend/app/gateway/checkpoint_retention.py`; no production trigger is wired | — | `checkpoint_retention.py:1-40`, `backend/docs/checkpoint-retention-contract.md:31-77` |
+| `#3859` (review) | DeerFlow review reference | An interrupted-title write must bump `channel_versions["title"]` and declare it in `new_versions`, or database savers drop the blob | `backend/tests/test_run_worker_rollback.py:3501-3504` pins the shape | — | `backend/tests/test_run_worker_rollback.py:3501-3504` |
+
+See [Operating Checkpoints](/docs/harness/checkpoints/operations) for what the remaining patch does and how the dependency floor is enforced, and [Troubleshooting](/docs/harness/checkpoints/troubleshooting) for the symptoms each defect produces for a user.
+
+## Change log (June to September 2026)
+
+Pull requests whose changelog entries concern dual-mode checkpoint storage. English entries under `## [Unreleased]` accumulate toward milestone 2.1.0; the `## [2.0.0]` entries are from the 2026-06-15 release. The section column names the changelog section each entry sits under.
+
+| PR | Changelog section | Change |
+| --- | --- | --- |
+| [#4516](https://github.com/bytedance/deer-flow/pull/4516) | `### ⚠ Breaking changes` | The config key moved from `database.checkpoint_delta_snapshot_frequency` to `database.checkpoint_delta.snapshot_frequency`, and the default changed from `1000` to `10`. The legacy top-level value is still honored with a deprecation warning and an explicit nested key wins. Threads now snapshot 100x more often in delta mode; set `…snapshot_frequency: 1000` explicitly to keep the previous cadence. |
+| [#4292](https://github.com/bytedance/deer-flow/pull/4292) | `### Added` | Dual-mode checkpoint storage with LangGraph `DeltaChannel` cuts thread storage from O(N²) to near-linear for long research and coding runs. |
+| [#4638](https://github.com/bytedance/deer-flow/pull/4638) | `### Added` | Delta-mode checkpoint history cache (memory/redis) with O(1) incremental composition, configured via `database.checkpoint_cache`. |
+| [#4437](https://github.com/bytedance/deer-flow/pull/4437), [#4460](https://github.com/bytedance/deer-flow/pull/4460), [#4468](https://github.com/bytedance/deer-flow/pull/4468) | `### Fixed` | Serialize checkpoint writes with active runs, linearize delta-mode checkpoint resume, and accept the SDK's default `stream_resumable=false` to avoid resume races. |
+| [#4383](https://github.com/bytedance/deer-flow/pull/4383) | `### Fixed` | **checkpoint:** unwrap `Overwrite` first writes into empty channels. |
+| [#5255](https://github.com/bytedance/deer-flow/pull/5255) | `### Fixed` | Checkpoint-retention contract suite: per-step growth baselines for both full and delta schemas, deleting a branch ancestor fails loudly with `CheckpointLineageError`, and pending writes are treated as retained state. |
+| [#4140](https://github.com/bytedance/deer-flow/pull/4140) | `### Security` | **storage:** stop persisting base64 image data in checkpoint state. Adjacent rather than mode-specific. |
+| [#5734](https://github.com/bytedance/deer-flow/pull/5734) | `### Internal` | Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the `InMemorySaver` delta-history patch: upstream 4.2.0 fixes the dropped first write after full→delta (`langgraph#8526`) and postgres locates plain-value seeds (`#8535`). The migration contract test remains the gate. |
+| [#4395](https://github.com/bytedance/deer-flow/pull/4395) | `### Internal` | **bench:** add an isolated checkpoint channel-mode benchmark comparing `full` and `delta` across latency, storage, and replay metrics. |
+| [#5051](https://github.com/bytedance/deer-flow/pull/5051) | `### Internal` | **bench:** measure Postgres checkpoint, blob, and write storage growth in the checkpoint benchmark alongside memory and SQLite. |
+| [#2582](https://github.com/bytedance/deer-flow/pull/2582) | `## [2.0.0]` → `### Fixed` → `#### Runtime, gateway & persistence` | Rollback restore checkpoint now supersedes newer checkpoints. |
+| [#3559](https://github.com/bytedance/deer-flow/pull/3559) | `## [2.0.0]` → `### Fixed` | **subagent:** isolate subagents from the parent run's checkpointer. |
+
+No entry in this list records a change to the mode default, which has been `full` throughout.
+
+The `#4292` row quotes the released changelog entry verbatim. Its "near-linear" wording describes the per-step representation; retained storage still adds up to O(N²/K + N) with K = `snapshot_frequency`, because every periodic snapshot holds the whole growing list — see [Checkpoints and Delta Channels](/docs/harness/checkpoints).

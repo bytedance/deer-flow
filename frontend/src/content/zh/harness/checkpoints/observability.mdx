@@ -1,0 +1,116 @@
+---
+title: 可观测性
+description: 没有任何接口暴露检查点模式。本章说明客户端能看到与不能看到什么、模式不匹配时留下的日志行与 SSE 帧、浏览器用户实际看到什么、运维可读的缓存计数器，以及如何判断某个进程或某个线程的模式。
+---
+
+import { Callout } from "nextra/components";
+
+# 可观测性
+
+## 没有任何接口暴露模式
+
+检查点模式是服务端状态。模式与快照节奏都不会出现在任何 health、readiness、features、capabilities 或 console 字段里，也不会出现在任何响应模型、响应头或事件字段里。
+
+- 健康与就绪探针只检测后端可达性；除了 threads 路由的错误映射之外，没有任何路由读取 `checkpoint_channel_mode`。
+- 仅有的自定义 SSE 响应头是 `Cache-Control`、`Connection`、`X-Accel-Buffering` 和 `Content-Location`。
+- Gateway 只在服务端消费该模式，写入 `app.state.checkpoint_channel_mode` / `app.state.checkpoint_snapshot_frequency` 与 run 上下文，不向外序列化。
+
+因此不存在可以轮询的「本部署是否为 delta 模式」字段。你只能从线程的 metadata、受门禁路由上的一次 `409`，或者在进程内部自行判断。
+
+## 客户端能看到与不能看到什么
+
+存在两个模式键，只有一个可能到达客户端。
+
+| 键 | 写入位置 | 是否上线 |
+| --- | --- | --- |
+| `INTERNAL_CHECKPOINT_MODE_KEY` = `"__deerflow_checkpoint_channel_mode"` | `config["configurable"]`，两种模式都写 | 从不。仅服务端内部。 |
+| `CHECKPOINT_MODE_METADATA_KEY` = `"deerflow_checkpoint_channel_mode"` | `config["metadata"]`，**只有** delta 模式写；full 模式移除 | 可以在响应的 `metadata` 对象中透传 |
+
+由于标记只在 delta 模式写入，已落库的 delta 检查点带有它，full 检查点没有；缺省即 full。
+
+有两个读接口用「存储快照的 metadata 减去一个剥离清单」构造响应的 `metadata`，而该清单不包含模式标记与 LangGraph 自己的 `counters_since_delta_snapshot`，因此两者都可能到达客户端：
+
+| 接口 | 响应 `metadata` 来源 |
+| --- | --- |
+| `GET /api/threads/{thread_id}` | `snapshot.metadata` 减去 `created_at`、`updated_at`、`step`、`source`、`writes`、`parents` —— 但仅当不存在 `threads_meta` 行时；否则 `metadata` 来自存储行 |
+| `POST /api/threads/{thread_id}/history` | 每条条目的 `snapshot.metadata` 减去同一清单再加上 `run_durations` 与 run-message-ids 键，然后重新加回 `step` |
+
+这种透传来自处理函数里的剥离清单；没有任何测试断言标记会出现在线上响应中，所以请把它当作实现细节而不是契约。
+
+流帧不携带模式。SSE 的 `metadata` 事件载荷只有 `{"run_id", "thread_id"}`，SSE 的 `error` 事件载荷是 `{"message", "name"}`，其中 `name` 是异常类名。
+
+## 日志与流面
+
+模式问题留下的证据取决于命中它的路径。
+
+| 场景 | 面 | 逐字文本 |
+| --- | --- | --- |
+| run 命中不匹配 | run worker 日志（`exc_info=True`） | `Run %s failed: %s`，`%s` 为不匹配文本 |
+| run 命中不匹配 | run 记录 / `/wait` 响应体 / SSE `error` 帧 | `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` |
+| run 命中重启要求违例 | run worker 日志（`exc_info=True`）、run 记录、SSE `error` 帧 | `Run %s failed: %s`，`%s` 为 `checkpoint_channel_mode is restart-required and cannot change in a running process`（或 `checkpoint_delta.snapshot_frequency` 的对应文本） |
+| 上下文用量命中不匹配 | 日志 | `Failed to load checkpoint for context usage on thread %s` |
+| 重新生成无法读取最新检查点 | 日志，随后 HTTP 500 `detail` | `Failed to read latest checkpoint for regenerate thread %s` → `Failed to read latest checkpoint` |
+| 重新生成无法列出检查点历史 | 日志，随后 HTTP 500 `detail` | `Failed to list checkpoints for regenerate thread %s` → `Failed to inspect checkpoint history` |
+
+失败载荷随路由不同。创建 run 在 threads 路由上**不会**提前做门禁：`POST /api/threads/{thread_id}/runs` 返回 `200` run 记录，随后变为 `status: error` 并带上不匹配文本；`POST /runs/stream` 返回 `200 text/event-stream`，随后发出 `event: error` 帧，载荷为 `{"message": ..., "name": "CheckpointModeMismatchError"}`；`POST /runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。例外是 run event 流为空但存在检查点头部的线程：`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里没有映射模式错误，于是同一个不匹配会在 run 被准入之前返回普通的 `500`。无状态的 `/api/runs/*` 路由共享这条路径。
+
+<Callout type="warning">
+  模式门自身不记任何日志。`checkpoint_mode.py` 没有 logger，threads
+  路由把模式错误转成 `HTTPException` 时也不记日志，所以一次 `409` 不会
+  单独留下日志行。证据在调用方：run worker 的 `Run %s failed: %s`、run
+  记录，或客户端侧的 toast。
+</Callout>
+
+## 浏览器用户看到什么
+
+前端完全没有模式界面：没有徽章、设置、列或错误文案，也没有针对模式不匹配的 i18n 字符串。但聊天页确实会命中受门禁的路由，所以用户能在不知道「模式」这个词的情况下看到失败。
+
+- 聊天页默认加载持久历史（`fetchStateHistory: { limit: 1 }`），调用 `POST /api/threads/{thread_id}/history`。当 full 模式进程读取 delta 线程时，这正是 `409` 路由。
+- SDK 把响应转成 `HTTPError`，其 message 为 `HTTP 409: <原始响应体文本>`；`409` 在 SDK 的不可重试集合里，因此立即抛出、不重试。
+- 该错误到达流的 `onError`，显示为错误 message 的 toast。用户实际看到的是原始服务端文本，大致为：
+
+  ```
+  HTTP 409: {"detail":"Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode."}
+  ```
+
+  两侧都各自经过核实（`HTTP 409: ` 前缀来自 SDK，`detail` 正文来自路由）；拼接后的整串未在运行期实测。
+- 侧边栏**导出**调用 `getState()` → `GET /api/threads/{thread_id}/state` → `409`，但一个裸 `catch {}` 丢弃了详情，只显示通用的 `exportFailed` toast。
+- **重命名**调用 `updateState()` → `POST /api/threads/{thread_id}/state` → `409` → `toast.error(error.message ?? renameFailed)`，因此这条路径上原始的 HTTPError 字符串可能显现。
+- 流缺口恢复会把失败的 `getState` 包装成 `StreamReplayGapError`；另一处内部 `getState`（重连输入快照）吞掉所有非 abort 错误并返回 `undefined`。
+- 界面里唯一带检查点意味的 toast 文本 `Failed to load thread history.` 属于消息分页路由，不属于任何受模式门禁的路由。
+
+## 缓存计数器
+
+delta 历史缓存只在 Gateway（异步）路径的 delta 模式下包裹 saver。`CachedHistorySaver.stats()` 把后端计数器与两个 wrapper 计数器合并。没有任何 HTTP 路由暴露它们，需在进程内读取。
+
+| 计数器 | 含义 | 由谁报告 |
+| --- | --- | --- |
+| `hits` | 由缓存直接命中的按通道历史查询 | memory、redis |
+| `misses` | 需要组合或回走的查询 | memory、redis |
+| `evictions` | 因 LRU 上限被丢弃的条目 | 仅 memory |
+| `entries` | 当前缓存条目数 | 仅 memory |
+| `compose_hits` | 由「热祖先」（已缓存条目或带快照的父级）组合出的祖先层级数 | wrapper |
+| `full_walks` | 回退到原始内层 saver 自行回走的次数（冷链到达深度预算、缓存被禁用、未找到目标） | wrapper |
+
+redis 后端只报告 `hits` 与 `misses`；它的 `evictions` 与 `entries` 恒为 `0`。`max_entries: 0` 统一禁用缓存，被禁用的缓存会直接透传给原始 saver，完全不做组合。改动 `database.checkpoint_cache.*` 的任何字段后，运行中的 Gateway 需要重启才会报告不同的计数，因为缓存是随 checkpointer 在启动时构造的；见[历史缓存](/docs/harness/checkpoints/history-cache)。
+
+## 判断模式
+
+### 运行中的进程
+
+模式是一个模块级全局量，在进程首次构建 agent 时冻结。`frozen_checkpoint_channel_mode()` 返回冻结值或 `None`，`frozen_checkpoint_snapshot_frequency()` 对节奏同理。Gateway 另外把启动快照存到 `app.state.checkpoint_channel_mode` 与 `app.state.checkpoint_snapshot_frequency`。
+
+启动时不会打印这两个值。实践上：
+
+1. 从 `config.yaml` 读取 `database.checkpoint_channel_mode`（以及 `database.checkpoint_delta.snapshot_frequency`）。
+2. 确认进程是在最后一次改动之后启动的 —— 改配置而不重启不生效，并会在构建新图时明确报错（见[故障排查](/docs/harness/checkpoints/troubleshooting)）。
+3. 记住共享同一检查点数据库的每个进程都必须使用相同的值，且客户端传入的 `configurable.__deerflow_checkpoint_channel_mode` 无法改变进程的模式。
+
+### 某个线程
+
+线程的模式记录在它已落库的检查点里：
+
+- delta 检查点的 metadata 带有 `deerflow_checkpoint_channel_mode: "delta"`；full 检查点没有。
+- LangGraph 自己的 `counters_since_delta_snapshot` metadata 是第二个 delta 信号。
+- 通过 HTTP，可从 `GET /api/threads/{thread_id}`（不存在 `threads_meta` 行时）的 `metadata` 对象，以及 `POST /api/threads/{thread_id}/history` 每条条目的 `metadata` 中读到该标记。
+- 或者在一个你认为是 `full` 的进程里打开该线程：delta 线程会以 `409` 回应。
