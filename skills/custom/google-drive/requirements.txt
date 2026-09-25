@@ -1,0 +1,15 @@
+# Google Drive 集成依赖
+google-api-python-client>=2.0.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=0.5.0
+python-magic>=0.4.27; sys_platform != 'win32'
+python-magic-bin>=0.4.14; sys_platform == 'win32'
+
+# LangChain / LangGraph 集成（可选）
+langchain>=0.1.0
+langchain-google-community>=0.0.0
+
+# 开发依赖
+pytest>=7.0.0
+black>=23.0.0
+flake8>=6.0.0
