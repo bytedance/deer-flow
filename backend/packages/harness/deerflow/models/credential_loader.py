@@ -156,8 +156,8 @@ def _extract_claude_code_credential(data: dict[str, Any], source: str) -> Claude
         logger.debug("Claude Code credentials source %s has a non-object claudeAiOauth container; skipping", source)
         return None
     access_token = oauth.get("accessToken", "")
-    if not access_token:
-        logger.debug("Claude Code credentials container exists but no accessToken found")
+    if not isinstance(access_token, str) or not access_token:
+        logger.debug("Claude Code credentials container exists but no string accessToken found")
         return None
 
     expires_at = oauth.get("expiresAt", 0)
@@ -244,8 +244,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     if not isinstance(account_id, str):
         logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
         account_id = ""
-    if not access_token:
-        logger.debug("Codex CLI credentials file exists but no token found")
+    if not isinstance(access_token, str) or not access_token:
+        logger.debug("Codex CLI credentials file exists but no string token found")
         return None
 
     logger.info("Loaded Codex CLI credential")
