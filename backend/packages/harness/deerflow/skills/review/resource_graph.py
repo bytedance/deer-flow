@@ -128,20 +128,22 @@ def _resolve_reference(
         if "://" in ref:
             return None
         if "#" in ref:
-            _, fragment = ref.split("#", 1)
-            if "/" in fragment or ".." in fragment:
-                # The text after '#' is path text, not a section anchor:
-                # drop it BEFORE normalizing, or normpath would collapse a
-                # segment like "faq.md#/.." and silently retarget the edge.
-                ref = ref.split("#", 1)[0]
+            pre_hash, fragment = ref.split("#", 1)
+            # A '..' segment in the post-'#' text must never participate in
+            # normalization: it would collapse the hash-bearing segment and
+            # retarget the edge ("faq.md#/../other.md" must resolve to
+            # faq.md). Any other fragment gets its chance first: the whole
+            # token may name a real package file — '#' is legal in file AND
+            # directory names ("references/C#.md", "references/C#/readme.md"),
+            # from nested sources too ("../C#.md"). Only when the
+            # canonicalized whole token matches no file does the suffix
+            # become a section fragment and get stripped.
+            if "/.." in f"/{fragment}" or fragment.startswith(".."):
+                ref = pre_hash
             elif files is not None and posixpath.normpath((base / ref).as_posix()) in files:
-                # The whole token names a real package file — filenames may
-                # contain '#' and the source may sit in a nested directory
-                # ("../C#.md" from references/sub/guide.md). Canonicalize
-                # the leading segments, then keep the token verbatim.
                 return normalize_relative_path((base / ref).as_posix())
             else:
-                ref = ref.split("#", 1)[0]
+                ref = pre_hash
         return normalize_relative_path((base / ref).as_posix())
     except ValueError:
         return "__ESCAPES__"

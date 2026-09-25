@@ -224,6 +224,24 @@ def test_resource_graph_prefers_hash_filenames_from_nested_sources(tmp_path):
     assert not any(f["rule_id"] in {"resource.missing", "resource.escaping-link"} and f["path"] == "references/sub/guide.md" for f in facts["findings"])
 
 
+def test_resource_graph_prefers_hash_directory_paths_over_stripping(tmp_path):
+    # '#' is legal in directory names too: the whole token
+    # `references/C#/readme.md` names a real file even though the text
+    # after '#' contains '/'. It must not be truncated to `references/C`
+    # — only a '..' segment in the post-'#' text forces the strip-first
+    # fallback ("faq.md#/../other.md").
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/C#/readme.md`.\n",
+    )
+    _write(tmp_path / "references" / "C#" / "readme.md", "# C#\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/C#/readme.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
 def test_resource_graph_strips_fragment_before_normalizing_fallback(tmp_path):
     # The exact-path preference must check the literal token: normalizing
     # first collapses a hash-bearing segment ("faq.md#/.." -> "other.md")
