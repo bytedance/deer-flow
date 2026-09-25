@@ -770,7 +770,20 @@ class LocalSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
-        entries = list_dir(resolved_path, max_depth)
+        container_path = path.rstrip("/")
+        try:
+            entries = list_dir(resolved_path, max_depth)
+        except FileNotFoundError:
+            # The requested path may exist only in the container, as the
+            # parent of mounted sub-directories (e.g. /mnt/skills with only
+            # per-category mounts and no aggregate root mapping), so the
+            # resolved host directory is missing. Continue with no host
+            # entries and let the virtual sub-directory overlay below
+            # surface those children; when nothing is mounted inside the
+            # path the directory genuinely does not exist, so keep raising.
+            if not any(mapping.container_path.startswith(container_path + "/") for mapping in self.path_mappings):
+                raise
+            entries = []
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -785,7 +798,6 @@ class LocalSandbox(Sandbox):
         # the ``list_dir`` utility skips them for security. We patch those
         # missing virtual children back in so the agent can discover them via
         # ``ls /mnt/skills``.
-        container_path = path.rstrip("/")
         existing_dirs = {e.rstrip("/") for e in result if e.endswith("/")}
         for mapping in self.path_mappings:
             # A mapping is a virtual child if:
