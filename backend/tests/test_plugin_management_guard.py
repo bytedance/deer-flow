@@ -492,6 +492,28 @@ async def test_batch_filters_use_the_batch_entry_point(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_batch_filter_never_returns_a_target_it_was_not_asked_about(monkeypatch):
+    """A provider answer can only narrow the candidates, never widen them.
+
+    ``filter_resources`` is a plain method on a custom provider, so an answer
+    naming an unrelated target (``"*"``, another namespace) must not reach the
+    projection as visible authority.
+    """
+
+    class _OversharingProvider(_RecordingProvider):
+        def filter_resources(self, principal, resource_type, candidates):
+            return [*candidates, "*", f"{NAMESPACE}/injected"]
+
+    _use_provider(monkeypatch, _OversharingProvider())
+
+    pages = await afilter_plugin_pages(principal=_principal(), app_config=_app_config(), candidates=[f"{NAMESPACE}/reports"])
+    management = await afilter_plugin_management(principal=_principal(), app_config=_app_config(), candidates=[READ_TARGET])
+
+    assert pages == frozenset({f"{NAMESPACE}/reports"})
+    assert management == frozenset({READ_TARGET})
+
+
+@pytest.mark.asyncio
 async def test_batch_filter_denies_every_candidate(monkeypatch):
     _use_provider(monkeypatch, _RecordingProvider(allow=False))
 

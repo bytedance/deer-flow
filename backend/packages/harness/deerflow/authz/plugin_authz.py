@@ -22,6 +22,8 @@ Semantics, uniform across every function here:
 * A caller-supplied ``provider`` is reused, so one request resolves the provider
   once (the Gateway hands in the instance from its loop-keyed cache).
 * An explicit deny raises :class:`PluginAuthorizationError`.
+* A batch answer is intersected with the candidates it was asked about, so a
+  provider that names a target the host never offered cannot widen a projection.
 * A provider exception, a resolution failure, a malformed decision (a non-
   :class:`AuthzDecision`, or one whose ``allow`` is not a real ``bool``) or a
   missing principal follows ``fail_closed``: raise the same error, or log a
@@ -238,6 +240,14 @@ async def _aenforce_single(*, principal, app_config, resource, action, target, p
 
 
 async def _afilter(*, principal, app_config, resource, candidates: Iterable[str], provider) -> frozenset[str]:
+    """Return the subset of *candidates* the provider allows (one round trip).
+
+    The result is a subset of *candidates* on every path, including the provider
+    answer: ``filter_resources`` is documented to return "only the allowed
+    subset", but it is a plain method on a custom provider, so an answer naming a
+    target that was never asked about (``"*"``, another namespace, a phantom
+    page) is intersected away rather than projected as visible.
+    """
     candidate_list = list(candidates)
     authz_config = _authorization_config(app_config, resource=resource, target=_BATCH_TARGET)
     if authz_config is None:
@@ -261,7 +271,7 @@ async def _afilter(*, principal, app_config, resource, candidates: Iterable[str]
         logger.warning("Authorization provider failed while filtering %s candidates", resource, exc_info=True)
         _unanswerable(resource=resource, target=_BATCH_TARGET, reason_code="authz.provider_error", fail_closed=fail_closed)
         return frozenset(candidate_list)
-    return frozenset(allowed)
+    return frozenset(allowed) & frozenset(candidate_list)
 
 
 def enforce_plugin_action(
