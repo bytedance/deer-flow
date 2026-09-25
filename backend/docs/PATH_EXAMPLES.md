@@ -10,7 +10,7 @@ DeerFlow 的文件上传系统返回三种不同的路径，每种路径用于�
 {DEER_FLOW_HOME}/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf
 ```
 
-API 返回的是**绝对路径**，且上传文件按用户分桶。未设置 `DEER_FLOW_HOME` 时，`{DEER_FLOW_HOME}` 默认是启动目录下的 `.deer-flow/`（在 `backend/` 启动即 `backend/.deer-flow/`）。
+API 返回的是**绝对路径**，且上传文件按用户分桶。`{DEER_FLOW_HOME}` 表示实际的运行时数据根目录：优先使用 `DEER_FLOW_HOME`；未设置时使用 `DEER_FLOW_PROJECT_ROOT/.deer-flow/`；两个环境变量都未设置时，才使用当前启动目录下的 `.deer-flow/`。
 
 **用途：**
 - 文件在服务器文件系统中的实际位置
@@ -141,7 +141,7 @@ async function uploadAndProcess(threadId: string, file: File) {
 | 备份脚本 | `path` | `{DEER_FLOW_HOME}/users/default/threads/abc123/user-data/uploads/file.pdf` |
 | 日志记录 | `path` | `{DEER_FLOW_HOME}/users/default/threads/abc123/user-data/uploads/file.pdf` |
 
-`path` 是绝对路径，`{DEER_FLOW_HOME}` 未配置时默认是启动目录下的 `.deer-flow/`（源码启动即 `backend/.deer-flow/`）。其中的 `users/default/` 是上传所属用户，换用户时该段会变，所以后端代码请用 `get_uploads_dir(thread_id)` 解析，不要按上表拼字符串。
+`path` 是绝对路径。上表中的 `{DEER_FLOW_HOME}` 优先取 `DEER_FLOW_HOME`；未设置时取 `DEER_FLOW_PROJECT_ROOT/.deer-flow/`；两个环境变量都未设置时，才取当前启动目录下的 `.deer-flow/`。其中的 `users/default/` 是上传所属用户，换用户时该段会变，所以后端代码请用 `get_uploads_dir(thread_id)` 解析，不要按上表拼字符串。
 
 ## 代码示例集合
 
