@@ -244,6 +244,60 @@ async def test_unchanged_fingerprint_reconcile_is_noop():
 
 
 @pytest.mark.asyncio
+async def test_force_rebind_advances_epoch_for_an_unchanged_fingerprint():
+    """A forced rebind mints a new epoch and detaches only the named server.
+
+    The shared lifecycle generation can advance while the normalized base
+    connection fingerprint is unchanged (delete + identical re-add). The pool
+    must then replace A's epoch and detach its live session, while B -- whose
+    generation did not advance -- stays byte-identical (spec section 12 D5).
+    """
+    pool = MCPSessionPool()
+    loop = asyncio.get_running_loop()
+    a = pool.bind_server("A", "a1")
+    b = pool.bind_server("B", "b1")
+    cm_a, cm_b = _GatedInitCm(), _GatedInitCm()
+
+    session_a = await _commit(pool, "A", "u:t", a, cm_a)
+    session_b = await _commit(pool, "B", "u:t", b, cm_b)
+
+    prepared = pool.reconcile_bindings({"A": "a1", "B": "b1"}, (), force_rebind={"A"})
+
+    # A is detached and forced to a new epoch even though its fingerprint matches.
+    assert [s for s, *_ in prepared.entries] == [session_a]
+    assert session_b not in [s for s, *_ in prepared.entries]
+    assert prepared.inflight == ()
+    assert pool.active_binding("A").fingerprint == "a1"
+    assert pool.active_binding("A").epoch > a.epoch
+
+    # B is byte-identical: same binding, same entry, CM not exited.
+    assert pool.active_binding("B") is b
+    assert pool.active_binding("B").epoch == b.epoch
+    assert pool._entries[("B", "u:t", loop)][0] is session_b
+    assert cm_b.closed is False
+
+    _session, _loop, a_task, _close = prepared.entries[0]
+    await asyncio.wait_for(a_task, timeout=1)
+    assert cm_a.closed is True
+
+
+@pytest.mark.asyncio
+async def test_force_rebind_keeps_a_repeated_identical_reconcile_idempotent():
+    """Forcing an unchanged fingerprint once must not re-epoch it forever."""
+    pool = MCPSessionPool()
+    pool.bind_server("A", "a1")
+
+    pool.reconcile_bindings({"A": "a1"}, (), force_rebind={"A"})
+    reforced = pool.active_binding("A")
+
+    prepared = pool.reconcile_bindings({"A": "a1"}, (), force_rebind=frozenset())
+
+    assert prepared.entries == ()
+    assert prepared.inflight == ()
+    assert pool.active_binding("A") is reforced
+
+
+@pytest.mark.asyncio
 async def test_cancelling_close_prepared_owners_sync_keeps_every_owner_signalled():
     """Cancelling the sync teardown caller must not strand a detached owner:
     every prepared owner is signalled before the first teardown wait."""

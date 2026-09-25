@@ -29,10 +29,11 @@ from deerflow.mcp.cache import (
     effective_server_config,
     finish_mcp_reconciliation,
     force_local_mcp_invalidation,
-    prepare_mcp_reconciliation,
+    prepare_mcp_reconciliation_from_revision,
     reset_mcp_tools_cache,
 )
 from deerflow.mcp.commit import (
+    CommittedMcpRevision,
     MCPCommitOutcomeUnknownError,
     MCPCommittedNotReconciledError,
     MCPCommittedReloadFailedError,
@@ -1260,8 +1261,12 @@ def _stored_server_for_secret_merge(name: str, raw_server: Any) -> McpServerConf
         return None
 
 
-def _fence_mcp_reconciliation(changed: set[str] | None) -> Any:
-    """Install the local ownership fence; never claim an uncommitted no-op.
+def _fence_mcp_reconciliation(committed: CommittedMcpRevision) -> Any:
+    """Install the local ownership fence from the in-memory committed revision.
+
+    The fence is derived from the *same* validated candidate and counters this
+    writer just persisted, never from a second disk read: a re-read could observe
+    a later writer's revision and install the wrong epoch (spec sections 3/6).
 
     The config commit has already landed when this runs, so a failing fence is a
     *committed but not reconciled* state. This function must NOT invalidate local
@@ -1270,7 +1275,7 @@ def _fence_mcp_reconciliation(changed: set[str] | None) -> Any:
     performs that invalidation after releasing the locks.
     """
     try:
-        return prepare_mcp_reconciliation(changed)
+        return prepare_mcp_reconciliation_from_revision(committed)
     except McpTaskConfigurationError as exc:
         # Pre-empted by ``_validate_mcp_task_config_candidate`` before the commit
         # in every helper here; raised for the documented 409 contract.
@@ -1360,7 +1365,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[st
 
             candidate_config = _validate_extensions_config_candidate(config_data)
             _validate_mcp_task_config_candidate(candidate_config)
-            commit_extensions_config(
+            committed = commit_extensions_config(
                 config_path=config_path,
                 raw_data=config_data,
                 previous_config=previous_config,
@@ -1371,7 +1376,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[st
 
             # Fence first, reload second: the local ownership transfer must not
             # depend on ``reload_extensions_config()`` succeeding.
-            pending_reconciliation = _fence_mcp_reconciliation(None)
+            pending_reconciliation = _fence_mcp_reconciliation(committed)
             # Reload the Gateway configuration and update the global cache. The
             # agent runtime lives in Gateway, so this keeps API reads and tool
             # execution aligned after extensions_config.json changes.
@@ -1427,7 +1432,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> tuple[d
             raw_server["enabled"] = body.enabled
             candidate_config = _validate_extensions_config_candidate(raw_data)
             _validate_mcp_task_config_candidate(candidate_config)
-            commit_extensions_config(
+            committed = commit_extensions_config(
                 config_path=config_path,
                 raw_data=raw_data,
                 previous_config=previous_config,
@@ -1436,7 +1441,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> tuple[d
 
             logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
             changed = {body.server_name} if enabled_changed else set()
-            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
     except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
@@ -1533,7 +1538,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> tuple[dict, set[s
             _ensure_skills_key(raw_data)
             candidate_config = _validate_extensions_config_candidate(raw_data)
             _validate_mcp_task_config_candidate(candidate_config)
-            commit_extensions_config(
+            committed = commit_extensions_config(
                 config_path=config_path,
                 raw_data=raw_data,
                 previous_config=previous_config,
@@ -1541,7 +1546,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> tuple[dict, set[s
             )
 
             logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
-            pending_reconciliation = _fence_mcp_reconciliation(added_names)
+            pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
     except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
@@ -1581,7 +1586,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> tuple
             raw_data["mcpServers"] = raw_servers
             candidate_config = _validate_extensions_config_candidate(raw_data)
             _validate_mcp_task_config_candidate(candidate_config)
-            commit_extensions_config(
+            committed = commit_extensions_config(
                 config_path=config_path,
                 raw_data=raw_data,
                 previous_config=previous_config,
@@ -1590,7 +1595,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> tuple
 
             logger.info("Updated MCP server: %s", body.server_name)
             changed = {body.server_name} if config_changed else set()
-            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
     except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
@@ -1624,7 +1629,7 @@ def _apply_mcp_server_delete(server_name: str) -> tuple[dict, set[str]]:
             # even when another legacy collision pair remains. Keep schema validation.
             candidate_config = _validate_extensions_config_candidate(raw_data, check_installation_ids=False)
             _validate_mcp_task_config_candidate(candidate_config)
-            commit_extensions_config(
+            committed = commit_extensions_config(
                 config_path=config_path,
                 raw_data=raw_data,
                 previous_config=previous_config,
@@ -1633,7 +1638,7 @@ def _apply_mcp_server_delete(server_name: str) -> tuple[dict, set[str]]:
 
             logger.info("Deleted MCP server: %s", server_name)
             changed = {server_name}
-            pending_reconciliation = _fence_mcp_reconciliation(changed)
+            pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
     except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):

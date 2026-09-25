@@ -1392,8 +1392,8 @@ class DeerFlowClient:
 
         The fence runs **inline on the calling thread**: this is a synchronous
         embedded-client entry point with no event loop, so
-        ``prepare_mcp_reconciliation`` is called inside the config critical
-        section and ``finish_mcp_reconciliation`` completes the detached-owner
+        ``prepare_mcp_reconciliation_from_revision`` is called inside the config
+        critical section and ``finish_mcp_reconciliation`` completes the detached-owner
         teardown from a post-lock ``finally`` before this returns -- including
         when the in-process reload raises after a successful fence.
 
@@ -1414,7 +1414,7 @@ class DeerFlowClient:
         from deerflow.mcp.cache import (
             finish_mcp_reconciliation,
             force_local_mcp_invalidation,
-            prepare_mcp_reconciliation,
+            prepare_mcp_reconciliation_from_revision,
         )
 
         config_path = ExtensionsConfig.resolve_config_path()
@@ -1434,16 +1434,16 @@ class DeerFlowClient:
                 config_data["mcpServers"] = mcp_servers
 
                 new_config = validate_raw_extensions_config(config_data)
-                commit_extensions_config(
+                committed = commit_extensions_config(
                     config_path=config_path,
                     raw_data=config_data,
                     previous_config=previous_config,
                     new_config=new_config,
                 )
                 # Fence before reload: the ownership transfer is derived from the
-                # committed candidate, not from a successful reload.
+                # exact committed candidate, never from a second disk read.
                 try:
-                    pending_reconciliation = prepare_mcp_reconciliation(None)
+                    pending_reconciliation = prepare_mcp_reconciliation_from_revision(committed)
                 except Exception as exc:
                     # Do not invalidate here: this is inside the config critical
                     # section and the conservative invalidation waits for the

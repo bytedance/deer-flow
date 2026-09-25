@@ -97,7 +97,7 @@ async def test_update_mcp_server_state_does_not_block_event_loop(tmp_path: Path,
         return None
 
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", lambda _changed: None)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", lambda _committed: None)
 
     response = await update_mcp_server_state(
         request=None,

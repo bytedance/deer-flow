@@ -365,7 +365,13 @@ class MCPSessionPool:
                 raise StaleMCPBindingError(server_name)
             return self._install_binding_locked(server_name, None)
 
-    def reconcile_bindings(self, active: Mapping[str, str], removed: Collection[str]) -> PreparedRetirement:
+    def reconcile_bindings(
+        self,
+        active: Mapping[str, str],
+        removed: Collection[str],
+        *,
+        force_rebind: Collection[str] = (),
+    ) -> PreparedRetirement:
         """Reconcile per-server epochs and detach the retired servers' owners.
 
         *active* maps every still-enabled server name to its new normalized
@@ -373,6 +379,16 @@ class MCPSessionPool:
         deleted. A name whose fingerprint is unchanged is left completely
         untouched — no epoch, no detach — so an unrelated server edit cannot
         tear down a live session.
+
+        *force_rebind* names servers in *active* whose shared lifecycle
+        generation advanced even though their normalized connection fingerprint
+        is unchanged (delete + identical re-add, disable + re-enable, or an
+        A1 -> A2 -> A1 round trip). Those names must mint a fresh epoch and
+        detach their current owner, so a superseded wrapper can never
+        re-authorize the old connection.
+
+        This only widens the condition under which a name is treated as changed;
+        the admission/commit/join fencing below is unchanged.
 
         Everything happens in ONE ``_lock`` critical section: install the new
         epochs / removal tombstones, pop the changed servers' ``_entries`` and
@@ -385,13 +401,14 @@ class MCPSessionPool:
         entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
         changed: list[str] = []
+        forced = set(force_rebind)
         with self._lock:
             self._binding_lifecycle_servers.update(active)
             self._binding_lifecycle_servers.update(removed)
             for server_name, fingerprint in active.items():
                 current = self._bindings.get(server_name)
-                if current is not None and current.fingerprint == fingerprint:
-                    continue  # Unchanged: never touched.
+                if current is not None and current.fingerprint == fingerprint and server_name not in forced:
+                    continue  # Unchanged and not force-rebound: never touched.
                 self._install_binding_locked(server_name, fingerprint)
                 changed.append(server_name)
             for server_name in removed:

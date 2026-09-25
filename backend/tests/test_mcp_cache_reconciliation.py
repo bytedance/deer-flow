@@ -14,6 +14,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,6 +68,8 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_mcp_applied_lifecycle",
+    "_mcp_applied_lifecycle_invalid",
 )
 
 _CLEARED_GLOBALS = (
@@ -80,6 +83,7 @@ _CLEARED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
+    "_mcp_applied_lifecycle",
 )
 
 
@@ -115,6 +119,7 @@ def cache_globals():
     for name in _CLEARED_GLOBALS:
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
+    cache_module._mcp_applied_lifecycle_invalid = False
     cache_module._init_lock = threading.RLock()
     cache_module._init_condition = threading.Condition(cache_module._init_lock)
     cache_module._initializing_generation = None
@@ -253,16 +258,22 @@ def _server_model(server: dict) -> McpServerConfigResponse:
     return McpServerConfigResponse.model_validate(server)
 
 
-def _record_reconcile_calls(monkeypatch) -> list[set[str] | None]:
-    calls: list[set[str] | None] = []
-    real_prepare = mcp_router.prepare_mcp_reconciliation
+def _record_reconcile_calls(monkeypatch) -> list[Any]:
+    """Record the committed revisions the Stage 2 writers fence from."""
+    calls: list[Any] = []
+    real_prepare = mcp_router.prepare_mcp_reconciliation_from_revision
 
-    def _record(changed):
-        calls.append(changed)
-        return real_prepare(changed)
+    def _record(committed):
+        calls.append(committed)
+        return real_prepare(committed)
 
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", _record)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _record)
     return calls
+
+
+def _committed_generations(calls: list[Any], name: str) -> list[int | None]:
+    """Per-commit generation of *name* from the revisions the writers fenced from."""
+    return [revision.lifecycle.server_generations.get(name) for revision in calls]
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +876,8 @@ def test_put_server_endpoint_retires_only_changed_server(cache_globals, monkeypa
     assert session_a.closed is True
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
-    assert reconcile_calls == [{"A"}]
+    assert _committed_generations(reconcile_calls, "A") == [1]
+    assert _committed_generations(reconcile_calls, "B") == [0]
     assert cache_module.get_cached_mcp_tools() == ["A:npx-next", "B:uvx"]
 
 
@@ -896,7 +908,8 @@ def test_put_server_endpoint_identical_config_is_a_noop(cache_globals, monkeypat
     assert session_a.closed is False
     assert session_b.closed is False
     assert cache_module._cache_initialized is True
-    assert reconcile_calls == [set()]
+    assert _committed_generations(reconcile_calls, "A") == [0]
+    assert _committed_generations(reconcile_calls, "B") == [0]
     assert cache_module.get_cached_mcp_tools() == ["A:npx", "B:uvx"]
 
 
@@ -926,7 +939,7 @@ def test_put_server_endpoint_transport_alias_only_is_a_noop(cache_globals, monke
 
     asyncio.run(_run())
 
-    assert reconcile_calls == [set()]
+    assert len(reconcile_calls) == 1
     assert get_session_pool() is pool
     assert pool.active_binding("A") == binding_a
     assert pool.active_binding("B") == binding_b
@@ -989,7 +1002,7 @@ def test_delete_endpoint_retires_only_the_deleted_server(cache_globals, monkeypa
     assert session_a.closed is True
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
-    assert reconcile_calls == [{"A"}]
+    assert _committed_generations(reconcile_calls, "A") == [1]
 
 
 def test_patch_endpoint_retires_only_when_enabled_flips(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -1027,7 +1040,8 @@ def test_patch_endpoint_retires_only_when_enabled_flips(cache_globals, monkeypat
     assert session_a.closed is True
     assert session_b.closed is False
     assert _entry(pool, "B", owner_loop)[0] is session_b
-    assert reconcile_calls == [set(), {"A"}]
+    assert _committed_generations(reconcile_calls, "A") == [0, 1]
+    assert _committed_generations(reconcile_calls, "B") == [0, 0]
 
 
 def test_create_endpoint_seeds_added_server_without_retiring_existing(cache_globals, monkeypatch, tmp_path, owner_loop):
@@ -1057,7 +1071,8 @@ def test_create_endpoint_seeds_added_server_without_retiring_existing(cache_glob
     assert pool.active_binding("C") is not None
     assert session_a.closed is False
     assert session_b.closed is False
-    assert reconcile_calls == [{"C"}]
+    assert _committed_generations(reconcile_calls, "C") == [1]
+    assert _committed_generations(reconcile_calls, "A") == [0]
     assert cache_module.get_cached_mcp_tools() == ["A:npx", "B:uvx", "C:uvx"]
 
 
@@ -1220,13 +1235,13 @@ def test_delete_then_readd_cannot_interleave_before_tombstone_installation(cache
     _allow_router_admin(monkeypatch)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
 
-    real_prepare = mcp_router.prepare_mcp_reconciliation
+    real_prepare = mcp_router.prepare_mcp_reconciliation_from_revision
     prepare_entered = threading.Event()
     release_prepare = threading.Event()
     prepare_lock = threading.Lock()
     prepare_calls = 0
 
-    def blocking_prepare(changed):
+    def blocking_prepare(committed):
         nonlocal prepare_calls
         with prepare_lock:
             prepare_calls += 1
@@ -1234,9 +1249,9 @@ def test_delete_then_readd_cannot_interleave_before_tombstone_installation(cache
         if is_first:
             prepare_entered.set()
             assert release_prepare.wait(timeout=10)
-        return real_prepare(changed)
+        return real_prepare(committed)
 
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", blocking_prepare)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", blocking_prepare)
 
     async def _run() -> None:
         delete_task = asyncio.create_task(delete_mcp_server(None, "A"))
@@ -1276,13 +1291,13 @@ def test_cancelled_delete_worker_still_installs_tombstone(cache_globals, monkeyp
     binding_a_before = pool.active_binding("A")
     _allow_router_admin(monkeypatch)
 
-    real_prepare = mcp_router.prepare_mcp_reconciliation
+    real_prepare = mcp_router.prepare_mcp_reconciliation_from_revision
     prepare_entered = threading.Event()
     release_prepare = threading.Event()
     prepare_lock = threading.Lock()
     prepare_calls = 0
 
-    def blocking_prepare(changed):
+    def blocking_prepare(committed):
         nonlocal prepare_calls
         with prepare_lock:
             prepare_calls += 1
@@ -1290,9 +1305,9 @@ def test_cancelled_delete_worker_still_installs_tombstone(cache_globals, monkeyp
         if is_first:
             prepare_entered.set()
             assert release_prepare.wait(timeout=10)
-        return real_prepare(changed)
+        return real_prepare(committed)
 
-    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", blocking_prepare)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", blocking_prepare)
 
     real_finish = mcp_router.finish_mcp_reconciliation
     worker_finished = threading.Event()
@@ -1407,3 +1422,88 @@ def test_embedded_client_update_mcp_config_reconciles_pool(cache_globals, monkey
     assert lifecycle["configRevision"] == 2
     assert lifecycle["serverGenerations"]["A"] == 2
     assert lifecycle["serverGenerations"]["B"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 / Task 6: revision-based fence and lock discipline
+# ---------------------------------------------------------------------------
+
+
+def test_writer_fences_from_the_in_memory_committed_revision(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """The writer must derive its fence from the object ``commit`` returned.
+
+    A second disk read would reintroduce the commit/coordination race the shared
+    lifecycle generation exists to close, so the fence is fed the immutable
+    committed revision and no stable revision is re-parsed (spec section 3).
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    old_binding_a = pool.active_binding("A")
+    monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda *_args, **_kwargs: None)
+
+    committed: list[Any] = []
+    real_commit = mcp_router.commit_extensions_config
+
+    def _record_commit(**kwargs):
+        revision = real_commit(**kwargs)
+        committed.append(revision)
+        return revision
+
+    fenced: list[Any] = []
+    real_prepare = mcp_router.prepare_mcp_reconciliation_from_revision
+
+    def _record_prepare(revision):
+        fenced.append(revision)
+        return real_prepare(revision)
+
+    monkeypatch.setattr(mcp_router, "commit_extensions_config", _record_commit)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _record_prepare)
+
+    def _no_second_disk_parse(_path, _signature):
+        raise AssertionError("the writer fence must not re-read the config from disk")
+
+    monkeypatch.setattr(cache_module, "_read_stable_mcp_revision", _no_second_disk_parse)
+
+    mcp_router._apply_mcp_server_config_update(
+        McpServerConfigUpdateRequest(server_name="A", server=_server_model(_stdio("npx-next"))),
+    )
+
+    assert len(committed) == 1, "the writer must retain the committed revision"
+    assert fenced == committed, "the fence must be fed the exact committed revision"
+    assert pool.active_binding("A") != old_binding_a
+    assert session_a.closed is True
+
+
+def test_lazy_detection_never_takes_the_config_write_lock(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """The lazy path holds ``_init_condition`` and must take no config write lock.
+
+    Readers keep the order ``cache._init_condition -> pool._lock`` and never take
+    the cross-process config write lock inside them, so a writer can never stall
+    a reader (or deadlock) by holding the config lock while a reader waits.
+    """
+    from deerflow.config.extensions_config import extensions_config_write_lock
+
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    _open_session(owner_loop, pool, "A")
+
+    _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
+
+    probes: list[bool] = []
+    real_read = cache_module._read_stable_mcp_revision
+
+    def _probe(path, signature):
+        # Record lock ordering at the exact point the lazy path reads the config.
+        assert cache_module._init_condition._lock._is_owned(), "lazy detection must run under _init_condition"
+        assert not extensions_config_write_lock.locked(), "the lazy path must not hold the config write lock"
+        assert not pool._lock.locked(), "the lazy path must not hold pool._lock"
+        probes.append(True)
+        return real_read(path, signature)
+
+    monkeypatch.setattr(cache_module, "_read_stable_mcp_revision", _probe)
+
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert probes == [True]
