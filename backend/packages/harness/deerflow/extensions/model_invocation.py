@@ -138,6 +138,7 @@ class HostModelInvoker:
         call = _Invocation()
         deadline = None
         task = asyncio.current_task()
+        cancellation_count = task.cancelling()
         self._tasks.add(task)
         try:
             if not isinstance(request, ModelInvocationRequest):
@@ -151,6 +152,12 @@ class HostModelInvoker:
                 await self._budget.semaphore.acquire()
                 call.acquired = True
                 return await self._invoke(request, call)
+        except asyncio.CancelledError:
+            # shield also raises when only the provider task is cancelled. A
+            # previously handled caller cancellation must not mask that failure.
+            if task.cancelling() > cancellation_count or call.provider is None or not call.provider.cancelled():
+                raise
+            failure = ModelInvocationFailed("Model provider cancelled")
         except ModelInvocationError as exc:
             # Copy only our normalized text. In particular, do not pass a JSON,
             # schema or provider exception through __context__ to extensions.

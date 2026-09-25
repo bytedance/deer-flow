@@ -287,6 +287,9 @@ services; its admission ceiling is twice the concurrency limit, checked before
 payload processing. Provider work is shielded from caller cancellation and retains
 both budgets until actual completion, including synchronous LangChain executor calls
 and offloaded construction. Abandoned construction cannot dispatch a model request.
+Provider-task cancellation is a normalized failure; only a new cancellation of
+the invoking task propagates. Compare cancellation counts against invocation entry
+so previously handled caller cancellations do not mask provider failures.
 Failed-install positional rollback also removes its adapters. The adapter
 receives startup config through `start_with_host`, while extensions receive only the
 neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.

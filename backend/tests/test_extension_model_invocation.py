@@ -429,6 +429,79 @@ async def test_provider_timeout_is_not_reported_as_host_deadline(host):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("self_cancel", [False, True])
+@pytest.mark.parametrize("prior_cancellation", [False, True])
+async def test_provider_cancellation_is_normalized_and_releases_capacity(host, self_cancel, prior_cancellation):
+    async def cancelled_provider(*args, **kwargs):
+        if self_cancel:
+            asyncio.current_task().cancel("secret provider detail")
+            await asyncio.sleep(0)
+        raise asyncio.CancelledError("secret provider detail")
+
+    host.model.ainvoke.side_effect = cancelled_provider
+    loaded, services, _ = await host.start([{**GRANT, "max_concurrency": 1}])
+    invoker = services[0].deps.model_invoker
+
+    async def caller():
+        if prior_cancellation:
+            asyncio.current_task().cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass  # A previously handled request must not mask provider failure.
+        with pytest.raises(ModelInvocationFailed, match="provider cancelled") as error:
+            await invoker.invoke(request())
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None
+        assert "secret" not in str(error.value)
+        assert invoker._budget.admitted == 0
+        host.model.ainvoke.side_effect = None
+        assert (await invoker.invoke(request())).content == '{"label":"positive"}'
+
+    try:
+        await asyncio.create_task(caller())
+    finally:
+        await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_wins_when_provider_also_cancels(host):
+    async def cancelled_provider(*args, **kwargs):
+        caller.cancel()
+        raise asyncio.CancelledError("provider cancelled too")
+
+    host.model.ainvoke.side_effect = cancelled_provider
+    loaded, services, _ = await host.start([GRANT])
+    invoker = services[0].deps.model_invoker
+    caller = asyncio.create_task(invoker.invoke(request()))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert caller.cancelled()
+        assert invoker._budget.admitted == 0
+    finally:
+        await stop_services(loaded)
+
+
+@pytest.mark.asyncio
+async def test_pending_caller_cancellation_at_invocation_entry_propagates(host):
+    loaded, services, _ = await host.start([GRANT])
+    invoker = services[0].deps.model_invoker
+
+    async def caller():
+        asyncio.current_task().cancel()
+        await invoker.invoke(request())
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(caller())
+    finally:
+        await asyncio.gather(*invoker._budget.workers, return_exceptions=True)
+        await stop_services(loaded)
+    assert invoker._budget.admitted == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("exit_kind", ["timeout", "cancel", "stop"])
 async def test_validation_deadline_does_not_block_event_loop(host, monkeypatch, exit_kind):
     import time

@@ -129,7 +129,9 @@ source, logical role, and purpose.
 All these derive from `ModelInvocationError`. Provider failures use a normalized
 message without the original exception chain. Host deadline expiry reports
 `Model invocation timed out`; a provider's own `TimeoutError` reports
-`Model provider timed out`. Normal caller cancellation remains
+`Model provider timed out`. A provider task that cancels itself reports
+`ModelInvocationFailed("Model provider cancelled")`; it does not cancel the
+extension's calling task. Normal caller cancellation remains
 `asyncio.CancelledError`, rather than being converted to an ordinary failure.
 
 Concurrency defaults to 2 (range 1–64), timeout to 60 seconds (maximum 600), and
