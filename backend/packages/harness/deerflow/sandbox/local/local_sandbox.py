@@ -779,7 +779,7 @@ class LocalSandbox(Sandbox):
             if "/" in child_rel:
                 continue
             try:
-                if os.path.isdir(os.path.realpath(mapping.local_path)):
+                if os.path.isdir(self._resolved_local_paths[mapping]):
                     virtual_children.append(mapping)
             except OSError:
                 pass
@@ -789,12 +789,11 @@ class LocalSandbox(Sandbox):
         except FileNotFoundError:
             # The requested path may exist only in the container, as the
             # parent of mounted sub-directories (e.g. /mnt/skills with only
-            # per-category mounts and no aggregate root mapping), so the
-            # resolved host directory is missing. Continue with no host
-            # entries and let the virtual sub-directory overlay below
-            # surface those children; when nothing is mounted inside the
-            # path the directory genuinely does not exist, so keep raising.
-            if not virtual_children:
+            # per-category mounts and no aggregate root mapping). Continue
+            # with virtual children only when the resolved host path is
+            # missing. An existing file is not a directory and must still
+            # raise, as must a path without direct virtual children.
+            if not virtual_children or os.path.exists(resolved_path):
                 raise
             entries = []
         # Reverse resolve local paths back to container paths and preserve

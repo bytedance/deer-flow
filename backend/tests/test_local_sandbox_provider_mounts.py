@@ -375,6 +375,22 @@ class TestSymlinkEscapes:
         with pytest.raises(FileNotFoundError):
             sandbox.list_dir("/mnt/virtual")
 
+    def test_list_dir_raises_when_parent_mount_is_a_file(self, tmp_path):
+        parent_file = tmp_path / "parent-file"
+        parent_file.write_text("not a directory", encoding="utf-8")
+        child_mount = tmp_path / "child"
+        child_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/virtual", local_path=str(parent_file), read_only=True),
+                PathMapping(container_path="/mnt/virtual/child", local_path=str(child_mount), read_only=True),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
     def test_list_dir_empty_directory_returns_empty(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
