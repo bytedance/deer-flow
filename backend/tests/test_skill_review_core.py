@@ -204,6 +204,26 @@ def test_resource_graph_prefers_hash_filenames_over_fragments(tmp_path):
     assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
+def test_resource_graph_prefers_hash_filenames_from_nested_sources(tmp_path):
+    # The literal-file check must canonicalize leading relative segments
+    # before comparing against the snapshot keys: from
+    # references/sub/guide.md, `../C#.md` joins to
+    # `references/sub/../C#.md`, which matches no key verbatim — without
+    # canonicalization the reference is truncated to `../C` and produces a
+    # false resource.missing plus an orphan report for the real file.
+    _write(tmp_path / "SKILL.md", _valid_skill())
+    _write(
+        tmp_path / "references" / "sub" / "guide.md",
+        _valid_skill("guide") + "\nSee `../C#.md`.\n",
+    )
+    _write(tmp_path / "references" / "C#.md", "# C#\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "references/sub/guide.md", "target": "references/C#.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] in {"resource.missing", "resource.escaping-link"} and f["path"] == "references/sub/guide.md" for f in facts["findings"])
+
+
 def test_resource_graph_strips_fragment_before_normalizing_fallback(tmp_path):
     # The exact-path preference must check the literal token: normalizing
     # first collapses a hash-bearing segment ("faq.md#/.." -> "other.md")
