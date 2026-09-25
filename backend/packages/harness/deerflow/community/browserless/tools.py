@@ -118,18 +118,19 @@ def _as_str_list(value: object) -> list[str] | None:
     """Coerce a config value into a non-empty list of strings, or ``None``.
 
     Accepts a list of strings and a comma-separated string, since YAML makes
-    both spellings natural. Anything else -- including an empty list, a blank
-    string, or a scalar -- yields ``None`` so the parameter stays out of the
-    payload instead of reaching Browserless as an unusable value.
+    both spellings natural. Non-string sequence items are ignored. Unsupported
+    top-level values, an empty list, or a blank string yield ``None`` so the
+    parameter stays out of the payload instead of reaching Browserless as an
+    unusable value.
     """
     if isinstance(value, str):
         parts = value.split(",")
     elif isinstance(value, (list, tuple)):
-        parts = [str(part) for part in value]
+        parts = [part for part in value if isinstance(part, str)]
     else:
         return None
 
-    items = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+    items = [part.strip() for part in parts if part.strip()]
     return items or None
 
 

@@ -310,6 +310,15 @@ class TestBrowserlessClient:
 class TestBrowserlessTools:
     """Tests for the Browserless tool functions."""
 
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self):
+        """Keep tool tests offline while preserving URL-safety validation."""
+        with patch(
+            "deerflow.community.browserless.tools._resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
+
     async def test_get_browserless_client_uses_env_token_fallback(self):
         """Browserless tools use BROWSERLESS_TOKEN when config omits token."""
         with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
@@ -422,6 +431,18 @@ class TestBrowserlessTools:
         kwargs = await self._fetch_kwargs_with_config({"reject_resource_types": 5, "reject_request_pattern": []})
 
         assert kwargs["reject_resource_types"] is None
+        assert kwargs["reject_request_pattern"] is None
+
+    async def test_web_fetch_tool_ignores_non_string_reject_list_items(self):
+        """Non-string list items stay out of the Browserless payload."""
+        kwargs = await self._fetch_kwargs_with_config(
+            {
+                "reject_resource_types": ["image", 5, "", " media "],
+                "reject_request_pattern": [False],
+            }
+        )
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
         assert kwargs["reject_request_pattern"] is None
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
