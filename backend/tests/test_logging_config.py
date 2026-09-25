@@ -711,8 +711,11 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
     assert spacey_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
     assert "QuerySecret" not in spacey_t1.getMessage()
 
-    # An absolute Location with an interior space stays whole for the
-    # generic absolute-URL pass (which stops its rest at whitespace).
+    # An absolute Location with an interior space must NOT be handed to the
+    # generic absolute-URL pass: that pass stops its ``rest`` at whitespace,
+    # so the signed tail after the first space used to survive (round 16).
+    # The slot collapses whole instead, like any other non-whole-coverable
+    # slot shape.
     spacey_absolute = logging.LogRecord(
         "urllib3.connectionpool",
         logging.DEBUG,
@@ -723,11 +726,131 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
         None,
     )
     assert filt.filter(spacey_absolute) is True
-    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted> page?sig=OtherSecret"
+    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> /<redacted>"
     assert "BearerSecret" not in spacey_absolute.getMessage()
+    assert "OtherSecret" not in spacey_absolute.getMessage()
+    assert "QuerySecret" not in spacey_absolute.getMessage()
+
+    # Same in the first slot, where the recursive urlopen frame carries the
+    # previous raw Location.
+    spacey_absolute_t1 = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("https://mirror.example/other page?sig=OtherSecret", "/private/x"),
+        None,
+    )
+    assert filt.filter(spacey_absolute_t1) is True
+    assert spacey_absolute_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
+    assert "OtherSecret" not in spacey_absolute_t1.getMessage()
 
     # The sandbox arrow false positive stays excluded: the prefix anchor,
     # not a strict tail, is what keeps non-Redirecting messages untouched.
     sandbox = logging.LogRecord("deerflow.sandbox.local.local_sandbox_provider", logging.ERROR, "p.py", 1, "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing", (), None)
     assert filt.filter(sandbox) is True
     assert sandbox.getMessage() == "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing"
+
+
+def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> None:
+    """Round-15 residual: a Redirecting slot stayed verbatim unless it
+    started with "/", but the Location field-value grammar (RFC 3986
+    relative-part) also admits slash-less relative references —
+    ``download?sign=…`` and ``?sign=…`` kept their signed queries verbatim,
+    and neither the slot rule nor the generic absolute-URL pass (which
+    needs a scheme) could see them. A slot is now kept ONLY when the generic
+    pass itself consumes it whole, so every relative-reference form collapses,
+    non-hierarchical schemes (``data:…``) collapse, a space-carrying
+    absolute slot collapses instead of leaking its signed tail (round 16),
+    and so does a slot the pass stops early on — a quote that reads as a
+    closing mark, or an empty host the ``host`` group never matches;
+    network-path references collapse with any
+    userinfo credentials they carry."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    cases = [
+        # (t1, t2, expected t2 rendering after the generic pass runs)
+        ("/private/BearerSecret?token=QuerySecret", "download?sign=LeakedSig", "Redirecting /<redacted> -> /<redacted>"),  # round-15 repro
+        ("/private/BearerSecret?token=QuerySecret", "?sign=LeakedSig", "Redirecting /<redacted> -> /<redacted>"),  # query-only
+        ("/private/x", "#frag", "Redirecting /<redacted> -> /<redacted>"),  # fragment-only
+        ("/private/x", "data:application/json;base64,SECRET", "Redirecting /<redacted> -> /<redacted>"),  # non-hierarchical scheme
+        ("/private/x", "//cdn.example/private/x?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # network-path
+        ("/private/x", "//user:tok@cdn.example/private/x?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # network-path + userinfo
+        # Absolute URLs are still kept whole for the generic absolute-URL pass.
+        ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other?sig=OtherSecret", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
+        # ... but only when the generic pass consumes the slot WHOLE. Its
+        # ``host``/``rest`` groups stop at whitespace, so a space-carrying
+        # absolute slot leaks its signed tail if it is handed over (round 16).
+        ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other page?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),
+        ("https://mirror.example/other page?sig=OtherSecret", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", "https://mirror.example/a\tb?sig=OtherSecret", "Redirecting /<redacted> -> /<redacted>"),  # any whitespace, not just a space
+        ("/private/x", "https://mirror.example/a%20b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),  # percent-encoded space stays absolute
+        # The pass also stops early INSIDE a whitespace-free absolute slot, so
+        # the "is it absolute" test alone was still not sufficient (review of
+        # #5687): a quote that reads as a closing mark ends ``rest`` there,
+        # and an empty host before the first ``/?#`` matches nowhere at all.
+        ("/private/x", "https://mirror.example/a')b?sig=LeakedSigQuote", "Redirecting /<redacted> -> /<redacted>"),
+        ("https://mirror.example/a')b?sig=LeakedSigQuote", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", "https:///path?sig=LeakedSigEmptyHost", "Redirecting /<redacted> -> /<redacted>"),
+        ("https:///path?sig=LeakedSigEmptyHost", "/private/x", "Redirecting /<redacted> -> /<redacted>"),
+        ("/private/x", 'https://mirror.example/a")b?sig=LeakedSigDQuote', "Redirecting /<redacted> -> /<redacted>"),
+        # A quote embedded mid-path is NOT a closing mark, so that slot is
+        # still consumed whole and keeps its host for debuggability.
+        ("/private/x", "https://mirror.example/a'b?sig=Ok", "Redirecting /<redacted> -> https://mirror.example/<redacted>"),
+    ]
+    for t1, t2, expected in cases:
+        record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, "Redirecting %s -> %s", (t1, t2), None)
+        assert filt.filter(record) is True
+        assert record.getMessage() == expected, (t1, t2)
+        assert "LeakedSig" not in record.getMessage()
+        assert "token=QuerySecret" not in record.getMessage()
+
+
+def test_url_redaction_filter_collapses_space_carrying_targets_in_every_retry_shape() -> None:
+    """Every urllib3 shape that carries a raw request target has to tolerate
+    interior spaces, not only ``Redirecting``.
+
+    On the recursive redirect frame urllib3 hands the raw ``Location`` field
+    value on as ``url`` (connectionpool.py:923-925), and that field grammar
+    admits interior spaces — the same fact rounds 13 and 16 rest on. The three
+    shapes pinned here bounded their target at the first space, so a signed
+    path survived all of them while the two sibling passes that never did
+    (``Incremented Retry for (url='…')`` and ``Redirecting``) redacted it.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    def _formatted(fmt: str, args: tuple) -> str:
+        record = logging.LogRecord("urllib3.connectionpool", logging.DEBUG, __file__, 1, fmt, args, None)
+        assert filt.filter(record) is True
+        return record.getMessage()
+
+    signed = "/private/a b?sig=LeakedSig"
+
+    # connectionpool.py:954 — bare target after the "Retry: " literal.
+    assert _formatted("Retry: %s", (signed,)) == "Retry: /<redacted>"
+
+    # connectionpool.py:869 — WARNING, so it clears the Gateway's INFO root.
+    retries_repr = "Retry(total=0, connect=None, read=None, redirect=None, status=None)"
+    error_repr = "ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    retrying = _formatted("Retrying (%r) after connection broken by '%r': %s", (retries_repr, error_repr, signed))
+    assert retrying == f"Retrying ({retries_repr!r}) after connection broken by '{error_repr!r}': /<redacted>"
+
+    # connectionpool.py:545 — the quoted per-request line.
+    request_line = _formatted('%s://%s:%s "%s %s %s" %s %s', ("https", "cdn.example", 443, "GET", signed, "HTTP/1.1", 200, None))
+    assert request_line == 'https://cdn.example:443 "GET /<redacted> HTTP/1.1" 200 None'
+
+    for formatted in (retrying, request_line, _formatted("Retry: %s", (signed,))):
+        assert "LeakedSig" not in formatted
+        assert "sig=" not in formatted
+
+    # The looser tails trade reach for one class of prose: a line that opens
+    # with urllib3's own ``Retry: `` literal AND a slash-initial tail collapses
+    # whole even when it is not a request target. Prose after ``Retry: `` that
+    # does not start with ``/`` keeps passing through untouched, which
+    # test_url_redaction_filter_covers_urllib3_retry_lines already pins.
+    assert _formatted("Retry: /tmp/build.sock went away", ()) == "Retry: /<redacted>"

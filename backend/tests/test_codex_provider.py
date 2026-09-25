@@ -361,3 +361,20 @@ def test_parse_tool_call_arguments_non_dict_json():
     parsed, err = model._parse_tool_call_arguments({"arguments": '["list", "not", "dict"]', "name": "t", "call_id": "c"})
     assert parsed is None
     assert err is not None
+
+
+# ---------------------------------------------------------------------------
+# Credential loading
+# ---------------------------------------------------------------------------
+
+
+def test_model_post_init_accepts_null_account_id(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"access_token": "tok-test", "account_id": None}}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    model = CodexChatModel(model="gpt-5.4", reasoning_effort="medium")
+
+    assert model._account_id == ""

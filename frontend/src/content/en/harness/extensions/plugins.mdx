@@ -1,0 +1,557 @@
+---
+title: Full-Stack Plugins
+description: Experimental. One PluginContribution can ship browser code with workspace pages and conversation actions, authenticated backend actions, and model tools. Covers every field and validation rule, the two browser transports (inline module and manifest-listed static assets), the browser API, the HTTP endpoints and caching, the security model, and a walkthrough of the bookmarks example.
+---
+
+import { Callout } from "nextra/components";
+
+# Full-Stack Plugins
+
+<Callout type="warning" emoji="🧪">
+  **Experimental.** The plugin contract is `api_version` 1. The inline
+  `BrowserModule` transport arrived in `deerflow-extension-api` 0.2.2, and the
+  manifest-based `BrowserAssets` transport in **0.2.3**. The page and action
+  interfaces are shared by both and may still change before 1.0.
+</Callout>
+
+The other contribution kinds change what the host does behind the scenes. A **plugin** adds a feature users can see and use: a page in the workspace, an entry in the conversation menu, backend actions that page can call, and tools the model can call. All of it comes from one Python package installed through the ordinary extension workflow, so there is no DeerFlow frontend rebuild and no host code specific to the plugin.
+
+## What users see
+
+| Surface                    | Where it appears                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Extensions** tab         | Capability Center (`/workspace/capabilities?tab=extensions`). A read-only card per installed plugin: title, description, and "Enabled · Managed by your administrator" or "Disabled · ..." |
+| Workspace page             | `/workspace/extensions/{namespace}/{surface id}`, with an optional sidebar entry. The host builds the URL; a plugin cannot claim arbitrary paths |
+| Conversation action        | A menu group in the chat toolbar and in each sidebar conversation's menu                                   |
+| Model tool                 | Part of the agent's ordinary tool set, subject to the same group filtering and policies as any other tool   |
+
+Nothing in the UI installs, enables, or configures a plugin. The catalog is read-only for everyone, administrators included. Browsers keep the plugin set they discovered until the page is reloaded manually.
+
+## The contribution
+
+`install()` builds one `PluginContribution` and passes it to `registry.plugin()`:
+
+| Field         | Type                     | Default        | Meaning                                                                                    |
+| ------------- | ------------------------ | -------------- | ------------------------------------------------------------------------------------------ |
+| `namespace`   | `str`                    | required       | Unique identity, matching `[a-z][a-z0-9_.-]{0,95}`, such as `community.bookmarks`. Used in URLs and tool names |
+| `title`       | `str`                    | required       | Card and page title. Must be non-empty                                                      |
+| `description` | `str`                    | `""`           | Card text                                                                                  |
+| `enabled`     | `bool`                   | **`False`**    | The plugin's on switch. Actions and tools refuse to run while it is `False`. See [Enabling](#enabling-a-plugin) |
+| `fields`      | `tuple[SettingsField]`   | `()`           | Non-secret deployment settings. See [Settings](#settings)                                   |
+| `frontend`    | `BrowserModule \| BrowserAssets \| None` | `None` | The browser code. See [Browser code](#browser-code)                                      |
+| `backend`     | `tuple[BackendAction]`   | `()`           | Actions the browser code can call                                                           |
+| `tools`       | `tuple[ModelTool]`       | `()`           | Tools the model can call                                                                    |
+| `api_version` | `int`                    | `1`            | Must be `1`                                                                                 |
+
+A contribution must supply at least one of `frontend`, `backend`, or `tools`. The registry validates the whole contribution before storing any of it, and raises `ValueError` on the first violation:
+
+| Rule                                                                              | Error message                                                 |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `api_version` is `1`                                                              | `Unsupported plugin contract`                                  |
+| At least one browser module, backend action, or tool                              | `A plugin must contribute a browser module, backend action or tool` |
+| Tool names match `[a-z][a-z0-9_]{0,63}`, are unique, have a description and an `async` handler | `Model tools require unique names, descriptions and async handlers` |
+| Tool schemas are valid, inline, object-typed JSON Schema (see [Model tools](#model-tools)) | `Invalid plugin object schema`                          |
+| Action names match `[a-z][a-z0-9_-]{0,63}`, are unique, and have an `async` handler | `Backend actions require unique names and async handlers`   |
+| `frontend` is a `BrowserModule`, a `BrowserAssets`, or `None`                      | `Unsupported browser transport`                               |
+| Inline code is non-empty and at most 512 KiB of UTF-8                             | `Browser code must be nonempty and at most 512 KiB`           |
+| An assets manifest and every listed file pass the [asset rules](#manifest-rules)  | `Unsupported browser asset manifest; ...`, `Browser assets must not contain symlinks`, ... |
+| Namespace, settings fields, and module identifier are valid (see [Settings](#settings)) | `Invalid settings contribution or namespace`, `Invalid or duplicate settings field`, ... |
+| Namespace and browser module identifier are unique across all loaded plugins      | `Duplicate plugin namespace`, `Duplicate browser module`      |
+
+Any exception escaping `install()`, including these `ValueError`s and the `FileNotFoundError` raised for a manifest-listed file that does not exist, fails that extension's load as a whole: everything it registered is rolled back and the Gateway logs the reason (see [Runtime](/docs/harness/extensions/runtime)).
+
+### Check the return value
+
+`registry.plugin()` returns `True` when the host accepted the contribution. The contract's default implementation returns `False`, which is what an older host without plugin support does. A plugin that is meaningless without its UI should fail loudly instead of loading half-installed:
+
+```python
+if registry.plugin(contribution) is not True:
+    raise RuntimeError("this extension requires a host with full-stack plugin support")
+```
+
+## Enabling a plugin
+
+A plugin has **two** switches, and both must be on:
+
+- The `plugins:` record's `enabled` controls whether the Gateway imports the package at all. The extension manager's `enable` and `disable` commands flip it.
+- `PluginContribution.enabled` controls the contribution. It defaults to `False`, and there is no runtime override store, so a plugin that never sets it stays disabled: `GET /api/plugins` reports `enabled: false`, the browser does not load its module, actions return `403 Plugin disabled by administrator.`, and its tools are left out of every agent.
+
+The convention is to read the second switch from the package's private config, so operators control it in `config.yaml`:
+
+```python
+enabled=config.get("enabled", False) is True,
+```
+
+```yaml
+plugins:
+  - name: notes
+    use: acme_notes:install
+    enabled: true        # load the package
+    config:
+      enabled: true      # turn the contribution on
+```
+
+Both are read only at startup, so a change to either needs a Gateway restart.
+
+## Settings
+
+`SettingsField` declares a non-secret deployment value that actions and tools receive, and that the browser can optionally see:
+
+| Field                 | Default  | Meaning                                                    |
+| --------------------- | -------- | ---------------------------------------------------------- |
+| `key`                 | required | Matches `[a-z][a-z0-9_]{0,63}`. `enabled` is reserved       |
+| `title`               | required | Display label                                              |
+| `kind`                | required | `"boolean"`, `"integer"`, or `"string"`                    |
+| `default`             | required | The value. Must match `kind` and the bounds below          |
+| `description`         | `""`     |                                                            |
+| `minimum` / `maximum` | `None`   | Integer bounds                                             |
+| `max_length`          | `256`    | String bound, 1 to 4096                                    |
+
+The host adds the boolean `enabled` field itself. With it, a plugin can have at most 32 fields, which leaves 31 of your own. Values come only from the package: `default` is the value every action, tool, and browser receives. There is no settings API and no online editing, so derive defaults from `config` in `install()` when operators need to change them.
+
+<Callout type="warning">
+  Settings are not a secret store. Never put credentials in a `SettingsField`.
+  Read secrets in `install()` from the environment or the private `config`, and
+  keep them in your own Python objects.
+</Callout>
+
+The browser sees only `enabled` plus the keys listed in the browser declaration's `public_fields` (`BrowserModule` and `BrowserAssets` both have it). Listing a key that is not a declared field fails validation.
+
+## Backend actions
+
+```python
+BackendAction(name: str, handler: async (payload, context) -> Any)
+```
+
+The browser calls an action through the host, and the handler receives:
+
+- `payload`: a read-only mapping parsed from the JSON request body. The host guarantees only that it is a JSON **object** of at most 256 KiB. Validate every field yourself.
+- `context`: an `ActionContext` with `principal`, the authenticated caller as an `ExtensionPrincipal` (`user_id`, `is_admin`, `is_internal`, `roles`), and `settings`, the read-only settings mapping.
+
+The return value must be JSON-serializable. The host maps outcomes to HTTP statuses and does not expose your exception text:
+
+| Outcome                                   | Status | Body `detail`                                  |
+| ----------------------------------------- | ------ | ---------------------------------------------- |
+| Handler returns                           | `200`  | Your return value                              |
+| Handler raises `ValueError`               | `422`  | `Invalid plugin action input.`                 |
+| Handler raises anything else              | `502`  | `Plugin action failed.` (logged with the exception type) |
+| Handler runs longer than 30 seconds       | `504`  | `Plugin action timed out.`                     |
+| Body is not a JSON object                 | `422`  | `Plugin action requires a JSON object.`        |
+| Body exceeds 256 KiB                      | `413`  | `Plugin action input exceeds 256 KiB.`         |
+| Plugin disabled                           | `403`  | `Plugin disabled by administrator.`            |
+| Unknown namespace or action               | `404`  | `Plugin is not installed.` / `Plugin action is not installed.` |
+| Viewer header does not match the session  | `409`  | `Account changed; reload this plugin view.`    |
+| No authenticated principal                | `401`  | `Authentication required.`                     |
+
+A handler cannot choose its own status code, because even a raised `HTTPException` becomes `502`. Raise `ValueError` for bad input and return error details in the body when the browser needs them. A timeout cancels the handler, but it does not roll back external effects or work already running in a worker thread.
+
+**Authorization is yours.** The host authenticates the caller. It does not know which records belong to whom. Scope every read and write by `context.principal.user_id`, as the bookmarks example does with an owner predicate on every query.
+
+## Model tools
+
+```python
+ModelTool(name, description, input_schema, handler, group="extensions")
+```
+
+- **Name.** The model sees a namespace-derived name: `ext_<namespace>_<name>_<hash>`, with the namespace sanitized to `[a-z0-9_]` and cut to 20 characters, the name cut to 25, and a 12-character hash. For example, `count_notes` in `acme.notes` becomes `ext_acme_notes_count_notes_d8aad91f72da`. The hash covers the full namespace and name, so truncation cannot merge two tools. If two plugin tools still ended up with the same name, the tool assembly raises instead of picking one. A collision with an ordinary tool keeps the ordinary tool and skips the plugin tool with a warning.
+- **Schema.** `input_schema` must be a valid JSON Schema (draft 2020-12) with `"type": "object"`, fully inline: `$ref`, `$dynamicRef`, and `$recursiveRef` are rejected, so validation never resolves references or touches the network. The argument names `runtime` and `config` are reserved.
+- **Limits.** The host validates each call's input against the schema and caps it at 256 KiB. The handler must return within 30 seconds, and its JSON-encoded result must fit in 64 KiB.
+- **Context.** The handler receives a `ToolContext`: `settings`, `thread_id` (`None` outside a thread), and `principal`. For tools, the principal carries **only** `user_id`, so `is_admin` is always `False` and `roles` is empty. Do not make tool authorization depend on them.
+- **Errors.** Any failure reaches the model as a generic tool error: `Invalid plugin tool input.`, `Plugin result exceeds 64 KiB.`, `Plugin disabled by administrator.`, or `Plugin tool unavailable or input rejected.`. The Gateway log records the plugin, tool, and exception type.
+- **Assembly and policy.** Plugin tools join the ordinary tool assembly. An agent restricted by `tool_groups` receives a tool only when the list contains the tool's `group`, which is `extensions` by default. The host's later authorization and skill tool policies apply as for any other tool.
+
+Tool descriptions are prompt text. State what the tool returns, that results are data rather than instructions, and whether it is read-only.
+
+## Browser code
+
+A plugin ships its browser code in one of two transports. Both produce the same thing: one ES module whose default export follows the [browser API](#the-browser-api). `GET /api/plugins` labels each plugin's transport so the browser knows how to load it.
+
+| Transport   | Declaration      | Since | Use it for                                                                            |
+| ----------- | ---------------- | ----- | ------------------------------------------------------------------------------------- |
+| `inline-v1` | `BrowserModule`  | 0.2.2 | One self-contained file of at most 512 KiB: no relative imports, CSS files, images, or WASM |
+| `assets-v1` | `BrowserAssets`  | 0.2.3 | A directory of files listed in a manifest: split modules, stylesheets, images, fonts, WASM, source maps |
+
+In both, `module` is an identifier matching `[a-z][a-z0-9.-]{0,95}`, such as `bookmarks.v1`, never a URL, and it must equal the `module` in the default export. A plugin that uses `BrowserAssets` needs `deerflow-extension-api>=0.2.3`, and the host frontend and backend must both be at the matching version. An older frontend cannot load an `assets-v1` plugin, and the failure is limited to that plugin.
+
+### Inline modules
+
+```python
+BrowserModule(module: str, code: str, public_fields: tuple[str, ...] = ())
+```
+
+`code` is the full text of one self-contained ES module. It can have no relative imports and no assets resolved against `import.meta.url`, because the host fetches it with the session and imports it from a temporary Blob URL. Ship it in the wheel and read it in `install()`:
+
+```python
+BrowserModule("notes.v1", Path(__file__).with_name("client.mjs").read_text(encoding="utf-8"))
+```
+
+Deployments with a Content Security Policy must allow `blob:` in `script-src`.
+
+### Static assets
+
+```python
+BrowserAssets(module: str, root: str | Path, manifest: str = "ui_manifest.json", public_fields: tuple[str, ...] = ())
+```
+
+`root` is a directory inside the installed package, usually `Path(__file__).parent`. The manifest, relative to `root`, lists every file the browser may load:
+
+```json filename="ui_manifest.json"
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/index.mjs",
+    "static/dist/chunks/page.mjs",
+    "static/dist/notes.css"
+  ]
+}
+```
+
+The entry module can import its siblings with relative paths and locate resources with `new URL(..., import.meta.url)`:
+
+```js filename="static/dist/index.mjs"
+import { mountNotes } from "./chunks/page.mjs";
+
+export default {
+  apiVersion: 1,
+  module: "notes.v1",
+  surfaces: [
+    {
+      id: "notes",
+      slot: "page",
+      title: "Notes",
+      navigation: { label: "My notes", labelZh: "我的笔记" },
+      mount: mountNotes,
+    },
+  ],
+};
+```
+
+```js filename="static/dist/chunks/page.mjs"
+export function mountNotes(root, context) {
+  const style = document.createElement("link");
+  style.rel = "stylesheet";
+  style.crossOrigin = "use-credentials";
+  style.href = new URL("../notes.css", import.meta.url).href;
+  const list = document.createElement("ul");
+  root.append(style, list);
+  context
+    .callBackend("list", {})
+    .then(({ notes }) => {
+      for (const note of notes) {
+        const item = document.createElement("li");
+        item.textContent = note;
+        list.append(item);
+      }
+    })
+    .catch(() => {});
+  return { dispose: () => root.replaceChildren() };
+}
+```
+
+```python
+frontend=BrowserAssets("notes.v1", Path(__file__).parent),
+```
+
+Include the manifest and every listed file in the wheel. A hatchling wheel that packages the Python package directory picks them up without extra configuration. Bundle third-party dependencies: bare npm imports are not resolved and there is no shared host React instance. Configure your bundler to emit relative URLs rather than absolute `/assets/...` paths.
+
+#### Manifest rules
+
+The registry reads, validates, and snapshots every listed file into memory during `install()`. Any violation fails the extension's load:
+
+| Rule                                                                                             | Error message                                                   |
+| ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| The manifest is a JSON object with exactly `schema_version` (the integer `1`), `entry`, and `files` | `Unsupported browser asset manifest; expected schema_version 1` |
+| No duplicate keys                                                                                | `Duplicate browser manifest key`                                |
+| `files` lists 1 to 256 unique, valid paths                                                       | `Browser manifest must list unique asset paths`                 |
+| `entry` is one of `files` and ends in `.js` or `.mjs`                                            | `Browser manifest entry must be a listed JavaScript module`     |
+| Every file has a supported type (below)                                                          | `Unsupported browser asset file type`                           |
+| `root` is not a symlink, and no component of any listed path is a symlink                        | `Browser asset root must not be a symlink`, `Browser assets must not contain symlinks` |
+| Every listed file is a regular file inside `root`                                                | `Browser asset must be a regular file inside its package` (a missing file raises `FileNotFoundError`) |
+| The manifest is at most 64 KiB, each file at most 4 MiB, and all files together at most 16 MiB    | `Browser asset size limit exceeded`                             |
+
+A valid path is at most 512 characters of `/`-separated segments, where each segment uses ASCII letters, digits, `_`, `-`, and `.` and starts with a letter, digit, `_`, or `-`. This rules out dotfiles, `.` and `..` segments, empty segments, backslashes, percent encoding, and query strings.
+
+Supported types, served with the MIME type in parentheses: `.js` and `.mjs` (`text/javascript`), `.css`, `.json` and `.map` (`application/json`), `.wasm`, `.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`, `.woff`, `.woff2`, `.ttf`, and `.otf`. HTML and server-side files are never served.
+
+#### Revisions and caching
+
+The host computes a SHA-256 **revision** over the manifest and the content hash of every file. Every URL contains it: `/api/plugins/{namespace}/assets/{revision}/{path}`. Changing any file changes the revision of all of them. Requests are answered from the startup snapshot, never from the filesystem, so editing the installed files has no effect until a restart.
+
+Asset responses carry `Cache-Control: private, max-age=31536000, immutable` and `Vary: Cookie, Authorization`. An unknown path or revision returns `404` with `private, no-store`. The host keeps no historical snapshots, and there is no public CDN contract. After an upgrade, a page still holding the old revision gets `404`s for anything it has not cached and must be reloaded. Conversely, a browser can keep using code it already cached after a plugin is removed, so removal is not instant cache revocation.
+
+#### How the browser loads assets
+
+The host inserts a native module script with `crossorigin="use-credentials"` pointing at the entry URL, then reads the exports from the document's module map. Relative static and dynamic imports therefore resolve inside the same revision and carry the session cookie. URLs honor `NEXT_PUBLIC_BACKEND_BASE_URL`, including path prefixes.
+
+- **Timeout.** The host stops waiting after 30 seconds and marks that plugin unavailable. This is a deadline for waiting, not cancellation: the module can still finish evaluating later. Keep top-level code free of side effects and start UI work in `mount`.
+- **Module state is shared.** A module instance is shared by the whole document. Keep per-viewer data in per-mount state and clear it in `dispose()`. Never cache principals or private results at module level across account changes.
+- **Other resources are your job.** Set `crossOrigin = "use-credentials"` on stylesheets and images you create, as `page.mjs` does, and use `fetch(url, { credentials: "include" })` for JSON, WASM, or binary data. Font and background URLs inside CSS do not reliably carry cross-origin cookies. For those, prefer a same-origin deployment, or fetch with credentials and build a `FontFace` or Blob URL that you release on dispose.
+- **CSP and CORS.** The backend origin must be allowed in the relevant `script-src`, `style-src`, `img-src`, `font-src`, and `connect-src` directives. Split-origin deployments need exact-origin credentialed CORS and working session cookies.
+
+### The browser API
+
+The module's default export must match the host's browser API v1:
+
+```js
+export default {
+  apiVersion: 1,          // required
+  module: "notes.v1",     // required, equal to the declaration's module
+  icon: "file-text",      // optional
+  surfaces: [/* page surfaces, at most 16 */],
+  conversationActions(t, locale) {/* returns one action group */},
+};
+```
+
+The host rejects the module, and shows "Page module unavailable" on its card, if `apiVersion` or `module` does not match or any surface or navigation entry is malformed.
+
+### Page surfaces
+
+| Field        | Rule                                                                  |
+| ------------ | --------------------------------------------------------------------- |
+| `id`         | `[a-z][a-z0-9-]{0,63}`, unique within the module                       |
+| `slot`       | `"page"` (the only slot today)                                         |
+| `title`      | Non-empty string                                                      |
+| `navigation` | Optional `{ label, labelZh?, icon? }` adds a sidebar entry. Labels are at most 120 characters |
+| `mount`      | `(root, context) => { dispose }`, called synchronously                |
+
+The host mounts the page into a Shadow DOM root and passes a context:
+
+| Context member                 | Meaning                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------- |
+| `namespace`, `locale`          | The plugin namespace and the UI locale, such as `en-US` or `zh-CN`               |
+| `settings`                     | `enabled` plus `public_fields`                                                  |
+| `signal`                       | Aborted on unmount or account change. Pass it to listeners and fetches          |
+| `callBackend(action, payload)` | POSTs to one of this plugin's declared actions and resolves to the JSON response. It rejects on non-2xx responses and on actions not declared by the plugin |
+| `openConversation(threadId)`   | Optional. Navigates to a conversation after resolving it through the authenticated API, and rejects without navigating if it is missing or inaccessible |
+
+`mount` must return an object with a synchronous `dispose()`. The host calls it on unmount after aborting `signal`, and fences late `callBackend` results.
+
+### Conversation actions
+
+`conversationActions(t, locale)` must be synchronous and return `{ label, icon, actions }`. Each action has `id`, `label`, `icon`, a synchronous `available(settings)` that returns a boolean, and `execute(context, services)`:
+
+- `context.thread` is the conversation, and `context.messages` holds its messages when the host already has them.
+- `services.callBackend` works as above. `services.latestVisibleAnswer(context)` returns the last visible assistant message as `{ id, text }` or `null`. `services.conversationText(context)` returns the visible transcript. Both reuse the host's export sanitizer, so hidden messages, tool output, and reasoning are excluded. `services.showMessage(text)` shows a toast.
+
+Each plugin's actions are evaluated inside their own error boundary. A malformed or throwing group is omitted, logged to the browser console, and leaves other plugins' actions and the conversation page intact.
+
+### Icons
+
+The host maps icon names to a fixed set: `bell`, `bookmark`, `download`, `file-json`, and `file-text`. Any other name renders as a generic puzzle icon.
+
+## HTTP endpoints
+
+The host serves plugins through four authenticated Gateway routes, behind the normal session and CSRF policies. Each returns `401` without an authenticated principal:
+
+| Route                                                   | Purpose                                                                                     |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/plugins`                                      | Every loaded plugin: `namespace`, `title`, `description`, `viewer_id`, `module`, `entry`, `transport` (`inline-v1`, `assets-v1`, or `null`), public `settings`, and `backend_actions` names |
+| `GET /api/plugins/modules/{module}/{sha256}.mjs`        | An inline module, addressed by its content hash. `text/javascript`, `nosniff`, `private, no-store` |
+| `GET /api/plugins/{namespace}/assets/{revision}/{path}` | One manifest-listed file. Its declared MIME type, `nosniff`, `Content-Security-Policy: sandbox`, and the immutable private caching described in [Revisions and caching](#revisions-and-caching) |
+| `POST /api/plugins/{namespace}/actions/{name}`          | Invokes one backend action (see [Backend actions](#backend-actions))                         |
+
+A stale inline hash or asset revision returns `404` and requires a page reload. Both download routes serve a plugin's code even while the plugin is disabled.
+
+The browser sends `X-Deerflow-Plugin-Viewer` with the `viewer_id` it discovered, so an action from a view opened under a different account is rejected with `409`.
+
+## Security model
+
+<Callout type="error">
+  Browser modules and Python handlers are trusted, operator-installed code.
+  Browser code runs **in the main page** with the signed-in user's same-origin
+  capabilities. Shadow DOM scopes CSS, not privileges. Python handlers run in the
+  Gateway process with Gateway privileges.
+</Callout>
+
+What the host does guarantee:
+
+- It never loads code from a browser-supplied path, import string, or remote URL. It serves only the installed inline module, verified by content hash, or files listed in the manifest, read from the startup snapshot. Directory listings and unlisted files are never served.
+- Asset responses carry `Content-Security-Policy: sandbox`, so opening an asset directly, such as an SVG with a script inside, cannot run scripts with the Gateway's origin. This restricts assets opened as documents. It does not sandbox the plugin JavaScript the host loads into the page.
+- Every endpoint requires an authenticated principal, and the principal comes from the session rather than the request body.
+- `callBackend` is bound to the plugin's own namespace and its declared action names.
+- Only `enabled` and explicitly public fields reach the browser.
+
+Any authenticated user can download every listed asset, including source maps, even while the plugin is disabled. Never list secrets or private sources in the manifest.
+
+What remains the plugin's job: authorizing access to its own data by `principal.user_id`, validating every payload, escaping user and model text when rendering it (`textContent`, never `innerHTML`), and treating tool results as untrusted data.
+
+## Walkthrough: the bookmarks example
+
+[`examples/deerflow-extension-bookmarks`](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks) (version 0.2.0, which requires `deerflow-extension-api>=0.2.3`) is a complete plugin: users save the last visible answer from a conversation menu, then search, rename, open, or delete their bookmarks on a **My bookmarks** page. The Agent can search them too. It exercises every piece of this chapter:
+
+1. **Config and state.** `install()` requires `config.enabled` (a boolean) and an absolute `config.storage_path`, and opens a SQLite store there. Mount a persistent directory for it in containers.
+2. **The contribution.** Namespace `community.bookmarks`, `enabled=config["enabled"]`, `BrowserAssets("bookmarks.v1", Path(__file__).parent)`, five `BackendAction`s (`save`, `search`, `get`, `rename`, `delete`), and one read-only `ModelTool`, `search_bookmarks`, which the model sees as `ext_community_bookmarks_search_bookmarks_<hash>`.
+3. **The return check.** It raises `RuntimeError` if `registry.plugin(...)` is not `True`.
+4. **Ownership.** Every SQL statement carries `owner = context.principal.user_id`, and each action accepts an exact set of payload keys. The model tool never accepts a user ID, so a user can only ever search their own bookmarks.
+5. **The resources.** `ui_manifest.json` lists four files under `static/dist/`: the entry `index.mjs`, a page module `chunks/bookmarks.mjs`, `styles.css`, and `bookmark.svg`. They ship inside the Python package and need no JavaScript build step.
+6. **The entry module.** `index.mjs` imports `mountBookmarks` from `./chunks/bookmarks.mjs` and exports one `page` surface, `library`, with `navigation: { label: "My bookmarks", labelZh: "我的书签", icon: "bookmark" }`, served at `/workspace/extensions/community.bookmarks/library`. It also exports a "Bookmarks → Save last answer" conversation action that calls `services.latestVisibleAnswer` and then `callBackend("save", ...)`.
+7. **The page module.** `chunks/bookmarks.mjs` resolves `../styles.css` and `../bookmark.svg` against `import.meta.url` and loads them with `crossorigin="use-credentials"`, so they work on split-origin deployments. It observes `context.signal`, renders text with `textContent`, and clears its DOM in `dispose()`.
+
+The deployment record looks like this:
+
+```yaml
+plugins:
+  - name: bookmarks
+    use: deerflow_extension_bookmarks:install
+    enabled: true
+    config:
+      enabled: true
+      storage_path: /var/lib/deerflow/bookmarks.sqlite
+```
+
+After a restart and a browser refresh, the card appears in the Extensions tab, the sidebar gains **My bookmarks**, and the conversation menus gain **Bookmarks**. The example uses single-host SQLite storage. It is not a multi-node storage pattern.
+
+## A minimal plugin
+
+The smallest useful shape is one page, two actions, and one read-only tool. This one uses the inline transport, so it is a single `client.mjs`. To split it into files, switch to [static assets](#static-assets), as `acme.notes` does in that section. Every part below has been exercised against the host's registry and routes:
+
+```python
+"""A per-user scratchpad: a page, one backend action, one read-only model tool."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from deerflow_extension_api import (
+    ActionContext,
+    BackendAction,
+    BrowserModule,
+    ModelTool,
+    PluginContribution,
+    SettingsField,
+    ToolContext,
+    extension,
+)
+
+NOTES: dict[str, list[str]] = {}  # demo only: in-memory, single process
+
+
+async def add_note(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text is required")  # becomes HTTP 422
+    notes = NOTES.setdefault(context.principal.user_id, [])
+    if len(notes) >= context.settings["max_notes"]:
+        raise ValueError("note limit reached")
+    notes.append(text.strip())
+    return {"count": len(notes)}
+
+
+async def list_notes(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
+    return {"notes": NOTES.get(context.principal.user_id, [])}
+
+
+async def count_notes(payload: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
+    return {"count": len(NOTES.get(context.principal.user_id, []))}
+
+
+@extension(api="0.2.2", name="notes")
+def install(registry, config: Mapping[str, Any]) -> None:
+    accepted = registry.plugin(
+        PluginContribution(
+            namespace="acme.notes",
+            title="Notes",
+            description="A private scratchpad for each user.",
+            enabled=config.get("enabled", False) is True,
+            fields=(SettingsField("max_notes", "Maximum notes", "integer", 50, minimum=1, maximum=500),),
+            frontend=BrowserModule(
+                "notes.v1",
+                Path(__file__).with_name("client.mjs").read_text(encoding="utf-8"),
+                public_fields=("max_notes",),
+            ),
+            backend=(BackendAction("add", add_note), BackendAction("list", list_notes)),
+            tools=(
+                ModelTool(
+                    "count_notes",
+                    "Count the current user's saved notes. Read-only.",
+                    {"type": "object", "properties": {}, "additionalProperties": False},
+                    count_notes,
+                ),
+            ),
+        )
+    )
+    if accepted is not True:
+        raise RuntimeError("acme-notes requires a host with full-stack plugin support")
+```
+
+And its `client.mjs`, placed next to `__init__.py` and included in the wheel:
+
+```js
+function mountNotes(root, context) {
+  const list = document.createElement("ul");
+  const input = document.createElement("input");
+  const add = document.createElement("button");
+  add.textContent = context.locale.startsWith("zh") ? "添加" : "Add";
+  root.append(input, add, list);
+
+  const render = async () => {
+    const { notes } = await context.callBackend("list", {});
+    list.replaceChildren(
+      ...notes.map((note) => {
+        const item = document.createElement("li");
+        item.textContent = note; // textContent, never innerHTML
+        return item;
+      }),
+    );
+  };
+  add.addEventListener(
+    "click",
+    async () => {
+      await context.callBackend("add", { text: input.value });
+      input.value = "";
+      await render();
+    },
+    { signal: context.signal },
+  );
+  render().catch(() => {});
+  return { dispose: () => root.replaceChildren() };
+}
+
+export default {
+  apiVersion: 1,
+  module: "notes.v1",
+  surfaces: [
+    {
+      id: "notes",
+      slot: "page",
+      title: "Notes",
+      navigation: { label: "My notes", labelZh: "我的笔记" },
+      mount: mountNotes,
+    },
+  ],
+  conversationActions(_t, locale = "en") {
+    const zh = locale.startsWith("zh");
+    return {
+      label: zh ? "笔记" : "Notes",
+      icon: "file-text",
+      actions: [
+        {
+          id: "save-answer",
+          label: zh ? "把最后一条回答存为笔记" : "Save last answer as a note",
+          icon: "file-text",
+          available: (settings) => settings.enabled === true,
+          async execute(context, services) {
+            const answer = await services.latestVisibleAnswer?.(context);
+            if (!answer) return services.showMessage(zh ? "没有可保存的回答" : "No answer to save");
+            await services.callBackend("add", { text: answer.text.slice(0, 2000) });
+            services.showMessage(zh ? "已保存" : "Saved");
+          },
+        },
+      ],
+    };
+  },
+};
+```
+
+The in-memory dict is only for the example. Real plugins need storage that survives restarts and is shared across Gateway workers.
+
+## Lifecycle
+
+- Install, upgrade, enable, disable, and every `config` change need a Gateway restart, followed by a browser reload. There is no hot reload or hot unload.
+- After a restart, an open page may point at a module hash, asset revision, or action that no longer exists. Those requests fail explicitly (`404`) until the user reloads.
+- A disabled or removed plugin has no sidebar entry after a reload. Visiting its page URL directly shows "Extension page unavailable" and mounts nothing.
+
+Operator commands are covered in [Operations](/docs/harness/extensions/operations).

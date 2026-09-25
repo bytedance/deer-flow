@@ -17,7 +17,7 @@ import { Callout, Tabs } from "nextra/components";
 
 ### 模型提供商
 
-<Tabs items={["OpenAI", "Claude", "Gemini", "DeepSeek", "Ollama（本地）"]}>
+<Tabs items={["OpenAI", "Claude", "Gemini", "DeepSeek", "Ollama（本地）", "llama.cpp（本地）"]}>
   <Tabs.Tab>
 ```yaml
 models:
@@ -106,7 +106,66 @@ ollama pull llama3.3
 ```
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```bash
+llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 --alias qwen-local
+```
+
+```yaml
+models:
+  - name: qwen-llamacpp
+    use: langchain_openai:ChatOpenAI
+    model: qwen-local
+    api_key: no-key
+    base_url: http://localhost:8080/v1
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: false
+```
+
+`llama-server` 提供 OpenAI 兼容的 `/v1/chat/completions` 接口，因此 `base_url` 应指向它的 `/v1` 根路径。`ChatOpenAI` 需要一个非空 API key；当 llama.cpp 未启用鉴权时，`no-key` 只是占位值。如果启动服务时使用了 `--api-key`，请改为对应的真实密钥。
+
+Docker 部署时，`localhost` 指向 DeerFlow 容器本身。请改用容器能够访问的宿主机地址；例如 Docker Desktop 通常可使用 `http://host.docker.internal:8080/v1`。
+
+<Callout type="warning">
+  DeerFlow 依赖工具调用。请确认 GGUF 模型的 chat template 支持 function/tool calls。
+  当前 llama.cpp 默认启用 Jinja chat-template 引擎；如果自定义模板，也必须保留工具调用支持。
+</Callout>
+  </Tabs.Tab>
 </Tabs>
+
+#### 推理能力契约
+
+`supports_thinking` 和 `supports_reasoning_effort` 只能表示"有没有这个开关"。当 provider 的约定与 DeerFlow 的通用假设不同——例如 thinking 无法关闭，或 effort 取值不是 `minimal/low/medium/high`——可以改为声明映射形式的 `reasoning` 块。此时这两个布尔值会由契约推导，聊天界面只提供模型接受的取值，并且所有模型调用（对话、总结、标题生成、子代理）都遵循同一套策略。已有的 Ollama `reasoning: true` / `false`，以及 gpt-oss 一类模型使用的 `low` / `medium` / `high` 档位字符串，仍是 ChatOllama 原生参数，不会启用此契约。
+
+```yaml
+models:
+  - name: glm-5.3-flash
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: glm-5.3-flash
+    api_base: https://api.z.ai/api/paas/v4
+    api_key: $ZAI_API_KEY
+    supports_vision: true
+    reasoning:
+      thinking: required            # unsupported | optional | required
+      dialect: openai_extra_body    # auto | openai_extra_body | anthropic | vllm_chat_template | ollama | none
+      history: clear                # preserve | clear
+      effort:
+        values: [low, high, max]    # provider 自己的取值
+        default: high               # 调用方未指定时使用
+        aliases:                    # DeerFlow 通用取值 -> provider 取值
+          minimal: low
+          medium: high
+    extra_body:
+      tool_stream: true
+```
+
+- `thinking: required` 会在后台调用请求关闭 thinking 时仍保持开启；设置 `on_disable_request: reject` 则改为让这类调用直接失败。
+- 不在 `values` 中的 effort 取值会先经 `aliases` 映射，否则回退到 `default`，绝不会原样发给 provider。出于同样的原因，写在 profile 或 `when_thinking_enabled` / `when_thinking_disabled` 模板里的 effort 取值也会在启动时对照 `values` 校验。
+- 修改 `effort.path` 时，请移除 profile 和 thinking 模板中旧的 `reasoning_effort` 字段；契约会在启动时拒绝这类冲突配置。切换到未声明该取值的旧模型时，聊天界面也会丢弃记住的 provider 专属 effort 档位。
+- `default` 同样作用于从不指定 effort 的调用方——总结、标题生成和子代理——所以请选一个你愿意为每次后台调用付费的档位（上例用 `high`，`max` 仍可在输入框里手动选择）。
+- `dialect: auto`（默认值）会根据 `when_thinking_enabled` 推断开关 payload，因此已有配置可以直接加上 `reasoning` 而无需改写模板。未声明 `reasoning` 块的配置行为完全不变。
+- 自相矛盾的配置（例如 `required` 同时配置了 `when_thinking_disabled`）会在启动时报错。
 
 ### 沙箱
 
@@ -238,13 +297,25 @@ BETTER_AUTH_SECRET=local-dev-secret-at-least-32-chars
 
 ## 运行时环境变量
 
-这些变量在 DeerFlow 进程中设置（通过 `.env`、Docker 环境或 shell）：
+这些变量由 DeerFlow 进程自身读取（通过 `.env`、Docker 环境或 shell）。
 
-| 变量                    | 默认值           | 描述                                             |
-| ----------------------- | ---------------- | ------------------------------------------------ |
-| `DEER_FLOW_CONFIG_PATH` | 自动发现         | `config.yaml` 的绝对路径                         |
-| `LOG_LEVEL`             | `info`           | 日志详细程度（`debug`/`info`/`warning`/`error`） |
-| `DEER_FLOW_ROOT`        | 仓库根目录       | 用于 Docker 中的技能和线程挂载                   |
+这些路径变量中，只有 `DEER_FLOW_SKILLS_PATH` 会把相对值基于 `DEER_FLOW_PROJECT_ROOT` 解析；
+`DEER_FLOW_HOME` 和 `DEER_FLOW_CONFIG_PATH` 都按原值直接使用，相对值会基于进程工作目录解析。
+请为这两个变量设置绝对路径，确保可写状态与加载的配置文件落在预期的位置。
+
+| 变量                     | 默认值                 | 描述                                                   |
+| ------------------------ | ---------------------- | ------------------------------------------------------ |
+| `DEER_FLOW_PROJECT_ROOT` | 当前工作目录           | 解析项目相对默认值（含 `skills` 查找）的根目录         |
+| `DEER_FLOW_HOME`         | `<项目根>/.deer-flow`  | 运行状态的可写目录（线程、上传文件）；建议使用绝对路径 |
+| `DEER_FLOW_CONFIG_PATH`  | 在项目根目录下自动发现 | `config.yaml` 的绝对路径                               |
+| `DEER_FLOW_SKILLS_PATH`  | `<项目根>/skills`      | 技能定义所在目录（相对值基于项目根解析）               |
+| `AUTH_JWT_SECRET`        | 自动生成               | Gateway 的 JWT 签名密钥                                |
+
+日志级别不是环境变量——请在 `config.yaml` 中设置 `log_level`（`debug`、`info`、`warning` 或 `error`，默认 `info`）。模块参考见 [Harness 配置](/docs/harness/configuration)。
+
+`DEER_FLOW_ROOT` 仅是 Docker Compose 开发栈使用的主机侧变量，DeerFlow 进程不会读取它，详见[部署指南](/docs/application/deployment-guide)。
+
+当 `AUTH_JWT_SECRET` 未设置时，DeerFlow 会在首次启动时生成一个密钥并持久化到 `.jwt_secret`，重启后会话仍然有效；生产环境请显式设置一个稳定的随机值。
 
 <Cards num={2}>
   <Cards.Card title="Harness 配置" href="/docs/harness/configuration" />

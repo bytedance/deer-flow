@@ -204,6 +204,11 @@ def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
     assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
 
 
@@ -1452,6 +1457,27 @@ def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tm
 
 
 @_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
 def test_grep_glob_keeps_its_directory_prefix(tmp_path, monkeypatch) -> None:
     # grep has no portable --include, so the glob is applied in Python. Matching
     # only its basename broadened "src/*.js" to every *.js in the tree; the scope
@@ -1485,3 +1511,40 @@ def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None
     assert [m.path for m in matches] == [str(target)]
     assert truncated is False
     assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    loop_thread = _EventLoopThread()
+    started = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    release_holder: dict[str, asyncio.Event] = {}
+
+    async def blocking_operation() -> None:
+        release = asyncio.Event()
+        release_holder["event"] = release
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(FutureTimeoutError):
+            loop_thread.run(blocking_operation(), timeout=0.05)
+
+        assert started.wait(1.0)
+        assert cancelled.wait(1.0), "timed-out BoxLite coroutine kept running on the private loop"
+    finally:
+        release = release_holder.get("event")
+        if release is not None and loop_thread._loop is not None:
+            loop_thread._loop.call_soon_threadsafe(release.set)
+        finished.wait(1.0)
+        loop_thread.close()

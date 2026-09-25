@@ -231,12 +231,12 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 ### Gateway Run-Context Trust Boundary
 
-A server-produced run-context key must be gated on both client-writable feeds:
-`body.context` (whitelist-merged) and free-form `body.config` (copied verbatim).
-`merge_run_context_overrides` forwards it only when `internal=True`;
-`strip_internal_context_keys` scrubs it from the assembled `context` *and*
-`configurable`. Trust and destination are separate axes, so a new key needs both
-decisions — and `disable_clarification` is no milder than `non_interactive`.
+Gate server-owned run context on both client feeds (`body.context` and
+`body.config`): `merge_run_context_overrides` admits it only for `internal=True`,
+while `strip_internal_context_keys` scrubs both destinations. Treat
+`disable_clarification` like `non_interactive`. Before run/state writes,
+`_normalize_input_messages` rejects canonical external system/developer roles;
+only `AUTH_SOURCE_INTERNAL` run input may retain them.
 
 ## Development Workflow
 
@@ -338,7 +338,7 @@ Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces)
 - One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
-- Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
+- Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
 - `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
@@ -347,12 +347,13 @@ See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
 ### Plan Mode
 
-TodoList middleware for complex multi-step tasks:
-- Controlled via runtime config: `config.configurable.is_plan_mode = True`
-- Provides `write_todos` tool for task tracking
-- One task in_progress at a time, real-time updates
+`config.configurable.is_plan_mode=True` enables TodoList `write_todos` for
+multi-step tasks: one `in_progress` task, real-time updates. See
+[usage](docs/plan_mode_usage.md).
 
-See [docs/plan_mode_usage.md](docs/plan_mode_usage.md) for details.
+### Run Interaction Policy
+
+Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 

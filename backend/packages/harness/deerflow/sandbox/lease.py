@@ -436,12 +436,15 @@ class SandboxLeaseManager:
         user_id: str,
         release_on_last: bool = True,
         acquire_release_on_last: bool = True,
+        allow_unscoped_borrow: bool = False,
     ) -> str:
-        """Atomically retain a live persisted sandbox or acquire a replacement.
+        """Atomically restore a scoped sandbox or acquire a replacement.
 
-        A fork-restored live client is borrowed with ``release_on_last=False``;
-        if that persisted client is gone, its freshly acquired replacement is
-        owned normally unless ``acquire_release_on_last`` is also disabled.
+        Ordinary checkpoint ids must match ``user_id`` and ``thread_id``.
+        Server-created fork wrappers may set ``allow_unscoped_borrow`` with
+        ``release_on_last=False`` to share a parent's live client. If that
+        client is gone, the replacement is owned normally unless
+        ``acquire_release_on_last`` is also disabled.
         """
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
@@ -453,7 +456,16 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            if self._provider.get(sandbox_id) is not None:
+            sandbox = (
+                self._provider.get(sandbox_id)
+                if allow_unscoped_borrow
+                else self._provider.get_scoped(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            )
+            if sandbox is not None:
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
@@ -508,6 +520,7 @@ class SandboxLeaseManager:
         user_id: str,
         release_on_last: bool = True,
         acquire_release_on_last: bool = True,
+        allow_unscoped_borrow: bool = False,
     ) -> str:
         """Async atomic retain-or-replace transition for a persisted sandbox."""
         key = self._thread_key(thread_id, user_id)
@@ -520,7 +533,16 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            if self._provider.get(sandbox_id) is not None:
+            sandbox = (
+                self._provider.get(sandbox_id)
+                if allow_unscoped_borrow
+                else self._provider.get_scoped(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            )
+            if sandbox is not None:
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,

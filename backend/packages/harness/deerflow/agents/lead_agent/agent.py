@@ -34,6 +34,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
@@ -63,6 +64,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
 )
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
@@ -77,7 +79,6 @@ from deerflow.tracing import build_tracing_callbacks
 logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
-_NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 
 # Channels whose inbound messages originate from untrusted external
 # commenters (anyone on a GitHub repo, etc.) and whose run context is
@@ -958,7 +959,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
-    non_interactive = bool(cfg.get("non_interactive", False))
+    interaction_policy = resolve_run_interaction_policy(config)
+    non_interactive = not interaction_policy.allows_clarification
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
@@ -1000,9 +1002,23 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
-    if thinking_enabled and not model_config.supports_thinking:
+    # Normalize the request against the model's reasoning contract (issue #5073)
+    # so the run metadata, the assembly descriptor and the factory agree on the
+    # effective policy: required-thinking models turn the flag back on, an
+    # unsupported model turns it off, and a restricted effort vocabulary maps
+    # the generic value onto the provider's own.
+    reasoning_contract = resolve_reasoning_contract(model_config)
+    resolved_reasoning = resolve_reasoning_request(reasoning_contract, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort)
+    if "thinking_unsupported" in resolved_reasoning.adjustments:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
-        thinking_enabled = False
+    elif resolved_reasoning.adjustments:
+        logger.info("Model '%s': reasoning request adjusted by its capability contract (%s)", model_name, ", ".join(resolved_reasoning.adjustments))
+    thinking_enabled = resolved_reasoning.thinking_enabled
+    if reasoning_contract.source == "contract":
+        # Legacy profiles keep forwarding the raw request (the factory strips
+        # what the profile cannot honor, exactly as before); declared
+        # contracts hand the factory the provider value they resolved to.
+        reasoning_effort = resolved_reasoning.reasoning_effort
 
     logger.info(
         "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s, max_total_subagents: %s",
@@ -1068,10 +1084,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             enabled=skill_search_enabled,
             container_base_path=container_base_path,
         )
-        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
         configured_tools = raw_tools
-        if non_interactive:
-            configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
             authorization_candidates.append(skill_setup.describe_skill_tool)
@@ -1119,14 +1135,16 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             skill_names=skill_setup.skill_names or None,
             allowed_subagents=allowed_subagents,
             subagent_execution_capacity=subagent_execution_capacity,
+            interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
         )
         graph = create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
+            model=chat_model,
             tools=final_tools,
             middleware=normalize_middleware_state_schemas(middlewares, mode),
             system_prompt=system_prompt,
             state_schema=get_thread_state_schema(mode),
+            context_schema=dict,
         )
         return _complete_assembly(
             config=config,
@@ -1188,7 +1206,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
-    # Default lead agent (unchanged behavior)
+    # Resolve the model once so tool guidance uses the same effective settings.
+    chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
@@ -1196,10 +1215,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         app_config=resolved_app_config,
+        chat_model=chat_model,
     )
     configured_tools = raw_tools + extra_tools
-    if non_interactive:
-        configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:
         authorization_candidates.append(skill_setup.describe_skill_tool)
@@ -1249,14 +1268,16 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
         subagent_execution_capacity=subagent_execution_capacity,
+        interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
     )
     graph = create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
+        model=chat_model,
         tools=final_tools,
         middleware=normalize_middleware_state_schemas(middlewares, mode),
         system_prompt=system_prompt,
         state_schema=get_thread_state_schema(mode),
+        context_schema=dict,
     )
     return _complete_assembly(
         config=config,

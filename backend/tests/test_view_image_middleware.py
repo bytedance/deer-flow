@@ -21,6 +21,7 @@ Covered behavior:
   checkpoint retains it, even if the run is interrupted mid-call.
 """
 
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -36,6 +37,7 @@ from deerflow.agents.middlewares.view_image_middleware import (
     _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
     ViewImageMiddleware,
 )
+from deerflow.config.paths import Paths
 
 
 def _view_image_call(call_id: str = "call_1", path: str = "/mnt/user-data/uploads/img.png") -> dict:
@@ -82,6 +84,15 @@ def _make_viewed_image(tmp_path, filename="img.png", mime_type="image/png", data
         "size": len(data),
         "actual_path": str(img_path),
     }
+
+
+def _authorized_host_view(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    outputs = paths.sandbox_outputs_dir("thread-test", user_id="user-test")
+    outputs.mkdir(parents=True)
+    virtual_path = "/mnt/user-data/outputs/img.png"
+    return virtual_path, _make_viewed_image(outputs)
 
 
 class TestGetLastAssistantMessage:
@@ -214,7 +225,7 @@ class TestCreateImageDetailsMessage:
                 "/path/to/cat.png": img_meta,
             }
         }
-        blocks = mw._create_image_details_message(state)
+        blocks = mw._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
         # header text + per-image description text + per-image image_url block
         assert len(blocks) == 3
@@ -235,7 +246,7 @@ class TestCreateImageDetailsMessage:
                 "/b.jpg": img2,
             }
         }
-        blocks = mw._create_image_details_message(state)
+        blocks = mw._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
         # 1 header + (1 description + 1 image_url) per image = 5 blocks
         assert len(blocks) == 5
@@ -269,7 +280,7 @@ class TestCreateImageDetailsMessage:
                 "/mystery.bin": img_meta,
             }
         }
-        blocks = mw._create_image_details_message(state)
+        blocks = mw._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
         # The description block should mention unknown
         description_blocks = [b for b in blocks if b.get("type") == "text" and "/mystery.bin" in b.get("text", "")]
         assert len(description_blocks) == 1
@@ -404,11 +415,13 @@ class TestInject:
         request = _model_request([HumanMessage(content="hi")])
         assert mw._inject(request) is request
 
-    def test_appends_image_context_message_to_request(self, tmp_path):
+    def test_appends_image_context_message_to_request(self, tmp_path, monkeypatch):
         mw = ViewImageMiddleware()
-        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        virtual_path, image_metadata = _authorized_host_view(tmp_path, monkeypatch)
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1", virtual_path)])
         original = [assistant, ToolMessage(content="ok", tool_call_id="c1")]
-        request = _model_request(original, {"/img.png": _make_viewed_image(tmp_path)})
+        request = _model_request(original, {virtual_path: image_metadata})
+        request.runtime.context = {"user_id": "user-test", "thread_id": "thread-test"}
 
         injected_request = mw._inject(request)
 
@@ -427,17 +440,19 @@ class TestInject:
         assert injected.id is not None
         assert injected.id.startswith("view-image-context:")
 
-    def test_replaces_a_stranded_payload_instead_of_stacking_a_second_one(self, tmp_path):
+    def test_replaces_a_stranded_payload_instead_of_stacking_a_second_one(self, tmp_path, monkeypatch):
         """A run that died during the model call can leave the old
         before_model/after_model pair's message checkpointed. Rebuild it rather
         than adding a second copy on top."""
         mw = ViewImageMiddleware()
-        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        virtual_path, image_metadata = _authorized_host_view(tmp_path, monkeypatch)
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1", virtual_path)])
         stranded = ViewImageMiddleware._create_image_context_message([{"type": "text", "text": "stale"}])
         request = _model_request(
             [assistant, ToolMessage(content="ok", tool_call_id="c1"), stranded],
-            {"/img.png": _make_viewed_image(tmp_path)},
+            {virtual_path: image_metadata},
         )
+        request.runtime.context = {"user_id": "user-test", "thread_id": "thread-test"}
 
         injected = _image_context_messages(mw._inject(request).messages)
 
@@ -538,19 +553,24 @@ class TestGraphIntegration:
         )
         return create_agent(model=model, tools=[], middleware=[ViewImageMiddleware()]), capture
 
-    def _input(self, tmp_path):
+    def _input(self, tmp_path, monkeypatch):
+        virtual_path, image_metadata = _authorized_host_view(tmp_path, monkeypatch)
         return {
             "messages": [
-                AIMessage(content="", tool_calls=[_view_image_call("c1")]),
+                AIMessage(content="", tool_calls=[_view_image_call("c1", virtual_path)]),
                 ToolMessage(content="ok", tool_call_id="c1"),
             ],
-            "viewed_images": {"/img.png": _make_viewed_image(tmp_path)},
+            "viewed_images": {virtual_path: image_metadata},
         }
 
-    def test_image_context_reaches_the_model_but_never_the_state(self, tmp_path):
+    def test_image_context_reaches_the_model_but_never_the_state(self, tmp_path, monkeypatch):
         graph, capture = self._graph_and_capture()
 
-        result = graph.invoke(self._input(tmp_path))
+        result = graph.invoke(
+            self._input(tmp_path, monkeypatch),
+            config={"configurable": {"thread_id": "thread-test"}},
+            context={"user_id": "user-test"},
+        )
 
         model_image_messages = _image_context_messages(capture.messages)
         assert len(model_image_messages) == 1
@@ -560,15 +580,33 @@ class TestGraphIntegration:
         assert _image_context_messages(result["messages"]) == []
 
     @pytest.mark.anyio
-    async def test_async_graph_matches_sync_behavior(self, tmp_path):
+    async def test_async_graph_matches_sync_behavior(self, tmp_path, monkeypatch):
         graph, capture = self._graph_and_capture()
 
-        result = await graph.ainvoke(self._input(tmp_path))
+        result = await graph.ainvoke(
+            self._input(tmp_path, monkeypatch),
+            config={"configurable": {"thread_id": "thread-test"}},
+            context={"user_id": "user-test"},
+        )
 
         assert len(_image_context_messages(capture.messages)) == 1
+        assert any(block.get("type") == "image_url" for block in _image_context_messages(capture.messages)[0].content)
         assert _image_context_messages(result["messages"]) == []
 
-    def test_graph_preserves_normalized_client_message_with_reserved_prefix(self, tmp_path):
+    def test_context_thread_id_cannot_override_configured_thread(self, tmp_path, monkeypatch):
+        graph, capture = self._graph_and_capture()
+
+        graph.invoke(
+            self._input(tmp_path, monkeypatch),
+            config={"configurable": {"thread_id": "another-thread"}},
+            context={"user_id": "user-test", "thread_id": "thread-test"},
+        )
+
+        model_image_messages = _image_context_messages(capture.messages)
+        assert len(model_image_messages) == 1
+        assert all(block.get("type") != "image_url" for block in model_image_messages[0].content)
+
+    def test_graph_preserves_normalized_client_message_with_reserved_prefix(self, tmp_path, monkeypatch):
         from app.gateway.services import normalize_input
 
         client_id = "view-image-context:client-supplied"
@@ -591,9 +629,9 @@ class TestGraphIntegration:
         assert _IMAGE_CONTEXT_MESSAGE_MARKER_KEY not in client_message.additional_kwargs
 
         graph, capture = self._graph_and_capture()
-        graph_input = self._input(tmp_path)
+        graph_input = self._input(tmp_path, monkeypatch)
 
-        result = graph.invoke({**graph_input, "messages": [client_message, *graph_input["messages"]]})
+        result = graph.invoke({**graph_input, "messages": [client_message, *graph_input["messages"]]}, context={"user_id": "user-test", "thread_id": "thread-test"})
 
         assert any(message.id == client_id for message in capture.messages)
         assert any(message.id != client_id and message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is True for message in _image_context_messages(capture.messages))
@@ -601,3 +639,127 @@ class TestGraphIntegration:
         assert persisted_client.content == "client-authored message"
         assert persisted_client.additional_kwargs == {"custom": "keep-me"}
         assert all(message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is not True for message in result["messages"] if isinstance(message, HumanMessage))
+
+
+def test_host_image_copy_is_scoped_to_current_user_and_thread(tmp_path, monkeypatch):
+    """A stale viewed_images entry must not open another user's host copy."""
+    from deerflow.authz import sandbox_authz
+
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution", lambda **kwargs: None)
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: None))
+
+    image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    virtual_path = "/mnt/user-data/outputs/canary.png"
+    owner_path = paths.sandbox_outputs_dir("thread-b", user_id="user-b") / "canary.png"
+    owner_path.parent.mkdir(parents=True)
+    owner_path.write_bytes(image_bytes)
+    metadata = {"mime_type": "image/png", "size": len(image_bytes), "actual_path": str(owner_path)}
+    messages = [AIMessage(content="", tool_calls=[_view_image_call("call-image", virtual_path)]), ToolMessage(content="Successfully read image", tool_call_id="call-image")]
+
+    def model_payloads(user_id: str, thread_id: str | None, actual_path: Path = owner_path) -> list[str]:
+        request = _model_request(messages, {virtual_path: {**metadata, "actual_path": str(actual_path)}})
+        request.runtime.context = {"user_id": user_id, "thread_id": thread_id}
+        prepared = ViewImageMiddleware()._inject(request)
+        return [block["image_url"]["url"] for message in _image_context_messages(prepared.messages) for block in message.content if isinstance(block, dict) and block.get("type") == "image_url"]
+
+    expected = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    assert model_payloads("user-b", "thread-b") == [expected]
+    assert model_payloads("user-a", "thread-a") == []
+    assert model_payloads("user-b", "thread-a") == []
+    assert model_payloads("user-b", None) == []
+
+    alias_path = paths.sandbox_outputs_dir("thread-a", user_id="user-a") / "canary.png"
+    alias_path.parent.mkdir(parents=True)
+    alias_path.symlink_to(owner_path)
+    assert model_payloads("user-a", "thread-a", alias_path) == []
+
+
+def _custom_base_view_request(tmp_path, monkeypatch):
+    """Use the real tool to record a host copy under a non-global Paths base."""
+    from deerflow.authz import sandbox_authz
+    from deerflow.tools.builtins.view_image_tool import _view_image_authorized
+
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution", lambda **kwargs: None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: None))
+
+    paths = Paths(tmp_path / "custom-base")
+    virtual_path = "/mnt/user-data/outputs/canary.png"
+    image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    actual_path = paths.sandbox_outputs_dir("thread-test", user_id="user-test") / "canary.png"
+    actual_path.parent.mkdir(parents=True)
+    actual_path.write_bytes(image_bytes)
+    thread_data = {
+        "workspace_path": str(paths.sandbox_work_dir("thread-test", user_id="user-test")),
+        "uploads_path": str(paths.sandbox_uploads_dir("thread-test", user_id="user-test")),
+        "outputs_path": str(actual_path.parent),
+    }
+    tool_runtime = SimpleNamespace(
+        state={"thread_data": thread_data},
+        context={"user_id": "user-test", "thread_id": "thread-test"},
+    )
+    result = _view_image_authorized(tool_runtime, virtual_path, "call-image")
+    metadata = result.update["viewed_images"][virtual_path]
+    assert metadata["actual_path"] == str(actual_path)
+
+    messages = [
+        AIMessage(content="", tool_calls=[_view_image_call("call-image", virtual_path)]),
+        ToolMessage(content="Successfully read image", tool_call_id="call-image"),
+    ]
+    request = _model_request(messages, {virtual_path: metadata})
+    request.state["thread_data"] = thread_data
+    request.runtime.context = tool_runtime.context
+    expected = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    return request, expected
+
+
+def _image_urls(request: ModelRequest) -> list[str]:
+    return [block["image_url"]["url"] for message in _image_context_messages(request.messages) for block in message.content if isinstance(block, dict) and block.get("type") == "image_url"]
+
+
+def test_custom_base_host_copy_reaches_sync_model(tmp_path, monkeypatch):
+    request, expected = _custom_base_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    ViewImageMiddleware().wrap_model_call(request, lambda value: prepared.append(value) or AIMessage(content="ok"))
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+@pytest.mark.anyio
+async def test_custom_base_host_copy_reaches_async_model(tmp_path, monkeypatch):
+    request, expected = _custom_base_view_request(tmp_path, monkeypatch)
+    prepared: list[ModelRequest] = []
+
+    async def handler(value: ModelRequest) -> AIMessage:
+        prepared.append(value)
+        return AIMessage(content="ok")
+
+    await ViewImageMiddleware().awrap_model_call(request, handler)
+
+    assert _image_urls(prepared[0]) == [expected]
+
+
+def test_custom_base_host_copy_still_requires_matching_user_and_thread(tmp_path, monkeypatch):
+    request, _ = _custom_base_view_request(tmp_path, monkeypatch)
+    middleware = ViewImageMiddleware()
+
+    for user_id, thread_id in (("other-user", "thread-test"), ("user-test", "other-thread"), ("user-test", None)):
+        request.runtime.context = {"user_id": user_id, "thread_id": thread_id}
+        assert _image_urls(middleware._inject(request)) == []
+
+
+def test_custom_base_host_copy_rejects_unscoped_thread_data_root(tmp_path, monkeypatch):
+    request, _ = _custom_base_view_request(tmp_path, monkeypatch)
+    virtual_path = "/mnt/user-data/outputs/canary.png"
+    unscoped_path = tmp_path / "unscoped" / "canary.png"
+    unscoped_path.parent.mkdir()
+    unscoped_path.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+    request.state["thread_data"] = {**request.state["thread_data"], "outputs_path": str(unscoped_path.parent)}
+    request.state["viewed_images"][virtual_path] = {
+        **request.state["viewed_images"][virtual_path],
+        "actual_path": str(unscoped_path),
+    }
+
+    assert _image_urls(ViewImageMiddleware()._inject(request)) == []

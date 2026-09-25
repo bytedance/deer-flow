@@ -81,6 +81,22 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def get_scoped(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> Sandbox | None:
+        """Return an active sandbox only when it belongs to this identity.
+
+        This hook must remain a non-blocking in-memory lookup. Providers that
+        do not implement identity-aware lookup fail closed; the caller then
+        resolves the canonical sandbox through ``acquire``.
+        """
+        del sandbox_id, thread_id, user_id
+        return None
+
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox environment.

@@ -13,10 +13,11 @@ can silently drift apart.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
-from deerflow.config.file_signature import ConfigSignature, get_config_signature
+from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
 
 
 def test_missing_file_returns_none(tmp_path: Path):
@@ -75,3 +76,80 @@ def test_app_config_and_mcp_cache_share_the_same_implementation():
     assert cache_module._get_config_signature is get_config_signature
     assert app_config_module._ConfigSignature is ConfigSignature
     assert cache_module._ConfigSignature is ConfigSignature
+
+
+def test_read_config_with_signature_describes_exactly_the_bytes_it_returns(tmp_path: Path):
+    """The returned signature must be derived from the returned bytes, not re-read from disk."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("log_level: info\n", encoding="utf-8")
+
+    data, signature = read_config_with_signature(cfg)
+
+    assert data == b"log_level: info\n"
+    assert signature == get_config_signature(cfg)  # a stable file yields the same signature either way
+    assert signature[1] == len(data)
+    assert signature[2] == hashlib.sha256(data).hexdigest()
+
+
+def test_read_config_with_signature_raises_for_a_missing_file(tmp_path: Path):
+    """Unlike ``get_config_signature`` (a probe), reading for parsing must fail loudly like ``open()`` does."""
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        read_config_with_signature(tmp_path / "missing.yaml")
+
+
+def test_app_config_cache_loader_reads_through_the_shared_reader():
+    """``_load_and_cache_app_config`` must parse the same bytes the shared reader signed."""
+    import deerflow.config.app_config as app_config_module
+    import deerflow.config.file_signature as file_signature_module
+
+    assert app_config_module._read_config_with_signature is file_signature_module.read_config_with_signature
+
+
+def test_read_config_with_signature_signs_the_bytes_even_when_stat_is_stale(tmp_path: Path, monkeypatch):
+    """Size and digest come from the bytes actually read, not from the stat taken before the read."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("log_level: info\n", encoding="utf-8")
+    original_stat = Path.stat
+    fired = False
+
+    def stat_then_grow(self: Path, *args, **kwargs):
+        nonlocal fired
+        result = original_stat(self, *args, **kwargs)
+        if self == cfg and not fired:  # the file grows between the stat and the read
+            fired = True
+            with cfg.open("a", encoding="utf-8") as handle:
+                handle.write("# appended after stat\n")
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat_then_grow)
+
+    data, signature = read_config_with_signature(cfg)
+
+    assert data.endswith(b"# appended after stat\n")
+    assert signature[1] == len(data)
+    assert signature[2] == hashlib.sha256(data).hexdigest()
+
+
+def test_read_config_with_signature_hashes_the_bytes_it_returns_not_a_second_read(tmp_path: Path, monkeypatch):
+    """The digest must be computed from the returned bytes; a second read could see a newer revision."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("log_level: info\n", encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+    fired = False
+
+    def read_then_rewrite(self: Path):
+        nonlocal fired
+        data = original_read_bytes(self)
+        if self == cfg and not fired:  # the file is rewritten right after the first read
+            fired = True
+            cfg.write_text("log_level: debug\n", encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_rewrite)
+
+    data, signature = read_config_with_signature(cfg)
+
+    assert data == b"log_level: info\n"
+    assert signature[2] == hashlib.sha256(data).hexdigest()

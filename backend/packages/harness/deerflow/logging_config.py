@@ -48,8 +48,12 @@ _URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo
 # ``METHOD target HTTP/x.x`` line — rewritten to scheme + host with the
 # target collapsed to ``/<redacted>``. The method class is case-tolerant:
 # HTTP methods are case-sensitive tokens, and callers may pass lowercase
-# custom methods through to urllib3.
-_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"\s]*) (?P<version>HTTP/[0-9.]+)"')
+# custom methods through to urllib3. The target may contain spaces for the
+# same reason ``Redirecting``'s slots may: on the recursive redirect frame it
+# is the raw ``Location`` field value, whose grammar admits interior spaces,
+# and a whitespace-strict target class let the signed path survive. Its scan
+# still stops at the closing quote, so the pass stays linear-time.
+_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"]*) (?P<version>HTTP/[0-9.]+)"')
 
 # urllib3's retry sites log the request target with NO scheme and NO request-
 # line scaffolding, so neither pattern above can see it (installed 2.7.0):
@@ -67,16 +71,26 @@ _URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?
 #   connectionpool.py:869, **WARNING**, so it passes the Gateway's INFO root
 #   without DEBUG being enabled; the greedy prefix groups pin the split to
 #   the final ``': `` so an error repr containing quotes cannot shift it.
-_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S+)$")
+# Both trailing-target shapes take a target that runs to the end of the
+# message rather than to the first space, because ``url`` is the caller's raw
+# request target and, on the recursive redirect frame, the raw ``Location``
+# field value (connectionpool.py:923-925) — whose grammar admits interior
+# spaces, exactly as ``Redirecting``'s slots do (round 13). A whitespace-strict
+# target left ``Retry: /download a file.pdf?sig=...`` and the same signed
+# target on the WARNING line unredacted, while the two sibling passes that
+# already take a loose tail redacted it. The target still has to start with
+# ``/``, so prose that merely begins with ``Retry: `` keeps passing through.
+_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S.*)$")
 _URLLIB3_INCREMENT_RETRY_RE = re.compile(r"Incremented Retry for \(url='(?P<url>(?:[^']|'(?!\)))*)'\)")
-_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S+)$")
+_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S.*)$")
 
 # urllib3's ``Redirecting %s -> %s`` (poolmanager.py:500 at INFO,
 # connectionpool.py:922 at DEBUG) can carry an origin-form target in either
 # slot: connectionpool passes the origin-form request target, and the Location
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
-# collapse to ``/<redacted>`` here; absolute slots are left for that pass.
+# collapse to ``/<redacted>`` here; a slot is left for that pass only when
+# the pass consumes it whole (see _url_pass_consumes_slot).
 # The pattern keeps the ``^Redirecting `` prefix anchor — the urllib3-owned
 # literal — because an ``-> /path`` arrow is not urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
@@ -86,12 +100,29 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # header string, and interior spaces are legal field syntax a misbehaving
 # server can emit — a whitespace-strict tail would void the pass entirely
 # and leak the origin-form request target in the first slot (round 13). A
-# space-carrying second slot collapses whole when it starts with ``/``. The
+# space-carrying slot collapses whole whether or not it starts with ``/``:
+# the generic pass stops its ``rest`` at whitespace, so an absolute
+# space-carrying slot kept its signed tail (round 16). The
 # first slot gets the same grammar treatment: the recursive urlopen frame
 # passes the previous raw Location as its url, so t1 can carry interior
 # spaces too — it is lazy, splitting at the FIRST `` -> `` the way the
 # line was constructed left to right.
 _URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
+
+
+# A Redirecting slot is kept only when the generic absolute-URL pass consumes
+# it WHOLE, so the rule is asked of that pass itself rather than of an
+# approximation that can drift from it. The pass leaves a tail in the clear
+# whenever its match stops early: ``rest`` halts at whitespace and at a quote
+# that reads as a closing mark (``https://h/a')b?sig=…`` keeps ``')b?sig=…``),
+# and an empty host before the first ``/?#`` (``https:///path?sig=…``) matches
+# nothing at all because ``host`` needs one character. Both are legal absolute
+# URLs, so a hand-written "is it absolute and whitespace-free" test cannot see
+# them. Everything the pass does not consume whole collapses.
+def _url_pass_consumes_slot(slot: str) -> bool:
+    match = _URL_REDACT_RE.match(slot)
+    return match is not None and match.end() == len(slot)
+
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -161,8 +192,9 @@ class UrlRedactionFilter(logging.Filter):
     per-request ``scheme://host:port "METHOD target HTTP/x.x"`` line, the
     retry lines that log a bare origin-form target (``Retry: <target>``,
     ``Incremented Retry for (url='<target>')``, ``Retrying (…) after
-    connection broken by '…': <target>``), and origin-form halves of
-    ``Redirecting <target> -> <target>``. The record is rewritten in place
+    connection broken by '…': <target>``), and every ``Redirecting <target>
+    -> <target>`` slot the generic pass would not consume whole
+    (see _url_pass_consumes_slot). The record is rewritten in place
     (``msg`` set to the redacted formatted message, ``args`` cleared) so
     every downstream handler and formatter — text or JSON — sees the same
     redacted line, while the method/status/error observability is preserved.
@@ -201,10 +233,22 @@ class UrlRedactionFilter(logging.Filter):
             return match.group("head") + ": /<redacted>"
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
-            # Origin-form slots collapse; absolute slots stay for the generic
-            # absolute-URL pass (which runs after this one).
+            # A slot stays verbatim ONLY when the generic absolute-URL pass
+            # — which runs after this one — consumes it whole; that pass is
+            # asked directly (see _url_pass_consumes_slot).
+            # Everything else collapses: the Location field-value grammar
+            # (RFC 3986 relative-part) also admits slash-less relative
+            # references (``download?sign=…``, ``?sign=…``, ``#frag``),
+            # network-path references (``//host/x``, whose userinfo
+            # collapses with it), and non-hierarchical schemes
+            # (``data:…``) — none of which either pass could otherwise see,
+            # and the slash-less forms kept their signed queries verbatim
+            # (round 15). A space-carrying slot is legal Location syntax
+            # too, and the generic pass stops its ``rest`` at whitespace,
+            # so the signed tail after the first space survived the same
+            # way (round 16).
             def _slot(target: str) -> str:
-                return "/<redacted>" if target.startswith("/") else target
+                return target if _url_pass_consumes_slot(target) else "/<redacted>"
 
             return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 

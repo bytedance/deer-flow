@@ -1,0 +1,271 @@
+---
+title: 快速上手
+description: 十五分钟内构建、测试、安装并移除一个可用的扩展。示例会记录每次工具调用的耗时，覆盖 Lead Agent 和所有子 Agent。
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# 快速上手
+
+本章完整走一遍一个名为 `hello` 的扩展。它贡献一个中间件，为每次工具调用计时，调用慢于配置阈值时记录一条警告。读完你会把它打包、在不依赖 DeerFlow 的情况下做单元测试、安装进一个 checkout，并看到它运行。
+
+## 前提
+
+- 一个能用 `make dev` 运行的 DeerFlow checkout。见[快速上手](/docs/application/quick-start)。
+- Python 3.12 及以上，以及 [uv](https://docs.astral.sh/uv/) 0.8.0 及以上。扩展管理器会拒绝更旧的 uv。
+- 运行 Gateway 那台机器的 shell 权限。安装扩展是运维操作，Web 界面不能做。
+
+<Steps>
+
+### 创建包
+
+扩展就是一个普通的 Python 包。把它建在 DeerFlow checkout **之外**，例如 `~/src/deerflow-extension-hello`：
+
+```text
+deerflow-extension-hello/
+├── pyproject.toml
+├── deerflow_extension_hello/
+│   └── __init__.py
+└── tests/
+    └── test_hello.py
+```
+
+`pyproject.toml` 声明契约版本范围、代码导入的每一个框架，以及 `deerflow.extensions` 组里唯一的一个入口点：
+
+```toml filename="pyproject.toml"
+[project]
+name = "deerflow-extension-hello"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "deerflow-extension-api>=0.2,<0.3",
+    "langchain>=1.3,<2",
+]
+
+[project.entry-points."deerflow.extensions"]
+hello = "deerflow_extension_hello:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_hello"]
+```
+
+入口点名称 `hello` 就是运维人员在 `enable`、`disable`、`remove` 中使用的名字。
+
+<Callout type="warning">
+  `deerflow-extension-api` 刻意不带任何依赖。如果你的代码导入了 LangChain、LangGraph
+  或 FastAPI，需要自己声明，就像这里声明了 `langchain`。不要导入 `deerflow.*` 或
+  `app.*`：那是宿主内部实现，没有兼容性承诺。
+</Callout>
+
+### 编写 install()
+
+```python filename="deerflow_extension_hello/__init__.py"
+"""Log how long each tool call takes, as the model sees it."""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from deerflow_extension_api import (
+    AgentBuildContext,
+    AgentScope,
+    ExtensionData,
+    ExtensionRegistry,
+    MiddlewarePlacement,
+    Placement,
+    extension,
+)
+from langchain.agents.middleware import AgentMiddleware
+
+logger = logging.getLogger(__name__)
+
+
+class ToolTimer(AgentMiddleware):
+    def __init__(self, slow_ms: float) -> None:
+        super().__init__()
+        self.slow_ms = slow_ms
+
+    def _report(self, request: Any, started: float) -> None:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        level = logging.WARNING if elapsed_ms >= self.slow_ms else logging.INFO
+        logger.log(level, "tool %s took %.1f ms", request.tool_call.get("name"), elapsed_ms)
+
+    def wrap_tool_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return handler(request)
+        finally:
+            self._report(request, started)
+
+    async def awrap_tool_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return await handler(request)
+        finally:
+            self._report(request, started)
+
+
+class ToolTimerContributor:
+    def __init__(self, slow_ms: float) -> None:
+        self.slow_ms = slow_ms
+
+    def contribute_middlewares(
+        self,
+        app_store: ExtensionData,
+        ctx: AgentBuildContext,
+    ) -> Sequence[MiddlewarePlacement]:
+        return (MiddlewarePlacement(ToolTimer(self.slow_ms), Placement.TOOL_VISIBLE, AgentScope.BOTH),)
+
+
+@extension(api="0.2.0", name="hello")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.middlewares(ToolTimerContributor(float(config.get("slow_ms", 1000))))
+```
+
+注意三点：
+
+- `install()` 只负责**注册**。它在 Gateway 启动时运行一次，那时还没有任何 Agent。宿主之后每组装一个 Agent，就调用一次 `contribute_middlewares()`。
+- `Placement.TOOL_VISIBLE` 要求位于工具链的外层端，所以计时包含输出截断和错误包装，也就是模型最终等待的时间。`AgentScope.BOTH` 把中间件装进 Lead Agent 和每个子 Agent。两者详见[中间件贡献](/docs/harness/extensions/middleware)。
+- 中间件同时实现了 `wrap_tool_call` 和 `awrap_tool_call`。如果只实现一侧，另一条执行路径会直接透传，什么也观察不到。
+
+### 不依赖 DeerFlow 进行测试
+
+契约就是普通 Python，所以用一个替身注册表就能测试注册逻辑，中间件也可以直接调用：
+
+```python filename="tests/test_hello.py"
+import asyncio
+import logging
+from types import SimpleNamespace
+
+from deerflow_extension_api import AgentBuildContext, AgentScope, ExtensionData, Placement
+
+from deerflow_extension_hello import ToolTimer, install
+
+
+class RecordingRegistry:
+    def __init__(self):
+        self.contributors = []
+
+    def middlewares(self, contributor):
+        self.contributors.append(contributor)
+
+
+def test_install_registers_one_tool_visible_middleware():
+    registry = RecordingRegistry()
+    install(registry, {"slow_ms": 50})
+
+    (contributor,) = registry.contributors
+    ctx = AgentBuildContext(scope=AgentScope.LEAD)
+    (placement,) = contributor.contribute_middlewares(ExtensionData("app"), ctx)
+    assert placement.placement is Placement.TOOL_VISIBLE
+    assert placement.middleware.slow_ms == 50
+
+
+def test_slow_tool_calls_log_a_warning(caplog):
+    timer = ToolTimer(slow_ms=0)
+    request = SimpleNamespace(tool_call={"name": "web_search"})
+
+    async def handler(req):
+        return "result"
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(timer.awrap_tool_call(request, handler)) == "result"
+    assert "tool web_search took" in caplog.text
+    assert caplog.records[-1].levelno == logging.WARNING
+```
+
+契约包目前从 DeerFlow checkout 获取，所以从那里以 editable 模式安装：
+
+```bash
+cd ~/src/deerflow-extension-hello
+uv venv --python 3.12
+uv pip install -e /path/to/deer-flow/backend/packages/extension-api -e . pytest
+uv run --no-project pytest -q
+```
+
+### 安装到 DeerFlow
+
+在 DeerFlow checkout 根目录下，以**绝对**路径传入包目录。Make 包装命令是在 `backend/` 下运行管理器的，相对路径会解析到错误的目录：
+
+```bash
+make extension-install SOURCE="$HOME/src/deerflow-extension-hello"
+```
+
+管理器会警告扩展将以 Gateway 权限执行，并询问 `Install this trusted source? [y/N]`。确认后，它会：
+
+1. 把目录快照复制到 `backend/extensions/sources/deerflow-extension-hello/`。之后对工作副本的修改不会生效，直到你运行 `make extension-upgrade`；
+2. 把快照加入 `backend/pyproject.toml` 的 `extensions` 依赖组，并更新 `backend/uv.lock`；
+3. 同步锁定的环境；
+4. 在 `config.yaml` 中追加一条已启用的 `plugins:` 记录。
+
+然后打印 `Installed and enabled hello (deerflow-extension-hello). Restart DeerFlow to load it.`。检查记录：
+
+```bash
+make extension-list
+```
+
+```text
+NAME	STATE	PACKAGE	ENTRY POINT
+hello	enabled	deerflow-extension-hello	deerflow_extension_hello:install
+```
+
+### 配置并重启
+
+管理器写入的私有配置是空的 `config: {}`。要调低慢调用阈值，编辑 `config.yaml` 中的这条记录。启用、禁用和升级都会保留这一段：
+
+```yaml filename="config.yaml"
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config:
+      slow_ms: 200
+```
+
+扩展只在 Gateway 启动时加载，所以要重启：
+
+```bash
+make dev
+```
+
+Gateway 日志会确认加载成功：
+
+```text
+Extensions loaded: 1/1 (deerflow_extension_hello:install)
+```
+
+如果入口点无法导入、版本不兼容，或者 `install()` 抛出异常，计数会显示 `0/1`，并有一行以 `Extension deerflow_extension_hello:install:` 开头的错误说明原因。因为记录是 `required: false`，Gateway 仍会启动。
+
+### 看它运行
+
+发一条会让 Agent 使用工具的消息，比如网页搜索。Gateway 日志里每次工具调用都有一行，包括 Lead Agent 和它委派的子 Agent。具体前缀取决于你的日志格式：
+
+```text
+WARNING deerflow_extension_hello: tool web_search took 1432.7 ms
+```
+
+### 禁用或移除
+
+```bash
+make extension-disable NAME=hello   # 保留包和配置，停止加载
+make extension-enable NAME=hello
+make extension-remove NAME=hello    # 卸载，删除记录和快照
+```
+
+每条命令都在下次重启后生效。如果用 Docker 部署，修改已安装的扩展集合后要重新构建 Gateway 镜像；构建好的生产容器在启动时不会安装扩展。
+
+</Steps>
+
+## 下一步
+
+- [中间件贡献](/docs/harness/extensions/middleware)：五种放置位置、作用域和排序，以及扩展中间件能改什么、不能改什么。
+- [内置示例](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example)把中间件与任务生命周期状态、系统模型观察者、服务和 HTTP 路由组合在一起。

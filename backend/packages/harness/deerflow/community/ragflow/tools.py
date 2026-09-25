@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _warned: set[str] = set()
 _RAGFLOW_UUID_PATTERN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
 _MAX_PARALLEL_RAGFLOW_REQUESTS = 4
+_MAX_DOCUMENT_IDS_PER_REQUEST = 100
 _NO_RELEVANT_CONTENT = "No relevant content found."
 
 
@@ -363,7 +364,11 @@ async def _validate_document_filters(
         by_id = {str(document.get("id")): document for document in documents if isinstance(document, Mapping) and document.get("id") is not None}
         return item, by_id
 
-    document_results = await _bounded_gather(document_filters, list_documents)
+    # 所有知识库的批次共用并发预算，避免放大提供商请求量。
+    batches = [
+        {"dataset_id": item["dataset_id"], "document_ids": item["document_ids"][offset : offset + _MAX_DOCUMENT_IDS_PER_REQUEST]} for item in document_filters for offset in range(0, len(item["document_ids"]), _MAX_DOCUMENT_IDS_PER_REQUEST)
+    ]
+    document_results = await _bounded_gather(batches, list_documents)
     validated: dict[str, list[str]] = {}
     for item, by_id in document_results:
         dataset_id = item["dataset_id"]
@@ -382,7 +387,7 @@ async def _validate_document_filters(
                     None,
                     "Error: The selected knowledge scope is no longer available; choose the knowledge bases or files again.",
                 )
-        validated[dataset_id] = document_ids
+        validated.setdefault(dataset_id, []).extend(document_ids)
     return validated, None
 
 

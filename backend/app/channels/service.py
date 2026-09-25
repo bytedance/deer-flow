@@ -469,7 +469,13 @@ class ChannelService:
                 # (tests, tooling) stay free of filesystem side effects.
                 from deerflow.config.paths import get_paths
 
-                config["seen_event_store_path"] = str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+                def _default_seen_store_path() -> str:
+                    # Worker thread: ``base_dir`` resolves through realpath, and a
+                    # channel start runs on the Gateway event loop — including the
+                    # per-request ``POST /api/channels/{name}/restart`` path.
+                    return str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+
+                config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
             channel = channel_cls(bus=self.bus, config=config)

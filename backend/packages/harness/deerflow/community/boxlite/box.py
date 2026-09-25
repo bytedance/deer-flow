@@ -231,8 +231,10 @@ class BoxliteBox(Sandbox):
         if start_line is None and end_line is None:
             return content
         lines = content.splitlines()
-        start = start_line or 1
-        end = end_line if end_line is not None else len(lines)
+        # Clamp like LocalSandbox.read_file: a negative start would otherwise
+        # wrap around through Python's negative-index slicing.
+        start = max(start_line or 1, 1)
+        end = max(end_line, 0) if end_line is not None else len(lines)
         return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
@@ -327,8 +329,12 @@ class BoxliteBox(Sandbox):
                 continue
             if path_matches(pattern, rel_path):
                 matches.append(entry)
-                if len(matches) >= max_results:
-                    return matches, True
+                # Look one match past the cap before deciding: returning on the
+                # max-th match cannot tell a search that held exactly
+                # ``max_results`` from one that held more, so an exhausted tree
+                # was reported as truncated.
+                if len(matches) > max_results:
+                    return matches[:max_results], True
         return matches, output.truncated
 
     def grep(
@@ -387,7 +393,7 @@ class BoxliteBox(Sandbox):
                 if not path_matches(glob, rel_path):
                     continue
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line_text)))
-            if len(matches) >= max_results:
-                truncated = True
-                break
+            # Same one-match-past-the-cap rule as glob() above.
+            if len(matches) > max_results:
+                return matches[:max_results], True
         return matches, truncated

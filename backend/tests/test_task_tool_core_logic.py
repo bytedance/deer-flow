@@ -437,11 +437,14 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
 
     assert captured["executor_kwargs"]["extensions"] is loaded
+
+    assert assemble_tools.call_args.kwargs["extensions"] is loaded
 
 
 def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
@@ -504,11 +507,14 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    assemble_tools = MagicMock(return_value=[])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble_tools)
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+    assert "extensions" not in assemble_tools.call_args.kwargs
 
 
 def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
@@ -3257,6 +3263,34 @@ def _capture_executor_call(monkeypatch, **call_kwargs):
     kwargs.update(call_kwargs)
     _run_task_tool(**kwargs)
     return captured["executor_kwargs"], captured["prompt"]
+
+
+@pytest.mark.parametrize("incarnation", ["captured-incarnation", None, "", False, {}])
+def test_task_tool_forwards_captured_thread_incarnation(monkeypatch, incarnation):
+    runtime = _make_runtime()
+    runtime.context["thread_incarnation"] = incarnation
+    executor_kwargs, _ = _capture_executor_call(monkeypatch, runtime=runtime)
+    assert executor_kwargs["thread_incarnation"] is incarnation
+
+
+def test_task_tool_does_not_invent_missing_thread_incarnation(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context.pop("thread_incarnation", None)
+    runtime.state["thread_incarnation"] = "untrusted-state"
+    runtime.config.setdefault("configurable", {})["thread_incarnation"] = "untrusted-config"
+    executor_kwargs, _ = _capture_executor_call(monkeypatch, runtime=runtime)
+    assert "thread_incarnation" not in executor_kwargs
+    assert "thread_incarnation" not in task_tool_module.task_tool.tool_call_schema.model_fields
+
+
+def test_task_tool_rejects_stale_standalone_thread_incarnation(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context["thread_incarnation"] = "incarnation-1"
+    runtime.context["__deerflow_thread_incarnation_metadata_guard"] = True
+    runtime.config["metadata"]["thread_incarnation"] = "incarnation-2"
+
+    with pytest.raises(RuntimeError, match="stale thread incarnation"):
+        _capture_executor_call(monkeypatch, runtime=runtime)
 
 
 def test_task_tool_forwards_acceptance_criteria_to_executor(monkeypatch):

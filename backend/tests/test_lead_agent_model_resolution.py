@@ -7,7 +7,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec
 
 import pytest
 from langchain.agents import create_agent
@@ -659,11 +659,12 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, mcp_plugins=None, include_conversation_reader=False, app_config=app_config)
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, mcp_plugins=None, include_conversation_reader=False, app_config=app_config, chat_model=result["model"])
     assert result["model"] is not None
 
 
-def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch):
+@pytest.mark.parametrize("is_bootstrap", [False, True])
+def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch, is_bootstrap):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -679,7 +680,18 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
         "get_available_tools",
         lambda **kwargs: [_named_tool("ask_clarification"), _named_tool("bash")],
     )
-    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    captured_prompt_policy = {}
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", create_autospec(lead_agent_module.build_middlewares, return_value=[]))
+
+    def _capture_prompt_policy(**kwargs):
+        captured_prompt_policy["policy"] = kwargs["interaction_policy"]
+        return "prompt"
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        _capture_prompt_policy,
+    )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
 
@@ -690,11 +702,13 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
                 "thinking_enabled": False,
                 "subagent_enabled": False,
                 "non_interactive": True,
+                "is_bootstrap": is_bootstrap,
             }
         }
     )
 
-    assert [tool.name for tool in result["tools"]] == ["bash"]
+    assert [tool.name for tool in result["tools"]] == (["bash", "setup_agent"] if is_bootstrap else ["bash"])
+    assert captured_prompt_policy["policy"].mode.value == "scheduled"
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
@@ -1520,6 +1534,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         subagent_enabled=False,
         include_conversation_reader=False,
         app_config=app_config,
+        chat_model=ANY,
     )
     assert config["context"]["subagent_enabled"] is False
     assert config["configurable"]["subagent_enabled"] is False
@@ -1549,3 +1564,46 @@ def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):
     lead_agent_module._make_lead_agent({"context": {"model_name": "safe-model"}}, app_config=app_config)
 
     assert captured["model_overrides"] is None
+
+
+def test_internal_make_lead_agent_applies_the_required_thinking_contract(monkeypatch):
+    """A required-thinking model (issue #5073) turns a ``thinking_enabled=False`` request
+    back on and maps the generic effort through the contract *before* the factory
+    runs, so the assembly metadata and the model see the same effective policy."""
+    model = ModelConfig(
+        name="glm-5.3-flash",
+        display_name="GLM-5.3-Flash",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="glm-5.3-flash",
+        supports_vision=False,
+        reasoning={
+            "thinking": "required",
+            "dialect": "openai_extra_body",
+            "effort": {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}},
+        },
+    )
+    app_config = _make_app_config([model])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config: dict = {"configurable": {"model_name": "glm-5.3-flash", "thinking_enabled": False, "reasoning_effort": "minimal"}}
+    lead_agent_module._make_lead_agent(config, app_config=app_config)
+
+    assert captured == {"thinking_enabled": True, "reasoning_effort": "low"}
+    assert config["metadata"]["thinking_enabled"] is True
+    assert config["metadata"]["reasoning_effort"] == "low"

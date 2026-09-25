@@ -1,0 +1,47 @@
+name: Jev Plugin Package
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'examples/deerflow-extension-jev-context/**'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - '.github/workflows/jev-plugin-package.yml'
+  push:
+    branches: [main, "*-dev"]
+    paths:
+      - 'examples/deerflow-extension-jev-context/**'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - '.github/workflows/jev-plugin-package.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-plugin-package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-package:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.1'
+      - name: Install host dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - name: Build and install the independent wheel
+        run: |
+          uv build --wheel examples/deerflow-extension-jev-context --out-dir "$RUNNER_TEMP/jev-wheel"
+          uv pip install --python backend/.venv/bin/python --no-deps --target "$RUNNER_TEMP/jev-installed" "$RUNNER_TEMP"/jev-wheel/*.whl
+      - name: Verify installed entry point through the host
+        run: backend/.venv/bin/python examples/deerflow-extension-jev-context/scripts/verify_package.py --installed-dir "$RUNNER_TEMP/jev-installed"

@@ -1,0 +1,97 @@
+---
+title: 子 Agent
+description: 子 Agent 是 Lead Agent 委派子任务的独立执行者。本章介绍它解决什么问题、委派如何流转、子 Agent 继承什么与不继承什么，以及本手册的阅读路线。
+asIndexPage: true
+---
+
+import { Callout } from "nextra/components";
+
+# 子 Agent
+
+<Callout type="info" emoji="👥">
+  子 Agent 是 Lead Agent
+  委派子任务的专注执行者。它在隔离的上下文里运行，处理并行或专业化的工作，同时保持主对话干净。
+</Callout>
+
+当一个任务对单个推理线程来说太宽泛，或者其中一部分可以并行完成时，Lead Agent 会把工作委派给**子 Agent**。子 Agent 是一次独立的 Agent 调用：接收一个明确的任务，执行，然后把结果作为工具结果交回 Lead Agent。
+
+## 本手册怎么读
+
+手册按"先懂原理、再会用、再会配、再会查"的顺序组织。不同读者可以只看自己需要的部分：
+
+| 读者                   | 建议阅读                                                                                                                                                                                                                                             |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 聊天用户               | 本章、[快速上手](/docs/harness/subagents/quick-start)、[子 Agent 目录](/docs/harness/subagents/catalog)                                                                                                                                              |
+| 编写提示词或编排任务的人 | [委派用法](/docs/harness/subagents/delegation)、[结果与验收](/docs/harness/subagents/results)                                                                                                                                                        |
+| 运维与管理员           | [限制、预算与容量](/docs/harness/subagents/limits)、[沙箱与隔离](/docs/harness/subagents/sandbox)、[可观测性](/docs/harness/subagents/observability)、[故障排查](/docs/harness/subagents/troubleshooting)                                             |
+| 集成开发者             | [开发者与集成](/docs/harness/subagents/developers)、[参考附录](/docs/harness/subagents/reference)                                                                                                                                                    |
+
+## 子 Agent 解决什么问题
+
+1. **上下文隔离**：子 Agent 只看到完成自己那部分任务所需的信息，默认不带父对话。每个 Agent 的工作上下文保持专注、可控。
+2. **并行**：多个子 Agent 可以并发运行，任务中互相独立的部分（例如同时调研几个主题）可以同时推进。
+
+隔离也意味着子 Agent 不会替 Lead Agent 记住任何东西。它留下的只有三样：交回的最终报告、写进共享工作区的文件，以及运行时记录的执行证据。
+
+## 委派流程
+
+Lead Agent 通过内置 `task` 工具委派：
+
+```
+task(
+  description="调研竞争对手",
+  prompt="调研 Acme Corp 的前 5 家竞争对手，总结其 B2B SaaS 定价",
+  subagent_type="general-purpose"
+)
+```
+
+运行时随后：
+
+1. **校验委派。** `subagent_type` 必须在当前调用方可见的目录里，`context_mode` 只能是 `isolated` 或 `snapshot`，`bash` 类型还要求沙箱允许执行命令。不满足时直接返回一条失败的工具结果，不会启动子 Agent。
+2. **装配子 Agent。** 从目录读取定义并叠加 `config.yaml` 覆盖；按允许 / 禁止列表过滤工具；加载用户作用域的技能索引；拼装系统提示，包括角色提示、报告契约、验收标准说明、技能索引和延迟加载的 MCP 工具目录。
+3. **运行。** 子 Agent 在独立的持久事件循环上运行，受进程级容量、`max_turns`、`timeout_seconds` 以及与 Lead Agent 镜像的防护中间件链约束。
+4. **交回结果。** 最终输出被整理成一条 `ToolMessage` 返回给 Lead Agent。结构化状态写在消息元数据里，正文只是给人看的展示内容。
+
+任务卡片、事件流和账本如何呈现这个过程，见[可观测性](/docs/harness/subagents/observability)。
+
+## 子 Agent 继承什么，不继承什么
+
+| 继承                                                         | 不继承                                                                              |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| 同一个线程沙箱，但有各自独立的 shell 会话与执行租约          | 父对话历史。默认隔离，可用 `context_mode="snapshot"` 显式带入一份快照               |
+| 用户身份，以及用户作用域的技能目录                           | 用户记忆与 Lead Agent 的动态上下文。子 Agent 只收到一条 `current_date` 提醒         |
+| 模型。默认 `inherit`，可按 Agent 覆盖                        | 父 run 的 checkpointer。子图以 `checkpointer=False` 编译，一次性执行、不可恢复      |
+| `summarization`、`loop_detection` 等防护配置；token 预算改用独立的 `subagents.token_budget` | 父 run 绑定到事件循环的回调。token 用量与审计事件通过专门的代理回传父 run           |
+| 请求级 trace id，以及 IM 渠道的 `channel_user_id`            | `task` 工具（不能再派生），以及默认禁用的 `ask_clarification`、`present_files`（不能向用户提问） |
+| 历史上传文件的发现能力（普通 `task` 委派）                   | Lead Agent 专属中间件：记忆、待办、标题生成、澄清、委派上限                         |
+
+细节见[沙箱与隔离](/docs/harness/subagents/sandbox)。
+
+## Lead Agent 何时委派
+
+Lead Agent 的提示词把委派定义为**可选项**，默认直接执行。每次调用 `task` 前它要做一次"委派检查"：只有当并行带来的真实延迟收益、专家能力或上下文隔离的价值，明显超过启动开销、重复的仓库探索、综合成本、状态冲突和副作用风险时，才委派；拿不准时直接做。
+
+提示词里还有两条硬限制：每次响应最多发起 3 个 `task` 调用，每次 run 最多 6 个（默认值）。超出的调用会被中间件丢弃，其工作会丢失。这两个数字怎么配置、怎样和进程容量联动，见[限制、预算与容量](/docs/harness/subagents/limits)。
+
+## 三种委派形态
+
+| 形态         | 工具               | 特点                                                                                                                                                                        |
+| ------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 普通委派     | `task`             | Lead Agent 同步等待结果，结果直接回到对话。受每次响应并发数和每次 run 总量限制                                                                                              |
+| 持久批处理   | `batch_task`       | 面向成百上千个彼此独立的条目。立即返回批次 id，独立于 Gateway 重启运行，不占用普通 `task` 的每 run 总量。需要 SQL 数据库并开启 `subagent_batches`                          |
+| 外部 ACP Agent | `invoke_acp_agent` | 通过 Agent Client Protocol 调用作为子进程运行的外部 Agent，例如 Claude Code、Codex 的 ACP 适配器                                                                           |
+
+## 术语
+
+- **Lead Agent**：线程里的主 Agent，负责推理、调用工具和委派。
+- **子 Agent / 子智能体**：被委派的执行者。设置页 UI 中称为"子智能体"，本手册统一用"子 Agent"。
+- **委派（delegation）**：一次 `task` 调用及其结果。**委派账本（delegation ledger）**是系统维护的委派记录，写在线程状态里，摘要压缩后仍然存在。
+- **回执（receipt）**：运行时为每次工具调用生成的执行记录，编号形如 `[r3 write_file]`。子 Agent 在报告里引用它来证明"这件事我做过"。
+- **验收标准（acceptance criteria）**：委派时附带的可判定条件，例如某文件存在且非空。父侧用代码检查，不消耗模型。
+- **stop_reason**：子 Agent 被 token 预算、轮次预算或循环检测截断时的原因标记。被截断的运行仍然可能是 `completed`。
+- **持久上下文（durable context）**：摘要文本、委派账本、技能上下文等被显式保存在线程状态、每次模型调用前重新注入的内容。
+
+<Cards num={2}>
+  <Cards.Card title="快速上手" href="/docs/harness/subagents/quick-start" />
+  <Cards.Card title="委派用法" href="/docs/harness/subagents/delegation" />
+</Cards>
