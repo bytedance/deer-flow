@@ -542,6 +542,22 @@ def test_link_staged_preserves_original_error_when_cleanup_fails(tmp_path):
     assert not (tmp_path / "report.pdf").exists()
 
 
+def test_link_staged_failure_leaves_staged_file_for_caller_when_not_owning(tmp_path):
+    staged_path = tmp_path / "upload.part"
+    staged_path.write_bytes(b"upload bytes")
+    original_error = OSError(errno.EIO, "original link failure")
+    with (
+        patch.object(os, "link", side_effect=original_error),
+        patch.object(uploads, "_remove_staged_file") as remove_mock,
+        pytest.raises(OSError) as exc_info,
+    ):
+        uploads._link_staged_no_overwrite(staged_path, tmp_path, "report.pdf", unlink_staged=False)
+
+    assert exc_info.value is original_error
+    remove_mock.assert_not_called()
+    assert staged_path.read_bytes() == b"upload bytes"
+
+
 def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

@@ -649,11 +649,23 @@ def build_middlewares(
             from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
 
             if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
-                middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+                middlewares.append(
+                    MemoryMiddleware(
+                        agent_name=agent_name,
+                        memory_config=resolved_app_config.memory,
+                        pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
+                    )
+                )
         else:
             if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
                 logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
-            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+            middlewares.append(
+                MemoryMiddleware(
+                    agent_name=agent_name,
+                    memory_config=resolved_app_config.memory,
+                    pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
+                )
+            )
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.

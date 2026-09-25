@@ -45,7 +45,7 @@ fi
 
 cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
 import os
-import sys, shutil, copy, re
+import sys, shutil, copy, re, secrets
 from pathlib import Path
 
 import yaml
@@ -154,6 +154,30 @@ MIGRATIONS = {
         'description': 'Preserve configured knowledge providers and move RAGFlow settings to the knowledge_search tool',
         'data_transform': migrate_knowledge_provider_settings,
     },
+}
+
+
+def migrate_pii_token_secret(data):
+    # token_secret became mandatory whenever pii_redaction is enabled (v47).
+    # A v46 deployment that enabled redaction without a secret would fail
+    # startup after the upgrade, so generate a random deployment-scoped
+    # secret and persist it here; the .bak backup taken below covers the
+    # original file.
+    pii = data.get('pii_redaction')
+    changes = []
+    if not isinstance(pii, dict) or not pii.get('enabled'):
+        return changes
+    secret = pii.get('token_secret')
+    if isinstance(secret, str) and secret.strip():
+        return changes
+    pii['token_secret'] = secrets.token_urlsafe(32)
+    changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
+    return changes
+
+
+MIGRATIONS[47] = {
+    'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
+    'data_transform': migrate_pii_token_secret,
 }
 
 # Apply migrations in order for versions (user_version, example_version]

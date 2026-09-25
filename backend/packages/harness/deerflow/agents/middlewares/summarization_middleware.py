@@ -1023,9 +1023,11 @@ def create_summarization_middleware(
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled and not skip_memory_flush:
+        from functools import partial
+
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
-        hooks.append(memory_flush_hook)
+        hooks.append(partial(memory_flush_hook, pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,

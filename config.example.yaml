@@ -1411,11 +1411,13 @@ loop_detection:
 # phone numbers, API keys, credit-card numbers (Luhn-validated) and national
 # IDs found in genuine user messages and remote-content tool results
 # (web_fetch / web_search / image_search / web_capture and MCP tools) are
-# rewritten to irreversible placeholders like [EMAIL_1] before they reach the
-# model. No mapping is stored, so redaction cannot be reversed. Raw text stays
-# in thread state for the UI; the memory-extraction path is not covered.
-# Compaction and configured LLM title inputs are redacted too. Existing
-# placeholders reserve indices; compacted raw identities cannot be relinked.
+# rewritten to keyed, value-derived placeholders like
+# [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
+# HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# Raw text stays in thread state for the UI; queued memory-extraction
+# payloads are redacted too. Compaction and configured LLM title inputs are
+# redacted as well; placeholders are value-derived, so an identity redacted
+# before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true
@@ -1423,6 +1425,13 @@ pii_redaction:
   # redact_credit_card: true
   # redact_phone: true
   # redact_national_id: true
+  # Required when enabled: true (non-empty, at least 16 characters) — the
+  # deployment-scoped HMAC secret for the placeholder digests. Tokens are
+  # linkable only within this deployment and cannot be re-derived offline
+  # without it. Enabling redaction without a valid secret fails config
+  # validation: an unkeyed digest would be a publicly computable, globally
+  # linkable fingerprint of the raw values (guessable for phone numbers).
+  # token_secret: change-me-to-a-long-random-string
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)
