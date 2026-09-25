@@ -103,6 +103,7 @@ class TestResourceMapping:
             ("skill", "skills"),
             ("mcp_server", "mcp_servers"),
             ("route", "routes"),
+            ("plugin_action", "plugin_actions"),
         ],
     )
     def test_reserved_request_alias_is_rejected(self, request_alias, config_key):
@@ -142,6 +143,40 @@ class TestResourceMapping:
         p = _provider({"user": {"tools": {"allow": ["web_search"]}}})
         # No model policy configured → unrestricted
         assert p.authorize(_make_request(resource="model", target="any")).allow is True
+
+    def test_plugin_action_maps_to_plugin_actions(self):
+        """The request resource is singular; the config key is plural."""
+        p = _provider({"user": {"plugin_actions": {"allow": ["community.check/check"]}}})
+        request = _make_request(resource="plugin_action", action="invoke", target="community.check/check")
+        assert p.authorize(request).allow is True
+        assert p.authorize(_make_request(resource="plugin_action", action="invoke", target="community.check/other")).allow is False
+        assert p.filter_resources(Principal(role="user"), "plugin_action", ["community.check/check", "community.check/other"]) == ["community.check/check"]
+
+    def test_plugin_actions_alias_direction_denies_when_empty(self):
+        """A reversed alias would silently allow; the mapping is request → config key."""
+        p = _provider({"user": {"plugin_actions": {"allow": []}}})
+        assert p.authorize(_make_request(resource="plugin_action", action="invoke", target="community.check/check")).allow is False
+
+    def test_plugin_management_is_self_mapped(self):
+        """Key == resource is legal (same shape as ``sandbox``)."""
+        p = _provider({"user": {"plugin_management": {"allow": ["community.check/permissions.read"]}}})
+        allowed = p.authorize(_make_request(resource="plugin_management", action="read", target="community.check/permissions.read"))
+        denied = p.authorize(_make_request(resource="plugin_management", action="write", target="community.check/permissions.write"))
+        assert allowed.allow is True
+        assert denied.allow is False
+
+    def test_plugin_management_separates_read_from_write_by_target(self):
+        """The built-in provider ignores ``action``, so authority must differ by target."""
+        from deerflow.authz.plugin_targets import MANAGEMENT_READ_PART, MANAGEMENT_WRITE_PART, plugin_management_target
+
+        read_target = plugin_management_target("community.check", MANAGEMENT_READ_PART)
+        write_target = plugin_management_target("community.check", MANAGEMENT_WRITE_PART)
+        p = _provider({"user": {"plugin_management": {"allow": [read_target]}}})
+
+        assert p.authorize(_make_request(resource="plugin_management", action="read", target=read_target)).allow is True
+        # The same call under the write action is still denied: the target carries the authority.
+        assert p.authorize(_make_request(resource="plugin_management", action="write", target=write_target)).allow is False
+        assert p.authorize(_make_request(resource="plugin_management", action="write", target=read_target)).allow is True
 
 
 # --- Role resolution ---

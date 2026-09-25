@@ -1664,6 +1664,16 @@ class SubagentExecutor:
                 )
                 try:
                     await close_agent_stream(stream)
+                except asyncio.CancelledError as exc:
+                    close_failure = exc.__cause__
+                    if isinstance(close_failure, Exception):
+                        logger.warning(
+                            "[trace=%s] Could not close interrupted subagent stream %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+                        )
+                    raise
                 except Exception:
                     cancel_requested = cancel_requested or result.cancel_event.is_set()
                     if active_error is None and not cancel_requested:

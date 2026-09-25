@@ -30,6 +30,15 @@ _RESOURCE_POLICY_KEYS: dict[str, str] = {
     "sandbox": "sandbox",
     "mcp_server": "mcp_servers",
     "route": "routes",
+    # Plugin resources. The left side is the request ``resource`` and the right
+    # side is the ``config.yaml`` key. ``plugin_management`` is genuinely
+    # self-mapped (like ``sandbox``), so a config key of the same name is legal;
+    # ``plugin_action`` is not, and using it as a config key is rejected at
+    # construction. A resource with no policy key is unrestricted, which is the
+    # documented non-breaking path for deployments that enable authorization
+    # without listing these keys.
+    "plugin_action": "plugin_actions",
+    "plugin_management": "plugin_management",
 }
 
 _ALL = object()  # sentinel meaning "allow all candidates"

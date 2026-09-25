@@ -5,6 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from deerflow.config.model_config import RequestAdmissionConfig
@@ -95,6 +96,71 @@ def test_sync_and_foreign_loops_share_one_budget(clock):
 def test_invalid_configuration(values):
     with pytest.raises(ValidationError):
         RequestAdmissionConfig(**values)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"requests_per_minute": "60"},
+        {"requests_per_minute": " 60 "},
+        {"requests_per_minute": 1, "max_queue_size": "512"},
+    ],
+)
+def test_integer_literal_strings_are_accepted(values):
+    """``$VAR`` substitution always yields ``str``; an integer literal must still validate."""
+    config = RequestAdmissionConfig(**values)
+    assert config.requests_per_minute == int(str(values["requests_per_minute"]).strip())
+    assert config.max_queue_size == int(str(values.get("max_queue_size", 256)).strip())
+    assert type(config.requests_per_minute) is int
+    assert type(config.max_queue_size) is int
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"requests_per_minute": 60.0},
+        {"requests_per_minute": "60.0"},
+        {"requests_per_minute": "sixty"},
+        {"requests_per_minute": ""},
+        {"requests_per_minute": "0"},
+        {"requests_per_minute": 1, "max_queue_size": True},
+        {"requests_per_minute": 1, "max_queue_size": 256.0},
+        {"requests_per_minute": 1, "max_queue_size": "-1"},
+    ],
+)
+def test_non_integer_inputs_remain_rejected(values):
+    """Accepting env-substituted integer strings must not reopen the strict check for bools, floats, or other strings."""
+    with pytest.raises(ValidationError):
+        RequestAdmissionConfig(**values)
+
+
+def test_env_substitution_reaches_request_admission_from_config_file(monkeypatch, tmp_path):
+    """``config.example.yaml`` promises ``$VAR`` for every field; the two strict integers must honor it end to end."""
+    from deerflow.config.app_config import AppConfig
+
+    monkeypatch.setenv("DEER_FLOW_TEST_RPM", "60")
+    monkeypatch.setenv("DEER_FLOW_TEST_QUEUE", "512")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "models": [
+                    {
+                        "name": "paced",
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": "gpt-test",
+                        "request_admission": {"requests_per_minute": "$DEER_FLOW_TEST_RPM", "max_queue_size": "$DEER_FLOW_TEST_QUEUE"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    policy = AppConfig.from_file(str(path)).get_model_config("paced").request_admission
+
+    assert policy == RequestAdmissionConfig(requests_per_minute=60, max_queue_size=512)
 
 
 def test_sync_timeout_removes_waiter(clock, monkeypatch):
