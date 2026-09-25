@@ -1,6 +1,6 @@
 {
   "name": "deer-flow-frontend",
-  "version": "2.1.0-rc0",
+  "version": "2.2.0-dev",
   "private": true,
   "type": "module",
   "scripts": {
