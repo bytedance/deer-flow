@@ -962,7 +962,7 @@ This release closes that milestone with **765 merged pull requests**.
   with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
   unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
   frontend started from that worktree was never recognised as deer-flow's and
-  the start aborted with "port already in use". The whole path is kept now.
+  the start aborted with "port already in use". The whole path is kept now. ([#5856])
 - **config:** A `config.yaml` edit that lands while the previous edit is still
   being loaded is no longer lost until the next edit. `get_app_config()`'s
   loader parsed the file and then hashed it again to record the cache
@@ -4443,4 +4443,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
 [#5838]: https://github.com/bytedance/deer-flow/pull/5838
 [#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5856]: https://github.com/bytedance/deer-flow/pull/5856
 
