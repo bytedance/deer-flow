@@ -56,8 +56,8 @@ from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
-from deerflow.runtime import CheckpointStateAccessor, serialize_interrupts
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
+from deerflow.runtime import CheckpointStateAccessor, serialize_interrupts
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
