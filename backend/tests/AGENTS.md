@@ -78,11 +78,16 @@ expand when escaped; preserving raw UTF-8 limits alone does not cover it.
 
 ## Advisory fetched-content screening example
 
-`test_jev_result_screening_extension.py` checks bounded requests and copying/failure
-semantics for the configured middleware. `test_jev_screening_pipeline.py` runs real
-lead/subagent graphs to a recording model; cover error metadata/receipts, budget,
-PII ordering and one-time annotation, including valid empty-string message IDs.
-Only `None` awaits ID assignment. Use offline transports. Detection is not
-behavioral defense; do not infer the final model input from an isolated hook test.
-`test_jev_screening_policy.py` uses the host descriptor builder to pin policy
-identity; hash endpoint/prompt text and never project credential values.
+Load the example through `load_extensions()` and the host isolation wrapper, as a
+`plugins:` entry is loaded; never instantiate the middleware directly.
+`test_jev_result_screening_extension.py` checks install/config diagnostics, bounded
+requests, the task-store handover between the tool wrapper and `before_model`, copy
+semantics, fail-open provider errors and isolation diagnostics for local bugs.
+`test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
+with a task store bound under the runtime-context key the Gateway worker uses; cover
+the redacted excerpt, error metadata/receipts, budget, one-time warnings including
+valid empty-string message IDs, and runs without a task store. Only `None` awaits ID
+assignment. Use offline transports. Detection is not behavioral defense; do not infer
+the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
+the host descriptor builder to pin policy identity; hash endpoint/prompt text and
+never project credential values.

@@ -1,108 +1,140 @@
-# Advisory screening of fetched content
+# Advisory screening of fetched content — extension example
 
-An experimental, operator-configured `AgentMiddleware` for [RFC #5737](https://github.com/bytedance/deer-flow/issues/5737).
-It screens a bounded excerpt of `web_fetch`, `web_search`,
-`image_search`, `web_capture` and MCP tool results with one TypeSafe Jev `noul`
-question. A score at or above the configured threshold causes a fixed advisory
-warning to be added before the next regular model call, in both async Gateway
-runs and synchronous embedded-client runs. It does not block tools,
-authorize actions or establish that the model will ignore an injected instruction.
+An opt-in packaged extension for [RFC #5737](https://github.com/bytedance/deer-flow/issues/5737).
+It contributes one `AgentMiddleware` through the extension API, placed at
+`TOOL_VISIBLE` for lead agents and subagents. The middleware screens a bounded
+excerpt of `web_fetch`, `web_search`, `image_search`, `web_capture` and MCP tool
+results with one TypeSafe Jev `noul` question. A score at or above the configured
+threshold adds a fixed advisory warning to that tool result before the next model
+call. It does not block tools, authorize actions or establish that the model will
+ignore an injected instruction.
 
-## Configuration and local trial
+The package imports only `deerflow_extension_api` from DeerFlow, so it can move
+out of this repository unchanged.
 
-The middleware is disabled by default. Enable it in operator-owned `config.yaml`:
+## Install and configure
+
+From `backend/` in a compatible DeerFlow deployment:
+
+```sh
+uv run deerflow extensions install ../examples/deerflow-extension-jev-screening --yes
+export TYPESAFE_API_KEY='your-deployment-secret'
+```
+
+Set the registered entry in the deployment configuration:
 
 ```yaml
-extensions:
-  middlewares:
-    - class: deerflow_extension_jev_screening:ScreeningMiddleware
-      kwargs:
-        enabled: true
-        api_key_env: TYPESAFE_API_KEY
-        model: jev-latest
-        threshold: 0.5
-        max_excerpt_chars: 4000
-        timeout_seconds: 3.0
+plugins:
+  - use: deerflow_extension_jev_screening:install
+    enabled: true
+    config:
+      enabled: true
+      threshold: 0.5
+      max_excerpt_chars: 4000
+      timeout_seconds: 3.0
 ```
 
-Supply `TYPESAFE_API_KEY` to the Gateway process. For a local trial, from `backend/`:
+Optional keys are `api_key_env` (default `TYPESAFE_API_KEY`), `model` (default
+`jev-latest`) and `endpoint`, which must use HTTPS or loopback HTTP. Provide the
+key to the actual Gateway process and restart Gateway after installing or changing
+the configuration. The outer switch loads the package; `config.enabled` turns
+screening on and defaults to off. Invalid settings make `install()` fail, which
+the Gateway reports as an extension diagnostic while starting without the
+extension, unless the entry is `required: true`.
 
-```bash
-uv run --locked --with ../examples/deerflow-extension-jev-screening \
-  uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001
-```
+**Data sharing:** `config.enabled: true` is also the consent to send up to
+`max_excerpt_chars` characters of each eligible tool result to the configured
+TypeSafe endpoint. The middleware sits outside the host's tool-result truncation,
+sanitization and PII redaction, so the excerpt is the text the model would see:
+with `pii_redaction` enabled, redacted values are replaced before the excerpt
+leaves the host. The key is read only from its named environment variable, never
+from settings, tool results or logs.
 
-Keep `--with` on each trial startup; it supplies the package without changing the
-backend dependency manifest or lock. For deployment, install the package into the
-Gateway's Python environment through your normal dependency/build process and
-restart Gateway with the configuration above. This package uses the existing
-configured-middleware entry point, not `plugins:` or `deerflow extensions install`.
-Missing packages or invalid constructor settings fail agent construction.
+## How it works
 
-**Data sharing:** Enabling the middleware sends up to 4,000 characters of a raw
-remote tool result to the configured TypeSafe service. This happens **before
-DeerFlow's PII redaction, sanitization and output budgeting**; enabling host PII
-redaction does not protect the excerpt sent to Jev. Enable this only for content
-your deployment permits sharing with that service. The key is read from its
-named environment variable, not stored in settings, tool results or logs. An
-optional `endpoint` must use HTTPS or loopback HTTP.
+1. **Detect.** The tool-call wrapper classifies the visible result of an eligible
+   tool. When the score reaches the threshold it records the tool-call ID in the
+   run's extension task store (`task_store_from_runtime`). The wrapper cannot
+   change the result: extension tool wrappers are observational, and the host's
+   isolation wrapper always returns the downstream result.
+2. **Warn.** `before_model` takes the recorded IDs and returns copies of the
+   matching tool messages from the latest tool step, with the warning prepended
+   and the same message ID (including a valid empty string), so the messages
+   reducer replaces them. The warning is added once; later model calls see the
+   same message.
+3. **Declare.** `release_policy_parameters()` declares the enabled state, model,
+   threshold, excerpt limit, timeout and key variable name, plus SHA-256 hashes of
+   the endpoint, question and warning. The host's assembly descriptor unwraps the
+   isolation wrapper to read it, so changing a setting moves the fingerprint while
+   rotating a key does not.
 
 ## Runtime behavior and boundaries
 
-The configured path supports normal middleware result/state transformations.
-The observational plugin contract remains unchanged. The tool hook copies a
-private pending flag into result metadata without changing the original text.
-This allows the host to classify errors, stamp receipts, redact and sanitize the
-result normally. The `before_model` lifecycle hook then consumes the flag and
-returns a new `ToolMessage` with the same ID (including a valid empty string)
-and a fixed warning. Subsequent
-model calls do not add the warning again.
+- Gateway lead runs and subagents bind a task store, and both use the async hook.
+  The sync hook runs the same classifier on LangGraph's synchronous tool worker
+  threads for embedders that run the graph synchronously. Called directly on an
+  event-loop thread, it passes the result through.
+- The embedded `DeerFlowClient` does not load `plugins:` extensions and binds no
+  extension task store. Without a task store the middleware sends nothing.
+- One classifier request is made per eligible tool call containing text,
+  including `Command` results. Multimodal results are skipped. Only the excerpt is
+  classified, so instructions beyond it can be missed.
+- The request deadline defaults to 3 seconds and cannot exceed 10. There are no
+  retries or cache, and a new client is used for each result.
+- A missing or unusable key, provider errors, invalid or oversized responses and
+  timeouts pass the result through silently. Unexpected local errors are reported
+  by the host as extension diagnostics, and the tool result is kept. Tool failures,
+  graph interrupts and cancellation propagate without repeating the tool.
+- A flag lives only as long as its task. If a run is interrupted between the tool
+  step and the next model call, the resumed run does not add the warning.
+- The host can still truncate or externalize output under its model-input budget,
+  including the warning.
+- The fixed question is the v2 wording in the evaluation kit attached to #5737. Its
+  detection measurements do not measure this middleware's latency or its effect on
+  agent behavior. No security claim is made for auxiliary model calls, summaries
+  or downstream actions.
 
-Original result objects are never modified. The screener itself does not remove
-source text, but the host can still externalize or truncate output under its
-configured budget, including after a warning is added. A small budget can also
-shorten the warning. Do not interpret this example as a guarantee that all source
-text or every warning reaches every model invocation.
+## What this example exercises in the extension API
 
-One classifier request is made per eligible tool call containing text, including
-`Command` results with tool messages. Text-only message blocks are supported;
-multimodal messages and local file/shell results are skipped. Only the bounded
-excerpt is classified, so instructions beyond it can be missed. The HTTP request
-cancellation deadline defaults to 3 seconds and cannot exceed 10 seconds. Synchronous
-runs reuse that coroutine with `asyncio.run`; cleanup, including system DNS
-executor shutdown, can extend wall-clock return time beyond the request deadline.
-There are no retries
-or cache; a new client is used for each result. Missing credentials, provider
-errors, invalid responses and local screening failures pass the original result
-through. Tool failures, graph interrupts and cancellation propagate without
-repeating the tool. LangGraph executes synchronous tools in worker threads; a
-direct manual call to the synchronous hook on an already-running event-loop
-thread passes through. Use the asynchronous hook on that thread.
+Everything above works without host changes: packaging and `plugins:` loading,
+private configuration with install-time validation, `TOOL_VISIBLE` placement for
+lead agents and subagents, the per-task store, lifecycle state updates, isolation
+diagnostics and assembly identity. Four gaps showed up along the way:
 
-The fixed question is the v2 wording in the evaluation kit attached to #5737.
-Its stored detection measurements do not measure this middleware's latency or
-its effect on agent behavior. The private pending flag is advisory metadata, not
-a permission or trust credential. No security claim is made for auxiliary model
-calls, summaries or downstream actions.
-
-The middleware declares its policy for the host's assembly fingerprint: enabled
-state, model, threshold, excerpt limit, timeout and credential environment-variable
-name, plus SHA-256 hashes of the endpoint, screening question/criteria and warning
-text. Endpoint and prompt text are not copied into the descriptor. Credential
-values are never read by this declaration; rotating a key does not change the
-policy identity.
+1. **Transforming a tool result takes two hooks.** Wrap hooks are observe-only, so
+   the example detects in the tool wrapper and edits state in `before_model`. The
+   extension manual says contributions are observational and cannot replace tool
+   output, while the same page says a lifecycle hook's returned dict is applied as a
+   state update. This example depends on the second rule. Saying whether rewriting
+   a tool message by ID from a lifecycle hook is intended would settle it for
+   extension authors.
+2. **No public signal for remote content.** The example repeats the sanitizer's
+   list of remote tools and reads the host's `deerflow_mcp` tool metadata key,
+   which is not part of the extension contract.
+3. **No structured flag for a tool result.** The provenance contract labels whole
+   messages that middleware injects. Nothing can attach a flag to a tool result, so
+   the example can only prefix text. This is the second review question in #5737.
+4. **Gateway only.** Only the Gateway loads `plugins:` and binds a task store, so
+   embedded-client runs get neither. If an embedder loads extensions itself, a
+   contributed middleware that implements only an async lifecycle hook, such as
+   `abefore_model`, makes every synchronous run raise `TypeError` before the
+   isolation wrapper is called. The wrapper adds sync pass-throughs for wrap hooks
+   but not for lifecycle hooks. This example implements both forms.
 
 ## Validation
 
-`backend/tests/test_jev_result_screening_extension.py` checks bounded excerpts,
-copy-on-write, malformed provider responses, cancellation and local failure
-recovery. `backend/tests/test_jev_screening_pipeline.py` runs real lead/subagent
-middleware builders and LangChain graphs against a recording model, including
-error classification, PII/sanitization, budget boundaries and repeated turns.
-`backend/tests/test_jev_screening_policy.py` verifies assembly fingerprints change
-with policy settings/text and remain stable across credential rotation.
+`backend/tests/test_jev_result_screening_extension.py` loads the package through
+the real extension loader and host isolation wrapper. It checks install and
+configuration diagnostics, bounded requests, the task-store handover, copy
+semantics, fail-open provider errors and isolation diagnostics.
+`backend/tests/test_jev_screening_pipeline.py` runs real lead and subagent
+middleware builders and LangChain graphs against a recording model, with a task
+store bound the way the Gateway worker binds it. It covers the redacted excerpt,
+error classification, budget boundaries, repeated turns and runs without a store.
+`backend/tests/test_jev_screening_policy.py` verifies that assembly fingerprints
+change with policy settings and text and stay stable across credential rotation.
 All tests use synthetic data and offline HTTP transports.
 
-A separate paired agent replay would be needed to measure whether warnings
-reduce successful injections and whether they disrupt benign tasks. Detection
-accuracy alone does not establish protective value.
+A separate paired agent replay would be needed to measure whether warnings reduce
+successful injections and whether they disrupt benign tasks. Detection accuracy
+alone does not establish protective value.

@@ -1286,11 +1286,6 @@ For vision-capable agents, `view_image` and the subsequent model-context image r
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.
 
-The [optional fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
-uses this configured middleware path for sync and async runs. It requires deployment opt-in
-to send raw text excerpts to Jev, then adds advisory warnings through a state update.
-Host error handling and output budgets still apply.
-
 For packaged and configurable runtime integrations, use DeerFlow's extension manager.
 It accepts a Python package requirement, a public HTTPS Git URL, or a local directory, installs the
 package into the backend's dedicated `extensions` dependency group, updates
@@ -1343,6 +1338,10 @@ not wrapped by middleware model-call hooks (goal, memory, title, and summarizati
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
+contributes one such middleware at the visible tool position. After operator opt-in it
+classifies the redacted text a remote tool result shows the model and adds an advisory
+warning through a lifecycle state update; it imports only the extension contract.
 
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the

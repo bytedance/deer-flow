@@ -1,4 +1,9 @@
-"""Screening policy identity through the host's assembly descriptor."""
+"""Screening policy identity through the host's assembly descriptor.
+
+The middleware reaches the descriptor the way a ``plugins:`` entry does: loaded
+by the extension loader and wrapped by host isolation, which the descriptor
+unwraps to read the extension's own policy declaration.
+"""
 
 import json
 from dataclasses import asdict
@@ -6,9 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from deerflow_extension_api import AgentBuildContext, AgentScope, Placement
 
 from deerflow.agents.assembly_descriptor import build_assembly_descriptor
-from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+from deerflow.extensions.anchors import outermost
+from deerflow.extensions.injection import inject_middlewares
+from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-jev-screening"
 
@@ -18,8 +26,15 @@ def example_path(monkeypatch):
     monkeypatch.syspath_prepend(str(EXAMPLE))
 
 
+def contributed(**options):
+    extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_jev_screening:install", config={"enabled": True, **options})])
+    assert [d for d in diagnostics if d.level == "error"] == []
+    stack, _provenance, construction = inject_middlewares([], {Placement.TOOL_VISIBLE: outermost()}, AgentScope.LEAD, AgentBuildContext(scope=AgentScope.LEAD), extensions)
+    assert construction == []
+    return stack
+
+
 def assembly(**options):
-    config = SimpleNamespace(extensions=SimpleNamespace(middlewares=[{"class": "deerflow_extension_jev_screening:ScreeningMiddleware", "kwargs": {"enabled": True, **options}}]))
     return build_assembly_descriptor(
         namespace="screening-policy-test",
         agent_name="test",
@@ -30,7 +45,7 @@ def assembly(**options):
         reasoning_effort=None,
         rendered_base_prompt="Fixed synthetic base prompt.",
         tools=[],
-        middlewares=load_configured_extension_middlewares(config),
+        middlewares=contributed(**options),
         deferred_names=frozenset(),
         enabled_skills=[],
         effective_policies={},
@@ -76,7 +91,9 @@ def test_policy_is_stable_json_safe_and_does_not_expose_endpoint_prompt_or_keys(
     monkeypatch.setattr(screener, "_CRITERIA", criteria)
     monkeypatch.setattr(screener, "_MARKER", marker)
     first = assembly(endpoint=endpoint)
-    declared = first.middlewares[0].policy_parameters
+    (entry,) = first.middlewares
+    assert entry.extension, "the descriptor must attribute the middleware to its extension"
+    declared = entry.policy_parameters
     assert "probed" not in declared
     assert declared["enabled"] is True
     assert declared["api_key_env"] == "TYPESAFE_API_KEY"
