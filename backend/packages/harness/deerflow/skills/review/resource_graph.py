@@ -98,17 +98,23 @@ _TRAILING_SENTENCE_PUNCTUATION = ".?!"
 
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
-    # Keep '#' inside every raw reference: _resolve_reference prefers the
-    # exact token when it names a real file (package filenames may contain
-    # '#') and only treats the suffix as a section fragment otherwise.
+    # Markdown link syntax fixes the fragment semantics: the text after '#'
+    # in a link target is ALWAYS a URL fragment, never part of the filename
+    # — a link to a file literally named "faq.md#pricing" would have to
+    # percent-encode it. So links always strip the fragment, and their full
+    # construct is blanked out of the residual text: the code-span and
+    # bare-path passes below are literal-path contexts where '#' may be
+    # part of a real filename, and they must never see link-internal text.
     # Trailing sentence punctuation is still stripped here (#5739).
+    residual = content
     for match in _MARKDOWN_LINK_RE.finditer(content):
-        refs.add(match.group(1).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-    for match in _CODE_SPAN_RE.finditer(content):
+        refs.add(match.group(1).split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+        residual = residual.replace(match.group(0), " " * len(match.group(0)))
+    for match in _CODE_SPAN_RE.finditer(residual):
         token = match.group(1).strip()
         if "/" in token:
             refs.add(token.rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-    for match in _PATH_TOKEN_RE.finditer(content):
+    for match in _PATH_TOKEN_RE.finditer(residual):
         refs.add(match.group(0).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     return refs
 

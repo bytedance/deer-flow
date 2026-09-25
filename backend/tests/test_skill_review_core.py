@@ -260,6 +260,25 @@ def test_resource_graph_strips_fragment_before_normalizing_fallback(tmp_path):
     assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
 
 
+def test_resource_graph_always_strips_markdown_link_fragments(tmp_path):
+    # In Markdown link syntax the text after '#' is always a URL fragment —
+    # a link to a file literally named "faq.md#pricing" would have to
+    # percent-encode it. The link must resolve to faq.md and stay broken
+    # (resource.missing) even when a file literally named
+    # references/faq.md#pricing exists; the bare-path pass must not see the
+    # link-internal text and resurrect the literal edge.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee [FAQ](references/faq.md#pricing).\n",
+    )
+    _write(tmp_path / "references" / "faq.md#pricing", "# trap\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert not any(e["target"] == "references/faq.md#pricing" for e in facts["resources"]["edges"])
+    assert any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" and "references/faq.md" in f["message"] for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(
