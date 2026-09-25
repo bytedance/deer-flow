@@ -210,7 +210,7 @@ async def batch_task(
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
     execution_spec = {
-        "subagent_config": asdict(config),
+        "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
         "mcp_plugins": metadata.get("mcp_plugins"),

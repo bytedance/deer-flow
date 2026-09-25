@@ -537,8 +537,9 @@ Phase 1 最低验证要求：
   含 red→green teeth）；扩展 `test_rbac_authorization_provider.py`、`test_plugin_tools.py`、
   `test_extension_api_contracts.py`。
 - **兼容性：** `authorization.enabled: false` 时 action 路由与 management helper 均为 no-op；
-  既有工具 resource 名与 `AuthorizationProvider` Protocol 未变；`config_version` 47 → 48
-  （`config.example.yaml` + Helm values + Helm README 三处同步）；`config.example.yaml`
+  既有工具 resource 名与 `AuthorizationProvider` Protocol 未变；`config_version` 47 → 49
+  （与主线的并发 bump 竞争后按「每次更新 PR 前的固定清单」重取下一个可用号，见下方合并记录；
+  `config.example.yaml` + Helm values + Helm README 三处同步）；`config.example.yaml`
   roles 新增 `plugin_actions` / `plugin_management` 两行并注明「省略 key = 该资源不受限」。
 - **否决方案：** 不为节省一次构造而复用 route cache（会把一个 loop 上的 loop-affine provider
   交给另一个 loop）；不在请求边界拼接 target（必须走 `plugin_targets`）；不在 PR1 引入
@@ -673,6 +674,29 @@ Phase 1 最低验证要求：
   `GuardrailMiddleware` 把 provider 异常按 `fail_closed` 处理，因此 `fail_closed: false` 时
   「显式拒绝 + reasons 遍历抛错」可能被翻成放行；该文件不在本 PR 面内（工具链路），
   如需同样收敛应随 PR2 一并处理。
+
+### 2026-09-25 — Phase 5 / PR1 合并主线 `3a862780`（config_version 竞争）
+
+- **背景：** 合并最新 `upstream/main`（`3a862780`）时只有 `config.example.yaml` 一处文本冲突：
+  冲突块本身是主线新增的 `lead_prompt_overlay` 注释段（本 PR 该位置为空），取主线即可。
+  真正的语义问题是 `config_version`：merge-base 为 47，本 PR 与主线**各自** bump 到同一个 48
+  （本 PR 为 `authorization` / roles 新增字段，主线为 prompt overlay 等）。该字段只驱动
+  `AppConfig._check_config_version()` 的过期提示（`backend/docs/CONFIGURATION.md`），两边同号会让
+  「已从主线 48 升级过的 `config.yaml`」收不到缺 `authorization` 字段的提示。
+- **决策：** 按本文件「每次更新 PR 前的固定清单」执行：先 fetch 最新 `upstream/main`、读最新值
+  （48），取下一个可用号 **49**，并在三处镜像同步（`config.example.yaml`、
+  `deploy/helm/deer-flow/values.yaml`、`deploy/helm/deer-flow/README.md`）；
+  `frontend/src/content/{en,zh}/harness/checkpoints/reference.mdx` 里「current `config_version`」
+  也一并改为 49（该文档由主线新增，写成时值为 47）。冲突块取主线；本 PR 的 `authorization:`
+  段与 `peek_loaded_app_config()` 均在自动合并结果中保留。
+- **证据：** `scripts/check_config_version.sh` 通过（example=49 / chart=49）；
+  `backend/tests/test_config_version.py` 全绿（含用真实 `scripts/config-upgrade.sh` 跑
+  v26 → 当前版本的升级用例，其 `expected_version` 直接读 `config.example.yaml`）。
+- **兼容性：** 仅提示语义变化，运行时行为不变。已按主线 48 升级的 `config.yaml` 会收到一次
+  “outdated” 提示，可 `make config-upgrade` 合并 `authorization` 默认段——这正是版本号存在的目的。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻且非本轮产生的文档漂移未改：上述
+  checkpoints 文档里的 `appcfg:531-575` / `appcfg:570-575` 行号引用在主线自己新增 prompt overlay
+  后已失准（当前 `_check_config_version` 位于 `appcfg:534-576`），不属本 PR 面内。
 
 ### 新记录模板
 

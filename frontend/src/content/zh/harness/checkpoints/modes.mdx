@@ -1,0 +1,89 @@
+---
+title: 通道模式
+description: 两种模式下检查点在磁盘上的形态、各自的读取路径、模式标记契约、失败关闭的闸门、409/503 错误映射、跨进程不变量，以及各模式编译出的状态 schema 符号。
+---
+
+import { Callout } from "nextra/components";
+
+# 通道模式
+
+`database.checkpoint_channel_mode` 只有两个取值。模式既决定消息通道怎么写，也决定读取时走哪条物化路径。它按进程冻结，因此线程写入时用的值，与读取进程启动时冻结的值必须一致。
+
+## 存储形态与读取路径
+
+| | `full` | `delta` |
+| --- | --- | --- |
+| 消息列表存放位置 | 每份检查点的 `channel_values` 里 | 逐步写入里。非快照步骤不把该通道放进 `channel_values`；每 `snapshot_frequency` 次写入落一份 `_DeltaSnapshot` 大对象 |
+| 单步代价 | 把整份列表重新序列化进又一份会被保留的检查点 | 追加该步写入；另外每 K 次写入落一份整份 `_DeltaSnapshot`（N 轮后保留总量：O(N²) 对 O(N²/K + N)） |
+| 快照触发 | 不适用——每一步都是完整载荷 | 更新计数达到 `snapshot_frequency`，或 superstep 计数达到 LangGraph 的 `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT` 上限（5000） |
+| 读取路径 | 直接使用已存储的取值 | 先补齐通道；`channel_values` 中缺失的增量通道合并为一次 saver 调用；再做 `from_checkpoint(seed)` 加 `replay_writes` |
+| 直接读 checkpointer | 返回已存储的取值 | 返回哨兵，而不是消息列表 |
+
+<Callout type="warning">
+  增量检查点不存完整的 `channel_values`——直接读 saver 只能看到哨兵——所以消费者必须走
+  `CheckpointStateAccessor`，不要直接调用 checkpointer。该访问器还会在每份准备好的 config 上重新注入模式标记，
+  写入的是 `configurable` 与 `metadata` 的副本，不会改动调用方的字典。
+</Callout>
+
+superstep 上限的作用，是让停止接收写入的通道重放深度也有界；节奏才是你要调的旋钮。权衡见[快照节奏](/docs/harness/checkpoints/cadence)，物化代价见[历史缓存](/docs/harness/checkpoints/history-cache)。
+
+## 标记契约
+
+| 常量 | 键与位置 | 写入时机 | 含义 |
+| --- | --- | --- | --- |
+| `CHECKPOINT_MODE_METADATA_KEY` | `config["metadata"]` 中的 `deerflow_checkpoint_channel_mode` | 仅 `delta`，取值 `"delta"` | 持久化的模式标记。`full` 模式会移除该键，因此**缺失即 `full`**，功能上线前的检查点无需迁移 |
+| `counters_since_delta_snapshot` | LangGraph 自己的检查点元数据键，一个含 `"messages"` 的字典 | 由 LangGraph 写入 | 兜底识别：即使没有 DeerFlow 标记，只要它存在也按增量处理 |
+| `INTERNAL_CHECKPOINT_MODE_KEY` | `config["configurable"]` 中的 `__deerflow_checkpoint_channel_mode` | 每个请求，两种模式都写 | 仅供内部分流，由 `inject_checkpoint_mode` 写入。它永远不是持久化的元数据键，也不会出现在线上报文里；调用方传入的取值会被 Gateway 的 run-config 构建器丢弃，首次冻结时被忽略，冻结之后再传不同取值则被拒绝 |
+
+快照节奏刻意**不**写入检查点元数据，这也是标记契约不受节奏取值影响的原因：
+
+> It is deliberately NOT stamped into checkpoint metadata: the mode marker contract (absence = full) and the full -> delta migration semantics are unchanged by the frequency value.
+
+## 失败关闭的闸门
+
+闸门在一次访问的两侧都会运行，而且是不对称的：增量模式进程可以透明读取旧的整份检查点，而 `full` 模式进程会拒绝增量线程，而不是悄悄物化出空状态。
+
+| 闸门 | 作用位置 | 行为 |
+| --- | --- | --- |
+| `raise_if_snapshot_incompatible(snapshot, mode)` | 物化读取（`get_state`、`get_state_history`） | 在物化后的 `StateSnapshot` 上抛出；只多一次检查点取数，不额外往返 |
+| `raise_if_checkpoint_tuple_incompatible(tuple, mode)` | 仅元数据读取（`get_metadata`、`aget_metadata`） | 在不做任何物化的前提下保留闸门 |
+| `ensure_checkpoint_mode_compatible(checkpointer, config, mode)` / `aensure_checkpoint_mode_compatible(...)` | 写入之前 | 在写入落库之前失败关闭——写入无法撤销。进程模式为 `delta` 时两者都立即返回 |
+
+被拒绝的访问抛出 `CheckpointModeMismatchError`，消息为 `Thread requires delta mode; materialize and convert its checkpoints before using full mode.`。同一串文本在降级的整份模式只读访问器里也复制了一份，因此即使 agent factory 坏掉，这条消息依然会出现。
+
+## HTTP 错误映射
+
+| 错误 | 状态码 | `detail` | 含义 |
+| --- | --- | --- | --- |
+| `CheckpointModeMismatchError` | 409 | `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.` | 线程已持久化的检查点与进程冻结的模式冲突 |
+| `CheckpointModeReconfigurationError` | 503 | `checkpoint_channel_mode is restart-required and cannot change in a running process`（或 `checkpoint_delta.snapshot_frequency` 的对应文本） | 进程自身正处于模式切换中，请求暂时无法服务 |
+
+路由里记录了这一区分的理由：
+
+> A mismatch means the thread's persisted checkpoints conflict with the process's frozen mode (operator-actionable, 409); a reconfiguration means the process itself is mid mode-flip (transient, 503).
+
+只有线程路由映射这两个错误；创建运行的路径会把同一段不一致文本异步地写进 run 记录或 SSE `error` 帧 —— 例外是线程的 run event 流为空、检查点头部必须在准入前被物化时，播种读取会把这个不一致变成普通的 `500`。映射中的 `503` 一半属于防御性代码：重新配置错误在构建图时抛出（Gateway 启动、`make_lead_agent`、`DeerFlowClient.__init__`），而没有任何状态、历史或线程路由会构建 agent，所以改完 `config.yaml` 却没重启的运维人员看到的是失败的 run，而不是 `503`。见[可观测性](/docs/harness/checkpoints/observability)与[故障排查](/docs/harness/checkpoints/troubleshooting)。
+
+## 跨进程不变量
+
+- 模式被编译进每张图的 channel table，而不是按检查点存储，因此共享同一个检查点数据库的**每个**进程都必须一致。
+- 节奏同样必须一致，但它不被打标记，所以逐检查点的不一致无法被发现：运行时根本不做节奏比较。强制只落实在模式层面，靠标记存在与否做失败关闭。请把"各进程 `config.yaml` 完全一致"当作部署要求，而不是建议。
+- 冻结状态是每个操作系统进程内的模块级全局变量。每个进程按自己的启动配置独立冻结，运行时不会替你调和任何一个跑偏的进程。
+
+## 状态 schema
+
+模式决定编译出哪张状态 schema，并把中间件贡献的通道适配到它上面。
+
+| 符号 | 模块 | 作用 |
+| --- | --- | --- |
+| `ThreadState` | `deerflow.agents.thread_state` | 整份模式的 state schema |
+| `DeltaThreadState` | `deerflow.agents.thread_state` | 默认节奏下的增量 schema；只有节奏等于默认值时该名字才保持 |
+| `delta_messages_field(snapshot_frequency=…)` | `deerflow.agents.thread_state` | 构造 `Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=…)]` |
+| `DELTA_MESSAGES_FIELD` | `deerflow.agents.thread_state` | 默认节奏下的模块级增量字段 |
+| `merge_message_writes(state, writes)` | `deerflow.agents.thread_state` | 线性时间、等价于 `add_messages` 的增量归并器 |
+| `get_thread_state_schema(mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | 非增量模式返回 `ThreadState`，否则返回带缓存的增量 schema；非默认节奏会得到按节奏缓存的专用 schema |
+| `adapt_state_schema_for_mode(schema, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | 按模式适配状态 schema，让中间件通道编译到正确的通道类型 |
+| `normalize_middleware_state_schemas(middleware, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | 返回带上已适配 `state_schema` 副本的中间件列表 |
+| `THREAD_STATE_REDUCER_FIELDS` | `deerflow.agents.thread_state` | 归并器通道集合，含 `messages`；用于判断哪些通道的替换式写入需要 `Overwrite` 包装 |
+
+完整的配置键表、其余常量与承重测试锚点见[参考附录](/docs/harness/checkpoints/reference)。

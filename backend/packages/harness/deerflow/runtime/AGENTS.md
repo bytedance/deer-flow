@@ -1,6 +1,6 @@
 ### Stream Bridge Heartbeats
 
-Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts retain backend ownership through exit: drain cache/bridge `aclose()`/`close()` and SQLite/PostgreSQL checkpointer/Store `__aexit__` across cancellation before it propagates.
+Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
 
 ### Checkpoint Channel Modes (`full` / `delta`)
 

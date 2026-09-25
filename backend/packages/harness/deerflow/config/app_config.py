@@ -31,6 +31,7 @@ from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.projects_config import ProjectsConfig
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -189,6 +190,8 @@ def apply_logging_level(name: str | None) -> None:
 
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
+
+    lead_prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal prepend/append around the assembled lead-agent system prompt")
 
     log_level: str = Field(
         default="info",

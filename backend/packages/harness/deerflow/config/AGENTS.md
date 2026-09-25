@@ -1,5 +1,11 @@
 ### Configuration System
 
+Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
+`subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
+The per-assembly snapshot owns these settings; no run-context override exists.
+DeerMem owns its separate `memory.backend_config.prompt_prepend`/`prompt_append`
+fields so the memory package remains host-agnostic.
+
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
 label of at most 100 Unicode code points. C0/C1 controls and bidirectional
 formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.

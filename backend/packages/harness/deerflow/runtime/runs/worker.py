@@ -105,6 +105,25 @@ from .schemas import RunStatus
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
 
+
+def _log_cancelled_stream_close_failure(
+    exc: asyncio.CancelledError,
+    *,
+    run_id: str,
+    abort_requested: bool,
+) -> None:
+    close_failure = exc.__cause__
+    if not isinstance(close_failure, Exception):
+        return
+    log = logger.warning if abort_requested else logger.debug
+    message = "Could not close aborted agent stream for run %s" if abort_requested else "Could not close agent stream for run %s"
+    log(
+        message,
+        run_id,
+        exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+    )
+
+
 _checkpoint_locks = AsyncKeyedLockTable[str]()
 
 # Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
@@ -1295,6 +1314,13 @@ async def run_agent(
                             close_error = sys.exception()
                             try:
                                 await close_agent_stream(stream)
+                            except asyncio.CancelledError as exc:
+                                _log_cancelled_stream_close_failure(
+                                    exc,
+                                    run_id=run_id,
+                                    abort_requested=broke_on_abort or record.abort_event.is_set(),
+                                )
+                                raise
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1344,6 +1370,13 @@ async def run_agent(
                         close_error = sys.exception()
                         try:
                             await close_agent_stream(stream)
+                        except asyncio.CancelledError as exc:
+                            _log_cancelled_stream_close_failure(
+                                exc,
+                                run_id=run_id,
+                                abort_requested=broke_on_abort or record.abort_event.is_set(),
+                            )
+                            raise
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
