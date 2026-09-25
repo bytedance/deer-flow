@@ -28,6 +28,31 @@ unresumable by either path: `ToolConfig` rejects the combination at config load
 and the middleware builder drops it defensively. Unifying the two mechanisms is
 deliberately out of scope for the change that introduced approval.
 
+## Which clients can answer a park
+
+The middleware is registered on every lead-agent build, so `tools[].interrupt_on`
+is always effective and `DeerFlowClient.resume()` is always reachable. What varies
+is whether a given client *can* answer, and the ones that cannot opt out per run
+with `disable_tool_approval` rather than by suppressing the registration —
+suppressing it would make the configuration and the resume API inert for every
+caller, including those that do implement the protocol.
+
+| Client | Path | Approval surface | Behaviour |
+| --- | --- | --- | --- |
+| `DeerFlowClient` | embedded, bypasses Gateway | `resume()` | parks and waits |
+| Web UI | Gateway HTTP | none — does not consume `__interrupt__` | auto-approves |
+| TUI | embedded via `DeerFlowClient` | none yet | auto-approves |
+| IM channels | Gateway, via `ChannelManager` | none | auto-approves |
+| Scheduler / MCP notifications | internal | none, by design | auto-approves (`non_interactive`) |
+
+Each downgrade is set at its own entry point, because the three paths do not share
+one: `start_run` for Gateway HTTP (after `strip_internal_context_keys`, so a client
+copy of this internal-only key cannot pre-empt it), `_apply_channel_policy` for IM,
+and the TUI's own run sites (`tui/app.py::_stream_worker` for the interactive app,
+`tui/cli.py` for the `--print` / `--json` one-shots). A new client that grows an
+approval surface removes its own downgrade; a new client without one must add it.
+Pinned by `tests/test_tool_approval_client_downgrade.py`.
+
 ## Middleware placement
 
 `DeerFlowHumanInTheLoopMiddleware` subclasses LangChain's

@@ -1,36 +1,29 @@
-"""Regression tests for tool-approval placement in the middleware chain.
+"""Regression test for tool-approval placement in the middleware chain.
 
-The middleware is deliberately NOT registered yet: a park is only answerable by
-a client that can read ``__interrupt__`` and post
-``Command(resume={"decisions": [...]})``, and neither the web UI nor the TUI
-consumes interrupts at this revision. Registering it would let
-``tools[].interrupt_on`` strand a bundled-client run with no way to approve or
-reject. See ``build_middlewares`` in ``deerflow/agents/lead_agent/agent.py``.
-
-So this file pins two things. First, that the chain stays inert while the
-clients cannot answer — ``interrupt_on`` must not park a Web/TUI run. Second,
-the ordering constraint the registration has to satisfy once it is restored:
 ``after_model`` hooks dispatch in REVERSE list order, so a middleware appended
 later runs earlier. Tool approval must therefore be appended BEFORE
-``ClarificationMiddleware`` so that Clarification runs first — a clarification
+``ClarificationMiddleware`` so that Clarification runs first: a clarification
 request drops its sibling tool calls, and gating those siblings first would ask
-the human to review calls that are about to be discarded. That order lives in
-source until the registration returns, so it is asserted against the source.
+the human to review calls that are about to be discarded.
 """
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
-from deerflow.agents.lead_agent import agent as agent_module
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.human_in_the_loop import DeerFlowHumanInTheLoopMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_config import InterruptOnConfig, ToolConfig
+
+
+def _index_of(middlewares, cls) -> int:
+    for index, middleware in enumerate(middlewares):
+        if isinstance(middleware, cls):
+            return index
+    raise AssertionError(f"{cls.__name__} is not in the chain")
 
 
 def _chain(*tools: ToolConfig):
@@ -57,13 +50,13 @@ def gated_chain():
     )
 
 
-def test_gated_tool_does_not_park_a_bundled_client_run(gated_chain):
-    """``interrupt_on`` stays inert until a client can answer the park.
-
-    A registered gate would interrupt a Web/TUI run that has no approval
-    surface, leaving the thread unresumable through the product UI.
-    """
-    assert not any(isinstance(m, DeerFlowHumanInTheLoopMiddleware) for m in gated_chain)
+def test_tool_approval_precedes_clarification_in_the_list(gated_chain):
+    """Appended before Clarification, so it DISPATCHES after it."""
+    approval_index = _index_of(gated_chain, DeerFlowHumanInTheLoopMiddleware)
+    clarification_index = _index_of(gated_chain, ClarificationMiddleware)
+    assert approval_index < clarification_index, (
+        "Tool approval must be appended before ClarificationMiddleware; after_model dispatches in reverse, so this ordering makes Clarification run first and prune its sibling tool calls before they are reviewed."
+    )
 
 
 def test_clarification_is_last_in_the_list(gated_chain):
@@ -78,20 +71,14 @@ def test_approval_middleware_absent_when_no_tool_is_gated():
     assert isinstance(chain[-1], ClarificationMiddleware)
 
 
-def test_approval_registration_site_precedes_clarification_append():
-    """The commented-out registration sits before the Clarification append.
+def test_registration_is_not_gated_on_a_client_capability_flag(gated_chain):
+    """The gate is registered for every caller; clients opt out per run instead.
 
-    Reverse ``after_model`` dispatch makes list position the run order, so
-    restoring the registration must not move it past Clarification. Asserting
-    against the source keeps that constraint recorded while the call is
-    commented out; it becomes a live chain assertion again once the web-UI
-    approval card ships and the lines are uncommented.
+    Suppressing the registration would make ``tools[].interrupt_on`` inert and
+    ``DeerFlowClient.resume()`` unreachable for the embedded callers that do
+    implement the resume protocol. Clients without an approval surface send
+    ``disable_tool_approval`` on the run instead — see
+    ``tests/test_tui_disables_tool_approval.py`` and
+    ``tests/test_gateway_disables_tool_approval.py``.
     """
-    source = inspect.getsource(agent_module.build_middlewares)
-
-    approval_at = source.index("create_interrupt_middleware(resolved_app_config")
-    clarification_at = source.index("middlewares.append(ClarificationMiddleware())")
-
-    assert approval_at < clarification_at, (
-        "The tool-approval registration must stay above the ClarificationMiddleware append; reverse after_model dispatch then runs Clarification first, pruning its sibling tool calls before they are reviewed."
-    )
+    assert any(isinstance(m, DeerFlowHumanInTheLoopMiddleware) for m in gated_chain)

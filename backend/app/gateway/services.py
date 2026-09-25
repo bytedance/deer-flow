@@ -40,6 +40,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
@@ -1924,6 +1925,31 @@ async def start_run(
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
+
+        # Tool approval raises a real LangGraph ``interrupt()``, which parks the run
+        # in the checkpoint until a client resumes it with ``Command(resume=...)``.
+        # No HTTP client bundled with this repo has an approval surface yet — the
+        # web UI does not consume ``__interrupt__`` — so every Gateway run
+        # auto-approves; without this an approval-gated tool would hang the thread
+        # with nobody able to answer. The embedded ``DeerFlowClient`` does not pass
+        # through here, so ``tools[].interrupt_on`` and ``DeerFlowClient.resume()``
+        # stay usable for the callers that implement the resume protocol.
+        #
+        # Deliberately unconditional rather than per-caller: the Gateway cannot
+        # tell a browser session from a custom API client (both arrive as ordinary
+        # authenticated REST calls), and auto-approving a caller that *could* have
+        # resumed is strictly better than parking one that cannot. This mirrors
+        # ``ChannelManager._apply_channel_policy``, which does the same for every
+        # IM channel. Narrow this in the change that gives an HTTP client a real
+        # approval surface.
+        #
+        # Assigned (not ``setdefault``) and placed after ``strip_internal_context_keys``
+        # so a client copy of this internal-only key cannot pre-empt the server's
+        # value with ``False``. Unconditional: ``build_run_config`` rejects a
+        # non-mapping ``context`` and turns ``null`` into ``{}``, so this is always a
+        # dict by here — an ``isinstance`` guard would silently skip the downgrade if
+        # that ever stopped holding, which is the failure this must not have.
+        config.setdefault("context", {})[DISABLE_TOOL_APPROVAL_KEY] = True
 
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")

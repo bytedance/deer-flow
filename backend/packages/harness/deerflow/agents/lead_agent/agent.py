@@ -38,6 +38,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+from deerflow.agents.middlewares.human_in_the_loop import create_interrupt_middleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
@@ -752,18 +753,16 @@ def build_middlewares(
     # clarification request; approving them first would ask the human to review
     # calls that are about to be discarded.
     #
-    # Deliberately left unregistered: a park is only answerable by a client that
-    # can read ``__interrupt__`` and post ``Command(resume={"decisions": [...]})``.
-    # Neither the web UI nor the TUI consumes interrupts yet, so registering this
-    # would let ``tools[].interrupt_on`` strand a bundled-client run with no way
-    # to approve or reject. The middleware and its tests are complete and
-    # exercised directly; the change that ships the web-UI approval card restores
-    # the ``create_interrupt_middleware`` import and uncomments the three lines
-    # below, and the TUI follow-up inherits it.
-    # from deerflow.agents.middlewares.human_in_the_loop import create_interrupt_middleware
-    # interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
-    # if interrupt_middleware:
-    #     middlewares.append(interrupt_middleware)
+    # Registered unconditionally: a park is only answerable by a client that can
+    # read ``__interrupt__`` and post ``Command(resume={"decisions": [...]})``, so
+    # the clients that cannot do that opt out per run instead — Gateway HTTP runs
+    # and the TUI both send ``disable_tool_approval``, which auto-approves here.
+    # Gating the registration itself would make ``tools[].interrupt_on`` and
+    # ``DeerFlowClient.resume()`` unreachable for every caller, including the
+    # embedded clients that do implement the resume protocol.
+    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
+    if interrupt_middleware:
+        middlewares.append(interrupt_middleware)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
