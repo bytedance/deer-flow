@@ -118,10 +118,11 @@ function maskInlineCode(markdown: string): string {
   // Pairing stays inside one paragraph, because an inline span cannot cross a
   // blank line either; without that limit a stray backtick in an earlier
   // paragraph steals the opener of a later span and mis-pairs both directions.
+  // The blank-line shape matches the inline scanner in core/messages/utils.ts.
   // The captured separator keeps every character, so occurrence indices stay
   // aligned with the original markdown.
   return markdown
-    .split(/(\n[ \t]*\n)/)
+    .split(/(\r?\n[ \t]*\r?\n)/)
     .map((part) => part.replace(/(`+)[\s\S]*?\1/g, maskKeepingNewlines))
     .join("");
 }

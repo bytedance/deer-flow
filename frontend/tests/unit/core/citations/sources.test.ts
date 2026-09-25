@@ -142,6 +142,15 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("ends a paragraph on a CRLF blank line, as the inline scanner does", () => {
+    const markdown =
+      "Install it with `npm i\r\n\r\nThe upstream guide is [citation:Docs](https://example.com/docs).\r\n\r\nThen run `npm start` to serve it.";
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/docs",
+    ]);
+  });
+
   it("ignores citations inside an unclosed fenced code block", () => {
     const markdown = [
       "Streaming output:",
