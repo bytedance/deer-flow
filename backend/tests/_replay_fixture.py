@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 # mode -> (thinking_enabled, is_plan_mode, subagent_enabled). Mirrors the
@@ -111,12 +112,18 @@ def prepare_hermetic_extras(home: Path) -> Path:
     return extensions
 
 
-def sse_event_shapes(resp) -> list[dict]:
-    """Reduce an SSE stream to (event name, sorted top-level data keys).
+@dataclass(frozen=True)
+class ReplayRunResult:
+    """Captured replay run with raw events for semantic assertions."""
 
-    Snapshots the *shape* of the stream, not volatile values, so the golden is
-    stable across runs while still catching event-sequence / payload-shape drift.
-    """
+    thread_id: str
+    events: list[dict]
+    event_shapes: list[dict]
+
+
+def _parse_sse_events(resp) -> list[dict]:
+    """Parse an SSE response without committing volatile payload values."""
+
     events: list[dict] = []
     current: str | None = None
     for line in resp.iter_lines():
@@ -128,12 +135,27 @@ def sse_event_shapes(resp) -> list[dict]:
                 data = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
                 data = {"_raw": raw[:200]}
-            events.append({"event": current, "keys": sorted(data.keys()) if isinstance(data, dict) else None})
+            events.append({"event": current, "data": data})
     return events
 
 
-def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
-    """Register -> create thread -> POST /runs/stream; return SSE event shapes.
+def _sse_event_shapes(events: list[dict]) -> list[dict]:
+    """Reduce parsed SSE events to event names and top-level data keys.
+
+    Snapshots the *shape* of the stream, not volatile values, so the golden is
+    stable across runs while still catching event-sequence / payload-shape drift.
+    """
+    return [
+        {
+            "event": event["event"],
+            "keys": sorted(event["data"].keys()) if isinstance(event["data"], dict) else None,
+        }
+        for event in events
+    ]
+
+
+def drive_gateway(app, *, prompt: str, context: dict, stream_mode: list[str] | None = None) -> ReplayRunResult:
+    """Register -> create thread -> POST /runs/stream; capture raw + shape events.
 
     This is the exact wire path the React frontend uses (LangGraph SDK), driven
     in-process via Starlette's TestClient with the real auth flow.
@@ -161,8 +183,13 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
             # graph steps without changing the streamed SSE contract.
             "config": {"recursion_limit": 100},
             "context": context,
-            "stream_mode": ["values"],
+            "stream_mode": stream_mode or ["values"],
         }
         with client.stream("POST", f"/api/threads/{thread_id}/runs/stream", json=body, headers={"X-CSRF-Token": csrf}) as resp:
             assert resp.status_code == 200, resp.read().decode()
-            return sse_event_shapes(resp)
+            events = _parse_sse_events(resp)
+            return ReplayRunResult(
+                thread_id=thread_id,
+                events=events,
+                event_shapes=_sse_event_shapes(events),
+            )
