@@ -98,7 +98,11 @@ class TestThreadDataMiddleware:
         )
 
         assert result is not None
-        assert result["messages"][-1].response_metadata == {"source": "gateway"}
+        updated_message = result["messages"][-1]
+        assert updated_message.response_metadata == {"source": "gateway"}
+        assert updated_message.name == "user-input"
+        assert updated_message.additional_kwargs["run_id"] == "run-123"
+        assert updated_message.additional_kwargs["timestamp"]
 
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
