@@ -1,11 +1,15 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from app.mcp_tasks import McpTaskService
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp.tasks import (
     ORDINARY_MCP_TASK_DRIVER,
     McpTaskDriverRegistry,
@@ -15,6 +19,7 @@ from deerflow.mcp.tasks import (
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -207,3 +212,70 @@ async def test_status_tool_error_retries_with_detail_before_structured_failure_t
     assert failed["error"] == "report generation failed"
     assert failed["consecutive_poll_error_count"] == 0
     assert failed["next_poll_at"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("operation", ["poll", "cancel"])
+async def test_recovered_task_authenticates_as_persisted_owner(tmp_path, monkeypatch, transport: str, operation: str) -> None:
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    session_factory = get_session_factory()
+    assert session_factory is not None
+    repo = McpTaskRepository(session_factory)
+    await _create_thread(repo)
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "reports": {
+                    "type": transport,
+                    "url": "https://reports.example.com/mcp",
+                    "headers": {"Authorization": "Bearer discovery"},
+                    "user_auth": {"users": {"user-1": "Bearer task-owner"}},
+                    "task_toolsets": [{"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}],
+                }
+            }
+        }
+    )
+    fake_server = FakeMcpServer()
+    fake_server.status_results.append({"task_id": "remote-1", "status": "completed", "result": {"report": "ready"}})
+    opened_headers = []
+    tool_names = []
+
+    async def call_tool(name, arguments):
+        tool_names.append(name)
+        return await fake_server.call_tool(tool_name=name, arguments=arguments)
+
+    @asynccontextmanager
+    async def create_session(connection):
+        opened_headers.append(dict(connection["headers"]))
+        yield SimpleNamespace(initialize=AsyncMock(), call_tool=call_tool)
+
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", create_session)
+    first_process = _service(repo, McpTaskToolCaller(config))
+    foreground_user = SimpleNamespace(id="user-1")
+    user_token = set_current_user(foreground_user)
+    try:
+        created = await first_process.submit(
+            driver_name=ORDINARY_MCP_TASK_DRIVER,
+            request=_request("remote-1"),
+            now=datetime.now(UTC) - timedelta(seconds=2),
+        )
+        assert get_current_user() is foreground_user
+    finally:
+        reset_current_user(user_token)
+
+    # The foreground context and caller are gone. Recovery has only the owner
+    # persisted in SQL; no original run or request credential is rehydrated.
+    assert get_current_user() is None
+    recovered_process = _service(repo, McpTaskToolCaller(config))
+    if operation == "cancel":
+        await recovered_process.cancel_task(task_id=created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
+    await recovered_process.run_once(now=datetime.now(UTC))
+
+    record = await repo.get(created["id"], user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
+    assert record is not None
+    assert record["status"] == ("completed" if operation == "poll" else "cancelled")
+    assert tool_names == ["submit_report", "status_report" if operation == "poll" else "cancel_report"]
+    assert opened_headers == [{"Authorization": "Bearer task-owner"}] * 2
+    assert get_current_user() is None

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -18,6 +19,7 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
 from deerflow.mcp_scope import mcp_session_scope_key
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,8 @@ class McpTaskToolCaller:
         # own credential. The later status/cancel polls are driven by the task
         # runtime long after that run ended: there is no run context to read, so
         # the fail-closed interceptor would deny every poll. Those keep using
-        # server-level credentials (see docs/MCP_SERVER.md), which is what
+        # configured credentials, including user_auth for the persisted owner
+        # (see docs/MCP_SERVER.md), which is what
         # ``build_context_headers_interceptor`` warns about at startup.
         if context_headers_interceptor is None:
             self._interceptors = self._submit_interceptors
@@ -142,6 +145,7 @@ class McpTaskToolCaller:
                 server_name=server_name,
                 tool_name=tool_name,
                 arguments=arguments,
+                background_user_id=user_id if not request_scoped_headers else None,
                 timeout_seconds=server_config.tool_call_timeout,
                 session_init_timeout_seconds=None,
                 persistent_session=True,
@@ -162,6 +166,7 @@ class McpTaskToolCaller:
             server_name=server_name,
             tool_name=tool_name,
             arguments=arguments,
+            background_user_id=user_id if not request_scoped_headers else None,
             timeout_seconds=server_config.tool_call_timeout,
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
@@ -178,6 +183,7 @@ class McpTaskToolCaller:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        background_user_id: str | None,
         timeout_seconds: float | None,
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
@@ -263,11 +269,21 @@ class McpTaskToolCaller:
 
             handler = wrapped
 
-        return await handler(
-            MCPToolCallRequest(
-                name=tool_name,
-                args=arguments,
-                server_name=server_name,
-                runtime=None,
+        # Durable status/cancel calls run after the originating Agent turn, so
+        # there is no LangGraph runtime from which the user-scoped auth
+        # interceptor can resolve an identity. Bind the persisted task owner for
+        # the duration of this call, leaving the live submit context untouched.
+        # ContextVar state keeps parallel polls for different users isolated.
+        user_context_token = set_current_user(SimpleNamespace(id=background_user_id)) if background_user_id is not None else None
+        try:
+            return await handler(
+                MCPToolCallRequest(
+                    name=tool_name,
+                    args=arguments,
+                    server_name=server_name,
+                    runtime=None,
+                )
             )
-        )
+        finally:
+            if user_context_token is not None:
+                reset_current_user(user_context_token)
