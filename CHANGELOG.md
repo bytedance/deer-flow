@@ -2410,6 +2410,14 @@ This release closes that milestone with **772 merged pull requests**.
   unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
   frontend started from that worktree was never recognised as deer-flow's and
   the start aborted with "port already in use". The whole path is kept now. ([#5856])
+- **uploads:** A malformed `files[*].size` in a run's message metadata no
+  longer fails the whole run. `UploadsMiddleware` validated every other field
+  of a client-supplied file entry fail-soft but passed `size` straight to
+  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
+  before the model was called — and again on every edit or regenerate of that
+  message, since the entry is carried over verbatim. The size only feeds the
+  human-readable line in `<current_uploads>`; unusable values now fall back to
+  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
 - **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
   `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
   and the Helm chart, but the lockfile records the root package's own version too
@@ -6083,6 +6091,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5844]: https://github.com/bytedance/deer-flow/pull/5844
 [#5845]: https://github.com/bytedance/deer-flow/pull/5845
 [#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
 
