@@ -3,8 +3,8 @@
 A writer that mutates the extensions config must persist the change and the
 ``mcpLifecycle`` counters in one atomic write, and must derive its local
 reconciliation from the same validated candidate instead of re-reading the file
-(see ``docs/superpowers/specs/2026-09-25-mcp-shared-lifecycle-generation.md``,
-sections 3 and 12). This module owns that single join point:
+(see the ``mcpLifecycle`` bullet in ``mcp/AGENTS.md``). This module owns that
+single join point:
 
 1. read the *previous* lifecycle counters out of the caller's raw on-disk
    document (:func:`commit_extensions_config`),
@@ -29,6 +29,35 @@ while the caller holds both ``extensions_config_write_lock`` (in-process) and
 same critical section that read the raw document. This module performs no
 locking of its own so the commit stays part of that one critical section rather
 than acquiring the config locks again underneath it.
+
+The protocol, in full:
+
+* Three independent counters. ``configRevision`` counts every committed write and is **not** a lifecycle version.
+  ``serverGenerations[name]`` advances only on a real per-server resource event — delete, disable, re-enable, re-add,
+  or a changed base stdio connection (``transport``/``command``/``args``/``cwd``/``env``) — and entries are never
+  pruned, because that history is what makes a delete followed by an identical re-add observable. ``globalGeneration``
+  advances on ``mcpInterceptors`` changes (and whenever the previous state is unverifiable). Metadata-only edits
+  (``description``/``routing``/``tools``/``tool_name_prefix``), declaration order and skills/middleware edits advance
+  no generation.
+* Writer inventory: the five MCP router helpers (``app/gateway/routers/mcp.py``), the skills router
+  (``app/gateway/routers/skills.py``) and the embedded client (``packages/harness/deerflow/client.py``). Every one of
+  them holds ``extensions_config_write_lock`` + the sidecar ``extensions_config_file_lock`` and writes the block in
+  the same atomic write as the configuration.
+* Migration: the first valid block is a trusted common baseline adopted under lock without retiring anything; the
+  guarantee begins only after that initialization completes, so "absent" is never treated as generation zero while
+  another worker advances (R1). A block that is present but malformed, or a previous document that cannot be
+  validated, resets to a fresh baseline and bumps every enabled server plus ``globalGeneration`` (R2/R3) so the write
+  is fail-closed without blocking a repair.
+* Deployment scope: the cross-process guarantee presupposes every supported writer follows this protocol **and** sees
+  the same sidecar lock inode (``.<config>.lock``). Multiple Uvicorn workers in one container do; containers that
+  bind-mount only ``extensions_config.json`` may not, so cross-container concurrent-write correctness requires a
+  shared lock directory (or genuinely shared transactional storage).
+* ``atomic_write_extensions_config()`` degrades to an in-place overwrite on a Docker single-file bind mount
+  (``EBUSY``), so it keeps its documented weaker atomicity: a reader may observe a torn write and a crash can leave it
+  torn. A mid-write exception is therefore reported as an **unknown outcome** with conservative local retirement,
+  never as "write failed, state unchanged". Residual (F3): the writer fence refreshes the *current* file signature
+  rather than deriving one from the exact committed bytes, so the recorded applied signature is only provably the
+  committed revision while the writer holds the shared lock.
 """
 
 from __future__ import annotations
@@ -39,7 +68,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -51,6 +80,9 @@ from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths
 from deerflow.mcp.lifecycle_rules import compute_next_lifecycle
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from deerflow.mcp.tasks.runtime import McpTaskConfigurationError
 
 
 class MCPConfigWriteError(RuntimeError):
@@ -91,6 +123,21 @@ class MCPCommittedReloadFailedError(MCPConfigWriteError):
     in-process config failed to reload, so a caller must not treat this as
     "nothing changed".
     """
+
+
+class MCPCommittedTaskConfigConflictError(MCPCommittedNotReconciledError):
+    """The config was committed, but the fence rejected it against the frozen task snapshot.
+
+    The write is durable and the local pool may not reflect it. This subclasses
+    :class:`MCPCommittedNotReconciledError` so every writer's existing
+    out-of-lock conservative-invalidation path runs; it carries the original
+    ``McpTaskConfigurationError`` so the router can still surface the
+    established 409 detail *after* invalidating local state.
+    """
+
+    def __init__(self, message: str, *, task_error: McpTaskConfigurationError) -> None:
+        super().__init__(message)
+        self.task_error = task_error
 
 
 def enabled_stdio_fingerprints(config: ExtensionsConfig) -> dict[str, str]:

@@ -1,4 +1,13 @@
-"""Cache for MCP tools to avoid repeated loading."""
+"""Cache for MCP tools to avoid repeated loading.
+Consistency boundary for the shared ``mcpLifecycle`` generations is **next check, not immediate**: on the next
+successfully completed cache check or tool assembly a worker must observe every committed lifecycle generation that
+advanced since its own applied baseline, even when the final effective configuration is byte-identical. On detection
+the old binding is invalidated, the affected sessions are retired, and a superseded discovery result is not published.
+It is explicitly *not* promised that an agent already holding a wrapper stops calling its old session before its
+worker's next check, nor that an idle worker is invalidated within any time bound; once a worker has detected and
+applied a newer generation, the existing binding fence must not re-admit an old epoch merely because the connection
+fingerprint is unchanged. There is no per-``get_session()`` shared-file read and no IPC broadcast.
+"""
 
 from __future__ import annotations
 

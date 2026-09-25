@@ -258,6 +258,30 @@ def _server_model(server: dict) -> McpServerConfigResponse:
     return McpServerConfigResponse.model_validate(server)
 
 
+class _SignalOnAcquire:
+    """Lock proxy that records the *attempt* to enter a critical section.
+
+    Used to prove a second writer actually reached the config write-lock
+    contention point instead of inferring it from a sleep. The proxy delegates
+    to the real lock, so mutual exclusion is unchanged; ``entered`` is set
+    immediately before the underlying acquisition, i.e. exactly when the writer
+    arrives at the critical section.
+    """
+
+    def __init__(self, inner, entered: threading.Event) -> None:
+        self._inner = inner
+        self._entered = entered
+        self.armed = False
+
+    def __enter__(self):
+        if self.armed:
+            self._entered.set()
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
 def _record_reconcile_calls(monkeypatch) -> list[Any]:
     """Record the committed revisions the Stage 2 writers fence from."""
     calls: list[Any] = []
@@ -1253,17 +1277,25 @@ def test_delete_then_readd_cannot_interleave_before_tombstone_installation(cache
 
     monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", blocking_prepare)
 
+    # Second coordination signal: prove the re-add actually reached the config
+    # write-lock contention point (armed only after the delete holds the lock),
+    # rather than inferring it from a sleep.
+    contended = threading.Event()
+    lock_proxy = _SignalOnAcquire(mcp_router.extensions_config_write_lock, contended)
+    monkeypatch.setattr(mcp_router, "extensions_config_write_lock", lock_proxy)
+
     async def _run() -> None:
         delete_task = asyncio.create_task(delete_mcp_server(None, "A"))
         assert await asyncio.to_thread(prepare_entered.wait, 10), "first prepare was never entered"
 
+        lock_proxy.armed = True
         create_task = asyncio.create_task(
             create_mcp_servers(
                 None,
                 McpConfigUpdateRequest(mcp_servers={"A": _server_model(_stdio("npx"))}),
             )
         )
-        await asyncio.sleep(0.1)
+        assert await asyncio.to_thread(contended.wait, 10), "second writer never reached the config write lock"
 
         assert not create_task.done(), "the second write completed before the first prepare was released"
         assert "A" not in json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]
