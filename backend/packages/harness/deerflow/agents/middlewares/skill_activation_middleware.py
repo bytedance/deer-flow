@@ -125,6 +125,13 @@ class SkillActivationMiddleware(AgentMiddleware):
 
     @staticmethod
     def _read_skill_content(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(storage):
+            return SkillActivationMiddleware._read_skill_content_unlocked(skill_file, skills_root, storage=storage)
+
+    @staticmethod
+    def _read_skill_content_unlocked(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
         # Use the storage's path validation if available — UserScopedSkillStorage

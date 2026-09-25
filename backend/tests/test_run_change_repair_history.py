@@ -90,10 +90,20 @@ async def test_repair_preserves_clock_and_downgrade_keeps_ancestor_schema(tmp_pa
     try:
         await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
         repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
-        await repo.put("existing", thread_id="existing-thread", user_id="user-1", status="pending")
         async with engine.begin() as connection:
+            # Seed using the historical schema, not today's ORM (which selects
+            # evidence columns that do not exist until 0027).
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO runs (run_id, thread_id, user_id, status, operation_kind, metadata_json, kwargs_json, "
+                    "multitask_strategy, message_count, total_input_tokens, total_output_tokens, total_tokens, llm_call_count, "
+                    "lead_agent_tokens, subagent_tokens, middleware_tokens, created_at, updated_at) "
+                    "VALUES ('existing', 'existing-thread', 'user-1', 'pending', 'run', '{}', '{}', 'reject', "
+                    "0, 0, 0, 0, 0, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
             await connection.execute(sa.text("UPDATE runs SET change_seq = 37"))
-            await connection.execute(sa.text("UPDATE run_change_clock SET value = 100 WHERE id = 1"))
+            await connection.execute(sa.text("INSERT INTO run_change_clock (id, value) VALUES (1, 100)"))
         await bootstrap_schema(engine, backend="sqlite")
         await bootstrap_schema(engine, backend="sqlite")
         async with engine.connect() as connection:

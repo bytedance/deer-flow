@@ -327,7 +327,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
     yields an empty list (fail-closed) or all skills (fail-open).
     """
     try:
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(lambda: _get_user_skill_storage(config).load_skills(enabled_only=False))
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
@@ -447,7 +447,8 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
     surface names the main listing hides.
     """
     try:
-        skills = [skill for skill in _get_user_skill_storage(config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+        loaded = await asyncio.to_thread(lambda: _get_user_skill_storage(config).load_skills(enabled_only=False))
+        skills = [skill for skill in loaded if skill.category == SkillCategory.CUSTOM]
         visible_skills = await _filter_visible_skills(request, config, skills)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
@@ -540,7 +541,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
+        prev_content = await asyncio.to_thread(storage.read_custom_skill, skill_name)
         await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
         await asyncio.to_thread(
             storage.append_history,
@@ -650,14 +651,12 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         await asyncio.to_thread(storage.validate_skill_markdown_content, skill_name, target_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
+        skill_file = storage.get_custom_skill_file(skill_name)
+        from deerflow.skills.mutations.guard import read_optional_text
 
-        def _read_current_content() -> str | None:
-            # Worker thread: the post-scan read of the file being replaced is
-            # blocking filesystem IO (#5747), same rule as the history read.
-            skill_file = storage.get_custom_skill_file(skill_name)
-            return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
-
-        current_content = await asyncio.to_thread(_read_current_content)
+        # Keep the post-scan read off the event loop while preserving the
+        # mutation runtime's readiness and owner-lock admission.
+        current_content = await asyncio.to_thread(read_optional_text, storage, skill_file)
         history_entry = {
             "action": "rollback",
             "author": "human",
@@ -697,7 +696,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
 async def get_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(lambda: _get_user_skill_storage(config).load_skills(enabled_only=False))
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -730,12 +729,12 @@ def _write_extensions_skill_state(
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    the public projection lock before the process-local and cross-process
-    extensions config locks. The first keeps the enabled-only view synchronized
-    across workers; the latter two prevent this router and the MCP router from
-    interleaving writes to the shared file. All locks are held by the worker, so
-    request cancellation cannot release them while the write or projection
-    rebuild is still running.
+    the same-name mutation fence before the public projection, process-local,
+    and cross-process extensions config locks. The projection lock keeps the
+    enabled-only view synchronized across workers; the latter two prevent this
+    router and the MCP router from interleaving writes to the shared file. All
+    locks are held by the worker, so request cancellation cannot release them
+    while the write or projection rebuild is still running.
     """
     from contextlib import nullcontext
 
@@ -749,7 +748,9 @@ def _write_extensions_skill_state(
         config_path = Path.cwd().parent / "extensions_config.json"
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-    with projection_update:
+    from deerflow.skills.mutations.guard import managed_global_state_write
+
+    with managed_global_state_write(storage, skill_name), projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
             # not. Existing files are therefore re-read under the lock, raw, so

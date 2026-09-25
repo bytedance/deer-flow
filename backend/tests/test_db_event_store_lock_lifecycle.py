@@ -1,5 +1,6 @@
 import asyncio
 import weakref
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,17 +8,17 @@ from deerflow.runtime.events.store.db import DbRunEventStore
 
 
 class _PausedDeleteSession:
-    """Fake session that pauses the deletion on its first aggregate read.
+    """Pause deletion on its first scalar (the retention change clock).
 
-    The fixed deletion path opens the session, takes the thread mutation fence
-    (a no-op on this fake's dialect) and only then reads the expected count, so
-    pausing in ``scalar`` proves the caller already owns the thread's mutation
-    critical section.
+    The in-process thread lock must already be held before any database work.
+    The database advisory fence is a no-op for this fake's SQLite dialect.
     """
 
     def __init__(self, scalar_started: asyncio.Event, allow_scalar: asyncio.Event) -> None:
         self._scalar_started = scalar_started
         self._allow_scalar = allow_scalar
+        # Deletion now allocates the evidence-retention change sequence too.
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
 
     async def __aenter__(self):
         return self
@@ -88,7 +89,7 @@ async def test_delete_waiter_handoff_keeps_one_write_lock_generation():
 
     # Delete now owns the same generation, and the queued writer is still
     # waiting behind it.
-    await scalar_started.wait()
+    await asyncio.wait_for(scalar_started.wait(), timeout=5)
     assert not waiter_entered.is_set()
 
     allow_scalar.set()

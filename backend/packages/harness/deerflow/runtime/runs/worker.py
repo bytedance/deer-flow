@@ -883,6 +883,7 @@ async def run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    evidence_execution_started = False
     completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
@@ -951,6 +952,7 @@ async def run_agent(
                 thread_id=thread_id,
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
@@ -1370,6 +1372,7 @@ async def run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
+        evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -1700,6 +1703,29 @@ async def run_agent(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
                     )
+            if not record.ownership_lost and journal is not None:
+                evidence_failure = None
+                try:
+                    evidence_receipt = await journal.finish_evidence()
+                    if evidence_receipt is not None:
+                        if not evidence_execution_started:
+                            evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
+                        elif not await run_manager.seal_completed_evidence(run_id, evidence_receipt):
+                            evidence_failure = "The owning worker could not persist the journal seal."
+                except BaseException as exc:
+                    evidence_failure = f"Journal seal failed ({type(exc).__name__})."
+                    if not isinstance(exc, Exception):
+                        deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                    logger.warning("Failed to seal completed-run evidence for %s (non-fatal)", run_id, exc_info=True)
+                if evidence_failure is not None:
+                    try:
+                        await run_manager.mark_evidence_partial(run_id, error=evidence_failure)
+                    except Exception:
+                        logger.warning("Failed to persist partial evidence for %s (non-fatal)", run_id, exc_info=True)
+                    except BaseException as exc:
+                        deferred_finalization_interrupt = _defer_finalization_interrupt(deferred_finalization_interrupt, exc)
+                        logger.warning("Partial evidence persistence interrupted for %s; completing cleanup first", run_id)
+
             if record.finalizing:
                 await run_manager.set_finalizing(run_id, False)
 

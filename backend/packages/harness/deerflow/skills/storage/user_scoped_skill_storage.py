@@ -155,7 +155,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
         removal_names = (skill_name,) if not enabled else ()
-        with self._skill_projection_mutation(remove_names=removal_names):
+        with self._skill_projection_mutation(remove_names=removal_names, names=(skill_name,)):
             states = self._read_skill_states()
             states[skill_name] = {"enabled": enabled}
             self._write_skill_states(states)
@@ -183,6 +183,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def load_skills(self, *, enabled_only: bool = False) -> list:
+        from deerflow.skills.mutations.guard import managed_read
+
+        with managed_read(self):
+            return self._load_skills_unlocked(enabled_only=enabled_only)
+
+    def _load_skills_unlocked(self, *, enabled_only: bool = False) -> list:
         """Discover all skills and merge enabled state per isolation scope.
 
         Delegates skill discovery and PUBLIC enabled-state to
@@ -364,7 +370,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        with self._skill_projection_mutation():
+        with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None

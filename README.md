@@ -1339,6 +1339,17 @@ Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package 
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
 
+Extensions may opt into owner-scoped completed-run evidence and safe updates to
+existing user-custom skills through `host_access` in operator-controlled
+`config.yaml`. These optional APIs stage an immutable candidate, check its exact
+contents, and publish with version conflict detection and crash recovery. They
+do **not** implement a learning/evolution plugin. Automatic changes are limited to
+the body and description of `SKILL.md`; changing permissions, supporting files,
+or enabled state is out of scope. See [Skill evolution host API](docs/skill-evolution-host.md)
+for deployment requirements, grants, recovery, and the plugin integration flow.
+This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
+and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
+
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent

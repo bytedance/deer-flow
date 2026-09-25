@@ -1459,10 +1459,11 @@ class DeerFlowClient:
             if config_path is None:
                 raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
+            from deerflow.skills.mutations.guard import managed_global_state_write
             from deerflow.skills.projection import skill_projection_mutation
 
             removal_names = (name,) if not enabled else ()
-            with skill_projection_mutation(storage, "public", remove_names=removal_names):
+            with managed_global_state_write(storage, name), skill_projection_mutation(storage, "public", remove_names=removal_names):
                 with extensions_config_write_lock, extensions_config_file_lock(config_path):
                     # The projection lock is cross-process, but the singleton
                     # cache is not. Reload raw from disk under the config lock.
@@ -1475,10 +1476,12 @@ class DeerFlowClient:
                 storage.set_skill_enabled_state(name, enabled)
             else:
                 # Fallback for non-user-scoped storage (unlikely in practice)
+                from deerflow.skills.mutations.guard import managed_global_state_write
+
                 config_path = ExtensionsConfig.resolve_config_path()
                 if config_path is None:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                with managed_global_state_write(storage, name), extensions_config_write_lock, extensions_config_file_lock(config_path):
                     self._write_skill_enabled_state(config_path, name, enabled)
 
         # Invalidate the prompt cache for this caller (and for all users if

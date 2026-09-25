@@ -44,6 +44,7 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
+    skill_mutations,
     skills,
     subagent_batches,
     subagents,
@@ -948,6 +949,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+    app.include_router(skill_mutations.router)
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)

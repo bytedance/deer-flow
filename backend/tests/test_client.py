@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -2439,6 +2440,46 @@ class TestSkillsManagement:
             assert persisted["skills"]["untouched-skill"] == {"enabled": False}
         finally:
             tmp_path.unlink()
+
+    def test_update_public_skill_enters_managed_write_before_projection(self, client, tmp_path):
+        from deerflow.skills import projection
+        from deerflow.skills.mutations import guard
+
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"skills": {}}', encoding="utf-8")
+        events = []
+
+        @contextmanager
+        def record_managed_write(*_args, **_kwargs):
+            events.append("managed-enter")
+            try:
+                yield
+            finally:
+                events.append("managed-exit")
+
+        @contextmanager
+        def record_projection(*_args, **_kwargs):
+            events.append("projection-enter")
+            try:
+                yield
+            finally:
+                events.append("projection-exit")
+
+        with (
+            patch(
+                "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+            ),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+            patch.object(guard, "managed_global_state_write", record_managed_write),
+            patch.object(projection, "skill_projection_mutation", record_projection),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        assert events == ["managed-enter", "projection-enter", "projection-exit", "managed-exit"]
 
     def test_update_skill_persists_state_when_source_omits_skills(self, client):
         skill = self._make_skill(enabled=True)
