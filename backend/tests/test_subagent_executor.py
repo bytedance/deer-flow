@@ -17,6 +17,7 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
@@ -2024,6 +2025,7 @@ class TestAsyncExecutionPath:
         classes,
         base_config,
         mock_agent,
+        caplog,
     ):
         SubagentExecutor = classes["SubagentExecutor"]
         started = asyncio.Event()
@@ -2049,15 +2051,18 @@ class TestAsyncExecutionPath:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            execution = asyncio.create_task(executor._aexecute("Task"))
-            await started.wait()
-            execution.cancel("host cancellation")
-            with pytest.raises(asyncio.CancelledError) as raised:
-                await execution
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                execution = asyncio.create_task(executor._aexecute("Task"))
+                await started.wait()
+                execution.cancel("host cancellation")
+                with pytest.raises(asyncio.CancelledError) as raised:
+                    await execution
 
         assert raised.value.args == ("host cancellation",)
         assert close_attempted is True
+        assert "Could not close interrupted subagent stream" in caplog.text
+        assert "close failed" in caplog.text
 
     @pytest.mark.anyio
     async def test_aexecute_finally_releases_only_the_failing_subagent_lease(

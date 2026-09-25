@@ -7,19 +7,21 @@ DeerFlow 的文件上传系统返回三种不同的路径，每种路径用于�
 ### 1. 实际文件系统路径 (path)
 
 ```
-.deer-flow/threads/{thread_id}/user-data/uploads/document.pdf
+{DEER_FLOW_HOME}/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf
 ```
+
+API 返回的是**绝对路径**，且上传文件按用户分桶。`{DEER_FLOW_HOME}` 表示实际的运行时数据根目录：优先使用 `DEER_FLOW_HOME`；未设置时使用 `DEER_FLOW_PROJECT_ROOT/.deer-flow/`；两个环境变量都未设置时，才使用当前启动目录下的 `.deer-flow/`。
 
 **用途：**
 - 文件在服务器文件系统中的实际位置
-- 相对于 `backend/` 目录
 - 用于直接文件系统访问、备份、调试等
 
 **示例：**
 ```python
-# Python 代码中直接访问
-from pathlib import Path
-file_path = Path("backend/.deer-flow/threads/abc123/user-data/uploads/document.pdf")
+# Python 代码中直接访问：解析当前用户上传桶，不要手写路径
+from deerflow.uploads.manager import get_uploads_dir
+
+file_path = get_uploads_dir("abc123") / "document.pdf"
 content = file_path.read_bytes()
 ```
 
@@ -99,11 +101,12 @@ async function uploadAndProcess(threadId: string, file: File) {
   console.log('文件信息：', fileInfo);
   // {
   //   filename: "report.pdf",
-  //   path: ".deer-flow/threads/abc123/user-data/uploads/report.pdf",
+  //   // path / markdown_path 是绝对路径；下面按默认数据目录 backend/.deer-flow 示例
+  //   path: "/srv/deer-flow/backend/.deer-flow/users/default/threads/abc123/user-data/uploads/report.pdf",
   //   virtual_path: "/mnt/user-data/uploads/report.pdf",
   //   artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.pdf",
   //   markdown_file: "report.md",
-  //   markdown_path: ".deer-flow/threads/abc123/user-data/uploads/report.md",
+  //   markdown_path: "/srv/deer-flow/backend/.deer-flow/users/default/threads/abc123/user-data/uploads/report.md",
   //   markdown_virtual_path: "/mnt/user-data/uploads/report.md",
   //   markdown_artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.md"
   // }
@@ -132,23 +135,25 @@ async function uploadAndProcess(threadId: string, file: File) {
 
 | 场景 | 使用的路径类型 | 示例 |
 |------|---------------|------|
-| 服务器后端代码直接访问 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
+| 服务器后端代码直接访问 | `path` | `{DEER_FLOW_HOME}/users/default/threads/abc123/user-data/uploads/file.pdf` |
 | Agent 工具调用 | `virtual_path` | `/mnt/user-data/uploads/file.pdf` |
 | 前端下载/预览 | `artifact_url` | `/api/threads/abc123/artifacts/mnt/user-data/uploads/file.pdf` |
-| 备份脚本 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
-| 日志记录 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
+| 备份脚本 | `path` | `{DEER_FLOW_HOME}/users/default/threads/abc123/user-data/uploads/file.pdf` |
+| 日志记录 | `path` | `{DEER_FLOW_HOME}/users/default/threads/abc123/user-data/uploads/file.pdf` |
+
+`path` 是绝对路径。上表中的 `{DEER_FLOW_HOME}` 优先取 `DEER_FLOW_HOME`；未设置时取 `DEER_FLOW_PROJECT_ROOT/.deer-flow/`；两个环境变量都未设置时，才取当前启动目录下的 `.deer-flow/`。其中的 `users/default/` 是上传所属用户，换用户时该段会变，所以后端代码请用 `get_uploads_dir(thread_id)` 解析，不要按上表拼字符串。
 
 ## 代码示例集合
 
 ### Python - 后端处理
 
 ```python
-from pathlib import Path
-from deerflow.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
+from deerflow.uploads.manager import get_uploads_dir
 
 def process_uploaded_file(thread_id: str, filename: str):
-    # 使用实际路径
-    base_dir = Path.cwd() / THREAD_DATA_BASE_DIR / thread_id / "user-data" / "uploads"
+    # 使用实际路径：Gateway 的上传落在解析后用户的桶里，
+    # 即 .deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/
+    base_dir = get_uploads_dir(thread_id)
     file_path = base_dir / filename
 
     # 直接读取

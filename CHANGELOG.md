@@ -965,6 +965,13 @@ This release closes that milestone with **765 merged pull requests**.
   comparison can never detect. The loader now reads the file once and signs
   the bytes it parsed; a write that races the load just triggers one more
   reload on the next call. ([#5848])
+- **config:** `request_admission.requests_per_minute` and `max_queue_size` now
+  accept `$VAR` environment references like every other field. Both are strict
+  integers so a bool or float is still rejected, but `$VAR` substitution always
+  produces a string, so `requests_per_minute: $RPM` failed the whole config load
+  with "Input should be a valid integer" even when `RPM=60`. A decimal literal
+  delivered as a string is now converted before the strict check; any other
+  string is still rejected. ([#5838])
 - **scheduler:** Pausing a scheduled task no longer loses the pause when a
   dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
   owner — which pausing clears — but read the row without taking SQLite's
@@ -4428,5 +4435,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
+[#5838]: https://github.com/bytedance/deer-flow/pull/5838
 [#5848]: https://github.com/bytedance/deer-flow/pull/5848
 

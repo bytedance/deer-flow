@@ -62,7 +62,10 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
-configure process-local model pacing. Models sharing an explicit group must use
+configure process-local model pacing. `requests_per_minute` and `max_queue_size` are strict
+integers (bools and floats are rejected) behind a `BeforeValidator` that converts a
+decimal literal delivered as a string, because `$VAR` substitution always yields
+`str`; any other string still fails validation. Models sharing an explicit group must use
 identical policies. Restart after changing, disabling or regrouping an active
 policy; conflicting policies fail construction rather than silently resetting
 an active budget. This nested model option is enforced by its limiter registry,

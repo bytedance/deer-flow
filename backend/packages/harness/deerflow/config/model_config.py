@@ -1,16 +1,37 @@
-from typing import Literal
+import re
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
+
+_INTEGER_LITERAL_PATTERN = re.compile(r"[0-9]+")
+
+
+def _accept_integer_literal_string(value: object) -> object:
+    """Turn an integer literal that arrived as a string into an ``int``.
+
+    ``AppConfig.resolve_env_variables`` substitutes every ``$VAR`` reference
+    with the raw environment string, so a strict integer field would reject
+    ``requests_per_minute: $RPM`` even when ``RPM=60``. Only a plain decimal
+    literal is converted; everything else is returned untouched so the strict
+    validation behind it still rejects bools, floats and non-integer strings.
+    """
+    if isinstance(value, str) and _INTEGER_LITERAL_PATTERN.fullmatch(value.strip()):
+        return int(value.strip())
+    return value
+
+
+# A strict ``int`` (no bool/float coercion) that still honors ``$VAR`` substitution.
+StrictIntFromEnv = Annotated[int, BeforeValidator(_accept_integer_literal_string)]
 
 
 class RequestAdmissionConfig(BaseModel):
     """Optional per-process pacing of model requests, shared by quota group."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    requests_per_minute: int = Field(gt=0, strict=True)
+    requests_per_minute: StrictIntFromEnv = Field(gt=0, strict=True)
     group: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     max_wait_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
-    max_queue_size: int = Field(default=256, gt=0, strict=True)
+    max_queue_size: StrictIntFromEnv = Field(default=256, gt=0, strict=True)
 
 
 _EFFORT_TOKEN_PATTERN = r"^[A-Za-z0-9_.-]{1,32}$"
