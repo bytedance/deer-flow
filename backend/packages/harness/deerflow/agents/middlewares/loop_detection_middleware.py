@@ -101,6 +101,8 @@ _MAX_PENDING_WARNINGS_PER_RUN = 4
 # Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
 # runs to the last line, which is not the same window as any numbered bound.
 _OPEN_ENDED_READ = "end"
+# Free-text arguments that explain a call without changing what it does.
+_NARRATION_ARG_FIELDS = frozenset({"description"})
 
 type _RunScopeKey = tuple[str, str | None]
 
@@ -170,7 +172,7 @@ def _normalized_read_range(args: dict) -> tuple[int, int | None]:
 
 
 def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
-    """Derive a stable key from salient args without overfitting to noise."""
+    """Derive a stable key from the args that change what a call does."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
         start_line, end_line = _normalized_read_range(args)
@@ -184,15 +186,17 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
             return fallback_key
         return json.dumps(args, sort_keys=True, default=str)
 
-    salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
-    stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
-    if stable_args:
-        return json.dumps(stable_args, sort_keys=True, default=str)
-
     if fallback_key is not None:
         return fallback_key
 
-    return json.dumps(args, sort_keys=True, default=str)
+    # Every other argument can change what the call does: keying only a salient
+    # field (``path``/``url``/``query``...) collapsed paging a URL or a search
+    # (``start_index``, ``page``, ``cursor``) and rewriting one skill file onto a
+    # single key, so the fifth *distinct* call hard-stopped the run. Only the
+    # narration the model attaches to a call is dropped, so rewording it cannot
+    # make a repeated call look new (#1905).
+    stable_args = {field: value for field, value in args.items() if field not in _NARRATION_ARG_FIELDS}
+    return json.dumps(stable_args, sort_keys=True, default=str)
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:

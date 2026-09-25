@@ -277,6 +277,62 @@ class TestReadFileRangeKey:
         assert _hash_tool_calls([self._read_call(path="/w/a.py", start_line=1, end_line=40)]) != _hash_tool_calls([self._read_call(path="/w/b.py", start_line=1, end_line=40)])
 
 
+class TestGenericToolKey:
+    """Tools without a dedicated key rule must keep every argument that changes the call.
+
+    Keying only the first salient field (``path``/``url``/``query``/...) collapsed
+    distinct calls onto one key: paging a URL or a search, or rewriting one
+    skill file with new content, hard-stopped on its fifth *distinct* call.
+    Only narration (``description``) may vary without making a call new.
+    """
+
+    @staticmethod
+    def _call(tool_name, args):
+        return {"name": tool_name, "id": f"call_{tool_name}", "args": args}
+
+    @pytest.mark.parametrize(
+        ("name", "first", "second"),
+        [
+            ("fetch", {"url": "https://example.com/doc", "start_index": 0}, {"url": "https://example.com/doc", "start_index": 5000}),
+            ("search_issues", {"query": "is:open label:bug", "page": 1}, {"query": "is:open label:bug", "page": 2}),
+            ("list_uploaded_files", {"query": "report"}, {"query": "report", "cursor": "next-page"}),
+            ("skill_manage", {"action": "write_file", "name": "etl", "path": "scripts/run.py", "content": "v1"}, {"action": "write_file", "name": "etl", "path": "scripts/run.py", "content": "v2"}),
+            ("grep", {"path": "/w", "pattern": "foo", "case_sensitive": False}, {"path": "/w", "pattern": "foo", "case_sensitive": True}),
+        ],
+    )
+    def test_non_salient_args_affect_hash(self, name, first, second):
+        assert _hash_tool_calls([self._call(name, first)]) != _hash_tool_calls([self._call(name, second)])
+
+    def test_description_does_not_affect_hash(self):
+        """Regression guard for #1905: rewording the narration must not dodge detection."""
+        first = self._call("bash", {"command": "make test", "description": "run the tests"})
+        second = self._call("bash", {"command": "make test", "description": "retry the tests once more"})
+
+        assert _hash_tool_calls([first]) == _hash_tool_calls([second])
+
+    def test_paging_a_url_does_not_hard_stop(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for start in range(0, 50_000, 5_000):
+            call = self._call("fetch", {"url": "https://example.com/doc", "max_length": 5_000, "start_index": start})
+            assert mw._apply(_make_state(tool_calls=[call]), runtime) is None, f"page at start_index={start} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_repeating_one_page_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [self._call("fetch", {"url": "https://example.com/doc", "start_index": 5_000})]
+
+        for _ in range(4):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        hard_stop = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert hard_stop is not None
+        assert hard_stop["messages"][0].tool_calls == []
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):
         mw = LoopDetectionMiddleware()
