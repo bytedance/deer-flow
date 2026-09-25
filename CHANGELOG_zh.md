@@ -734,6 +734,16 @@
   也会拒绝该工作区；装了 pre-commit 时还会更早在 `uv-lock-check` 钩子上失败。现在该脚本会用
   `uv lock` 刷新 lockfile，并在缺少 `uv` 时于修改任何文件之前退出，而不是留下一个只改一半的
   工作区。实际改动仅涉及根包的那一行版本号。([#5859])
+- **配置：** 在上一次编辑仍在加载时落盘的 `config.yaml` 编辑，不再要等到下一次编辑才生效。
+  `get_app_config()` 的加载器先解析文件，再重新读取一遍来计算缓存签名，因此夹在两次读取
+  之间的写入会让缓存以较新内容的签名保存较旧的内容，而签名比较永远无法发现这种状态。
+  现在加载器只读取文件一次，并对解析的那份字节计算签名；与加载竞争的写入只会在下一次
+  调用时多触发一次重载。([#5848])
+- **配置：** `request_admission.requests_per_minute` 与 `max_queue_size` 现在与其他字段一样
+  接受 `$VAR` 环境变量引用。这两个字段是严格整数，布尔值与浮点数仍会被拒绝；但 `$VAR`
+  替换得到的永远是字符串，因此即使 `RPM=60`，`requests_per_minute: $RPM` 也会让整个配置
+  加载失败并报 "Input should be a valid integer"。现在以字符串形式到达的十进制整数字面量会在
+  严格校验之前被转换；其他字符串仍会被拒绝。([#5838])
 - **调度器：** 在 SQLite 上，调度分发进行中暂停计划任务时不再丢失暂停状态。
   `release_dispatch_lease` 依据租约持有者做校验（暂停会清除该字段），但读取任务行时没有先获取
   SQLite 的写锁，因此过期的读取会通过校验，并把任务状态写回 `enabled` 且不改动 `next_run_at`，
@@ -3579,4 +3589,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
+[#5838]: https://github.com/bytedance/deer-flow/pull/5838
+[#5848]: https://github.com/bytedance/deer-flow/pull/5848
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859

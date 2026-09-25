@@ -22,6 +22,7 @@ from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
@@ -437,7 +438,17 @@ class AppConfig(BaseModel):
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
+            return cls._from_yaml_text(f.read(), resolved_path)
+
+    @classmethod
+    def _from_yaml_text(cls, text: str, resolved_path: Path) -> Self:
+        """Build the config from already-read YAML *text* of *resolved_path*.
+
+        Split out of :meth:`from_file` so the process-wide cache can parse the
+        exact bytes it signed (see ``_load_and_cache_app_config``) instead of
+        reading the file a second time.
+        """
+        config_data = yaml.safe_load(text) or {}
 
         # Check config version before processing
         cls._check_config_version(config_data, resolved_path)
@@ -680,14 +691,25 @@ def _get_config_mtime(config_path: Path) -> float | None:
 
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
-    """Load config from disk and refresh cache metadata."""
+    """Load config from disk and refresh cache metadata.
+
+    The file is read exactly once and the recorded signature is computed from
+    those bytes. Parsing the file and then hashing it again would open a window
+    in which a concurrent write leaves the cache holding the older content under
+    the newer content's signature — a state ``get_app_config`` can never detect,
+    because the on-disk signature already matches, so the edit would only be
+    picked up by the *next* edit. Signing the parsed bytes makes any write that
+    races the load show up as a signature mismatch on the next call instead.
+    """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
 
     resolved_path = AppConfig.resolve_config_path(config_path)
-    _app_config = AppConfig.from_file(str(resolved_path))
+    raw, signature = _read_config_with_signature(resolved_path)
+    config = AppConfig._from_yaml_text(raw.decode("utf-8"), resolved_path)
+    _app_config = config
     _app_config_path = resolved_path
-    _app_config_mtime = _get_config_mtime(resolved_path)
-    _app_config_signature = _get_config_signature(resolved_path)
+    _app_config_mtime = signature[0]
+    _app_config_signature = signature
     _app_config_is_custom = False
     return _app_config
 
@@ -781,6 +803,23 @@ def set_app_config(config: AppConfig) -> None:
 def peek_current_app_config() -> AppConfig | None:
     """Return the runtime-scoped AppConfig override, if one is active."""
     return _current_app_config.get()
+
+
+def peek_loaded_app_config() -> AppConfig | None:
+    """Return the configuration this process has loaded, without touching the filesystem.
+
+    The runtime-scoped override wins when one is active; otherwise this is the
+    cached singleton ``get_app_config()`` last loaded (or ``set_app_config()``
+    installed). ``None`` means no configuration has ever been loaded in this
+    process, which is what a host without a ``config.yaml`` looks like — as
+    opposed to a host that *is* running on a config and can no longer read the
+    file, where callers need the loaded value to tell "unavailable" from
+    "never configured".
+    """
+    override = _current_app_config.get()
+    if override is not None:
+        return override
+    return _app_config
 
 
 def push_current_app_config(config: AppConfig) -> None:

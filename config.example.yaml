@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 48
+config_version: 49
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1041,6 +1041,11 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
   #   # wait_for_selector_timeout_ms: 5000  # How long to wait for that selector, in milliseconds
+  #   # reject_resource_types: ["image", "media", "font"]  # Skip these resource types
+  #   # reject_request_pattern: ["\\.css$", "\\.png$"]     # Skip URLs matching these regexes
+  #   #                                    # Both accept a YAML list or a
+  #   #                                    # comma-separated string. Regexes containing
+  #   #                                    # commas must use the YAML list form.
 
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
@@ -2991,6 +2996,16 @@ run_ownership:
 #       # (which models/skills the caller sees on GET /api/models and the
 #       # GET /api/skills[.../custom, /{name}] skill routes); skill
 #       # management endpoints (install/edit/export) stay admin-gated.
+#       #
+#       # Plugin resources: `plugin_actions` gates invoking a registered
+#       # backend action (POST /api/plugins/{ns}/actions/{name}), and
+#       # `plugin_management` gates an enterprise-contributed management route
+#       # that calls require_plugin_management. Targets are
+#       # "<namespace>/<action-name>" and "<namespace>/permissions.read"
+#       # / "<namespace>/permissions.write". **Omitting a key leaves that
+#       # resource unrestricted for the role**, so list it explicitly to
+#       # constrain it. Declared plugin pages are not gated yet: their
+#       # `plugin_pages` row ships with the page-authorization slice.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
@@ -2998,12 +3013,16 @@ run_ownership:
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}
+#           plugin_management: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}                 # invoke any installed action
+#           plugin_management: {allow: []}               # no management route access
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -3014,6 +3033,8 @@ run_ownership:
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
 #           skills: {allow: []}      # no skills visible in the listing
+#           plugin_actions: {allow: ["acme.reports/export"]}
+#           plugin_management: {allow: ["acme.reports/permissions.read"]}
 authorization:
   enabled: false
 
@@ -3201,6 +3222,14 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     host_access:                        # optional host-owned grants (restart required)
+#       model_invocation:
+#         roles:                          # logical role -> configured models[].name
+#           default: my-configured-model
+#         max_concurrency: 2              # shared by this installation's services
+#         timeout_seconds: 60             # includes waiting for capacity
+#         max_input_chars: 262144         # includes the response-schema instruction
+#         max_output_chars: 65536         # returned text, checked after generation
 #     table_prefix: example_ext_          # optional: table-name prefix this extension
 #                                         # owns under its own MetaData/migration chain.
 #                                         # Keeps `alembic revision --autogenerate`, run
