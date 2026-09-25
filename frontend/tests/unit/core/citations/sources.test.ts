@@ -109,6 +109,39 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("keeps a citation whose paragraph sits between two unclosed backtick runs", () => {
+    // An inline span cannot cross a blank line, so neither stray backtick opens
+    // a span here and the citation is a rendered link, not sample code.
+    const markdown = [
+      "Install it with `npm i",
+      "",
+      "The upstream guide is [citation:Docs](https://example.com/docs).",
+      "",
+      "Then run `npm start` to serve it.",
+    ].join("\n");
+
+    const sources = extractCitationSources(markdown);
+
+    expect(sources.map((source) => source.url)).toEqual([
+      "https://example.com/docs",
+    ]);
+    expect(sources[0]?.occurrences[0]?.index).toBe(
+      markdown.indexOf("[citation:Docs]"),
+    );
+  });
+
+  it("still masks a code span that closes inside its own paragraph", () => {
+    const markdown = [
+      "Install it with `npm i",
+      "",
+      "Example: `[citation:Fake](https://example.com/fake)` then real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("ignores citations inside an unclosed fenced code block", () => {
     const markdown = [
       "Streaming output:",
