@@ -39,6 +39,7 @@ from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langgraph.func import task
 from langgraph.types import interrupt
 
+from deerflow.agents.middlewares.tool_call_args import rewrite_tool_call_args
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.tool_config import NON_APPROVABLE_TOOL_NAMES
@@ -350,6 +351,7 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
 
         revised_tool_calls: list[ToolCall] = []
         artificial_tool_messages: list[ToolMessage] = []
+        edited_args: dict[str, dict[str, Any]] = {}
         decision_positions = {idx: position for position, idx in enumerate(interrupt_indices)}
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
@@ -362,9 +364,36 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
             config = self.interrupt_on[tool_call["name"]]
             revised_tool_call, tool_message = self._process_decision(decisions[position], tool_call, config)
             if revised_tool_call is not None:
+                # Upstream's ``edit`` accepts ``edited_action["name"]``, letting a
+                # decision rename the call. Refused here: ``interrupt_on`` is keyed
+                # by tool name, so a rename would run a *different* tool under the
+                # approval its own gate never issued — and ``when``/``args_schema``
+                # were resolved for the original name. Rejecting is also what keeps
+                # the surface sync below sound: ``rewrite_tool_call_args`` rewrites
+                # args on every provider surface but not names, so a rename would
+                # leave the raw payload and content blocks naming the old tool.
+                if (edited_name := revised_tool_call.get("name")) != tool_call["name"]:
+                    msg = f"A tool-approval 'edit' decision may not rename the call: {tool_call['name']!r} -> {edited_name!r}. Reject the call instead."
+                    raise ValueError(msg)
                 revised_tool_calls.append(revised_tool_call)
+                if revised_tool_call is not tool_call and revised_tool_call.get("args") != tool_call.get("args") and isinstance(call_id := tool_call.get("id"), str) and call_id:
+                    edited_args[call_id] = revised_tool_call["args"]
             if tool_message:
                 artificial_tool_messages.append(tool_message)
+
+        # An ``edit`` decision keeps the call id and changes only its args, so
+        # the clone below — which filters by id — would carry the *original*
+        # args forward on every surface other than ``tool_calls``: the raw
+        # provider payload in ``additional_kwargs["tool_calls"]`` and the
+        # content tool-call blocks (Anthropic ``tool_use``, OpenAI Responses
+        # ``function_call``, v1 ``tool_call``). The tool node executes the
+        # edited args while the next model request could be serialized from a
+        # stale surface, telling the model ``rm`` ran when the human approved
+        # ``ls``. ``rewrite_tool_call_args`` is the shared helper that rewrites
+        # all of those surfaces together; run it first so the clone only has to
+        # drop calls, never reconcile args.
+        if edited_args:
+            last_ai_msg = rewrite_tool_call_args(last_ai_msg, edited_args)
 
         # Rebuild rather than mutate. Upstream assigns ``last_ai_msg.tool_calls``
         # in place, which rewrites the very object already streamed to clients

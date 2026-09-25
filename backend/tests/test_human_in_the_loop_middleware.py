@@ -1,5 +1,6 @@
 """Tests for the tool-approval (human-in-the-loop) middleware."""
 
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Annotated, TypedDict
@@ -247,6 +248,144 @@ class TestOriginalMessageNotMutated:
         assert revised.tool_calls[0]["args"] == {"command": "ls"}
         # The instance already streamed to clients keeps its original args.
         assert original.tool_calls[0]["args"] == {"command": "rm -rf /"}
+
+
+class TestEditRewritesEveryProviderSurface:
+    """An edited call must not leave its original args reachable anywhere.
+
+    ``edit`` keeps the call id and changes only the args, so an id-keyed filter
+    alone carries the pre-review payload forward on every surface other than
+    ``tool_calls``. The tool node runs the edited args while the next model
+    request can be serialized from a stale surface — telling the model ``rm``
+    ran when the human approved ``ls``. Which surface a provider adapter reads
+    varies, so all of them are asserted.
+    """
+
+    EDIT = {"type": "edit", "edited_action": {"name": "bash_tool", "args": {"command": "ls"}}}
+
+    def _revise(self, **message_kwargs):
+        message_kwargs.setdefault("content", "")
+        original = AIMessage(id="ai-1", tool_calls=[_call()], **message_kwargs)
+        state = {"messages": [HumanMessage(content="do it"), original]}
+        result, _ = _resume(_middleware(), state, [self.EDIT])
+        return original, result["messages"][0]
+
+    def test_rewrites_the_raw_provider_payload(self):
+        """OpenAI-style ``additional_kwargs``: a JSON string under ``function.arguments``."""
+        original, revised = self._revise(
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "bash_tool", "arguments": '{"command": "rm -rf /"}'}}]},
+        )
+
+        assert json.loads(revised.additional_kwargs["tool_calls"][0]["function"]["arguments"]) == {"command": "ls"}
+        # The streamed instance is untouched.
+        assert json.loads(original.additional_kwargs["tool_calls"][0]["function"]["arguments"]) == {"command": "rm -rf /"}
+
+    def test_rewrites_an_anthropic_tool_use_content_block(self):
+        _original, revised = self._revise(content=[{"type": "tool_use", "id": "call-1", "name": "bash_tool", "input": {"command": "rm -rf /"}}])
+
+        block = revised.content[0]
+        assert block["input"] == {"command": "ls"}
+        # ``partial_json`` would otherwise re-leak the streamed original.
+        assert "partial_json" not in block
+
+    def test_rewrites_an_openai_responses_function_call_block(self):
+        """Matched by ``call_id``; the ``fc_…`` item id is not the tool-call id."""
+        _original, revised = self._revise(content=[{"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "bash_tool", "arguments": '{"command": "rm -rf /"}'}])
+
+        block = revised.content[0]
+        assert json.loads(block["arguments"]) == {"command": "ls"}
+        assert block["id"] == "fc_1"
+
+    def test_rewrites_a_v1_tool_call_content_block(self):
+        """LangChain standard content: ``extras.arguments`` wins in the Responses translator."""
+        _original, revised = self._revise(
+            content=[{"type": "tool_call", "id": "call-1", "name": "bash_tool", "args": {"command": "rm -rf /"}, "extras": {"arguments": '{"command": "rm -rf /"}'}}],
+        )
+
+        block = revised.content[0]
+        assert block["args"] == {"command": "ls"}
+        assert json.loads(block["extras"]["arguments"]) == {"command": "ls"}
+
+    def test_leaves_an_untouched_sibling_call_alone(self):
+        """Only the edited id is rewritten; an approved sibling keeps its args."""
+        original = AIMessage(
+            content=[
+                {"type": "tool_use", "id": "call-1", "name": "bash_tool", "input": {"command": "rm -rf /"}},
+                {"type": "tool_use", "id": "call-2", "name": "bash_tool", "input": {"command": "keep-me"}},
+            ],
+            id="ai-1",
+            tool_calls=[_call(), _call(args={"command": "keep-me"}, call_id="call-2")],
+            additional_kwargs={
+                "tool_calls": [
+                    {"id": "call-1", "type": "function", "function": {"name": "bash_tool", "arguments": '{"command": "rm -rf /"}'}},
+                    {"id": "call-2", "type": "function", "function": {"name": "bash_tool", "arguments": '{"command": "keep-me"}'}},
+                ]
+            },
+        )
+        state = {"messages": [HumanMessage(content="do it"), original]}
+
+        result, _ = _resume(_middleware(), state, [self.EDIT, {"type": "approve"}])
+        revised = result["messages"][0]
+
+        assert [tc["args"] for tc in revised.tool_calls] == [{"command": "ls"}, {"command": "keep-me"}]
+        assert [block["input"] for block in revised.content] == [{"command": "ls"}, {"command": "keep-me"}]
+        assert [json.loads(raw["function"]["arguments"]) for raw in revised.additional_kwargs["tool_calls"]] == [{"command": "ls"}, {"command": "keep-me"}]
+
+    def test_approve_does_not_rewrite_anything(self):
+        """No edit means no rewrite: the surfaces pass through by identity."""
+        original = AIMessage(
+            content=[{"type": "tool_use", "id": "call-1", "name": "bash_tool", "input": {"command": "rm -rf /"}}],
+            id="ai-1",
+            tool_calls=[_call()],
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "bash_tool", "arguments": '{"command": "rm -rf /"}'}}]},
+        )
+        state = {"messages": [HumanMessage(content="do it"), original]}
+
+        result, _ = _resume(_middleware(), state, [{"type": "approve"}])
+        revised = result["messages"][0]
+
+        assert revised.content[0] is original.content[0]
+        assert revised.additional_kwargs["tool_calls"][0] is original.additional_kwargs["tool_calls"][0]
+
+    def test_an_edit_may_not_rename_the_call(self):
+        """A rename would execute a tool its own gate never approved.
+
+        Upstream's ``edit`` accepts ``edited_action["name"]``, but ``interrupt_on``
+        is keyed by tool name: renaming would carry this call's approval over to a
+        different tool, whose own ``interrupt_on`` (and ``when`` predicate, and
+        ``args_schema``) never ran. It is also the one edit the surface sync could
+        not honour — ``rewrite_tool_call_args`` rewrites args, not names.
+        """
+        decision = {"type": "edit", "edited_action": {"name": "ls_tool", "args": {"path": "/"}}}
+
+        with pytest.raises(ValueError, match="may not rename"):
+            _resume(_middleware(), _state([_call()]), [decision])
+
+    def test_an_edit_that_keeps_the_name_is_still_allowed(self):
+        """The guard rejects renames only; an ordinary args edit is untouched."""
+        _original, revised = self._revise()
+
+        assert revised.tool_calls[0]["name"] == "bash_tool"
+        assert revised.tool_calls[0]["args"] == {"command": "ls"}
+
+    def test_rejected_call_keeps_its_original_args_on_every_surface(self):
+        """``reject`` keeps the call and answers it; nothing is rewritten.
+
+        The args must stay as the model emitted them, because the pairing
+        ``ToolMessage`` is what prevents execution — not a changed payload.
+        """
+        original = AIMessage(
+            content=[{"type": "tool_use", "id": "call-1", "name": "bash_tool", "input": {"command": "rm -rf /"}}],
+            id="ai-1",
+            tool_calls=[_call()],
+        )
+        state = {"messages": [HumanMessage(content="do it"), original]}
+
+        result, _ = _resume(_middleware(), state, [{"type": "reject", "message": "no"}])
+        revised, _tool_message = result["messages"]
+
+        assert revised.tool_calls[0]["args"] == {"command": "rm -rf /"}
+        assert revised.content[0]["input"] == {"command": "rm -rf /"}
 
 
 class TestParallelToolCalls:

@@ -197,6 +197,23 @@ upstream's in-place `last_ai_msg.tool_calls = ...`, so the instance already
 streamed to clients is not rewritten under them and
 `additional_kwargs["tool_calls"]` stays in sync.
 
+An `edit` needs one step more than that clone. It keeps the call id and changes
+only the args, while the clone reconciles surfaces *by id* — so the pre-review
+payload would survive on every surface except `tool_calls`: the raw provider
+copy in `additional_kwargs["tool_calls"]`, and the content tool-call blocks
+(Anthropic `tool_use`, OpenAI Responses `function_call` keyed by `call_id`,
+LangChain v1 `tool_call` with its `extras.arguments`). Provider adapters do not
+all read the same surface, so the tool node would run the edited args while the
+next model request could be serialized from a stale one — telling the model
+`rm` ran where the human approved `ls`. `_gate_on_review_batch` therefore runs
+`rewrite_tool_call_args` (the shared helper documented in
+`middlewares/tool_call_args.py`) over the edited ids *before* cloning, leaving
+the clone only calls to drop. `approve`, `reject` and `respond` change no args
+and rewrite nothing. Pinned by
+`tests/test_human_in_the_loop_middleware.py::TestEditRewritesEveryProviderSurface`,
+which asserts each surface separately — a test that checks only `tool_calls`
+cannot catch this.
+
 ## Wire format
 
 A parked run keeps its payload on `snapshot.tasks` only. LangGraph records
