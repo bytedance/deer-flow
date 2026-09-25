@@ -33,10 +33,14 @@ WIKIPEDIA_LANGUAGE_ALIASES = {
 
 def _coerce_max_results(value: object) -> int:
     """Normalize config/parameter values before passing them to DDGS."""
-    try:
-        count = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
         count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
     if count <= 0:
         logger.warning("Invalid DDG Search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
         return DEFAULT_MAX_RESULTS

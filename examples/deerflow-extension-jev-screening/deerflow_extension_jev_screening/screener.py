@@ -200,10 +200,25 @@ def _latest_tool_results(messages: Iterable[Any]) -> list[ToolMessage]:
     return latest
 
 
+def _probability_from(payload: Any) -> float | None:
+    answer = payload.get("answers", {}).get("injection") if isinstance(payload, dict) and isinstance(payload.get("answers"), dict) else None
+    if not isinstance(answer, dict) or answer.get("type") != "noul":
+        return None
+    value = answer.get("noul")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    probability = float(value)
+    return probability if math.isfinite(probability) and 0.0 <= probability <= 1.0 else None
+
+
 class ScreeningMiddleware(AgentMiddleware):
     def __init__(self, options: Options) -> None:
         super().__init__()
         self.options = options
+        # The validator allows plain HTTP only for loopback. Such a request must
+        # not follow HTTP_PROXY/ALL_PROXY, or the bearer key and excerpt would
+        # leave the host in cleartext; HTTPS endpoints keep the proxy settings.
+        self._trust_env = httpx.URL(options.endpoint).scheme != "http"
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare behavior identity without reading or exposing credentials."""
@@ -226,29 +241,25 @@ class ScreeningMiddleware(AgentMiddleware):
             "state": {"content": excerpt},
             "questions": {"injection": _question()},
         }
+        headers = {"Authorization": "Bearer " + key, "Accept": "application/json", "Accept-Encoding": "identity"}
         try:
             async with asyncio.timeout(self.options.timeout_seconds):
-                async with client.stream("POST", self.options.endpoint, json=body, headers={"Authorization": "Bearer " + key, "Accept": "application/json"}) as response:
-                    if response.status_code != 200:
+                async with client.stream("POST", self.options.endpoint, json=body, headers=headers) as response:
+                    # The size cap below counts decoded bytes, so an encoded body
+                    # could expand far past it before the check runs.
+                    if response.status_code != 200 or response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
                         return None
                     raw = bytearray()
                     async for chunk in response.aiter_bytes():
                         if len(raw) + len(chunk) > _MAX_RESPONSE_BYTES:
                             return None
                         raw.extend(chunk)
-            payload = json.loads(raw)
-        except (httpx.HTTPError, TimeoutError, OSError, ValueError):
-            # Provider trouble is an expected condition for an advisory screen:
-            # pass the result through. Never surface response bodies or keys.
+            return _probability_from(json.loads(raw))
+        except (httpx.HTTPError, TimeoutError, OSError, ValueError, RecursionError, OverflowError):
+            # Provider trouble, including malformed answers such as deep nesting
+            # or huge numbers, is expected for an advisory screen: pass the
+            # result through. Never surface response bodies or keys.
             return None
-        answer = payload.get("answers", {}).get("injection") if isinstance(payload, dict) and isinstance(payload.get("answers"), dict) else None
-        if not isinstance(answer, dict) or answer.get("type") != "noul":
-            return None
-        value = answer.get("noul")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        probability = float(value)
-        return probability if math.isfinite(probability) and 0.0 <= probability <= 1.0 else None
 
     async def _flagged_call_ids(self, result: Any) -> set[str]:
         excerpts = _excerpts(result, self.options.max_excerpt_chars)
@@ -257,7 +268,7 @@ class ScreeningMiddleware(AgentMiddleware):
             return set()
         # One client, one request per message, all in flight together: each has
         # its own deadline, so one slow or failed message cannot hide another.
-        async with httpx.AsyncClient(timeout=self.options.timeout_seconds, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=self.options.timeout_seconds, follow_redirects=False, trust_env=self._trust_env) as client:
             async with asyncio.TaskGroup() as group:
                 tasks = [group.create_task(self._probability(client, key, excerpt)) for _, excerpt in excerpts]
         flagged: set[str] = set()

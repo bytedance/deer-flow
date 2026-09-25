@@ -27,7 +27,7 @@ async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeyp
     if provider == "jina_ai":
         monkeypatch.setattr(module.JinaClient, "crawl", AsyncMock(return_value=html))
     elif provider == "infoquest":
-        monkeypatch.setattr(module, "_get_infoquest_client", lambda: SimpleNamespace(fetch=lambda url: html))
+        monkeypatch.setattr(module, "_get_infoquest_client", lambda: SimpleNamespace(fetch=AsyncMock(return_value=html)))
     else:
         client = SimpleNamespace(fetch_html_with_status=AsyncMock(return_value=BrowserlessFetchResult(html, "200", "OK")))
         monkeypatch.setattr(module, "_get_browserless_client", lambda name: client)

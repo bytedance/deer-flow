@@ -32,8 +32,11 @@ distinguishes it from a release.
 
 ## Helper scripts
 
-- `scripts/bump_version.sh <version>` — set all four fields at once, then
-  self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
+- `scripts/bump_version.sh <version>` — set all four fields at once, refresh
+  `backend/uv.lock`, then self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
+  Needs `uv` on `PATH` (`backend/uv.lock` pins the root package version too, and
+  lint CI runs `uv lock --check`); the script fails before editing anything when
+  `uv` is missing.
   ```bash
   scripts/bump_version.sh 2.1.0
   ```
@@ -47,7 +50,8 @@ distinguishes it from a release.
 
 ## Release procedure
 
-1. **Bump the version** across all sources:
+1. **Bump the version** across all sources (this refreshes
+   `backend/uv.lock` too):
    ```bash
    scripts/bump_version.sh 2.1.0
    ```
@@ -74,13 +78,13 @@ distinguishes it from a release.
 
 Release-candidate tags must include the same prerelease suffix in all four
 version fields. For example, before tagging `v2.1.0-rc0`, run
-`bash scripts/bump_version.sh 2.1.0-rc0`, refresh `backend/uv.lock` with
-`cd backend && uv lock`, and run `bash scripts/verify_versions.sh 2.1.0-rc0`
-from the repository root. Commit the version and lockfile changes before
-creating the tag. Python lockfiles normalize this version to `2.1.0rc0`;
-the source version fields checked by the release gate retain `2.1.0-rc0`.
-Re-running a failed workflow on an unchanged tag does not pick up a later
-version-fix commit.
+`bash scripts/bump_version.sh 2.1.0-rc0` and run
+`bash scripts/verify_versions.sh 2.1.0-rc0` from the repository root. Commit
+the version and lockfile changes before creating the tag. Python lockfiles
+normalize this version to `2.1.0rc0` — `bump_version.sh` leaves the normalizing
+to `uv lock` — while the source version fields checked by the release gate
+retain `2.1.0-rc0`. Re-running a failed workflow on an unchanged tag does not
+pick up a later version-fix commit.
 
 ## What CI publishes on a `v*` tag
 
@@ -147,6 +151,10 @@ Both publishing workflows call `.github/workflows/verify-versions.yml` as their
 first job. It runs `scripts/verify_versions.sh` against the tag (minus the
 `v`). If any of the four version sources doesn't match the tag, the verify job
 fails and **all** publish jobs are skipped — no images, no chart.
+
+The gate covers those four fields. `backend/uv.lock` is refreshed to the same
+version by `scripts/bump_version.sh` and checked by `uv lock --check` in lint CI,
+which fails on a stale lock.
 
 When it fails, the job annotation names the offending file and suggests the
 fix:

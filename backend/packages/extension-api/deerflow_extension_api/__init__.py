@@ -43,6 +43,18 @@ from deerflow_extension_api.contracts import (
     TaskOutcome,
     extension,
 )
+from deerflow_extension_api.model_invocation import (
+    ModelInvocationError,
+    ModelInvocationFailed,
+    ModelInvocationRequest,
+    ModelInvocationResult,
+    ModelInvocationUnauthorized,
+    ModelInvocationUnavailable,
+    ModelInvoker,
+    ModelMessage,
+    ModelOutputValidationError,
+    ModelUsage,
+)
 from deerflow_extension_api.placement import (
     AgentBuildContext,
     AgentScope,
@@ -89,6 +101,16 @@ from deerflow_extension_api.state import ExtensionData
 API_VERSION = "0.2.4"
 
 __all__ = [
+    "ModelInvocationError",
+    "ModelInvocationFailed",
+    "ModelInvocationRequest",
+    "ModelInvocationResult",
+    "ModelInvocationUnauthorized",
+    "ModelInvocationUnavailable",
+    "ModelInvoker",
+    "ModelMessage",
+    "ModelOutputValidationError",
+    "ModelUsage",
     "ActionContext",
     "BackendAction",
     "BrowserAssets",
