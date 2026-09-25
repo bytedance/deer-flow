@@ -39,7 +39,9 @@ instead of hanging.
 Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
 The transparent mode uses Textual's `ansi_default` background for the main
 screen, header, transcript, status, palette, composer, and modal surfaces while
-keeping truecolor foregrounds and selection highlights. Combine
+keeping truecolor foregrounds and selection highlights. Those foregrounds are
+calibrated for dark terminal backgrounds, so on a light-background terminal they
+may render with low contrast. Combine
 `--tui-transparent` with `--tui` when the UI also needs to be forced without a
 detected TTY.
 
