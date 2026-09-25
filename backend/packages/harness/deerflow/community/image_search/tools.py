@@ -11,6 +11,24 @@ from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_RESULTS = 5
+
+
+def _coerce_max_results(value: object) -> int:
+    """Normalize config/parameter values before passing them to DDGS."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
+        count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+    if count <= 0:
+        logger.warning("Invalid DDG image search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
+        return DEFAULT_MAX_RESULTS
+    return count
+
 
 def _search_images(
     query: str,
@@ -111,6 +129,7 @@ def image_search_tool(
     # Override max_results from config if set
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results", max_results)
+    max_results = _coerce_max_results(max_results)
 
     results = _search_images(
         query=query,

@@ -1,5 +1,11 @@
 ### Memory System
 
+DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
+`memory_update` after formatting, without touching its human data message or
+cached templates. This is the live summary/fact extraction path; do not wire
+extensions only to the legacy `FACT_EXTRACTION_PROMPT` alias. Settings belong
+to the constructed backend and require backend recreation to change.
+
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
 #### Main components
@@ -37,6 +43,9 @@ Only `AuthMiddleware` can authorize the internal owner header.
 
 No-auth mode uses `DEFAULT_USER_ID`, which is `"default"`.
 An absolute `storage_path` opts out of the default per-user root.
+`UserRepository.list_user_ids()` returns registered IDs in creation order for
+administrative workflows such as `scripts/load_memory_sample.py --all-users`.
+The bulk loader requires persistent database mode and backs up each user's memory by default.
 
 DeerMem uses this layout:
 

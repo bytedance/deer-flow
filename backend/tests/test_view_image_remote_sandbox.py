@@ -486,7 +486,7 @@ def test_middleware_falls_back_to_host_when_saved_sandbox_has_no_live_client(tmp
         },
     }
 
-    blocks = ViewImageMiddleware()._create_image_details_message(state)
+    blocks = ViewImageMiddleware()._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
     assert _image_bytes_from_blocks(blocks) == PNG_BYTES
     assert provider.acquire_calls == []
@@ -512,7 +512,7 @@ def test_middleware_uses_verified_host_copy_after_sandbox_replacement(tmp_path, 
         },
     }
 
-    blocks = ViewImageMiddleware()._create_image_details_message(state)
+    blocks = ViewImageMiddleware()._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
 
     assert _image_bytes_from_blocks(blocks) == PNG_BYTES
     assert sandbox.downloads == []

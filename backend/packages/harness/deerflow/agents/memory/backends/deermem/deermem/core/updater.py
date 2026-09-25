@@ -1387,6 +1387,16 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        if config.prompt_prepend or config.prompt_append:
+            # Extend trusted instructions only, after formatting the original
+            # template. Conversation/memory data stays in its human message.
+            for index, message in enumerate(prompt):
+                if message.type == "system":
+                    content = "\n\n".join(part for part in (config.prompt_prepend, message.content, config.prompt_append) if part)
+                    prompt[index] = message.model_copy(update={"content": content})
+                    break
+            else:
+                raise ValueError("Memory prompt overlays require a system message in the configured chat template")
         return current_memory, prompt
 
     def _has_manual_facts(self, memory: dict[str, Any]) -> bool:

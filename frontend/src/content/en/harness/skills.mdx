@@ -111,7 +111,7 @@ The `container_path` is important: it tells the agent where to find skill resour
 Skill availability is tracked in `extensions_config.json` (separate from `config.yaml`). You can manage skill state:
 
 - **Through the DeerFlow App UI**: the skills panel lets you toggle skills on and off.
-- **Through the Gateway API**: `POST /api/extensions/skills/{name}/enable` and `/disable`.
+- **Through the Gateway API**: `PUT /api/skills/{name}` with body `{"enabled": true}` or `{"enabled": false}` (admin only).
 - **By editing `extensions_config.json` directly**.
 
 Because `load_skills()` re-reads the extensions config on every call, changes take effect immediately — no server restart required.

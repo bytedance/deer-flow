@@ -115,6 +115,43 @@ def test_resource_graph_tracks_referenced_resource(tmp_path):
     assert "references/guide.md" not in facts["resources"]["orphans"]
 
 
+def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp_path):
+    # A bare path at the end of an English sentence is followed by "." or "!".
+    # Those are prose punctuation, not part of the path: they must not turn a
+    # valid reference into a resource.missing finding or orphan the real file.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nRead references/setup.md.\nAlso see references/usage.md!\n",
+    )
+    _write(tmp_path / "references" / "setup.md", "# Setup\n")
+    _write(tmp_path / "references" / "usage.md", "# Usage\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/setup.md", "references/usage.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
+        assert target not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
+    # "." is also a legitimate path character: a real dotted filename in a
+    # link target or a path token must keep its dots, not be stripped.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee [config](references/config.yaml) and references/v1.0.md.\n",
+    )
+    _write(tmp_path / "references" / "config.yaml", "a: 1\n")
+    _write(tmp_path / "references" / "v1.0.md", "# v1.0\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/config.yaml", "references/v1.0.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
+        assert target not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(

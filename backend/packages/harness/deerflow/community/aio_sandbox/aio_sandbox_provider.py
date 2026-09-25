@@ -594,11 +594,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         This is what the per-sandbox ``flock`` used to cover for free: a held lock
         cannot expire. A lease can, so the exclusion has to be held deliberately
         rather than assumed to outlast the work it guards. Reachable without an
-        abnormal backend — the config schema bounds only ``renewal_interval_seconds``
-        (> 0) and ``ttl_multiplier`` (>= 2), so a legal setting puts the TTL below a
-        normal container stop, and ``LocalContainerBackend._stop_container`` passes
-        no ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded
-        even at the default 120s.
+        abnormal backend — the config schema permits very short derived TTLs
+        (Redis down to 1 ms), so a legal setting can put the TTL below a normal
+        container stop, and ``LocalContainerBackend._stop_container`` passes no
+        ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded even
+        at the default 120s.
 
         The TTL stays finite on purpose: the heartbeat dies with the process, so a
         destroyer that crashes mid-stop still releases the container one TTL later
@@ -2175,7 +2175,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         paths = get_paths()
         effective_user_id = self._effective_acquire_user_id(user_id)
         await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=effective_user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+
+        def _lock_path():
+            # Worker thread: thread_dir() resolves through Paths.base_dir, which is
+            # a syscall — the same reason ensure_thread_dirs directly above it, and
+            # every later step of this coroutine, is offloaded.
+            return paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+
+        lock_path = await asyncio.to_thread(_lock_path)
 
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False

@@ -1,5 +1,10 @@
 ### Agent System
 
+`AppConfig.lead_prompt_overlay` wraps the fully rendered lead system prompt with
+literal operator prepend/append text. Do not template-format these extensions
+or source them from run context. The graph and assembly descriptor must see the
+same resulting prompt. Empty overlays preserve bytes.
+
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
 - `make_lead_agent(config: RunnableConfig)` is the published `langgraph.json`
   entry point; preserve its signature and bare-graph return type.

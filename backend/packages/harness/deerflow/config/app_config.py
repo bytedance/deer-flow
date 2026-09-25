@@ -14,6 +14,7 @@ from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, load_authorization_config_from_dict
+from deerflow.config.blob_storage_config import BlobStorageConfig, load_blob_storage_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
@@ -30,6 +31,7 @@ from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.projects_config import ProjectsConfig
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -189,6 +191,8 @@ def apply_logging_level(name: str | None) -> None:
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
+    lead_prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal prepend/append around the assembled lead-agent system prompt")
+
     log_level: str = Field(
         default="info",
         description=format_field_description(
@@ -247,6 +251,7 @@ class AppConfig(BaseModel):
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    blob_storage: BlobStorageConfig = Field(default_factory=BlobStorageConfig, description="Content-addressed blob store configuration")
     knowledge_base: KnowledgeBaseConfig = Field(
         default_factory=KnowledgeBaseConfig,
         description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
@@ -484,6 +489,7 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_blob_storage_config_from_dict(config.blob_storage.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
