@@ -130,8 +130,11 @@ def _url_pass_consumes_slot(slot: str) -> bool:
 # its value, and a header-looking line in any other log is untouched, because
 # the pass runs only on text carrying urllib3's own literals. ``location`` is in
 # the list because that field value is the same origin-form signed target the
-# Redirecting and retry passes collapse.
-_CREDENTIAL_FIELD_RE = re.compile(r"(?i)^(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|proxy-authentication-info|location)[ \t]*:[ \t]*(?P<value>.*)$")
+# Redirecting and retry passes collapse. The anchor is applied past a segment's
+# obs-fold marker (see _OBS_FOLD_RE) rather than written into the pattern,
+# because a folded value is one header value under RFC 7230 unfolding: a bearer
+# token folded under a field this list does not name is still a bearer token.
+_CREDENTIAL_FIELD_RE = re.compile(r"(?i)(?P<name>set-cookie2?|cookie|authorization|proxy-authorization|www-authenticate|proxy-authenticate|authentication-info|proxy-authentication-info|location)[ \t]*:[ \t]*(?P<value>.*)$")
 # The payload's line breaks as they appear in the log: escaped inside a repr,
 # and real if a future format ever stops quoting the block. The repr's opening
 # quote is a break too — the dump's first field follows ``unparsed data: `` and
@@ -142,8 +145,11 @@ _HEADER_DUMP_PREFIX = "Failed to parse headers (url="
 # An RFC 5322 obs-fold continuation keeps the field's value on the next line and
 # is marked by a leading SP/HTAB. This warning exists to dump malformed upstream
 # bytes, so a folded credential cannot be assumed absent: the rest of a collapsed
-# field's value lives in the segments that follow its break.
-_OBS_FOLD_RE = re.compile(r"^[ \t]")
+# field's value — or the whole of it, when the field's first segment is empty —
+# lives in the segments that follow its break. The marker has two spellings in
+# the logged copy, because the payload reaches the record through ``!r``: a real
+# tab is the two characters backslash-t, while a space is never escaped.
+_OBS_FOLD_RE = re.compile(r"^(?:[ \t]|\\t)+")
 # HeaderParsingError's own message, so a record's exception text — which repeats
 # the dump verbatim — is recognised as the same shape rather than as free text.
 _HEADER_DUMP_MARKER = "unparsed data: "
@@ -154,15 +160,21 @@ def _redact_credential_headers(message: str) -> str:
     # A capturing split returns [text, break, text, break, ...]; only the
     # even-indexed segments are header lines.
     for index in range(0, len(parts), 2):
-        match = _CREDENTIAL_FIELD_RE.match(parts[index])
-        # An empty value hides nothing, and rewriting it would claim a redaction
-        # that never happened.
-        if match is not None and match.group("value"):
-            parts[index] = match.group("name") + ": <redacted>"
-            fold = index + 2
-            while fold < len(parts) and _OBS_FOLD_RE.match(parts[fold]):
-                parts[fold] = "<redacted>"
-                fold += 2
+        segment = parts[index]
+        fold = _OBS_FOLD_RE.match(segment)
+        lead = fold.group(0) if fold else ""
+        match = _CREDENTIAL_FIELD_RE.match(segment, len(lead))
+        if match is None:
+            continue
+        # An empty value hides nothing on its own line, and rewriting it would
+        # claim a redaction that never happened — but the field is still the one
+        # its continuation belongs to, so the walk below runs either way.
+        if match.group("value"):
+            parts[index] = lead + match.group("name") + ": <redacted>"
+        walk = index + 2
+        while walk < len(parts) and _OBS_FOLD_RE.match(parts[walk]):
+            parts[walk] = "<redacted>"
+            walk += 2
     return "".join(parts)
 
 

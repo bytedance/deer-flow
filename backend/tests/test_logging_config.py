@@ -911,6 +911,71 @@ def test_url_redaction_filter_collapses_folded_continuations_and_proxy_auth_info
     assert "charset=utf-8" in formatted
 
 
+def test_url_redaction_filter_collapses_a_credential_folded_under_an_unlisted_field() -> None:
+    """A folded credential is still that header's value, whatever field it folds under.
+
+    Under RFC 7230 unfolding ``X-Trace: keep\\r\\n Authorization: Bearer …`` is one
+    header whose value carries the bearer token, so the fold is a credential leak
+    even though the field it attaches to is not on the list. Anchoring the field
+    name only at the segment start let exactly this segment through while the
+    unindented ``Set-Cookie`` right after it collapsed, which is the proof the
+    pass ran rather than that a name matched.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nX-Trace: keep\r\n Authorization: Bearer FoldSecret\r\nSet-Cookie: session=CookieSecret\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("FoldSecret", "CookieSecret", "Bearer", "UrlSecret"):
+        assert secret not in formatted, secret
+    # The fold marker and the name stay for operator legibility, and the
+    # non-sensitive field the credential folded under keeps its own value.
+    assert " Authorization: <redacted>" in formatted
+    assert "X-Trace: keep" in formatted
+    assert "Set-Cookie: <redacted>" in formatted
+
+
+def test_url_redaction_filter_collapses_an_escaped_htab_continuation() -> None:
+    """A tab continuation reaches the log as ``\\t``, not as a real HTAB.
+
+    ``HeaderParsingError`` renders the payload with ``!r``, so the RFC 5322
+    marker in front of a folded value survives into the record as the two
+    characters backslash-t. A fold test that uses a space for the sensitive
+    continuation therefore never asks the walk about that spelling, and a
+    bearer token sitting behind it is logged whole.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie: session=AlphaSecret\r\n\tBetaSecret; Path=/\r\nContent-Type: application/json\r\n\tcharset=utf-8\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("AlphaSecret", "BetaSecret", "session=", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>\\r\\n<redacted>" in formatted
+    # The asymmetry holds under the escaped spelling: a continuation that names
+    # no credential field stays, so this pass cannot be replaced by "fold
+    # everything whitespace-led".
+    assert "Content-Type: application/json" in formatted
+    assert "\\tcharset=utf-8" in formatted
+
+
+def test_url_redaction_filter_collapses_a_credential_entirely_inside_the_fold() -> None:
+    """An empty first segment does not mean the folded field has no value.
+
+    ``Set-Cookie:\\r\\n CookieSecret`` puts the whole value on the continuation.
+    Gating the fold walk on the matched segment having a non-empty value
+    skipped the walk for exactly this shape, so the credential was logged
+    while a same-shaped field with a value collapsed. The field itself stays
+    as written — nothing on that segment was redacted.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie:\r\n GammaSecret; Path=/\r\nX-Other: keep\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("GammaSecret", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie:\\r\\n<redacted>" in formatted
+    assert "X-Other: keep" in formatted
+
+
 def test_url_redaction_filter_collapses_dump_credentials_in_json_logging_too() -> None:
     """JSON output must not reopen the leak the text path closes.
 
