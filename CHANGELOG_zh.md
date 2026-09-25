@@ -727,6 +727,11 @@
 
 ### 修复
 
+- **开发：** 当同级 worktree 的路径包含空格时，`make stop` / `make dev` 现在也能回收它占用的
+  开发端口。`serve.sh` 用 `awk '{print $2}'` 解析 `git worktree list --porcelain` 来构建
+  worktree 根目录列表，而该输出中的路径不加引号，因此 `.../deer flow two` 被记录成了
+  `.../deer`；从那个 worktree 启动的 Gateway 或前端永远不会被识别为 deer-flow 的进程，
+  启动会以“端口已被占用”中止。现在会保留整条路径。
 - **配置：** 在上一次编辑仍在加载时落盘的 `config.yaml` 编辑，不再要等到下一次编辑才生效。
   `get_app_config()` 的加载器先解析文件，再重新读取一遍来计算缓存签名，因此夹在两次读取
   之间的写入会让缓存以较新内容的签名保存较旧的内容，而签名比较永远无法发现这种状态。

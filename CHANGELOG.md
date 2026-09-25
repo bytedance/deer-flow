@@ -957,6 +957,12 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
+  worktree whose path contains spaces. `serve.sh` built its worktree-root list
+  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
+  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
+  frontend started from that worktree was never recognised as deer-flow's and
+  the start aborted with "port already in use". The whole path is kept now.
 - **config:** A `config.yaml` edit that lands while the previous edit is still
   being loaded is no longer lost until the next edit. `get_app_config()`'s
   loader parsed the file and then hashed it again to record the cache
