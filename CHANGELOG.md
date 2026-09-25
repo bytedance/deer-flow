@@ -5,11 +5,11 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] — 2026-09-24
 
 This section accumulates work toward the **2.1.0** milestone
-([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
-This release closes that milestone with **765 merged pull requests**.
+([2.1.0](https://github.com/bytedance/deer-flow/milestone/2)).
+This release closes that milestone with **772 merged pull requests**.
 
 ### ⚠ Breaking changes
 
@@ -493,22 +493,6 @@ This release closes that milestone with **765 merged pull requests**.
 
 #### Models & integrations
 
-- **models:** Optional per-model `reasoning:` capability contract beside the
-  legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
-  `unsupported | optional | required`, the accepted effort `values` with
-  `aliases`, `default`, and serialization `path`, the payload `dialect`, and the
-  reasoning `history` requirement. Every model-creation path enforces one
-  normalized policy, so required-thinking models never receive a synthesized
-  disable payload and unsupported effort values never reach the provider;
-  `/api/models` projects the contract as `reasoning`, the composer derives its
-  effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
-  `low/high/max` effort control. Custom effort paths reject leftover generic
-  effort keys, and the chat UI drops remembered contract-only levels when
-  switching to legacy models. Existing Ollama `reasoning: true` / `false` and
-  `low|medium|high` settings remain native provider options and stay in the
-  assembly fingerprint. Profiles without a mapping contract keep their existing
-  provider behavior.
-  ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
   screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
@@ -957,47 +941,16 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
-- **config:** A `config.yaml` edit that lands while the previous edit is still
-  being loaded is no longer lost until the next edit. `get_app_config()`'s
-  loader parsed the file and then hashed it again to record the cache
-  signature, so a write between those two reads left the cache holding the
-  older content under the newer content's signature — a state the signature
-  comparison can never detect. The loader now reads the file once and signs
-  the bytes it parsed; a write that races the load just triggers one more
-  reload on the next call. ([#5848])
-- **config:** `request_admission.requests_per_minute` and `max_queue_size` now
-  accept `$VAR` environment references like every other field. Both are strict
-  integers so a bool or float is still rejected, but `$VAR` substitution always
-  produces a string, so `requests_per_minute: $RPM` failed the whole config load
-  with "Input should be a valid integer" even when `RPM=60`. A decimal literal
-  delivered as a string is now converted before the strict check; any other
-  string is still rejected. ([#5838])
-- **scheduler:** Pausing a scheduled task no longer loses the pause when a
-  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
-  owner — which pausing clears — but read the row without taking SQLite's
-  writer, so a stale read passed the guard and wrote the task back to
-  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
-  the API had reported as paused. The read now takes the writer first, as every
-  other mutating path in that repository does. PostgreSQL was unaffected.
-  ([#5777])
-- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
-  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
-  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
-  `get_event_loop()` failing, but it also caught discovery errors and
-  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
-  up; inside a running loop it also logged a misleading "asyncio.run() cannot
-  be called from a running event loop" traceback instead of the real cause.
-- **uploads:** Deleting an uploaded document no longer deletes the converted
-  Markdown beside it. Conversion names a companion after the document's stem
-  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
-  a document can belong to another document sharing the stem, or to the user:
-  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
-  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
-  document, stay listed, and can be deleted on their own. ([#5673])
-- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
-  acceptance checks. Readable empty files now satisfy `exists` and
-  `file_written` and deterministically fail `non-empty`, instead of remaining
-  UNVERIFIED. ([#5559])
+- **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
+  sidebar. In the sidebar's grouped Projects mode the indented nested menus
+  kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
+  100% of the width plus 16px and their absolutely positioned `right-1`
+  action landed past the sidebar edge — clipped on active-project rows and
+  pushed out entirely on the doubly indented rows under the Archived group,
+  while the flat chat list (the only unindented menu) was unaffected, which
+  is why it slipped through. Both nested menus now use `w-auto`, so the
+  block-level flex container fills the remaining width minus its margin. No
+  behavior, data, or API change beyond the layout fix. ([#5682])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -1009,22 +962,74 @@ This release closes that milestone with **765 merged pull requests**.
   upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
   `UserPreferenceRow` are also registered in the ORM model registry so
   `create_all` and autogenerate see every table through explicit imports
-  instead of module side effects. Rolling back the repair to
-  `0024_project_documents` intentionally leaves the ancestor-owned schema and
-  existing change positions intact; the repair downgrade is a no-op.
-- **nginx:** Extend the 600-second read timeout to the two remaining locations
-  whose routes wait on the Gateway, both left on nginx's 60-second default by
-  the thread-route fix. Behind the `/api/` catch-all, the stateless
-  `POST /api/runs/wait` blocks on the same run-completion wait and cancels its
-  run when the client disconnects, so an API consumer waiting on a run longer
-  than 60 seconds got a 504 *and* a cancelled run, and the composer's
-  `POST /api/input-polish` waits for a one-shot model call. Behind
-  `/api/skills`, installing a `.skill` archive runs one LLM security scan per
-  file in it, and a custom-skill edit or rollback runs one more; none of them
-  sets its own timeout, and only the sibling `/api/skills/install/upload`
-  endpoint had been given the longer timeout, so the same install through
-  `POST /api/skills/install` failed at 60 seconds. Applied to the Docker,
-  local, and Helm configs. ([#5524])
+  instead of module side effects. ([#5517])
+- **backend:** Validate pagination on the LangGraph-compatible
+  `POST /api/assistants/search`. `limit` and `offset` were applied directly
+  through Python slicing, so invalid values such as `offset: -1`, `limit: 0`,
+  or an excessive limit returned `200` with misleading results instead of
+  being rejected at the API boundary. `limit` is now required within the
+  compatible range of 1–1000 and `offset` must be non-negative; invalid
+  requests get `422`. ([#5506])
+- **models:** Guard the Claude Code credential loader against a malformed
+  `claudeAiOauth` container. `~/.claude/.credentials.json` can hold a
+  syntactically valid JSON payload whose `claudeAiOauth` value is not an
+  object — a `null` left by a partial export, a raw string, an array, a
+  number — and the extractor called `.get` on it, raising `AttributeError`
+  out of `ClaudeChatModel.model_post_init` and aborting model construction,
+  the opposite of the loader's documented degrade-gracefully behavior (the
+  sibling Codex loader already guarded the identical shape). A non-object
+  top-level payload or `claudeAiOauth` value now logs at debug level and
+  counts as "no credential from this source", so loading falls through to
+  the next source and ultimately returns `None` when every source is
+  unusable. ([#5494])
+- **events:** Preserve the DB write-lock generation across thread deletion.
+  `DbRunEventStore` serializes per-thread sequence assignment with an
+  `asyncio.Lock`, and `delete_by_thread()` evicted that lock whenever
+  `lock.locked()` was false — but `asyncio.Lock.release()` clears the locked
+  state before a queued waiter resumes, so a deletion landing in that
+  handoff window removed the registry entry while an admitted waiter still
+  referenced the old lock. A later writer then created a new lock generation
+  for the same thread, and two writers could proceed under different locks,
+  violating the single-process serialization around `max(seq) + INSERT`.
+  The per-thread registry is now weak, so an admitted holder/waiter keeps
+  its lock generation discoverable until it drains, while a separate strong
+  pin preserves the existing stable one-lock-per-thread behavior; deletion
+  retires only the pin. ([#5462])
+- **setup:** Honor a custom sandbox image in BOM-prefixed configs.
+  `setup-sandbox.sh` matched `^sandbox:` against a first line still carrying
+  its UTF-8 BOM, never matched, and silently chose and pulled the default
+  image instead of the configured one, although the runtime YAML loader
+  accepts the same configuration. The script now strips a UTF-8 BOM at the
+  beginning of the first line before the image-selection pipeline, with no
+  new runtime dependency. ([#5515])
+- **gateway:** Keep the shutdown run drain alive across repeated
+  cancellation. `_drain_inflight_runs()` shielded the `RunManager.shutdown()`
+  task and then awaited it again, but a second `Task.cancel()` while that
+  second shield was pending interrupted the helper itself, letting the
+  lifespan continue unwinding while run tasks were still draining —
+  reopening the exact resource-ordering hazard the drain exists to prevent:
+  run tasks could still be writing checkpoints after checkpointer teardown
+  began. The helper now keeps the already-started shutdown task strongly
+  owned and repeatedly shields it until it reaches a terminal state,
+  remembering the first caller cancellation and propagating it only after
+  the bounded drain completes. Logging and error behavior on a failing
+  drain are unchanged. ([#5487])
+- **models:** Pair Codex invalid tool calls with their tool results. A Codex
+  model that emits a `function_call` whose `arguments` are not valid JSON
+  does not fail the turn: the call is parked on `invalid_tool_calls` and
+  answered with a placeholder `ToolMessage` by `DanglingToolCallMiddleware`,
+  so the model sees a recoverable tool error. But the Codex Responses
+  serializer emitted input items for valid `tool_calls` only, so the
+  placeholder reached the provider as a `function_call_output` whose
+  `call_id` had no matching `function_call` in the same request, and the
+  Responses API requires the pair — the exact case the middleware exists to
+  recover from ended in a provider error instead of a retry. Chat
+  Completions providers already replay invalid calls through LangChain's
+  converter, and the OpenAI-compatible path had the same failure class
+  repaired in the middleware; Codex requests now also replay
+  `invalid_tool_calls` as `function_call` input items next to the valid
+  ones. The valid-call path, the parse side, and the middleware are
+  unchanged. ([#5509])
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
@@ -1075,15 +1080,6 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
-- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
-  reporting an exactly-full result as truncated. They hold the whole listing —
-  the raw stream is capped above `max_results` and reports its own cut-off — but
-  they returned as soon as they had collected `max_results` filtered matches, so
-  a tree holding exactly that many — and no more — came back flagged as cut off
-  and the tool told the model the result was incomplete. They now look one match
-  past the cap before deciding, the rule AIO's `glob` branches already apply.
-  This concerns the filtered-match cap only; the raw-output cap
-  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2838,42 +2834,6 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
-- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
-  first-boot requests both create an admin. The handler counted admins in one
-  session and created the account in another, so two requests with different
-  emails both saw an empty system; the loser now gets the documented
-  `409 system_already_initialized`. The count and the insert share one
-  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
-  PostgreSQL advisory lock). ([#5776])
-- **uploads:** Document conversion no longer re-opens the upload by name. The
-  Gateway converted the committed file and the embedded client converted the
-  copy it had just placed in the thread's uploads directory, so a sandbox that
-  replaced that name with a symlink in between had a host file converted into
-  the thread as the `.md` companion. The Gateway now converts a private copy of
-  the staged bytes, read through the descriptor it wrote, and the client
-  converts the caller's own source file. ([#5611])
-- **client:** `DeerFlowClient.upload_files` no longer writes through a
-  symlink. A symlink planted in the sandbox-writable uploads directory, at an
-  upload's name or its Markdown companion's name, made the embedded client
-  overwrite the host file it pointed to while reporting success. The file is
-  now skipped and listed in `skipped_files` with `success: false`, matching
-  the Gateway; an unsafe companion is left out and the upload kept. Copies
-  keep the source's permission bits and timestamps. ([#5578])
-- **uploads:** Deleting an upload no longer follows a symlink to delete a
-  different file. A symlink planted in the sandbox-writable uploads directory
-  made `DELETE /api/threads/{id}/uploads/{filename}` (and
-  `DeerFlowClient.delete_upload`) remove the upload it pointed to, plus that
-  file's companion `.md`, while reporting the requested name as deleted.
-  Symlinks now return 404, matching the upload listing; links that leave the
-  uploads directory are still rejected with 400. ([#5547])
-- **frontend:** Tool steps no longer turn non-web URLs into links. The
-  `web_fetch` URL and `web_search` / `image_search` result links in the
-  chain-of-thought panel skipped the scheme allowlist that markdown links use,
-  so a prompt-injected tool call could put a `file:` or OS protocol-handler
-  link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
-  and show an unsafe URL with the same "Unsafe link omitted" marker as
-  markdown links. A tool call whose args are missing, or whose `web_fetch` URL
-  is not a string, no longer crashes the message list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it
@@ -3032,7 +2992,7 @@ This release closes that milestone with **765 merged pull requests**.
   integration, and a reference appendix with the June to September 2026
   change log. The former single page becomes the section index, so existing
   page links keep working; deep links to sections of the old page now land
-  on the index.
+  on the index. ([#5761])
 - **docs:** Add an extension developer manual under `harness/extensions/` in
   both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
   to write an extension, a quick start, the runtime model, middleware
@@ -3040,33 +3000,10 @@ This release closes that milestone with **765 merged pull requests**.
   evidence reader, operating extensions, troubleshooting by error message,
   and a reference of every public name with the contract's version history.
   Also correct stale descriptions of the contribution kinds and of run
-  evidence metadata redaction in `AGENTS.md`.
-- **docs:** Bring the extension developer manual up to the
-  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
-  covering `registry.plugin()`, browser modules and packaged assets, backend
-  actions, model tools and settings; the request-scoped run evidence reader
-  with a per-user route example; and plugin troubleshooting and operations
-  notes. Also correct the plugin `mount` return value in
-  `docs/full-stack-plugins.md`.
-- **docs:** Add a checkpoint storage manual under `harness/checkpoints/` in both
-  languages, covering the `full` and `delta` channel modes: concepts, quick
-  start, the mode marker and its fail-closed gate, the snapshot cadence, the
-  delta history cache, resume and rollback linearization, operating and
-  retention constraints, observability, troubleshooting by symptom, and a
-  reference of every configuration key, error message, and pinned upstream
-  defect. The section is a new directory rather than a restructured page, so
-  the existing checkpointer documentation is unchanged.
+  evidence metadata redaction in `AGENTS.md`. ([#5769])
 
 ### Internal
 
-- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
-  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
-  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
-  first write dropped after a full → delta migration
-  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
-  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
-  the patch; the full → delta migration contract test remains the gate.
-  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged. ([#5734])
 - **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
   a DOM environment. ([#3703], [#4453])
 - **tests:** Require explicit opt-in for live client tests. ([#4482])
@@ -3130,6 +3067,15 @@ This release closes that milestone with **765 merged pull requests**.
 - **tests:** Skip the POSIX mode-bit skill-permission assertions on Windows,
   where the `chmod` contract is unobservable, so Windows contributors can
   reach a green backend-suite baseline. ([#5244])
+- **tests:** Pin the composer's skill suggestions against an empty skill
+  catalog (RFC #4063 Phase 4): a caller whose `skills` policy allows nothing
+  — or a fresh install with no skills — receives `[]` from `GET /api/skills`,
+  and the composer must degrade to a builtin-only dropdown, never a broken
+  or fully vanishing one. New tests drive the matcher and mount the real
+  `InputBox` with an empty catalog: typing `/` offers exactly the builtin
+  commands, and an unmatched query renders no listbox. No production code
+  changed; all four `useSkills()` consumers were audited and already
+  degrade gracefully. ([#5490])
 
 ## [2.0.0] — 2026-06-15
 
@@ -4228,7 +4174,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5066]: https://github.com/bytedance/deer-flow/pull/5066
 [#5069]: https://github.com/bytedance/deer-flow/pull/5069
 [#5071]: https://github.com/bytedance/deer-flow/pull/5071
-[#5073]: https://github.com/bytedance/deer-flow/issues/5073
 [#5074]: https://github.com/bytedance/deer-flow/pull/5074
 [#5076]: https://github.com/bytedance/deer-flow/pull/5076
 [#5077]: https://github.com/bytedance/deer-flow/pull/5077
@@ -4404,6 +4349,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5458]: https://github.com/bytedance/deer-flow/pull/5458
 [#5459]: https://github.com/bytedance/deer-flow/pull/5459
 [#5461]: https://github.com/bytedance/deer-flow/pull/5461
+[#5462]: https://github.com/bytedance/deer-flow/pull/5462
 [#5463]: https://github.com/bytedance/deer-flow/pull/5463
 [#5465]: https://github.com/bytedance/deer-flow/pull/5465
 [#5467]: https://github.com/bytedance/deer-flow/pull/5467
@@ -4418,23 +4364,19 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5483]: https://github.com/bytedance/deer-flow/pull/5483
 [#5485]: https://github.com/bytedance/deer-flow/pull/5485
 [#5486]: https://github.com/bytedance/deer-flow/pull/5486
+[#5487]: https://github.com/bytedance/deer-flow/pull/5487
 [#5488]: https://github.com/bytedance/deer-flow/pull/5488
+[#5490]: https://github.com/bytedance/deer-flow/pull/5490
 [#5492]: https://github.com/bytedance/deer-flow/pull/5492
+[#5494]: https://github.com/bytedance/deer-flow/pull/5494
 [#5496]: https://github.com/bytedance/deer-flow/pull/5496
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
-[#5524]: https://github.com/bytedance/deer-flow/pull/5524
-[#5559]: https://github.com/bytedance/deer-flow/pull/5559
-[#5526]: https://github.com/bytedance/deer-flow/pull/5526
-[#5534]: https://github.com/bytedance/deer-flow/pull/5534
-[#5547]: https://github.com/bytedance/deer-flow/pull/5547
-[#5578]: https://github.com/bytedance/deer-flow/pull/5578
-[#5611]: https://github.com/bytedance/deer-flow/pull/5611
-[#5673]: https://github.com/bytedance/deer-flow/pull/5673
-[#5734]: https://github.com/bytedance/deer-flow/pull/5734
-[#5776]: https://github.com/bytedance/deer-flow/pull/5776
-[#5777]: https://github.com/bytedance/deer-flow/pull/5777
-[#5838]: https://github.com/bytedance/deer-flow/pull/5838
-[#5848]: https://github.com/bytedance/deer-flow/pull/5848
-
+[#5506]: https://github.com/bytedance/deer-flow/pull/5506
+[#5509]: https://github.com/bytedance/deer-flow/pull/5509
+[#5515]: https://github.com/bytedance/deer-flow/pull/5515
+[#5517]: https://github.com/bytedance/deer-flow/pull/5517
+[#5682]: https://github.com/bytedance/deer-flow/pull/5682
+[#5761]: https://github.com/bytedance/deer-flow/pull/5761
+[#5769]: https://github.com/bytedance/deer-flow/pull/5769

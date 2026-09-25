@@ -7,10 +7,10 @@
 
 [English](./CHANGELOG.md) | 中文
 
-## [未发布]
+## [2.1.0] — 2026-09-24
 
-本节累积面向 **2.1.0** 里程碑（[里程碑 2](https://github.com/bytedance/deer-flow/milestone/2)）的工作。
-该里程碑随本次发布收尾，共合并 **765 个 pull request**。
+本节累积面向 [2.1.0](https://github.com/bytedance/deer-flow/milestone/2)）的工作。
+该里程碑随本次发布收尾，共合并 **772 个 pull request**。
 
 ### ⚠ 不兼容变更（Breaking Changes）
 
@@ -727,58 +727,61 @@
 
 ### 修复
 
-- **配置：** 在上一次编辑仍在加载时落盘的 `config.yaml` 编辑，不再要等到下一次编辑才生效。
-  `get_app_config()` 的加载器先解析文件，再重新读取一遍来计算缓存签名，因此夹在两次读取
-  之间的写入会让缓存以较新内容的签名保存较旧的内容，而签名比较永远无法发现这种状态。
-  现在加载器只读取文件一次，并对解析的那份字节计算签名；与加载竞争的写入只会在下一次
-  调用时多触发一次重载。([#5848])
-- **配置：** `request_admission.requests_per_minute` 与 `max_queue_size` 现在与其他字段一样
-  接受 `$VAR` 环境变量引用。这两个字段是严格整数，布尔值与浮点数仍会被拒绝；但 `$VAR`
-  替换得到的永远是字符串，因此即使 `RPM=60`，`requests_per_minute: $RPM` 也会让整个配置
-  加载失败并报 "Input should be a valid integer"。现在以字符串形式到达的十进制整数字面量会在
-  严格校验之前被转换；其他字符串仍会被拒绝。([#5838])
-- **调度器：** 在 SQLite 上，调度分发进行中暂停计划任务时不再丢失暂停状态。
-  `release_dispatch_lease` 依据租约持有者做校验（暂停会清除该字段），但读取任务行时没有先获取
-  SQLite 的写锁，因此过期的读取会通过校验，并把任务状态写回 `enabled` 且不改动 `next_run_at`，
-  导致接口已回复“已暂停”的任务仍被继续触发。现在该读取会像该仓储中其他写入路径一样先获取写锁。
-  PostgreSQL 不受影响。([#5777])
-- **mcp：** MCP 延迟初始化在工具发现本身抛出 `RuntimeError`（例如
-  `McpTaskConfigurationError`）时，不再把发现流程跑两遍。`get_cached_mcp_tools()` 里的
-  `asyncio.run` 兜底只为 `get_event_loop()` 失败而设，却同时捕获了发现阶段的错误，于是在
-  放弃之前会重新拉起每一个 stdio 服务器（并重新获取 OAuth 令牌）；在运行中的事件循环里，
-  它记录的还是误导性的 "asyncio.run() cannot be called from a running event loop"
-  堆栈，而不是真正的原因。
-- **上传：** 删除已上传的文档时，不再连带删除其旁边转换生成的 Markdown。转换以文档主干名
-  命名配套文件，名称被占用时回退为 `_N` 后缀，因此文档旁的 `.md` 可能属于主干名相同的另一个
-  文档，或属于用户自己：上传 `a.docx` 与 `a.pdf` 会生成 `a.md` 与 `a_1.md`，删除 `a.pdf`
-  却会销毁 `a.docx` 的配套文件。现在配套文件会保留、继续出现在列表中，可单独删除。([#5673])
-- **nginx：** 把 600 秒读取超时扩展到其余两个会等待 Gateway 的 location，它们在线程路由的修复
-  之后仍沿用 nginx 默认的 60 秒。`/api/` 兜底 location 之后：无状态的 `POST /api/runs/wait`
-  阻塞在同一套运行完成等待上，并在客户端断开时取消该运行，因此等待超过 60 秒的 API 调用方会
-  同时收到 504 **并且**运行被取消；输入框的 `POST /api/input-polish` 则等待一次性模型调用。
-  `/api/skills` 之后：安装 `.skill` 压缩包会对其中每个文件各做一次 LLM 安全扫描，自定义技能的
-  编辑与回滚各再做一次，它们都没有自己的超时；此前只有同级的 `/api/skills/install/upload`
-  拿到了更长的超时，因此同样的安装经由 `POST /api/skills/install` 会在 60 秒失败。
-  Docker、本地开发与 Helm 配置均已应用。([#5524])
+- **前端：** 项目会话行上的 `…`（kebab）菜单不再溢出侧边栏。在侧边栏的按项目分组模式下，
+  缩进的嵌套菜单继承了 `SidebarMenu` 的 `w-full` 又额外带着 `ml-4`，实际宽度是"100% + 16px"，
+  其绝对定位的 `right-1` 操作按钮因此落到侧边栏边缘之外——活跃项目分组下的行被裁剪，Archived
+  分组下双层缩进的行则完全看不到按钮；扁平会话列表（唯一不带缩进的菜单）不受影响，这也是问题
+  此前未被发现的原因。两个嵌套菜单现在改用 `w-auto`，块级 flex 容器按"剩余宽度减去外边距"填充。
+  除布局修复本身外，行为、数据与 API 均无变化。([#5682])
+- **持久化：** 修复静默跳过了 run-change clock schema 的数据库。`0023_run_change_seq` 被插到了
+  已经发布的 `0023_user_preferences` 修订之前，因此在该修订点（或之后）盖章的数据库会把它当作
+  已应用的祖先而从不执行——`run_change_clock` 表与 `runs.change_seq` 列永久缺失，第一次删除会话
+  （任何 run-store change-clock 递增）就会以 `no such table: run_change_clock` 失败。新增的
+  `0025_repair_run_change_seq` 修订在升级时重新应用同一份带守卫的 DDL，在形态健康的库上空操作。
+  `RunChangeClockRow` 与 `UserPreferenceRow` 也已注册进 ORM 模型注册表，`create_all` 与
+  autogenerate 通过显式导入（而非模块副作用）看到所有表。([#5517])
+- **后端：** 为 LangGraph 兼容的 `POST /api/assistants/search` 增加分页校验。此前 `limit` 与
+  `offset` 直接用于 Python 切片，`offset: -1`、`limit: 0` 之类的非法值乃至过大的 limit 都会返回
+  `200` 和误导性的结果，而不是在 API 边界被拒绝。现在 `limit` 必须落在兼容范围的 1~1000 内，
+  `offset` 必须非负；非法请求返回 `422`。([#5506])
+- **模型：** Claude Code 凭据加载器现在能防护格式错误的 `claudeAiOauth` 容器。
+  `~/.claude/.credentials.json` 可能是合法 JSON 但 `claudeAiOauth` 的值不是对象——部分导出遗留的
+  `null`、原始字符串、数组或数字——此前提取器会对它调用 `.get`，从
+  `ClaudeChatModel.model_post_init` 抛出 `AttributeError` 并中断模型构造，与该模块文档声明的
+  "优雅降级"行为相反（同属模型加载器的 Codex 一侧早已对同样形态做了防护）。现在顶层 payload
+  或 `claudeAiOauth` 值不是对象时，会以 debug 级别记录并视为"此来源没有凭据"，加载流程继续尝试
+  下一个来源，所有来源都不可用时最终返回 `None`。([#5494])
+- **事件：** 删除会话时保持 DB 写锁的代际稳定。`DbRunEventStore` 用一把 `asyncio.Lock` 串行化
+  每会话的序列号分配，而 `delete_by_thread()` 只要发现 `lock.locked()` 为假就把锁从注册表移除
+  ——但 `asyncio.Lock.release()` 会先清除锁定状态、再让排队的等待者恢复运行，删除若恰好落在这个
+  交接窗口内，就会在已入队的等待者仍引用旧锁时移除注册表项。随后同一会话的新写入者会创建新一代
+  锁，两个写入者可能各持一把锁并行推进，破坏围绕 `max(seq) + INSERT` 的单进程串行化保证。现在
+  注册表改为弱引用，已入队的持锁者/等待者在自己排空之前锁仍可被发现；另用单独的强引用 pin 维持
+  正常运行中"每会话一把锁"的既有行为，删除只回收 pin。([#5462])
+- **setup：** BOM 前缀配置中的自定义 sandbox 镜像现在会生效。`setup-sandbox.sh` 用 `^sandbox:`
+  去匹配仍带着 UTF-8 BOM 的首行，匹配失败后静默选择并拉取默认镜像，而运行时 YAML 加载器其实
+  接受同一份配置。脚本现在在进入镜像选择流程前剥离首行开头的 UTF-8 BOM，未引入新的运行时依赖。
+  ([#5515])
+- **网关：** 关停时的运行排空在重复取消下得以存活。`_drain_inflight_runs()` 会对
+  `RunManager.shutdown()` 任务加 shield 并再次 await，但第二次 `Task.cancel()` 若落在第二个
+  shield 尚未完成时，会打断 helper 自身，让 lifespan 在运行任务仍在排空时继续退出——恰好重新
+  打开该排空机制要防止的资源顺序问题：checkpointer 开始拆除后，运行任务可能仍在写 checkpoint。
+  现在 helper 会强持有已启动的 shutdown 任务并反复 shield 直至其到达终态，记住首次调用方取消
+  并在有界排空完成后再传播；排空自身失败时的日志与错误行为保持不变。([#5487])
+- **模型：** Codex 的无效工具调用现在与其工具结果成对重放。Codex 模型发出 `arguments` 不是
+  合法 JSON 的 `function_call` 时并不会让本轮失败：调用被记入 `invalid_tool_calls`，由
+  `DanglingToolCallMiddleware` 以占位 `ToolMessage` 应答，模型看到的是可恢复的工具错误。但
+  Codex Responses 序列化器只对有效的 `tool_calls` 生成输入项，占位结果作为
+  `function_call_output` 到达 provider 时，同一请求里没有与之配对的 `function_call`，而
+  Responses API 要求二者成对——中间件本要恢复的那个场景反而以 provider 报错收场，而不是重试。
+  Chat Completions 系 provider 经 LangChain 转换器本就会这样重放无效调用，OpenAI 兼容路径的
+  同类失败也已在中间件层修复；现在 Codex 请求同样把 `invalid_tool_calls` 作为 `function_call`
+  输入项与有效调用并列重放。有效调用路径、解析侧与中间件均未改动。([#5509])
 - **nginx：** 需要等待模型调用的线程路由不再在 60 秒时失败。浏览器直接调用 `/api/threads/*`，
   而该 location 没有设置 `proxy_read_timeout`，因此沿用 nginx 默认的 60 秒，而 `/api/langgraph/`
   允许 600 秒。较慢的 `/compact` 会返回 504，但 Gateway 仍会继续执行并保存压缩结果，于是 UI
   对已经生效的操作显示错误，诱使用户重试并再次压缩。`/suggestions` 也受同一限制，`/runs/wait`
   则会在 nginx 断开连接时取消其运行。Docker、本地开发与 Helm 配置现在都为该 location 允许 600 秒。([#5505])
-- **中间件：** 循环检测不再中断正在分段读取文件的智能体。此前 `read_file` 调用按 200 行分桶作为
-  键，因此任何短于一个桶的读取都会与相邻读取塌缩到同一个键：连续五次 40 行读取会哈希成相同值并
-  触发硬停止，运行被迫给出最终答复并带上 `stop_reason=loop_capped`——而这恰恰是 `read_file` 自身
-  的截断提示要求模型去做的分段读取。现在键使用精确的行区间，省略 `end_line` 时保持"读到末行"的
-  开放语义，因此不带范围的读取与显式 `start_line=1` 仍共用同一个键。重复同一区间依然会在原有阈值
-  被拦下，边界抖动的读取循环仍由按工具类型计数的频率层覆盖。
-- **子智能体：** `max_turns` 现在真正表示运维人员理解的"轮次"。此前它被直接当作 LangGraph 的
-  `recursion_limit` 传入，而后者统计的是 super-step——每个图节点一步，且 `create_agent` 会为每个
-  中间件生命周期钩子编译出一个节点，因此在子智能体的中间件链上一轮要花掉 7~8 步：内置
-  `general-purpose` 的 `max_turns=150` 实际只买到约 18 轮带工具调用的轮次，随后以 `turn_capped`
-  结束；每往链上加一个中间件，有效预算还会再缩水一次。现在执行器会按实际组装出的中间件链的
-  每轮节点数来换算配置的轮次，调高 `max_turns` 就能得到它所声明的轮次。没有配置项变化；既有的
-  `max_turns` 取值现在会获得完整预算，因此原先被截断的子智能体运行可能变长，其上界仍由
-  `subagents.timeout_seconds` 与 `subagents.token_budget` 约束。
 - **middleware：** 循环检测不再中断正在分段读取文件的智能体。`read_file` 调用
   此前按 200 行的分桶建键，因此短于一个分桶的读取都会塌缩到相邻分桶上：连续
   五次 40 行的读取哈希完全相同，会触发硬停止，使 run 以强制最终答复和
@@ -816,19 +819,6 @@
   `parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
   有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
   ([#5449])
-
-- **沙箱：** AIO 的 `glob` 不再把"恰好填满"的结果报告为截断。其 `include_dirs` 分支在收集到
-  `max_results` 个匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录列表也会被标记为
-  被截断，工具据此告诉模型结果不完整。该分支本就持有整份目录列表，现在改为多看一个匹配再判断，
-  与同一函数的 `include_dirs=False` 分支一致（后者一直是按完整列表判断的）。这里涉及的只是
-  **过滤后匹配数**上限；`parse_remote_search_output` 管的是**原始输出行数**上限，是另一条限制、
-  有自己的"多放一行"记账方式，其他 provider 的过滤后匹配数上限未作改动。
-- **沙箱：** AIO 的 `grep` 与各远端 provider 的 `glob`/`grep` 不再把"恰好填满"的结果报告为截断。
-  它们本就持有整份列表——原始输出在上限之上截取并自行报告截断——但在收集到 `max_results` 个
-  过滤后的匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录也会被标记为被截断，
-  工具据此告诉模型结果不完整。现在改为多看一个匹配再判断，与 AIO 的 `glob` 两个分支一致。
-  这里涉及的只是**过滤后匹配数**上限；`parse_remote_search_output` 管的**原始输出行数**上限未作改动。
-  ([#5534])
 - **中间件：** 移除工具调用的守卫不再导致 Claude 或 OpenAI Responses 线程之后的每一轮都失败。
   token 预算与循环检测的硬停止、subagent 数量限制的截断以及安全终止抑制只清空了 `tool_calls`，
   却把 provider 自身的工具调用块留在消息 content 中。Anthropic 与 Responses API 会重新发送这些块，
@@ -898,6 +888,26 @@
   后的宿主机路径与解析后的 outputs 根目录再次比对，`outputs/` 内被植入的符号链接同样
   无法把写入重定向到别处。该规则现在收敛为一个共享 helper，IM 渠道的附件投递也走同
   一实现，两处不会再各自漂移。([#5321])
+- **网关：** 不再把调用方提供的 `deerflow_trace_id` 持久化到 run 记录上。`body.metadata`
+  会同时到达运行中的 run config（run worker 会重新盖章）和 runs API 原样回显的 run 记录，
+  此前只覆盖了前者，因此客户端可以让 run 最持久的展示面与同一请求的 `X-Trace-Id` 及日志行
+  互相矛盾。现在 id 只在信任边界处盖章一次，`config.context` 也以同样方式封堵，且会话自身
+  的 metadata 不再被写入"创建它的那个 run"的 run 作用域 id。([#5119])
+- **网关：** 在 `Access-Control-Expose-Headers` 中暴露 `X-Trace-Id`。它不在 CORS 安全列表
+  中，因此跨域拆分的浏览器客户端——同样读不到 Gateway 日志的那一方——无法读到本应写进
+  bug 报告的关联 id。([#5119])
+- **网关：** 未处理异常的 500 响应现在也携带 `X-Trace-Id`。Starlette 的
+  `ServerErrorMiddleware` 通过所有用户中间件之外的原始 send 发出这类响应，因此服务器 bug
+  的 500——最需要关联 id 的那个响应——成了唯一不带 id 的响应。`TraceMiddleware` 现在会在
+  重新抛出异常前自行发送一个携带该 header 的 500；服务端的异常日志不受影响，流中途的失败
+  也照旧传播。这一回退响应在 `CORSMiddleware` 之外发出、保持 CORS 不可读，因此跨域拆分的
+  浏览器客户端在这个响应上读不到 id——与它所替换的 `ServerErrorMiddleware` 500 一致。
+  ([#5119])
+- **网关：** 从持久化的请求回显中剔除伪造的 `deerflow_trace_id`。`body.config` 会原样存入
+  `runs.kwargs_json` 并由 runs API 返回，因此 `config.metadata` 或 `config.context` 中的
+  伪造 id 会在这一处幸存，而其他所有展示面都带着真实 id。`redact_config_secrets` 现在会把
+  该键从两个容器中剔除，`build_run_config` 则将 run metadata 合并到副本上，服务器盖章的
+  id 不再能写穿回调用方的请求体。([#5119])
 - **运行时：** 会话元数据现在仅在 run 通过启动屏障后才切换为 `running`，待取消的
   run 不再短暂呈现 `running` 状态；worker 启动期间客户端可能观察到先前的会话状态
   。([#4450])
@@ -2116,30 +2126,6 @@
 
 ### 安全
 
-- **认证：** `POST /api/v1/auth/initialize` 不再让两个并发的首次初始化请求都创建 admin。
-  此前处理器在一个会话中统计 admin 数量、在另一个会话中创建账号，因此两个使用不同邮箱的请求
-  会同时看到空系统；现在失败方会返回文档所述的 `409 system_already_initialized`。统计与插入现在
-  在同一事务内完成，并先对写入串行化（SQLite 用 `BEGIN IMMEDIATE`，PostgreSQL 用
-  advisory lock）。([#5776])
-- **上传：** 文档转换不再按文件名重新打开上传文件。此前 Gateway 转换的是已提交的文件，嵌入式
-  客户端转换的是刚放入线程 uploads 目录的副本，因此沙箱若在此期间把该文件名替换为符号链接，
-  宿主文件的内容就会被转换成该线程的 `.md` 配套文件。现在 Gateway 通过自己写入时持有的文件
-  描述符，转换 uploads 之外的私有副本；客户端则转换调用方提供的源文件。([#5611])
-- **客户端：** `DeerFlowClient.upload_files` 不再写穿符号链接。沙箱可写的 uploads 目录中，
-  若在上传文件名或其 Markdown 配套文件名处放置符号链接，嵌入式客户端此前会覆盖链接指向的宿主
-  文件并报告成功。现在该文件会被跳过并列入 `skipped_files`，`success` 为 `false`，与 Gateway
-  一致；不安全的配套文件会被省略，原上传保留。复制时保留源文件的权限位与时间戳。([#5578])
-- **上传：** 删除上传文件时不再跟随符号链接删除另一个文件。沙箱可写的 uploads 目录中若被
-  放置符号链接，`DELETE /api/threads/{id}/uploads/{filename}`（以及
-  `DeerFlowClient.delete_upload`）此前会删除链接指向的上传文件及其配套 `.md`，却仍报告
-  删除的是请求的文件名。现在符号链接返回 404，与上传列表一致；指向 uploads 目录之外的
-  链接仍以 400 拒绝。([#5547])
-- **前端：** 工具步骤不再把非 Web URL 渲染为链接。思维链面板中的 `web_fetch` URL 与
-  `web_search` / `image_search` 结果链接此前绕过了 Markdown 链接使用的协议白名单，
-  被提示注入的工具调用可在聊天中放入 `file:` 或系统协议处理程序链接（`ms-msdt:`、
-  `vscode:` 等）。现在它们会经过 `isSafeHref`，不安全的 URL 与 Markdown 链接一样显示
-  “Unsafe link omitted” 标记；缺少 args 的工具调用或非字符串的 `web_fetch` URL 也不再导致
-  消息列表崩溃。([#5526])
 - **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
   文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
   `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
@@ -2252,31 +2238,15 @@
   概念、快速上手、目录、委派用法、结果与验收、限制与容量、沙箱与隔离、可观测性、
   按症状排查、开发者集成，以及附带 2026 年 6 月至 9 月变更记录的参考附录。原单页
   成为该章节的索引页，指向该页面的已有链接保持有效；指向旧页面小节锚点的深链接
-  会落到索引页。
+  会落到索引页。([#5761])
 - **文档：** 新增中英文扩展开发手册（`harness/extensions/`），覆盖
   `deerflow-extension-api` 0.2.1 契约：何时编写扩展、快速上手、运行时模型、中间件
   放置位置、生命周期与观察者、服务与路由、运行证据读取器、扩展运维、按错误信息排查，
   以及列出全部公开名称和契约版本历史的参考章节。同时修正 `AGENTS.md` 中对贡献类型
-  和运行证据元数据脱敏的过时描述。
-- **文档：** 将扩展开发手册更新到 `deerflow-extension-api` 0.2.3 契约：新增全栈
-  插件章节，涵盖 `registry.plugin()`、浏览器模块与打包资源、后端动作、模型工具和
-  设置；新增请求级运行证据读取器及按用户的路由示例；补充插件的排查与运维说明。同时
-  修正 `docs/full-stack-plugins.md` 中插件 `mount` 返回值的描述。
-- **文档：** 新增中英文检查点存储手册（`harness/checkpoints/`），覆盖 `full` 与
-  `delta` 两种通道模式：概念、快速上手、模式标记与失败关闭门禁、快照节奏、delta
-  历史缓存、恢复与回滚的线性化、运维与保留约束、可观测性、按症状排查，以及列出全部
-  配置键、错误信息和已固定上游缺陷的参考章节。该章节为新增目录而非页面重构，原有
-  检查点相关文档保持不变。
+  和运行证据元数据脱敏的过时描述。([#5769])
 
 ### 内部改进
 
-- **依赖：** `langgraph-checkpoint` 下限提升到 `>=4.2.0,<5.0`，
-  `langgraph-checkpoint-postgres` 提升到 `>=3.1.2,<3.2`，并移除
-  `InMemorySaver` delta-history 兼容补丁。上游 4.2.0 修复了 full → delta
-  迁移后首条写入丢失（langchain-ai/langgraph#8526），postgres 新版本能定位
-  plain-value delta 种子（langchain-ai/langgraph#8535），因此由依赖下限取代
-  补丁；full → delta 迁移合约测试保留为门禁。`langgraph` 与
-  `langgraph-checkpoint-sqlite` 不变。 ([#5734])
 - **测试：** 前端单元测试迁移到 rstest，并在 DOM 环境运行 hook 级测试。([#3703]、[#4453])
 - **测试：** live client 测试要求显式 opt-in。([#4482])
 - **测试：** LLM 错误测试替身不再复用共享 `FakeError`。([#4744])
@@ -2324,6 +2294,12 @@
   E2E 运行可解析平台对应的包二进制，不再因无扩展名的 POSIX shim 失败。([#5185])
 - **测试：** Windows 上跳过 POSIX mode-bit 技能权限断言（`chmod` 契约在该平台不可
   观测），使 Windows 贡献者可以获得绿色的后端套件基线。([#5244])
+- **测试：** 针对空技能目录固定 composer 技能建议的行为（RFC #4063 Phase 4）：`skills`
+  策略不允许任何技能的调用方——或没有任何技能的全新安装——会从 `GET /api/skills` 得到
+  `[]`，此时 composer 必须降级为仅含内置命令的下拉框，而不是损坏或彻底消失。新增测试
+  驱动 matcher 并真实挂载 `InputBox`：输入 `/` 时恰好列出内置命令，输入无匹配的查询时
+  不渲染列表框。没有生产代码改动；已审计全部四处 `useSkills()` 消费方，均能优雅降级。
+  ([#5490])
 
 ## [2.0.0] — 2026-06-15
 
@@ -3552,6 +3528,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5458]: https://github.com/bytedance/deer-flow/pull/5458
 [#5459]: https://github.com/bytedance/deer-flow/pull/5459
 [#5461]: https://github.com/bytedance/deer-flow/pull/5461
+[#5462]: https://github.com/bytedance/deer-flow/pull/5462
 [#5463]: https://github.com/bytedance/deer-flow/pull/5463
 [#5465]: https://github.com/bytedance/deer-flow/pull/5465
 [#5467]: https://github.com/bytedance/deer-flow/pull/5467
@@ -3566,21 +3543,19 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5483]: https://github.com/bytedance/deer-flow/pull/5483
 [#5485]: https://github.com/bytedance/deer-flow/pull/5485
 [#5486]: https://github.com/bytedance/deer-flow/pull/5486
+[#5487]: https://github.com/bytedance/deer-flow/pull/5487
 [#5488]: https://github.com/bytedance/deer-flow/pull/5488
+[#5490]: https://github.com/bytedance/deer-flow/pull/5490
 [#5492]: https://github.com/bytedance/deer-flow/pull/5492
+[#5494]: https://github.com/bytedance/deer-flow/pull/5494
 [#5496]: https://github.com/bytedance/deer-flow/pull/5496
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
-[#5524]: https://github.com/bytedance/deer-flow/pull/5524
-[#5526]: https://github.com/bytedance/deer-flow/pull/5526
-[#5534]: https://github.com/bytedance/deer-flow/pull/5534
-[#5547]: https://github.com/bytedance/deer-flow/pull/5547
-[#5578]: https://github.com/bytedance/deer-flow/pull/5578
-[#5611]: https://github.com/bytedance/deer-flow/pull/5611
-[#5673]: https://github.com/bytedance/deer-flow/pull/5673
-[#5734]: https://github.com/bytedance/deer-flow/pull/5734
-[#5776]: https://github.com/bytedance/deer-flow/pull/5776
-[#5777]: https://github.com/bytedance/deer-flow/pull/5777
-[#5838]: https://github.com/bytedance/deer-flow/pull/5838
-[#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5506]: https://github.com/bytedance/deer-flow/pull/5506
+[#5509]: https://github.com/bytedance/deer-flow/pull/5509
+[#5515]: https://github.com/bytedance/deer-flow/pull/5515
+[#5517]: https://github.com/bytedance/deer-flow/pull/5517
+[#5682]: https://github.com/bytedance/deer-flow/pull/5682
+[#5761]: https://github.com/bytedance/deer-flow/pull/5761
+[#5769]: https://github.com/bytedance/deer-flow/pull/5769
