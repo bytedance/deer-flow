@@ -85,6 +85,13 @@ its effect on agent behavior. The private pending flag is advisory metadata, not
 a permission or trust credential. No security claim is made for auxiliary model
 calls, summaries or downstream actions.
 
+The middleware declares its policy for the host's assembly fingerprint: enabled
+state, model, threshold, excerpt limit, timeout and credential environment-variable
+name, plus SHA-256 hashes of the endpoint, screening question/criteria and warning
+text. Endpoint and prompt text are not copied into the descriptor. Credential
+values are never read by this declaration; rotating a key does not change the
+policy identity.
+
 ## Validation
 
 `backend/tests/test_jev_result_screening_extension.py` checks bounded excerpts,
@@ -92,6 +99,8 @@ copy-on-write, malformed provider responses, cancellation and local failure
 recovery. `backend/tests/test_jev_screening_pipeline.py` runs real lead/subagent
 middleware builders and LangChain graphs against a recording model, including
 error classification, PII/sanitization, budget boundaries and repeated turns.
+`backend/tests/test_jev_screening_policy.py` verifies assembly fingerprints change
+with policy settings/text and remain stable across credential rotation.
 All tests use synthetic data and offline HTTP transports.
 
 A separate paired agent replay would be needed to measure whether warnings

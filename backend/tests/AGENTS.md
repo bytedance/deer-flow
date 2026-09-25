@@ -84,3 +84,5 @@ lead/subagent graphs to a recording model; cover error metadata/receipts, budget
 PII ordering and one-time annotation, including valid empty-string message IDs.
 Only `None` awaits ID assignment. Use offline transports. Detection is not
 behavioral defense; do not infer the final model input from an isolated hook test.
+`test_jev_screening_policy.py` uses the host descriptor builder to pin policy
+identity; hash endpoint/prompt text and never project credential values.

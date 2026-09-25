@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import replace
+from hashlib import sha256
 from typing import Any
 
 import httpx
@@ -44,6 +45,10 @@ _CRITERIA = {
 }
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9._:/-]{1,64}$")
+
+
+def _question() -> dict[str, Any]:
+    return {"type": "noul", "instructions": _INSTRUCTION, "criteria": _CRITERIA}
 
 
 class Options(BaseModel):
@@ -171,6 +176,16 @@ class ScreeningMiddleware(AgentMiddleware):
         super().__init__()
         self.options = Options.model_validate(config)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Declare behavior identity without reading or exposing credentials."""
+        question = json.dumps(_question(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return {
+            **self.options.model_dump(mode="json", exclude={"endpoint"}),
+            "endpoint_sha256": sha256(self.options.endpoint.encode("utf-8")).hexdigest(),
+            "question_sha256": sha256(question.encode("utf-8")).hexdigest(),
+            "marker_sha256": sha256(_MARKER.encode("utf-8")).hexdigest(),
+        }
+
     async def _probability(self, excerpt: str) -> float | None:
         key = os.environ.get(self.options.api_key_env)
         if not key:
@@ -178,7 +193,7 @@ class ScreeningMiddleware(AgentMiddleware):
         body = {
             "model": self.options.model,
             "state": {"content": excerpt},
-            "questions": {"injection": {"type": "noul", "instructions": _INSTRUCTION, "criteria": _CRITERIA}},
+            "questions": {"injection": _question()},
         }
         try:
             async with asyncio.timeout(self.options.timeout_seconds):
