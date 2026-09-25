@@ -20,7 +20,14 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 47
+config_version: 49
+
+# Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
+# lead_prompt_overlay:
+#   prepend: "Apply our organization-wide writing conventions."
+#   append: "End reports with a concise decision summary."
+# Subagents: subagents.agents.<name>.prompt_overlay.{prepend,append}
+# DeerMem: memory.backend_config.{prompt_prepend,prompt_append}
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -1034,6 +1041,11 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
   #   # wait_for_selector_timeout_ms: 5000  # How long to wait for that selector, in milliseconds
+  #   # reject_resource_types: ["image", "media", "font"]  # Skip these resource types
+  #   # reject_request_pattern: ["\\.css$", "\\.png$"]     # Skip URLs matching these regexes
+  #   #                                    # Both accept a YAML list or a
+  #   #                                    # comma-separated string. Regexes containing
+  #   #                                    # commas must use the YAML list form.
 
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
@@ -1399,11 +1411,13 @@ loop_detection:
 # phone numbers, API keys, credit-card numbers (Luhn-validated) and national
 # IDs found in genuine user messages and remote-content tool results
 # (web_fetch / web_search / image_search / web_capture and MCP tools) are
-# rewritten to irreversible placeholders like [EMAIL_1] before they reach the
-# model. No mapping is stored, so redaction cannot be reversed. Raw text stays
-# in thread state for the UI; the memory-extraction path is not covered.
-# Compaction and configured LLM title inputs are redacted too. Existing
-# placeholders reserve indices; compacted raw identities cannot be relinked.
+# rewritten to keyed, value-derived placeholders like
+# [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
+# HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# Raw text stays in thread state for the UI; queued memory-extraction
+# payloads are redacted too. Compaction and configured LLM title inputs are
+# redacted as well; placeholders are value-derived, so an identity redacted
+# before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true
@@ -1411,6 +1425,13 @@ pii_redaction:
   # redact_credit_card: true
   # redact_phone: true
   # redact_national_id: true
+  # Required when enabled: true (non-empty, at least 16 characters) — the
+  # deployment-scoped HMAC secret for the placeholder digests. Tokens are
+  # linkable only within this deployment and cannot be re-derived offline
+  # without it. Enabling redaction without a valid secret fails config
+  # validation: an unkeyed digest would be a publicly computable, globally
+  # linkable fingerprint of the raw values (guessable for phone numbers).
+  # token_secret: change-me-to-a-long-random-string
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)
@@ -2984,6 +3005,16 @@ run_ownership:
 #       # (which models/skills the caller sees on GET /api/models and the
 #       # GET /api/skills[.../custom, /{name}] skill routes); skill
 #       # management endpoints (install/edit/export) stay admin-gated.
+#       #
+#       # Plugin resources: `plugin_actions` gates invoking a registered
+#       # backend action (POST /api/plugins/{ns}/actions/{name}), and
+#       # `plugin_management` gates an enterprise-contributed management route
+#       # that calls require_plugin_management. Targets are
+#       # "<namespace>/<action-name>" and "<namespace>/permissions.read"
+#       # / "<namespace>/permissions.write". **Omitting a key leaves that
+#       # resource unrestricted for the role**, so list it explicitly to
+#       # constrain it. Declared plugin pages are not gated yet: their
+#       # `plugin_pages` row ships with the page-authorization slice.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
@@ -2991,12 +3022,16 @@ run_ownership:
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}
+#           plugin_management: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}                 # invoke any installed action
+#           plugin_management: {allow: []}               # no management route access
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -3007,6 +3042,8 @@ run_ownership:
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
 #           skills: {allow: []}      # no skills visible in the listing
+#           plugin_actions: {allow: ["acme.reports/export"]}
+#           plugin_management: {allow: ["acme.reports/permissions.read"]}
 authorization:
   enabled: false
 
@@ -3194,6 +3231,14 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     host_access:                        # optional host-owned grants (restart required)
+#       model_invocation:
+#         roles:                          # logical role -> configured models[].name
+#           default: my-configured-model
+#         max_concurrency: 2              # shared by this installation's services
+#         timeout_seconds: 60             # includes waiting for capacity
+#         max_input_chars: 262144         # includes the response-schema instruction
+#         max_output_chars: 65536         # returned text, checked after generation
 #     table_prefix: example_ext_          # optional: table-name prefix this extension
 #                                         # owns under its own MetaData/migration chain.
 #                                         # Keeps `alembic revision --autogenerate`, run

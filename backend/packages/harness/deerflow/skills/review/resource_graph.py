@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
+from collections.abc import Set as AbstractSet
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -11,7 +13,7 @@ from deerflow.skills.review.models import make_finding, normalize_relative_path
 
 _MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+-]+")
+_PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+#-]+")
 _RESOURCE_DIRS = {"references", "scripts", "templates", "assets", "evals"}
 
 
@@ -29,7 +31,7 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
             continue
         content = str(entry.get("content") or "")
         for raw_ref in _extract_references(content):
-            resolved = _resolve_reference(path, raw_ref)
+            resolved = _resolve_reference(path, raw_ref, files.keys())
             if resolved is None:
                 continue
             if resolved == "__ESCAPES__":
@@ -96,18 +98,32 @@ _TRAILING_SENTENCE_PUNCTUATION = ".?!"
 
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
+    # Markdown link syntax fixes the fragment semantics: the text after '#'
+    # in a link target is ALWAYS a URL fragment, never part of the filename
+    # — a link to a file literally named "faq.md#pricing" would have to
+    # percent-encode it. So links always strip the fragment, and their full
+    # construct is blanked out of the residual text: the code-span and
+    # bare-path passes below are literal-path contexts where '#' may be
+    # part of a real filename, and they must never see link-internal text.
+    # Trailing sentence punctuation is still stripped here (#5739).
+    residual = content
     for match in _MARKDOWN_LINK_RE.finditer(content):
         refs.add(match.group(1).split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-    for match in _CODE_SPAN_RE.finditer(content):
+        residual = residual.replace(match.group(0), " " * len(match.group(0)))
+    for match in _CODE_SPAN_RE.finditer(residual):
         token = match.group(1).strip()
         if "/" in token:
             refs.add(token.rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-    for match in _PATH_TOKEN_RE.finditer(content):
+    for match in _PATH_TOKEN_RE.finditer(residual):
         refs.add(match.group(0).rstrip(_TRAILING_SENTENCE_PUNCTUATION))
     return refs
 
 
-def _resolve_reference(source_path: str, raw_ref: str) -> str | None:
+def _resolve_reference(
+    source_path: str,
+    raw_ref: str,
+    files: AbstractSet[str] | None = None,
+) -> str | None:
     ref = raw_ref.strip().strip("\"'")
     if not ref or ref.startswith("#") or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", ref):
         return None
@@ -117,7 +133,23 @@ def _resolve_reference(source_path: str, raw_ref: str) -> str | None:
         base = PurePosixPath(source_path).parent
         if "://" in ref:
             return None
-        candidate = (base / ref).as_posix()
-        return normalize_relative_path(candidate)
+        if "#" in ref:
+            pre_hash, fragment = ref.split("#", 1)
+            # A '..' segment in the post-'#' text must never participate in
+            # normalization: it would collapse the hash-bearing segment and
+            # retarget the edge ("faq.md#/../other.md" must resolve to
+            # faq.md). Any other fragment gets its chance first: the whole
+            # token may name a real package file — '#' is legal in file AND
+            # directory names ("references/C#.md", "references/C#/readme.md"),
+            # from nested sources too ("../C#.md"). Only when the
+            # canonicalized whole token matches no file does the suffix
+            # become a section fragment and get stripped.
+            if "/.." in f"/{fragment}" or fragment.startswith(".."):
+                ref = pre_hash
+            elif files is not None and posixpath.normpath((base / ref).as_posix()) in files:
+                return normalize_relative_path((base / ref).as_posix())
+            else:
+                ref = pre_hash
+        return normalize_relative_path((base / ref).as_posix())
     except ValueError:
         return "__ESCAPES__"

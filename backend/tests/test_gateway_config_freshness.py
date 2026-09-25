@@ -13,6 +13,7 @@ runtime ``ContextVar`` override must keep working for per-request injection.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -20,10 +21,12 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+import deerflow.config.app_config as app_config_module
 from app.gateway import deps as gateway_deps
 from app.gateway.deps import get_config
 from deerflow.config.app_config import (
     AppConfig,
+    get_app_config,
     pop_current_app_config,
     push_current_app_config,
     reset_app_config,
@@ -96,6 +99,100 @@ def test_get_config_reflects_file_mtime_reload(tmp_path, monkeypatch):
     os.utime(config_file, (future_mtime, future_mtime))
 
     assert client.get("/probe").json() == {"log_level": "debug"}
+
+
+def _install_edit_during_load(monkeypatch, config_file: Path, *, log_level: str) -> None:
+    """Rewrite ``config_file`` once, from inside the next config load.
+
+    ``AppConfig._check_config_version`` runs after the YAML has been parsed and
+    before the loader records its cache metadata, so an edit written there
+    lands in exactly the window between "content parsed" and "signature
+    recorded".
+    """
+    original = AppConfig._check_config_version.__func__
+    fired = False
+
+    def racy(cls, config_data, resolved_path):
+        nonlocal fired
+        if not fired:
+            fired = True
+            _write_config_yaml(config_file, log_level=log_level)
+        return original(cls, config_data, resolved_path)
+
+    monkeypatch.setattr(AppConfig, "_check_config_version", classmethod(racy))
+
+
+def test_edit_landing_during_load_is_applied_on_the_next_call(tmp_path, monkeypatch):
+    """An edit that lands while the previous edit is being loaded must not be lost.
+
+    The loader used to parse the file and then hash the file again to record
+    the cache signature. A write between those two reads left the cache holding
+    the older content under the newer content's signature, so ``get_app_config``
+    saw "unchanged" forever after and the edit only surfaced on the *next* edit.
+    """
+    config_file = tmp_path / "config.yaml"
+    _write_config_yaml(config_file, log_level="info")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_file))
+    assert get_app_config().log_level == "info"
+
+    _write_config_yaml(config_file, log_level="warning")  # edit #1: triggers a reload
+    _install_edit_during_load(monkeypatch, config_file, log_level="debug")  # edit #2: lands mid-load
+
+    assert get_app_config().log_level == "warning"  # the load that was in flight parsed edit #1
+    assert get_app_config().log_level == "debug"  # edit #2 must be visible on the very next call
+
+
+def test_recorded_signature_is_the_signature_of_the_parsed_content(tmp_path, monkeypatch):
+    """The cache metadata must describe the bytes that were parsed, not whatever is on disk afterwards."""
+    config_file = tmp_path / "config.yaml"
+    _write_config_yaml(config_file, log_level="info")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_file))
+    assert get_app_config().log_level == "info"
+
+    _write_config_yaml(config_file, log_level="warning")
+    parsed_bytes = config_file.read_bytes()
+    _install_edit_during_load(monkeypatch, config_file, log_level="debug")
+
+    assert get_app_config().log_level == "warning"
+
+    recorded = app_config_module._app_config_signature
+    assert recorded is not None
+    assert recorded[1] == len(parsed_bytes)
+    assert recorded[2] == hashlib.sha256(parsed_bytes).hexdigest()
+    assert recorded != app_config_module._get_config_signature(config_file)  # disk already holds edit #2
+
+
+def test_parsed_content_is_the_signed_content_even_across_an_edit_and_revert(tmp_path, monkeypatch):
+    """Signing the file before parsing it is not enough: the parsed bytes must *be* the signed bytes.
+
+    A loader that hashes the file, then re-opens it to parse, can parse a
+    revision it never signed. If that revision is then reverted, the disk
+    matches the recorded signature again and the stale parse is served
+    forever. Reading once and parsing those bytes makes the scenario moot.
+    """
+    config_file = tmp_path / "config.yaml"
+    _write_config_yaml(config_file, log_level="info")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_file))
+    assert get_app_config().log_level == "info"
+
+    _write_config_yaml(config_file, log_level="warning")  # edit #1: triggers a reload
+    real_read = app_config_module._read_config_with_signature
+    fired = False
+
+    def read_then_edit(path):
+        nonlocal fired
+        result = real_read(path)
+        if not fired:  # edit #2 lands right after the signed read, before parsing
+            fired = True
+            _write_config_yaml(config_file, log_level="debug")
+        return result
+
+    monkeypatch.setattr(app_config_module, "_read_config_with_signature", read_then_edit)
+
+    assert get_app_config().log_level == "warning"  # what was signed is what was parsed
+
+    _write_config_yaml(config_file, log_level="warning")  # edit #3 reverts edit #2; disk matches the recorded signature again
+    assert get_app_config().log_level == "warning"  # correct for the disk; a re-reading loader would serve "debug" here forever
 
 
 def test_get_config_respects_runtime_context_override(tmp_path, monkeypatch):

@@ -4,6 +4,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
 from deerflow_extension_api import (
+    EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY,
+    EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY,
     EXTENSION_PRINCIPAL_RESOLVER_KEY,
     RUN_EVIDENCE_READER_RESOLVER_KEY,
     ExtensionPrincipal,
@@ -81,6 +83,84 @@ _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 # The retrieval index is derived state, so shutdown only waits briefly for its
 # startup rebuild. The canonical memory flush keeps its full configured budget.
 _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+
+
+def _installed_plugin_namespace(request: Request, namespace: str) -> bool:
+    """True when *namespace* is a plugin installed for this app instance."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    loaded = getattr(state, "extensions", None)
+    for _, plugin in getattr(loaded, "plugins", ()):
+        if plugin.namespace == namespace:
+            return True
+    return False
+
+
+def _resolve_extension_plugin_management(request: Request, namespace: str, scope: str = "read") -> bool | None:
+    """Answer a contributed route's ``plugin_management`` question (sync callers).
+
+    ``None`` means the host cannot answer — an unknown plugin or an anonymous
+    caller — and the public helper turns that into a denial. ``True``/``False``
+    are decisions: ``True`` when authorization is disabled, so a deployment that
+    turns authorization off does not start 403-ing enterprise routes, and
+    ``False`` for a policy denial or a configuration that cannot be read (that
+    resolution layer is fail-closed).
+
+    Runs in the caller's thread: a FastAPI ``def`` endpoint is executed in the
+    thread pool, which is where a synchronous caller legitimately lives. An
+    async endpoint must use :func:`_resolve_extension_plugin_management_async`.
+    """
+    from app.gateway.authz import _PluginAuthorizationUnavailable, resolve_plugin_authorization
+    from deerflow.authz.plugin_authz import PluginAuthorizationError, enforce_plugin_management
+
+    if not _installed_plugin_namespace(request, namespace):
+        return None
+    try:
+        provider, principal, app_config = resolve_plugin_authorization(request)
+    except _PluginAuthorizationUnavailable as unavailable:
+        return not unavailable.fail_closed
+    if provider is None:
+        return True
+    if principal is None:
+        return None
+    try:
+        enforce_plugin_management(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            write=scope == "write",
+            provider=provider,
+        )
+    except PluginAuthorizationError:
+        return False
+    return True
+
+
+async def _resolve_extension_plugin_management_async(request: Request, namespace: str, scope: str = "read") -> bool | None:
+    """Async counterpart of :func:`_resolve_extension_plugin_management`."""
+    from app.gateway.authz import _PluginAuthorizationUnavailable, aresolve_plugin_authorization
+    from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_management
+
+    if not _installed_plugin_namespace(request, namespace):
+        return None
+    try:
+        provider, principal, app_config = await aresolve_plugin_authorization(request)
+    except _PluginAuthorizationUnavailable as unavailable:
+        return not unavailable.fail_closed
+    if provider is None:
+        return True
+    if principal is None:
+        return None
+    try:
+        await aenforce_plugin_management(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            write=scope == "write",
+            provider=provider,
+        )
+    except PluginAuthorizationError:
+        return False
+    return True
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -843,6 +923,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         )
 
     setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, _resolve_extension_principal)
+
+    # Contributed management routes ask the same provider the tool path uses,
+    # through a neutral ``bool | None`` answer. The host owns plugin-namespace
+    # validation and the request-scoped provider; the handler only asks.
+    setattr(app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY, _resolve_extension_plugin_management)
+    setattr(app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY, _resolve_extension_plugin_management_async)
 
     def _resolve_extension_run_evidence_reader(request):
         """Bind evidence access to the principal stamped by AuthMiddleware."""

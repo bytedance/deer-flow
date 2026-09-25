@@ -231,9 +231,11 @@ These apply repo-wide; module guides own the module-specific detail.
   relying on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
-  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
-  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
-  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
+  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
+  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
+  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
+  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
   `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

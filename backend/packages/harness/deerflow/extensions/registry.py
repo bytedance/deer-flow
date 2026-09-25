@@ -26,6 +26,8 @@ from deerflow_extension_api import (
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
 
+from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
+
 _Entry = tuple[str, Any]
 
 
@@ -83,16 +85,20 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._routers: list[_Entry] = []
         self._plugins: list[_Entry] = []
         self._current_source: str | None = None
+        self._model_access: ModelInvocationScope | None = None
 
     @contextmanager
-    def attributed_to(self, source: str) -> Iterator[None]:
+    def attributed_to(self, source: str, *, model_access: ModelInvocationScope | None = None) -> Iterator[None]:
         """Attribute everything registered inside the block to ``source``."""
         previous = self._current_source
+        previous_access = self._model_access
         self._current_source = source
+        self._model_access = model_access
         try:
             yield
         finally:
             self._current_source = previous
+            self._model_access = previous_access
 
     def _source(self) -> str:
         if self._current_source is None:
@@ -154,6 +160,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._context_compaction_observers.append((self._source(), observer))
 
     def service(self, service: ExtensionService) -> None:
+        if self._model_access is not None:
+            service = ModelInvocationService(service, self._model_access)
         self._services.append((self._source(), service))
 
     def routers(self, routers: Sequence[Any]) -> None:
