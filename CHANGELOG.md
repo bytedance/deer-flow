@@ -957,6 +957,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **config:** A `config.yaml` edit that lands while the previous edit is still
+  being loaded is no longer lost until the next edit. `get_app_config()`'s
+  loader parsed the file and then hashed it again to record the cache
+  signature, so a write between those two reads left the cache holding the
+  older content under the newer content's signature — a state the signature
+  comparison can never detect. The loader now reads the file once and signs
+  the bytes it parsed; a write that races the load just triggers one more
+  reload on the next call.
 - **scheduler:** Pausing a scheduled task no longer loses the pause when a
   dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
   owner — which pausing clears — but read the row without taking SQLite's

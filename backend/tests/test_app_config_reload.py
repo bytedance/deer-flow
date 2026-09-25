@@ -487,8 +487,17 @@ def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp
             assert current_signature is not None
             return (initial_signature[0], initial_signature[1], current_signature[2])
 
+        real_read_config_with_signature = app_config_module._read_config_with_signature
+
+        def stale_metadata_reader(path: Path):
+            # The loader signs the bytes it parses; on a mount with stale
+            # metadata its stat sees the same stale mtime/size as the probe.
+            data, current_signature = real_read_config_with_signature(path)
+            return data, (initial_signature[0], initial_signature[1], current_signature[2])
+
         monkeypatch.setattr(app_config_module, "_get_config_mtime", lambda _path: initial_mtime)
         monkeypatch.setattr(app_config_module, "_get_config_signature", stale_metadata_signature)
+        monkeypatch.setattr(app_config_module, "_read_config_with_signature", stale_metadata_reader)
 
         reloaded = get_app_config()
         assert reloaded.models[0].name == "model-b"
