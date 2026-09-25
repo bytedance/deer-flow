@@ -1345,8 +1345,9 @@ framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, o
 libraries they import.
 The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
 contributes one such middleware at the visible tool position. After operator opt-in it
-classifies the redacted text a remote tool result shows the model and adds an advisory
-warning through a lifecycle state update; it imports only the extension contract.
+classifies the sanitized text a remote tool result shows the model, PII-redacted when
+`pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
+update; it imports only the extension contract.
 
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
