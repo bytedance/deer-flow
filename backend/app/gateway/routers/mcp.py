@@ -37,6 +37,8 @@ from deerflow.mcp.commit import (
     MCPCommitOutcomeUnknownError,
     MCPCommittedNotReconciledError,
     MCPCommittedReloadFailedError,
+    MCPCommittedTaskConfigConflictError,
+    MCPConfigWriteError,
     commit_extensions_config,
     validate_previous_config_lenient,
 )
@@ -1230,6 +1232,21 @@ def _raise_mcp_task_config_conflict(exc: McpTaskConfigurationError) -> NoReturn:
     ) from None
 
 
+def _invalidate_after_failed_fence(exc: MCPConfigWriteError) -> NoReturn:
+    """Conservatively invalidate local MCP state after a committed-but-unfenced write.
+
+    Runs with every config-write lock released. The frozen-task conflict is
+    converted back to its established 409 detail *after* invalidation; every
+    other committed-but-unreconciled failure propagates as-is. Either way the
+    local pool/cache is retired first, so the response never reports the
+    conflict while leaving an old session usable.
+    """
+    force_local_mcp_invalidation()
+    if isinstance(exc, MCPCommittedTaskConfigConflictError):
+        _raise_mcp_task_config_conflict(exc.task_error)
+    raise exc
+
+
 def _lenient_previous_mcp_config(raw_data: dict) -> ExtensionsConfig | None:
     """Validate the pre-mutation document, or ``None`` when it is unverifiable.
 
@@ -1277,9 +1294,16 @@ def _fence_mcp_reconciliation(committed: CommittedMcpRevision) -> Any:
     try:
         return prepare_mcp_reconciliation_from_revision(committed)
     except McpTaskConfigurationError as exc:
-        # Pre-empted by ``_validate_mcp_task_config_candidate`` before the commit
-        # in every helper here; raised for the documented 409 contract.
-        _raise_mcp_task_config_conflict(exc)
+        # The candidate was validated against the frozen task snapshot *before*
+        # the commit, but the snapshot is process-global: it can change between
+        # that pre-check and this fence. The write has already landed, so this
+        # must reach the caller through the conservative-invalidation path
+        # (``_invalidate_after_failed_fence``) rather than as a bare 409 that
+        # would leave the committed change unfenced.
+        raise MCPCommittedTaskConfigConflictError(
+            "MCP configuration was committed to disk but the local reconciliation fence rejected it against the frozen durable-task snapshot",
+            task_error=exc,
+        ) from exc
     except Exception as exc:
         raise MCPCommittedNotReconciledError(
             "MCP configuration was committed to disk but the local reconciliation fence failed; the caller must conservatively invalidate local MCP state",
@@ -1382,11 +1406,10 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[st
             # execution aligned after extensions_config.json changes.
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(config_data)
-    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError) as exc:
         # Locks are already released here: the conservative invalidation waits
         # for the retired pool's teardown and must never run under the write lock.
-        force_local_mcp_invalidation()
-        raise
+        _invalidate_after_failed_fence(exc)
     finally:
         finish_mcp_reconciliation(pending_reconciliation)
     return payload, None
@@ -1444,11 +1467,10 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> tuple[d
             pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
-    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError) as exc:
         # Locks are already released here: the conservative invalidation waits
         # for the retired pool's teardown and must never run under the write lock.
-        force_local_mcp_invalidation()
-        raise
+        _invalidate_after_failed_fence(exc)
     finally:
         finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed
@@ -1549,11 +1571,10 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> tuple[dict, set[s
             pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
-    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError) as exc:
         # Locks are already released here: the conservative invalidation waits
         # for the retired pool's teardown and must never run under the write lock.
-        force_local_mcp_invalidation()
-        raise
+        _invalidate_after_failed_fence(exc)
     finally:
         finish_mcp_reconciliation(pending_reconciliation)
     return payload, added_names
@@ -1598,11 +1619,10 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> tuple
             pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
-    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError) as exc:
         # Locks are already released here: the conservative invalidation waits
         # for the retired pool's teardown and must never run under the write lock.
-        force_local_mcp_invalidation()
-        raise
+        _invalidate_after_failed_fence(exc)
     finally:
         finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed
@@ -1641,11 +1661,10 @@ def _apply_mcp_server_delete(server_name: str) -> tuple[dict, set[str]]:
             pending_reconciliation = _fence_mcp_reconciliation(committed)
             _reload_mcp_config_after_fence()
             payload = _mcp_server_responses_from_raw(raw_data)
-    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
+    except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError) as exc:
         # Locks are already released here: the conservative invalidation waits
         # for the retired pool's teardown and must never run under the write lock.
-        force_local_mcp_invalidation()
-        raise
+        _invalidate_after_failed_fence(exc)
     finally:
         finish_mcp_reconciliation(pending_reconciliation)
     return payload, changed

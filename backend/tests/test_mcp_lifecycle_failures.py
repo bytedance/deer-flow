@@ -22,6 +22,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 import deerflow.mcp.cache as cache_module
 from app.gateway.routers import mcp as mcp_router
@@ -54,7 +55,7 @@ from deerflow.mcp.session_pool import (
     normalized_connection_fingerprint,
     reset_session_pool,
 )
-from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
+from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, set_mcp_task_config_snapshot
 
 _MISSING = object()
 
@@ -820,3 +821,36 @@ def test_fence_failure_invalidates_outside_the_config_lock(cache_globals, monkey
     assert get_session_pool() is not pool
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
+
+
+def test_task_config_conflict_escaping_the_fence_still_invalidates(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """F2: a ``McpTaskConfigurationError`` from the fence must not skip invalidation.
+
+    The frozen durable-task 409 is raised for a write that has *already*
+    committed, so the local pool must be conservatively invalidated on the way
+    out. Mapping straight to 409 (the pre-fix behaviour) leaves the committed
+    change unfenced and an old session usable.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    session_b = _open_session(owner_loop, pool, "B")
+    _allow_router_admin(monkeypatch)
+
+    def _conflict(_committed):
+        raise McpTaskConfigurationError("frozen task config changed", changed_servers=("A",))
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _conflict)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(delete_mcp_server(None, "A"))
+
+    assert excinfo.value.status_code == 409
+    assert "MCP task-enabled server configuration changed" in excinfo.value.detail
+    # Conservative invalidation: no session may survive the committed write.
+    assert cache_module._cache_initialized is False
+    assert get_session_pool() is not pool
+    assert session_a.closed is True
+    assert session_b.closed is True

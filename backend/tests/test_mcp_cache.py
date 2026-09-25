@@ -1427,6 +1427,8 @@ class TestLazyInitializationFailure:
 
         assert len(calls) == 1
         assert cache_module._cache_initialized is True
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 / Task 7: shared lifecycle publish gate
 # ---------------------------------------------------------------------------
@@ -1572,7 +1574,7 @@ def test_legacy_none_lifecycle_during_discovery_still_publishes(cache_globals, m
 def test_config_revision_only_commit_during_discovery_still_publishes(cache_globals, monkeypatch, tmp_path):
     """``configRevision`` is not lifecycle identity (spec section 12 D3-2).
 
-    A concurrent skills-router commit during discovery advances only
+    A concurrent skills-only commit (the shape the skills router writes) advances only
     ``configRevision``: the effective MCP content and the lifecycle identity are
     unchanged, so the discovery result must still publish and the pool must not
     be retired.
