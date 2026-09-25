@@ -30,6 +30,7 @@ from deerflow.config.mcp_tasks_config import McpTasksConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.config.progress_scoring_config import ProgressScoringConfig
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
@@ -273,6 +274,7 @@ class AppConfig(BaseModel):
         ),
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
+    progress_scoring: ProgressScoringConfig = Field(default_factory=ProgressScoringConfig, description="LLM-scored progress evaluation middleware configuration (experimental, #2805)")
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")

@@ -1445,6 +1445,27 @@ pii_redaction:
 #     - task
 
 # ============================================================================
+# Progress Scoring Configuration (issue #2805, experimental)
+# ============================================================================
+# LLM-scored progress-aware loop detection. The model appends a compact
+# self-evaluation (task_progress / tool_usefulness, 0-3) after tool results;
+# the harness cross-checks those scores against objective signals (repeated
+# tool calls, repeated result hashes, unchanged status/error signatures).
+# When a sliding window is stagnant, a replan-required hint is injected at the
+# next model call — this middleware never hard-stops; repeated-call hard stops
+# remain loop_detection's job. Default-off until benchmarked against the
+# existing guards (see the issue's decision gate).
+
+# progress_scoring:
+#   enabled: false
+#   window_size: 8                 # Steps (model turns with tool results) per sliding window
+#   min_evals: 3                   # Valid self-evaluations required before a stagnation decision
+#   progress_floor: 1.0            # Window-average task_progress below this = low progress
+#   rearm_progress: 2.0            # Window average at/above this re-arms the intervention
+#   repetition_threshold: 0.6      # Repeated tool-call / result-hash share that counts as high repetition
+#   max_tracked_threads: 100
+
+# ============================================================================
 # Read-Before-Write File Gate (issue #3857)
 # ============================================================================
 # Blocks write_file (append / overwrite of an existing file) and str_replace
