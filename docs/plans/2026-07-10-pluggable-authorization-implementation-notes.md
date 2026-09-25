@@ -579,6 +579,53 @@ Phase 1 最低验证要求：
 - **兼容性：** 同步 hook 路径行为不变（决策映射仅异步构造）；`SkillToolPolicyMiddleware`
   新参数默认 `None`；`describe_skill` 对 `invoke` 调用方（既有测试）保持同步语义。
 
+### 2026-09-25 — PR #4541 规范技能名：授权目标统一为注册表 `Skill.name`
+
+- **背景：** review（ShenAC-SAC，P2）发现路径推导名与声明名不一致：bundled 技能目录名
+  可不同于 SKILL.md 声明的 `name`（`skills/public/vercel-deploy-claimable` 声明
+  `vercel-deploy`），而 Layer 1、slash 激活、`describe_skill` 授权的都是声明名。
+  ① read 盖章路径（同步 `_stamp_skill_read_metadata` / 异步 `_amaybe_stamp`）用
+  `_skill_name_from_path()`（目录 basename）做 `skill:activate` 目标——RBAC
+  `allow: ["vercel-deploy"]` 下读取被误盖 `skill_context_denied`；② 异步决策预计算 map
+  的键同样用路径推导名（slash 来源 + 持久化 `entry["name"]`，后者本身由
+  `extract_skills` 按 path 盖章、必然是路径名），而消费点 `_active_skills_for_paths` /
+  `_in_context_secret_sources` 查的是注册表解析出的 `skill.name`——map miss 回退
+  worker 线程里的同步 `authorize()`（`_AsyncOnlyProvider` 下直接 fail-closed 丢工具，
+  且破坏上一轮消除同步回落的成果）。
+- **决策（共享注册表解析）：** 新增 `deerflow/skills/container_registry.py`：
+  `build_container_path_registry(storage)`（规范化容器 SKILL.md 路径 → live `Skill`，
+  `enabled_only=False`）与 `canonical_skill_name(registry, path)`。三个中间件
+  （activation / tool-policy / tool-error-handling）统一经它把路径解析为声明名。
+- **决策（盖章路径）：** `ToolErrorHandlingMiddleware` 新增 `user_id`（经
+  `_build_runtime_middlewares` → lead `build_middlewares` / subagent builder 穿入，
+  与另两个技能中间件同一 storage 解析顺序——user-scoped 优先）。同步路径在
+  `_canonical_skill_name()` 中解析（registry 失败或路径未解析 → 回退路径名，未解析路径
+  的下游消费本就按同一 registry 跳过）；异步路径 `asyncio.to_thread` 解析后于 loop 上
+  `await skill_activation_allowed_async(...)`。
+- **决策（决策 map 键）：** `SkillToolPolicyMiddleware` 异步 hook 改三段式：
+  to_thread 加载 registry 并把策略路径规范名化（`_resolve_policy_registry`）→ loop 上
+  `aauthorize()` 批量预计算（`_collect_activation_decisions(names)` 只收规范名）→
+  to_thread 过滤并复用同一 registry（整 hook 一次 skill-tree 扫描）。slash 来源不再
+  basename 推导，持久化条目一律取 `entry["path"]` 解析（不信任 `entry["name"]`），
+  `_entry_names` 删除。`SkillActivationMiddleware` 同理：候选收集拆为
+  `_candidate_activation_targets()`（slash 名——本就是注册表名 + 条目路径，loop-safe），
+  `awrap_model_call` 先 to_thread 规范名化（`_canonical_names_for_paths`）再预计算。
+- **否决方案：** 不在 `extract_skills` 盖章时把 `entry["name"]` 改写为声明名（渲染层
+  展示名与路径一致有其意义，且历史条目仍需注册表解析，改写只修新条目不修存量）；
+  不在 map 里同时预计算"路径名 + 声明名"两个键（掩盖键错配而非消除，同步回落仍可能
+  命中错误键）。
+- **证据：** 新增 5 个回归（`tests/test_skills_authorization.py` 45→50）：同步盖章断言
+  provider 目标为声明名（`sync_calls == ["vercel-deploy"]`）；RBAC allow 声明名 → 激活 /
+  allow 目录名 → 拒绝（双向钉死经注册表解析）；异步盖章 `_AsyncOnlyProvider` 下
+  `async_calls == ["vercel-deploy"]` 且条目盖章（同步回退会 fail-closed 出拒绝标记）；
+  组合路径（async slash 激活 → tool-policy）`async_calls` 恰为声明名×2、`bash` 保留
+  （回退同步 API 则 fail-closed 丢 `bash`）；持久化条目（路径名盖章的历史形态）经
+  注册表规范名化后秘密绑定仍生效（路径名键 → map miss → 同步回退 → 绑定丢失）。
+  三处突变（盖章路径名、tool-policy map 键、activation 条目名）逐一还原均有测试失败。
+- **兼容性：** 授权禁用时零新增开销（`skill_authorization is None` 不触达 registry）；
+  `ToolErrorHandlingMiddleware.user_id` 与两个 builder 的新参数默认 `None`；
+  未解析路径回退路径名（与旧行为一致）；同步 hook 路径语义不变。
+
 ### 新记录模板
 
 ```markdown

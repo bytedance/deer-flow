@@ -1699,7 +1699,7 @@ def test_async_tool_policy_uses_aauthorize(monkeypatch, tmp_path):
     request = SimpleNamespace(state={"skill_context": [{"name": "demo-skill", "path": skill_path}]})
 
     async def _run():
-        return await middleware._collect_activation_decisions(request)
+        return await middleware._collect_activation_decisions(["demo-skill"])
 
     decisions = asyncio.run(_run())
     assert decisions == {"demo-skill": True}
@@ -1719,6 +1719,258 @@ def test_async_tool_policy_uses_aauthorize(monkeypatch, tmp_path):
 
     kept = [getattr(t, "name", None) for t in filtered.tools]
     assert kept == ["bash", "read_file"]
+
+
+# ── Canonical skill names: Skill.name != directory name ───────────────
+#
+# Bundled skills may declare a name that differs from their directory
+# (``skills/public/vercel-deploy-claimable/SKILL.md`` declares ``name:
+# vercel-deploy``). Layer 1, slash activation, and describe_skill authorize
+# the declared ``Skill.name``; every runtime gate that starts from a path
+# must resolve it through the same registry before asking the provider.
+
+
+def _mismatched_skill(tmp_path):
+    """Bundled-skill shape: directory name differs from the declared name."""
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "vercel-deploy-claimable"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: Deploy stuff\n---\n# vercel-deploy\nbody", encoding="utf-8")
+    return SkillObject(
+        name="vercel-deploy",
+        description="Deploy stuff",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("vercel-deploy-claimable"),
+        category=SkillCategory.PUBLIC,
+        enabled=True,
+        allowed_tools=("bash",),
+    )
+
+
+def _patch_registry_storage(monkeypatch, middleware_cls, skills, container_root="/mnt/skills"):
+    monkeypatch.setattr(
+        middleware_cls,
+        "_storage",
+        lambda self: SimpleNamespace(
+            load_skills=lambda *, enabled_only: list(skills),
+            get_container_root=lambda: container_root,
+        ),
+    )
+
+
+def test_skill_read_stamp_authorizes_declared_name_not_directory(tmp_path, monkeypatch):
+    """[P2 regression] The stamp gate resolves the read path through the
+    registry and authorizes the declared Skill.name — never the directory
+    basename the path would suggest."""
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    skill = _mismatched_skill(tmp_path)
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    _patch_registry_storage(monkeypatch, ToolErrorHandlingMiddleware, [skill])
+    middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+
+    request, message = _read_call_and_message("/mnt/skills/public/vercel-deploy-claimable/SKILL.md")
+    stamped = middleware._stamp_skill_read_metadata(message, request, tool_name="read_file")
+
+    # The provider saw the declared name, and the read activates the skill.
+    assert provider.sync_calls == ["vercel-deploy"]
+    assert SKILL_CONTEXT_DENIED_KEY not in stamped.additional_kwargs
+    assert SKILL_CONTEXT_ENTRY_KEY in stamped.additional_kwargs
+
+
+def test_skill_read_stamp_rbac_allowed_read_activates_mismatched_skill(tmp_path, monkeypatch):
+    """[P2 regression] RBAC allow: ["vercel-deploy"] — a read of the advertised
+    container path activates; allow: ["vercel-deploy-claimable"] (directory
+    name) does not, because the decision is keyed by the declared name."""
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    skill = _mismatched_skill(tmp_path)
+
+    def _stamped_with(provider):
+        resolved = _resolved_skill_authorization(provider, fail_closed=True)
+        _patch_registry_storage(monkeypatch, ToolErrorHandlingMiddleware, [skill])
+        middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+        request, message = _read_call_and_message("/mnt/skills/public/vercel-deploy-claimable/SKILL.md")
+        return middleware._stamp_skill_read_metadata(message, request, tool_name="read_file")
+
+    allowed = _stamped_with(_rbac_provider({"user": {"skills": {"allow": ["vercel-deploy"]}}}))
+    assert SKILL_CONTEXT_ENTRY_KEY in allowed.additional_kwargs
+    assert SKILL_CONTEXT_DENIED_KEY not in allowed.additional_kwargs
+
+    denied = _stamped_with(_rbac_provider({"user": {"skills": {"allow": ["vercel-deploy-claimable"]}}}))
+    assert SKILL_CONTEXT_ENTRY_KEY not in denied.additional_kwargs
+    assert denied.additional_kwargs.get(SKILL_CONTEXT_DENIED_KEY) is True
+
+
+def test_async_stamp_path_authorizes_declared_name(tmp_path, monkeypatch):
+    """[P2 regression] The async stamp path canonicalizes off-loop and awaits
+    aauthorize() for the declared name — a loop-affine provider sees exactly
+    that target, and an allowed read still yields an entry (not a fail-closed
+    denial marker from a synchronous authorize() fallback)."""
+    import asyncio
+
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    skill = _mismatched_skill(tmp_path)
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    _patch_registry_storage(monkeypatch, ToolErrorHandlingMiddleware, [skill])
+    middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+
+    request, message = _read_call_and_message("/mnt/skills/public/vercel-deploy-claimable/SKILL.md")
+
+    async def _run():
+        return await middleware._amaybe_stamp(message, request)
+
+    stamped = asyncio.run(_run())
+    assert provider.async_calls == ["vercel-deploy"]
+    assert SKILL_CONTEXT_ENTRY_KEY in stamped.additional_kwargs
+    assert SKILL_CONTEXT_DENIED_KEY not in stamped.additional_kwargs
+
+
+def test_async_slash_to_tool_policy_uses_declared_name(tmp_path, monkeypatch):
+    """[P2 regression] Composed async slash activation → tool-policy with
+    Skill.name != directory name: the decision maps are keyed by the declared
+    name resolved from the registry, the loop-affine provider answers every
+    check through aauthorize() (a map miss would fall back to the sync API and
+    fail closed, dropping the skill's tools), and the allowed skill keeps its
+    declared allowed-tools."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+
+    skill = _mismatched_skill(tmp_path)
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+    _patch_registry_storage(monkeypatch, SkillToolPolicyMiddleware, [skill])
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    token = "test-token"
+    activation = SkillActivationMiddleware(
+        available_skills={"vercel-deploy"},
+        skill_authorization=resolved,
+        slash_source_owner_token=token,
+    )
+    policy = SkillToolPolicyMiddleware(
+        available_skills={"vercel-deploy"},
+        slash_source_owner_token=token,
+        skill_authorization=resolved,
+    )
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    run_context: dict = {}
+
+    async def _identity(prepared):
+        return prepared
+
+    # Turn 1: the user slash-activates /vercel-deploy. The activation
+    # middleware resolves the skill by its declared name and records the
+    # canonical container path on the run context.
+    activation_request = _Request(
+        messages=[HumanMessage(content="/vercel-deploy deploy it")],
+        state={},
+        runtime=SimpleNamespace(context=run_context),
+    )
+    prepared = asyncio.run(activation.awrap_model_call(activation_request, _identity))
+    assert any(is_slash_activation_reminder(m) for m in prepared.messages)
+
+    # Turn 2 (tool loop): the tool-policy middleware picks the slash source up
+    # from the shared run context and re-authorizes before applying the
+    # skill's allowed-tools declaration.
+    policy_request = _Request(
+        messages=[],
+        state={},
+        tools=[SimpleNamespace(name="bash"), SimpleNamespace(name="read_file")],
+        runtime=SimpleNamespace(context=run_context),
+    )
+    filtered = asyncio.run(policy.awrap_model_call(policy_request, _identity))
+
+    assert provider.async_calls == ["vercel-deploy", "vercel-deploy"]
+    assert "vercel-deploy-claimable" not in provider.async_calls
+    kept = [getattr(t, "name", None) for t in filtered.tools]
+    assert kept == ["bash", "read_file"]
+
+
+def test_async_secret_binding_canonicalizes_persisted_entry_paths(tmp_path, monkeypatch):
+    """[P2 regression] A persisted skill_context entry whose stamped name is
+    path-derived (directory != declared Skill.name) is canonicalized through
+    the registry before the async decision map is built: the loop-affine
+    provider answers for the declared name and the entry's declared secrets
+    still bind. A path-derived map key would miss and fall back to the sync
+    API from the worker thread, failing closed and dropping the binding."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+
+    skill = _mismatched_skill(tmp_path)
+    object.__setattr__(skill, "required_secrets", [SimpleNamespace(name="API_KEY", optional=False)])
+    object.__setattr__(skill, "secrets_autonomous", True)
+
+    storage = SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill],
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"vercel-deploy"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    skill_path = posixpath_normpath(skill.get_container_file_path("/mnt/skills"))
+    # The stamped entry name is the directory name — the historical shape.
+    run_context = {"secrets": {"API_KEY": "secret-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="deploy the thing")],
+        state={"skill_context": [{"name": "vercel-deploy-claimable", "path": skill_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    assert provider.async_calls == ["vercel-deploy"]
+    assert "vercel-deploy-claimable" not in provider.async_calls
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"API_KEY": "secret-value"}
 
 
 def posixpath_normpath(path: str) -> str:

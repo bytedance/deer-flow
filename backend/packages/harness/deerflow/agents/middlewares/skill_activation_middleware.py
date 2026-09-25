@@ -158,15 +158,21 @@ class SkillActivationMiddleware(AgentMiddleware):
             decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
         return decisions
 
-    def _candidate_activation_names(self, request: ModelRequest) -> list[str]:
-        """Skill names the handler may need an ``skill:activate`` decision for.
+    def _candidate_activation_targets(self, request: ModelRequest) -> tuple[list[str], list[str]]:
+        """Split the activation candidates into (names, entry_paths).
 
-        Loop-safe (no storage I/O): the slash reference is parsed straight from
-        the latest real user message; the persisted entry names come from
-        ``skill_context`` state. Both mirror the lookups the threaded handler
-        performs, so the precomputed map covers them.
+        Loop-safe (no storage I/O): the slash reference is parsed straight
+        from the latest real user message — its name is already canonical,
+        because ``_resolve_activation`` matches it against the registry's
+        ``Skill.name`` set. The persisted ``skill_context`` entries contribute
+        their *paths*: the stamped ``entry["name"]`` is path-derived (the
+        directory name) and can differ from the declared ``Skill.name``, so
+        the consumer (``_in_context_secret_sources``) resolves the path
+        through the live registry — the decision map must be keyed by the
+        same canonical names, resolved off-loop by the caller.
         """
         names: list[str] = []
+        entry_paths: list[str] = []
         messages = list(request.messages)
         for index in range(len(messages) - 1, -1, -1):
             if _is_user_activation_target(messages[index]):
@@ -183,14 +189,26 @@ class SkillActivationMiddleware(AgentMiddleware):
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            name = entry.get("name")
-            if isinstance(name, str) and name:
-                names.append(name)
-            else:
-                path = entry.get("path")
-                if isinstance(path, str) and path:
-                    names.append(posixpath.basename(posixpath.dirname(path)))
-        return names
+            path = entry.get("path")
+            if isinstance(path, str) and path:
+                entry_paths.append(path)
+        return names, entry_paths
+
+    def _canonical_names_for_paths(self, paths: list[str]) -> list[str]:
+        """Canonical ``Skill.name`` for the entry paths (thread-only; disk I/O).
+
+        Paths the registry cannot resolve yield no name — the entry consumers
+        (``_in_context_secret_sources``) skip those against the same registry
+        before any activation check, so no decision is needed for them.
+        """
+        try:
+            from deerflow.skills.container_registry import build_container_path_registry, canonical_skill_name
+
+            registry = build_container_path_registry(self._storage())
+        except Exception:
+            logger.exception("Failed to load skills while collecting activation candidates")
+            return []
+        return [name for name in (canonical_skill_name(registry, path) for path in paths) if name is not None]
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -565,13 +583,12 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         call rather than trusting stale caller-supplied data.
         """
         try:
-            storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
-            container_root = storage.get_container_root()
+            from deerflow.skills.container_registry import build_container_path_registry
+
+            return build_container_path_registry(self._storage())
         except Exception:
             logger.exception("Failed to load skills while resolving secret bindings")
             return None
-        return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
 
     def _resolve_registry_skill(self, registry: dict[str, Skill], path: object, *, require_autonomous: bool) -> Skill | None:
         """Resolve a container path to a live registry skill eligible for secret
@@ -685,8 +702,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # provider's async API, then hand them to the worker thread: the
         # blocking handler (skill-tree reads) keeps its to_thread offload while
         # loop-affine providers still receive aauthorize() — a synchronous
-        # authorize() from the thread is the wrong API for them.
-        activation_decisions = await self._collect_activation_decisions(self._candidate_activation_names(request))
+        # authorize() from the thread is the wrong API for them. Entry paths
+        # are canonicalized through the registry in a worker thread first so
+        # the decision map is keyed by declared Skill.name (the same names the
+        # threaded handler's registry lookups produce), not directory names.
+        if self._skill_authorization is not None:
+            slash_names, entry_paths = self._candidate_activation_targets(request)
+            canonical_names = await asyncio.to_thread(self._canonical_names_for_paths, entry_paths)
+            activation_decisions = await self._collect_activation_decisions([*slash_names, *canonical_names])
+        else:
+            activation_decisions = None
         prepared = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call", activation_decisions=activation_decisions)
         if isinstance(prepared, AIMessage):
             return prepared

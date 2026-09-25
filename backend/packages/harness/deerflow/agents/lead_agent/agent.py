@@ -528,6 +528,10 @@ def build_middlewares(
         # skill-file-load stamp on the same skill:activate decision the
         # activation middleware enforces for slash commands).
         runtime_middleware_kwargs["skill_authorization"] = skill_authorization
+    if user_id is not None:
+        # ToolErrorHandlingMiddleware canonicalizes skill-read paths through
+        # the same user-scoped registry the activation/policy middlewares use.
+        runtime_middleware_kwargs["user_id"] = user_id
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
