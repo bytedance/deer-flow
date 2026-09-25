@@ -350,11 +350,14 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
                 continue
             if not changed_msg:
                 continue
-            messages[index] = HumanMessage(
-                content=content,
-                id=msg.id,
-                name=msg.name,
-                additional_kwargs=dict(msg.additional_kwargs or {}),
+            # model_copy keeps the fields a hand-built message would drop
+            # (response_metadata et al.) — same alignment as the thread-data
+            # middleware's message rebuild.
+            messages[index] = msg.model_copy(
+                update={
+                    "content": content,
+                    "additional_kwargs": dict(msg.additional_kwargs or {}),
+                },
             )
             changed = True
         updates = {}

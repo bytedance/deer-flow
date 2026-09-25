@@ -434,6 +434,32 @@ def test_genuine_user_message_false_for_legacy_summary_message():
 # ---------------------------------------------------------------------------
 
 
+class TestWrapModelCallFieldPreservation:
+    """The sanitized message is rebuilt with model_copy: fields a hand-built
+    message would drop (response_metadata et al.) survive the rewrite."""
+
+    def test_sanitized_message_preserves_response_metadata(self):
+        mw = _make_middleware()
+        request = _make_request(
+            [
+                HumanMessage(
+                    content="<script>alert(1)</script>",
+                    id="msg-1",
+                    response_metadata={"source": "gateway"},
+                    additional_kwargs={"custom": "keep"},
+                )
+            ]
+        )
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        updated = captured[0].messages[-1]
+        assert updated.response_metadata == {"source": "gateway"}
+        assert updated.additional_kwargs["custom"] == "keep"
+        assert updated.id == "msg-1"
+
+
 class TestWrapModelCallCleanInput:
     """Clean user messages are wrapped in boundary markers."""
 

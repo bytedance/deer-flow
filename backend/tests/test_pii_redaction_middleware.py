@@ -278,10 +278,30 @@ class TestModelCallBoundary:
         # The original message object is untouched.
         assert original.content[0] == "reach me at alice@example.com"
 
+    # ---------------------------------------------------------------------------
+    # Tool boundary
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Tool boundary
-# ---------------------------------------------------------------------------
+    def test_redacted_message_preserves_response_metadata(self):
+        # The redacted copy is rebuilt with model_copy: fields a hand-built
+        # message would drop (response_metadata et al.) survive the rewrite,
+        # same alignment as the thread-data middleware's message rebuild.
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [
+                HumanMessage(
+                    "mail alice@example.com",
+                    id="msg-1",
+                    response_metadata={"source": "gateway"},
+                    additional_kwargs={"custom": "keep"},
+                ),
+            ],
+        )
+        redacted = messages[0]
+        assert "alice@example.com" not in redacted.content
+        assert redacted.response_metadata == {"source": "gateway"}
+        assert redacted.additional_kwargs["custom"] == "keep"
+        assert redacted.id == "msg-1"
 
 
 class TestToolBoundary:

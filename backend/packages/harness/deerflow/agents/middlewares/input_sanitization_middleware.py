@@ -357,11 +357,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                                     new_content.append(block)
                             else:
                                 new_content.append(block)
-                        return HumanMessage(
-                            content=new_content,
-                            id=msg.id,
-                            name=msg.name,
-                            additional_kwargs=preserved_kwargs,
+                        # model_copy keeps the fields a hand-built message
+                        # would drop (response_metadata et al.).
+                        return msg.model_copy(
+                            update={"content": new_content, "additional_kwargs": preserved_kwargs},
                         )
                     # Cannot distinguish server block from user blocks
                     # (non-list content or len(content) < 2).
@@ -410,12 +409,9 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             content if isinstance(content, str) else "[content-blocks]",
             processed,
         )
-        return HumanMessage(
-            content=new_content,
-            id=msg.id,
-            name=msg.name,
-            additional_kwargs=preserved_kwargs,
-        )
+        # model_copy keeps the fields a hand-built message would drop
+        # (response_metadata et al.).
+        return msg.model_copy(update={"content": new_content, "additional_kwargs": preserved_kwargs})
 
     def _process_request(self, request: ModelRequest) -> ModelRequest:
         """Return a request with every genuine user message sanitized.
