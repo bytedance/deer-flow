@@ -469,6 +469,29 @@ class TestRewriteLocalPathsInText:
 
         assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/page.yml. Other path: `{other_path}`."
 
+    def test_bare_filename_before_markdown_hard_break_is_left_untouched(self, paths: Paths):
+        """A trailing backslash before a newline is treated as a path separator.
+
+        That position is more often a Markdown hard line break, so a genuine bare
+        filename there keeps its literal spelling instead of becoming a virtual
+        path. A backslash is also a legal filename character on POSIX, so this
+        forgoes one rewrite rather than risk corrupting a real path reference.
+        """
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "page.yml")
+        text = "Saved as page.yml\\\nnext line"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == text
+
     def test_bare_filename_without_changed_file_is_left_untouched(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         _workspace_file(paths, "page.yml")
