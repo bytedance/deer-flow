@@ -249,16 +249,22 @@ asks for plugin-scoped authority itself:
 
 ```python
 from deerflow_extension_api import arequire_plugin_management, require_admin
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 @router.get("/{namespace}/permissions")
 async def read_permissions(namespace: str, request: Request):
-    principal = await arequire_plugin_management(request, namespace, scope="read")
+    try:
+        principal = await arequire_plugin_management(request, namespace, scope="read")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     ...  # read the enterprise's own policy store
 
 @router.put("/{namespace}/permissions")
 async def write_permissions(namespace: str, request: Request):
-    principal = await arequire_plugin_management(request, namespace, scope="write")
+    try:
+        principal = await arequire_plugin_management(request, namespace, scope="write")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     ...  # validate delegation/scope, then commit
 ```
 
@@ -266,6 +272,11 @@ async def write_permissions(namespace: str, request: Request):
   request identity; it never reads or writes enterprise policy itself.
 - It **fails closed**: an unknown namespace, an anonymous caller, a missing or
   failing host resolver, or a non-allowed decision raises `PermissionError`.
+- That `PermissionError` is not an HTTP response. The Gateway installs no
+  `PermissionError` handler, so a route that lets it escape answers `500`, not
+  `403`; translate it at your own boundary as the example does. The host's other
+  contributed-route safeguards — authentication, CSRF, PAT rejection — run
+  before your handler and none of them covers a policy denial.
 - When authorization is disabled the host answers "allow", so the helper is a
   no-op and a deployment that turns authorization off does not start rejecting
   enterprise routes. An enterprise that needs an unconditional floor keeps
