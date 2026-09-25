@@ -187,7 +187,13 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
     stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
     if stable_args:
-        return json.dumps(stable_args, sort_keys=True, default=str)
+        # Salient fields alone collapse calls that differ only in pagination or
+        # content args, and the fifth distinct page hard-stopped a working run;
+        # the write_file branch avoids the same collapse by hashing full args
+        # (#5871). Salient-only calls keep the exact old key.
+        if len(stable_args) == len(args):
+            return json.dumps(stable_args, sort_keys=True, default=str)
+        return json.dumps(args, sort_keys=True, default=str)
 
     if fallback_key is not None:
         return fallback_key

@@ -20,6 +20,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
     _MAX_PENDING_WARNINGS_PER_RUN,
     LoopDetectionMiddleware,
     _hash_tool_calls,
+    _stable_tool_key,
 )
 
 
@@ -792,6 +793,56 @@ class TestLoopDetection:
 
         mw._apply(_make_state(tool_calls=call), runtime)
         assert ("default", mw._get_run_id(runtime)) in mw._history
+
+
+class TestGenericToolKey:
+    """Generic tools key on every argument, not just the salient subset (#5871).
+
+    Calls that differ only by a pagination or content argument are progress,
+    not a loop; collapsing them hard-stopped a working run.
+    """
+
+    @staticmethod
+    def _search_call(**extra):
+        return {"name": "search_symbols", "id": "call_search", "args": {"query": "EURUSD", **extra}}
+
+    def test_paginated_calls_are_distinct(self):
+        pages = [self._search_call(offset=offset) for offset in (0, 20, 40, 60, 80)]
+
+        hashes = {_hash_tool_calls([page]) for page in pages}
+
+        assert len(hashes) == len(pages)
+
+    def test_pagination_does_not_hard_stop(self):
+        """Regression for #5871: five distinct pages used to force loop_capped."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for offset in (0, 20, 40, 60, 80):
+            decision = mw._apply(_make_state(tool_calls=[self._search_call(offset=offset)]), runtime)
+            assert decision is None, f"page {offset} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_repeating_the_same_call_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [self._search_call(offset=0)]
+
+        for _ in range(4):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        hard_stop = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert hard_stop is not None
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_salient_only_call_keeps_the_salient_key(self):
+        """A call with only salient args keys exactly as before."""
+        import json as _json
+
+        call = {"name": "read_url", "id": "c1", "args": {"url": "https://x.test/a"}}
+        key = _stable_tool_key(call["name"], call["args"], None)
+
+        assert key == _json.dumps({"url": "https://x.test/a"}, sort_keys=True, default=str)
 
 
 class TestRunScopedTracking:
