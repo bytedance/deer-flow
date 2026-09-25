@@ -1270,11 +1270,14 @@ def _stored_server_for_secret_merge(name: str, raw_server: Any) -> McpServerConf
     """
     try:
         return _mcp_server_response_from_raw(name, raw_server)
-    except HTTPException:
+    except HTTPException as exc:
+        # Never log the chained ValidationError: its traceback echoes the
+        # offending input value, which may be a literal credential pasted into
+        # the stored entry. Only the server name and the exception type are safe.
         logger.warning(
-            "Stored MCP server %s could not be parsed while merging a full config replacement; using the incoming server as-is.",
+            "Stored MCP server %s could not be parsed while merging a full config replacement (%s); using the incoming server as-is.",
             name,
-            exc_info=True,
+            safe_error_summary(exc),
         )
         return None
 
