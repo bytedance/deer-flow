@@ -403,7 +403,7 @@ class TestRedirectParity:
     @pytest.mark.anyio
     async def test_web_search_client_follows_redirects(self, mock_async_client_cls):
         payload = {"type": "search", "results": []}
-        mock_response = httpx.Response(200, text=json.dumps(payload), request=httpx.Request("POST", "https://search.infoquest.byteplues.com"))
+        mock_response = httpx.Response(200, text=json.dumps(payload), request=httpx.Request("POST", "https://search.infoquest.bytepluses.com"))
         mock_async_client_cls.return_value = _mock_async_client(mock_response)
 
         await InfoQuestClient().web_search_raw_results("query", site="")
