@@ -20,7 +20,14 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 47
+config_version: 49
+
+# Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
+# lead_prompt_overlay:
+#   prepend: "Apply our organization-wide writing conventions."
+#   append: "End reports with a concise decision summary."
+# Subagents: subagents.agents.<name>.prompt_overlay.{prepend,append}
+# DeerMem: memory.backend_config.{prompt_prepend,prompt_append}
 
 # Optional per-model request pacing (inside a models[] entry):
 # request_admission:
@@ -214,16 +221,53 @@ models:
   #       thinking:
   #         type: disabled
 
-  # Example: Z.AI GLM-5.3-Flash (required-thinking workaround)
+  # Reasoning capability contract (optional, per model)
+  #
+  # A mapping-valued `reasoning:` block opts into this contract. The existing
+  # Ollama `reasoning: true` / `false` boolean, and the `low` / `medium` / `high`
+  # level string gpt-oss style models take, remain native provider options and
+  # are still forwarded to ChatOllama.
+  #
+  # `supports_thinking` / `supports_reasoning_effort` only say whether a knob
+  # exists. Models whose provider contract differs from DeerFlow's generic
+  # assumptions can declare a `reasoning:` block instead; the two booleans are
+  # then derived from it and every model-creation path (chat, summarization,
+  # title generation, subagents) enforces the same normalized policy:
+  #
+  #   reasoning:
+  #     thinking: optional             # unsupported | optional | required
+  #     on_disable_request: keep_enabled   # required only: keep_enabled | reject
+  #     dialect: auto                  # auto | openai_extra_body | anthropic |
+  #                                    # vllm_chat_template | ollama | none
+  #     history: clear                 # preserve | clear (omit for provider default)
+  #     effort:
+  #       values: [low, medium, high]  # provider vocabulary, in display order
+  #       default: medium              # applied when the caller does not choose
+  #       aliases: {minimal: low}      # DeerFlow generic value -> provider value
+  #       path: reasoning_effort       # dotted identifier path (default)
+  #
+  # `required` thinking never receives a disable payload, unknown effort values
+  # never reach the provider (they map through `aliases` or fall back to
+  # `default`), and `dialect` lets the factory synthesize the on/off payload
+  # when `when_thinking_enabled` / `when_thinking_disabled` are absent
+  # (`auto` infers it from `when_thinking_enabled`). `default` also applies to
+  # callers that never choose an effort — summarization, title generation and
+  # subagents — so pick a level you are happy to pay for on every background
+  # call. Contradictory profiles fail at startup: `required` plus
+  # `when_thinking_disabled`, a `default` outside `values`, an effort value in
+  # the profile or in `when_thinking_*` templates that the contract rejects, a
+  # stale `reasoning_effort` beside a custom `effort.path`, or a `path` that
+  # would overwrite a whole mapping such as `extra_body`.
+  # Profiles without `reasoning:` behave exactly as before.
+
+  # Example: Z.AI GLM-5.3-Flash (required thinking, restricted effort)
   #
   # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
-  # DeerFlow's current generic UI may request disabled thinking or emit
-  # minimal/medium, so this profile keeps thinking enabled unconditionally and
-  # suppresses generic effort forwarding. Keep the thinking block in the base
-  # extra_body: moving it to when_thinking_enabled would let background calls
-  # synthesize the invalid thinking.type=disabled + reasoning_effort=minimal pair.
-  # clear_thinking=true is intentional for this compatibility workaround: it
-  # avoids requiring exact historical reasoning replay after summarization.
+  # The contract keeps thinking on for every foreground and background call,
+  # maps DeerFlow's generic minimal/medium presets onto low/high, and
+  # serializes clear_thinking=true so the model does not require exact
+  # reasoning replay after summarization. `default: high` keeps background
+  # calls off the provider's deepest budget; `max` stays selectable in the UI.
   #
   # - name: glm-5.3-flash
   #   display_name: GLM-5.3-Flash
@@ -237,14 +281,19 @@ models:
   #   top_p: 0.95
   #   max_tokens: 131072
   #   context_window: 1000000
-  #   supports_thinking: true
-  #   supports_reasoning_effort: false
   #   supports_vision: true
   #   stream_usage: false
+  #   reasoning:
+  #     thinking: required
+  #     dialect: openai_extra_body
+  #     history: clear
+  #     effort:
+  #       values: [low, high, max]
+  #       default: high
+  #       aliases:
+  #         minimal: low
+  #         medium: high
   #   extra_body:
-  #     thinking:
-  #       type: enabled
-  #       clear_thinking: true
   #     tool_stream: true
 
   # Example: OpenAI model
@@ -992,6 +1041,11 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
   #   # wait_for_selector_timeout_ms: 5000  # How long to wait for that selector, in milliseconds
+  #   # reject_resource_types: ["image", "media", "font"]  # Skip these resource types
+  #   # reject_request_pattern: ["\\.css$", "\\.png$"]     # Skip URLs matching these regexes
+  #   #                                    # Both accept a YAML list or a
+  #   #                                    # comma-separated string. Regexes containing
+  #   #                                    # commas must use the YAML list form.
 
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
@@ -1357,11 +1411,13 @@ loop_detection:
 # phone numbers, API keys, credit-card numbers (Luhn-validated) and national
 # IDs found in genuine user messages and remote-content tool results
 # (web_fetch / web_search / image_search / web_capture and MCP tools) are
-# rewritten to irreversible placeholders like [EMAIL_1] before they reach the
-# model. No mapping is stored, so redaction cannot be reversed. Raw text stays
-# in thread state for the UI; the memory-extraction path is not covered.
-# Compaction and configured LLM title inputs are redacted too. Existing
-# placeholders reserve indices; compacted raw identities cannot be relinked.
+# rewritten to keyed, value-derived placeholders like
+# [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
+# HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# Raw text stays in thread state for the UI; queued memory-extraction
+# payloads are redacted too. Compaction and configured LLM title inputs are
+# redacted as well; placeholders are value-derived, so an identity redacted
+# before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true
@@ -1369,6 +1425,13 @@ pii_redaction:
   # redact_credit_card: true
   # redact_phone: true
   # redact_national_id: true
+  # Required when enabled: true (non-empty, at least 16 characters) — the
+  # deployment-scoped HMAC secret for the placeholder digests. Tokens are
+  # linkable only within this deployment and cannot be re-derived offline
+  # without it. Enabling redaction without a valid secret fails config
+  # validation: an unkeyed digest would be a publicly computable, globally
+  # linkable fingerprint of the raw values (guessable for phone numbers).
+  # token_secret: change-me-to-a-long-random-string
 
 # ============================================================================
 # Tool Progress State Machine Configuration (RFC #3177)
@@ -2859,8 +2922,9 @@ run_ownership:
 # ============================================================================
 # Optional pre-execution authorization for tool calls.
 # When enabled, every tool call passes through the configured provider
-# before execution. Three options: built-in allowlist, OAP policy provider,
-# or custom provider. See backend/docs/GUARDRAILS.md for full documentation.
+# before execution. Four options: built-in allowlist, OAP policy provider,
+# custom provider, or the TypeSafe (Jev) risk gate. See
+# backend/docs/GUARDRAILS.md for full documentation.
 #
 # Providers are loaded by class path via resolve_variable (same as models/tools).
 
@@ -2889,6 +2953,38 @@ run_ownership:
 #     config:
 #       key: value
 
+# --- Option 4: TypeSafe (Jev) pre-execution risk gate (network provider) ---
+#   Sends the tool name and its full argument JSON to POST /v1/systemone and
+#   denies calls whose risk probability reaches `threshold`. Requires an API
+#   key: export TYPESAFE_API_KEY=... (or set `api_key` below).
+#
+#   `tools: ["bash"]` is a SMOKE-TEST scope, not a production recommendation:
+#   the operation can move to an unprobed tool, an MCP tool or a subagent, and
+#   long heredocs / large write_file payloads are denied locally once the
+#   argument text exceeds max_state_chars. Probe every tool that can perform the
+#   risky work instead of narrowing the gate. Pointing `guardrails.provider` at
+#   TypeSafe REPLACES the allowlist/OAP provider: the allow half of an old
+#   allowlist moves into `allowed_tools` below, while deny rules still belong to
+#   `authorization.*` (see backend/docs/GUARDRAILS.md, Option 4).
+# guardrails:
+#   enabled: true
+#   fail_closed: true
+#   provider:
+#     use: deerflow.guardrails.typesafe:TypeSafeGuardrailProvider
+#     config:
+#       model: jev-latest           # pin an exact version (e.g. jev-1.13.0) when
+#                                   # decisions must stay traceable across releases
+#       threshold: 0.5              # example value; calibrate with the online evaluation
+#       tools: ["bash"]
+#       # allowed_tools: ["bash", "read_file", "write_file"]   # hard permission list:
+#       #   unlisted tools are refused locally before any state is built, and
+#       #   listed tools still have to pass the risk gate. Omit to enforce none;
+#       #   [] refuses every tool.
+#       # Optional: api_key / api_key_env (default TYPESAFE_API_KEY) / base_url /
+#       #           timeout / deadline_seconds / max_attempts / retry_backoff /
+#       #           max_state_chars / cache_size / cache_ttl_seconds /
+#       #           instructions / criteria
+
 # ============================================================================
 # Authorization Configuration
 # ============================================================================
@@ -2909,6 +3005,16 @@ run_ownership:
 #       # (which models/skills the caller sees on GET /api/models and the
 #       # GET /api/skills[.../custom, /{name}] skill routes); skill
 #       # management endpoints (install/edit/export) stay admin-gated.
+#       #
+#       # Plugin resources: `plugin_actions` gates invoking a registered
+#       # backend action (POST /api/plugins/{ns}/actions/{name}), and
+#       # `plugin_management` gates an enterprise-contributed management route
+#       # that calls require_plugin_management. Targets are
+#       # "<namespace>/<action-name>" and "<namespace>/permissions.read"
+#       # / "<namespace>/permissions.write". **Omitting a key leaves that
+#       # resource unrestricted for the role**, so list it explicitly to
+#       # constrain it. Declared plugin pages are not gated yet: their
+#       # `plugin_pages` row ships with the page-authorization slice.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
@@ -2916,12 +3022,16 @@ run_ownership:
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}
+#           plugin_management: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}
+#           plugin_actions: {allow: "*"}                 # invoke any installed action
+#           plugin_management: {allow: []}               # no management route access
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2932,6 +3042,8 @@ run_ownership:
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
 #           skills: {allow: []}      # no skills visible in the listing
+#           plugin_actions: {allow: ["acme.reports/export"]}
+#           plugin_management: {allow: ["acme.reports/permissions.read"]}
 authorization:
   enabled: false
 
@@ -3119,6 +3231,14 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     host_access:                        # optional host-owned grants (restart required)
+#       model_invocation:
+#         roles:                          # logical role -> configured models[].name
+#           default: my-configured-model
+#         max_concurrency: 2              # shared by this installation's services
+#         timeout_seconds: 60             # includes waiting for capacity
+#         max_input_chars: 262144         # includes the response-schema instruction
+#         max_output_chars: 65536         # returned text, checked after generation
 #     table_prefix: example_ext_          # optional: table-name prefix this extension
 #                                         # owns under its own MetaData/migration chain.
 #                                         # Keeps `alembic revision --autogenerate`, run

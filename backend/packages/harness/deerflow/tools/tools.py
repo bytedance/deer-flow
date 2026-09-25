@@ -233,29 +233,45 @@ def get_available_tools(
     if include_mcp:
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.mcp.cache import get_cached_mcp_tools, refresh_mcp_cache_if_active
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+            try:
+                extensions_config = ExtensionsConfig.from_file()
+            except Exception as exc:
+                # Only this call carries the resolved-credential risk:
+                # from_file() resolves $VAR values before validation, so a
+                # ValidationError message can embed secrets. Log the type only.
+                logger.error("Failed to load MCP extensions config (%s)", type(exc).__name__)
+            else:
+                if extensions_config.get_enabled_mcp_servers():
+                    mcp_tools = get_cached_mcp_tools()
+                    if mcp_tools:
+                        logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly at each
-                    # agent construction site can identify them. Lead agents
-                    # assemble their full configured MCP catalog and apply active
-                    # skill policy at runtime; subagents may pass an already
-                    # policy-filtered list because their skills load at startup.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
-            if mcp_plugins is not None:
-                from deerflow.capabilities.runtime import filter_mcp_plugins
+                        # Tag MCP-sourced tools so deferred-tool assembly at each
+                        # agent construction site can identify them. Lead agents
+                        # assemble their full configured MCP catalog and apply active
+                        # skill policy at runtime; subagents may pass an already
+                        # policy-filtered list because their skills load at startup.
+                        for t in mcp_tools:
+                            tag_mcp_tool(t)
+                else:
+                    # A change that disables the last MCP server must still retire
+                    # the previously initialized cache and its pooled sessions.
+                    # This never initializes tools: a process that never initialized
+                    # MCP pays no config-hashing or discovery cost, while one that
+                    # did still checks the existing cache for staleness.
+                    refresh_mcp_cache_if_active()
+                if mcp_plugins is not None:
+                    from deerflow.capabilities.runtime import filter_mcp_plugins
 
-                mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
+                    mcp_tools = filter_mcp_plugins(mcp_tools, mcp_plugins, extensions_config)
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
-        except Exception as e:
-            logger.error(f"Failed to get cached MCP tools: {e}")
+        except Exception:
+            # Tool caching, pool cleanup and plugin filtering raise ordinary
+            # exceptions whose messages are safe and needed for debugging.
+            logger.exception("Failed to get cached MCP tools")
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []

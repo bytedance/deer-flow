@@ -485,3 +485,100 @@ class TestExtractOutline:
         assert len(outline) == 1
         # Title must be clean — no ** ** artefacts
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+# ---------------------------------------------------------------------------
+# Off-loop stat/write-back: cancellation drain and executor re-entrancy
+# (review follow-ups on the uploads conversion PR)
+# ---------------------------------------------------------------------------
+
+
+def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeypatch):
+    """Cancel must not abandon the in-flight write, and must clean the partial file.
+
+    ``run_file_io`` awaits ``run_in_executor``, so a plain await would unwind
+    while the worker is still writing; the drained write delivers the
+    cancellation only after the worker settled, and the handler then removes
+    the partial output so repeated cancelled conversions cannot leave large
+    hidden staging files behind.
+    """
+    import threading
+    from pathlib import Path
+
+    started = threading.Event()
+    cancel_issued = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    real_write_text = Path.write_text
+
+    def _blocking_write_text(self, data, encoding=None):
+        started.set()
+        release.wait(timeout=10)
+        result = real_write_text(self, data, encoding=encoding)
+        done.set()
+        return result
+
+    # Seed the source BEFORE installing the patch, so the setup write is not
+    # captured by _blocking_write_text (which would pre-set started/done).
+    src = tmp_path / "doc.txt"
+    out = tmp_path / "doc.md"
+    src.write_text("hello")
+
+    monkeypatch.setattr(Path, "write_text", _blocking_write_text)
+
+    async def _scenario():
+        task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))
+        await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        # Release the worker only after the cancel is in flight, so the
+        # ordering (cancel first, then the write settles) is forced and the
+        # assertion below cannot pass by racing the releaser.
+        cancel_issued.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # The drain invariant: the cancellation is delivered only after
+            # the in-flight write settled. A plain run_file_io await cancels
+            # immediately and leaves the worker running.
+            return done.is_set()
+        return "not-cancelled"
+
+    releaser = threading.Thread(target=lambda: (started.wait(10), cancel_issued.wait(10), release.set()), daemon=True)
+    releaser.start()
+    try:
+        settled = asyncio.run(_scenario())
+    finally:
+        release.set()
+        releaser.join(10)
+
+    assert settled is True, "cancellation was delivered before the in-flight write drained"
+    assert done.wait(timeout=10), "the write worker never settled"
+    assert not out.exists(), "partial output left behind after a cancelled conversion"
+
+
+def test_conversion_inside_file_io_worker_runs_nested_offload_inline(tmp_path, monkeypatch):
+    """A conversion started inside a file-IO worker must not re-enter the pool.
+
+    Project-document conversion runs its worker body through ``run_file_io``
+    and that body calls ``asyncio.run(convert_file_to_markdown(...))``, whose
+    own stat/write offloads used to submit to the same bounded executor —
+    deadlocking once every worker is busy (deterministically with a single
+    configured worker). ``run_file_io`` now runs nested calls inline in the
+    worker thread; this pins that behavior by thread identity.
+    """
+    import threading
+
+    from deerflow.utils import file_io
+
+    observed: dict[str, object] = {}
+
+    def _nested() -> str:
+        observed["nested_thread"] = threading.current_thread()
+        return "ok"
+
+    def _worker_body() -> str:
+        observed["worker_thread"] = threading.current_thread()
+        return asyncio.run(file_io.run_file_io(_nested))
+
+    assert asyncio.run(file_io.run_file_io(_worker_body)) == "ok"
+    assert observed["nested_thread"] is observed["worker_thread"], "nested run_file_io from inside a file-io worker must run inline; submitting to the same bounded executor can deadlock conversion"

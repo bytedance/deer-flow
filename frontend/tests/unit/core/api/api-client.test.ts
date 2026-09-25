@@ -84,6 +84,182 @@ test("ignores reconnect metadata storage access failures", () => {
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
 });
 
+test.each(["http", "network"])(
+  "does not retry run creation after an ambiguous %s failure",
+  async (failure) => {
+    const sessionStorage = makeSessionStorage();
+    let attempts = 0;
+    const fetchFn = rs.fn(async () => {
+      attempts += 1;
+      if (failure === "network") {
+        throw new TypeError("connection interrupted");
+      }
+      const status = attempts === 1 ? 504 : 400;
+      return new Response(JSON.stringify({ detail: "request failed" }), {
+        status,
+      });
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-no-retry",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        void entry;
+      }
+    };
+
+    await expect(consume()).rejects.toThrow(
+      failure === "http" ? "HTTP 504" : "connection interrupted",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each([0, 1, 4, 5])(
+  "preserves the recovery GET retry budget without recreating the run (%s failures)",
+  async (recoveryFailures) => {
+    const sessionStorage = makeSessionStorage();
+    const encoder = new TextEncoder();
+    let interruptStream: (() => void) | undefined;
+    const interruptedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n',
+          ),
+        );
+        interruptStream = () => {
+          controller.error(new TypeError("connection interrupted"));
+        };
+      },
+    });
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      lastEventId: string | null;
+    }> = [];
+    const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(_url),
+        method: init?.method,
+        lastEventId: headers.get("Last-Event-ID"),
+      });
+      if (requests.length === 1) {
+        return new Response(interruptedBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
+            Location:
+              "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+          },
+        });
+      }
+      if (requests.length <= recoveryFailures + 1) {
+        return new Response(JSON.stringify({ detail: "gateway timeout" }), {
+          status: 504,
+        });
+      }
+      return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+    rs.stubGlobal("setTimeout", (callback: () => void) => {
+      callback();
+      return 0;
+    });
+
+    const received: Array<{ id?: string; event: string; data: unknown }> = [];
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-reconnect",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        received.push(entry);
+        if ("id" in entry && entry.id === "1-0") {
+          interruptStream?.();
+        }
+      }
+    };
+    // The SDK retries four times after the initial HTTP attempt. Exhaustion
+    // must surface the error instead of starting a new run or retrying forever.
+    if (recoveryFailures === 5) {
+      await expect(consume()).rejects.toThrow("HTTP 504");
+    } else {
+      await consume();
+    }
+
+    expect(received).toEqual([
+      { id: "1-0", event: "custom", data: { phase: "started" } },
+      ...(recoveryFailures === 5
+        ? []
+        : [{ id: "2-0", event: "end", data: null }]),
+    ]);
+    expect(requests).toEqual([
+      {
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/stream",
+        method: "POST",
+        lastEventId: null,
+      },
+      ...Array.from({ length: Math.min(recoveryFailures + 1, 5) }, () => ({
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+        method: "GET",
+        lastEventId: "1-0",
+      })),
+    ]);
+  },
+);
+
+test("keeps retries for reads and explicit stream joins", async () => {
+  const attempts = new Map<string, number>();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url).pathname;
+    const attempt = (attempts.get(path) ?? 0) + 1;
+    attempts.set(path, attempt);
+    if (attempt === 1) {
+      return new Response("gateway timeout", { status: 504 });
+    }
+    return path.endsWith("/stream")
+      ? makeSSEResponse("event: end\ndata: null\n\n")
+      : Response.json({ status: "running" });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  rs.stubGlobal("setTimeout", (callback: () => void) => {
+    callback();
+    return 0;
+  });
+
+  const received: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-read-retry",
+    "run-read-retry",
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([{ event: "end", data: null }]);
+  expect([...attempts.entries()]).toEqual([
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry", 2],
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry/stream", 2],
+  ]);
+});
+
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");

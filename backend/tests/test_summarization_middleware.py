@@ -700,7 +700,9 @@ def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
     middleware = create_summarization_middleware(app_config=app_config)
 
     assert middleware is not None
-    assert memory_flush_hook in middleware._before_summarization_hooks
+    # The hook is wrapped in functools.partial to carry the pii_redaction
+    # config; unwrap it for the identity check.
+    assert any(getattr(h, "func", h) is memory_flush_hook for h in middleware._before_summarization_hooks)
 
 
 def test_factory_skip_memory_flush_omits_hook(monkeypatch):

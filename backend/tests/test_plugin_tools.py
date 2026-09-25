@@ -84,6 +84,25 @@ def test_group_filter_and_name_collision_fail_closed(installed):
         build_plugin_tools(loaded, reserved_names={tool.name})
 
 
+def test_built_tools_carry_host_recorded_plugin_provenance(installed):
+    """The tag is written at construction, from registry-validated values."""
+    from deerflow.tools.tool_provenance import get_plugin_source, is_plugin_tool, resolve_tool_provenance
+
+    loaded, plugin, _ = installed
+    (tool,) = build_plugin_tools(loaded)
+
+    assert is_plugin_tool(tool) is True
+    assert get_plugin_source(tool) == {
+        "namespace": plugin.namespace,
+        "declaration": "search",
+        "installation": "test",
+    }
+    provenance = resolve_tool_provenance(tool)
+    assert provenance is not None
+    assert provenance.source == f"plugin:{plugin.namespace}"
+    assert provenance.declaration == "search"
+
+
 @pytest.mark.parametrize("source", ["config", "builtin", "mcp", "acp"])
 def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(installed, monkeypatch, caplog, source):
     from langchain_core.tools import Tool

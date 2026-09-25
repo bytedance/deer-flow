@@ -48,8 +48,12 @@ _URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo
 # ``METHOD target HTTP/x.x`` line — rewritten to scheme + host with the
 # target collapsed to ``/<redacted>``. The method class is case-tolerant:
 # HTTP methods are case-sensitive tokens, and callers may pass lowercase
-# custom methods through to urllib3.
-_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"\s]*) (?P<version>HTTP/[0-9.]+)"')
+# custom methods through to urllib3. The target may contain spaces for the
+# same reason ``Redirecting``'s slots may: on the recursive redirect frame it
+# is the raw ``Location`` field value, whose grammar admits interior spaces,
+# and a whitespace-strict target class let the signed path survive. Its scan
+# still stops at the closing quote, so the pass stays linear-time.
+_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Za-z]+) (?P<target>/[^"]*) (?P<version>HTTP/[0-9.]+)"')
 
 # urllib3's retry sites log the request target with NO scheme and NO request-
 # line scaffolding, so neither pattern above can see it (installed 2.7.0):
@@ -67,9 +71,18 @@ _URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?
 #   connectionpool.py:869, **WARNING**, so it passes the Gateway's INFO root
 #   without DEBUG being enabled; the greedy prefix groups pin the split to
 #   the final ``': `` so an error repr containing quotes cannot shift it.
-_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S+)$")
+# Both trailing-target shapes take a target that runs to the end of the
+# message rather than to the first space, because ``url`` is the caller's raw
+# request target and, on the recursive redirect frame, the raw ``Location``
+# field value (connectionpool.py:923-925) — whose grammar admits interior
+# spaces, exactly as ``Redirecting``'s slots do (round 13). A whitespace-strict
+# target left ``Retry: /download a file.pdf?sig=...`` and the same signed
+# target on the WARNING line unredacted, while the two sibling passes that
+# already take a loose tail redacted it. The target still has to start with
+# ``/``, so prose that merely begins with ``Retry: `` keeps passing through.
+_URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S.*)$")
 _URLLIB3_INCREMENT_RETRY_RE = re.compile(r"Incremented Retry for \(url='(?P<url>(?:[^']|'(?!\)))*)'\)")
-_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S+)$")
+_URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S.*)$")
 
 # urllib3's ``Redirecting %s -> %s`` (poolmanager.py:500 at INFO,
 # connectionpool.py:922 at DEBUG) can carry an origin-form target in either
