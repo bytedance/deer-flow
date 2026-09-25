@@ -957,6 +957,14 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** A malformed `files[*].size` in a run's message metadata no
+  longer fails the whole run. `UploadsMiddleware` validated every other field
+  of a client-supplied file entry fail-soft but passed `size` straight to
+  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
+  before the model was called — and again on every edit or regenerate of that
+  message, since the entry is carried over verbatim. The size only feeds the
+  human-readable line in `<current_uploads>`; unusable values now fall back to
+  `0`, the same as a missing size, while numeric strings keep working.
 - **config:** A `config.yaml` edit that lands while the previous edit is still
   being loaded is no longer lost until the next edit. `get_app_config()`'s
   loader parsed the file and then hashed it again to record the cache
