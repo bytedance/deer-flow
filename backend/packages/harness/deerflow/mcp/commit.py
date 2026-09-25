@@ -18,10 +18,10 @@ When the atomic write itself raises, the outcome is *indeterminate*: the Docker
 ``EBUSY`` fallback overwrites in place, so the destination may already be
 truncated or fully written. This module raises
 :class:`MCPCommitOutcomeUnknownError` -- never "write failed, state unchanged"
-(section 12 D4) -- and deliberately does **not** invalidate local MCP state
-itself: this function runs inside the config critical section, while the
-conservative invalidation waits for the retired pool's teardown. The writer
-performs that invalidation after releasing the locks.
+-- and deliberately does **not** invalidate local MCP state itself: this
+function runs inside the config critical section, while the conservative
+invalidation waits for the retired pool's teardown. The writer performs that
+invalidation after releasing the locks.
 
 Locking is the caller's responsibility: ``commit_extensions_config`` must run
 while the caller holds both ``extensions_config_write_lock`` (in-process) and
@@ -45,8 +45,8 @@ The protocol, in full:
   the same atomic write as the configuration.
 * Migration: the first valid block is a trusted common baseline adopted under lock without retiring anything; the
   guarantee begins only after that initialization completes, so "absent" is never treated as generation zero while
-  another worker advances (R1). A block that is present but malformed, or a previous document that cannot be
-  validated, resets to a fresh baseline and bumps every enabled server plus ``globalGeneration`` (R2/R3) so the write
+  another worker advances. A block that is present but malformed, or a previous document that cannot be
+  validated, resets to a fresh baseline and bumps every enabled server plus ``globalGeneration`` so the write
   is fail-closed without blocking a repair.
 * Deployment scope: the cross-process guarantee presupposes every supported writer follows this protocol **and** sees
   the same sidecar lock inode (``.<config>.lock``). Multiple Uvicorn workers in one container do; containers that
@@ -55,9 +55,9 @@ The protocol, in full:
 * ``atomic_write_extensions_config()`` degrades to an in-place overwrite on a Docker single-file bind mount
   (``EBUSY``), so it keeps its documented weaker atomicity: a reader may observe a torn write and a crash can leave it
   torn. A mid-write exception is therefore reported as an **unknown outcome** with conservative local retirement,
-  never as "write failed, state unchanged". Residual (F3): the writer fence refreshes the *current* file signature
-  rather than deriving one from the exact committed bytes, so the recorded applied signature is only provably the
-  committed revision while the writer holds the shared lock.
+  never as "write failed, state unchanged". Residual limitation: the writer fence refreshes the *current* file
+  signature rather than deriving one from the exact committed bytes, so the recorded applied signature is only
+  provably the committed revision while the writer holds the shared lock.
 """
 
 from __future__ import annotations
@@ -90,8 +90,7 @@ class MCPConfigWriteError(RuntimeError):
 
     These errors exist so a writer never collapses a *committed* or
     *indeterminate* write into the pre-existing "write failed, state unchanged"
-    story (see ``docs/superpowers/specs/2026-09-25-mcp-shared-lifecycle-generation.md``,
-    section 12 D4).
+    story.
     """
 
 
@@ -196,7 +195,7 @@ class CommittedMcpRevision:
 def validate_previous_config_lenient(raw_data: Mapping[str, Any]) -> ExtensionsConfig | None:
     """Validate a pre-mutation raw document, or ``None`` when it is unverifiable.
 
-    D7-R3: the lifecycle protocol must not turn a repair into a dead end. A
+    The lifecycle protocol must not turn a repair into a dead end. A
     stored server (or any other stored value) that no longer validates must not
     make the *previous* snapshot derivation raise; the caller proceeds with
     ``previous_config = None`` so the shared commit treats every enabled server
@@ -228,44 +227,44 @@ def commit_extensions_config(
 
     ``previous_config`` is the real pre-mutation validated config when the
     caller could read it, and ``None`` when the previous effective state is
-    unverifiable (D7-R3: a stored server that no longer validates must not turn
+    unverifiable (a stored server that no longer validates must not turn
     a repair into a dead end). ``None`` makes every enabled server in
     ``new_config`` look newly added, so each is bumped exactly once -- the
     conservative, fail-closed answer. A first migration write over a legacy file
     must still pass the real config so pre-existing servers are not counted as
-    lifecycle events (D7-R1).
+    lifecycle events.
 
     The persisted block is derived as follows:
 
-    * key absent (legacy file) -> D7-R1 migration grace: ``previous = None``
+    * key absent (legacy file) -> migration grace: ``previous = None``
       with the *real* ``old_servers``, so a legacy file adopts a fresh baseline
       without inventing a lifecycle event;
     * present and valid -> continue the existing history;
     * present but malformed/unsupported -- including an explicit ``null`` --
-      -> D7-R2: log a warning, reset ``previous = None`` and
+      -> log a warning, reset ``previous = None`` and
       ``old_servers = {}`` so every enabled server bumps by one, and still write
       a fresh valid block. A writer must never refuse the write: it is the only
       API path that can repair the file.
 
     ``globalGeneration`` advances by one for every *unverifiable* baseline -- a
-    previous config that would not validate (R3) or a malformed persisted block
-    (R2) -- because the interceptor identity cannot be proven unchanged. The
-    ordinary migration case (absent block, valid previous config) is not
-    unverifiable and therefore does not advance it.
+    previous config that would not validate, or a malformed persisted block --
+    because the interceptor identity cannot be proven unchanged. The ordinary
+    migration case (absent block, valid previous config) is not unverifiable and
+    therefore does not advance it.
 
     The new block always overwrites whatever the raw document carried -- API
     clients can never set or merge lifecycle counters.
     """
     old_servers = enabled_stdio_fingerprints(previous_config) if previous_config is not None else {}
     # A baseline is *unverifiable* when the previous effective document could not
-    # be validated (D7-R3), or when the persisted block itself is malformed
-    # (D7-R2). Either way "equal content" cannot prove identity, so the whole pool
-    # must be retired for this commit -- not only the per-server generations.
+    # be validated, or when the persisted block itself is malformed. Either way
+    # "equal content" cannot prove identity, so the whole pool must be retired
+    # for this commit -- not only the per-server generations.
     unverifiable_baseline = previous_config is None
     previous: McpLifecycle | None = None
     # Presence, not truthiness: an explicit ``"mcpLifecycle": null`` is a
-    # *malformed* block (R2), not the legacy "no block yet" case (R1). Stage 2
-    # readers must use the same present-versus-absent boundary.
+    # *malformed* block, not the legacy "no block yet" case. Readers must use the
+    # same present-versus-absent boundary.
     if "mcpLifecycle" in raw_data:
         try:
             parsed = parse_mcp_lifecycle(raw_data["mcpLifecycle"])
@@ -300,7 +299,7 @@ def commit_extensions_config(
     try:
         atomic_write_extensions_config(config_path, raw_data)
     except BaseException as exc:
-        # D4: the ``EBUSY`` in-place fallback may already have overwritten the
+        # The ``EBUSY`` in-place fallback may already have overwritten the
         # destination before raising, so the outcome is indeterminate. Do NOT
         # invalidate here (this runs under the config locks, and the
         # conservative invalidation waits for session teardown); the caller

@@ -140,9 +140,9 @@ class McpTaskToolCaller:
             pool = get_session_pool()
             # Capture the binding from the BASE connection BEFORE
             # ``_prepare_stdio_connection`` augments it with the per-call
-            # workspace cwd/TMPDIR: those additions must not affect identity
-            # (I9), and a mid-flight config change must fence this wrapper
-            # rather than silently rebinding it to a new epoch.
+            # workspace cwd/TMPDIR: those additions must not affect identity,
+            # and a mid-flight config change must fence this wrapper rather
+            # than silently rebinding it to a new epoch.
             binding = _resolve_stdio_binding(pool, server_name, connection)
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,

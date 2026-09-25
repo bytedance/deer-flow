@@ -762,7 +762,7 @@ def _write_extensions_skill_state(
                 raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
             # Capture the pre-mutation effective config so the shared commit can
             # prove that a skills toggle changes no server or interceptor. This
-            # is lenient (D7-R3): an unverifiable stored document must not block
+            # is lenient: an unverifiable stored document must not block
             # the write, and a skills toggle can itself repair a bad skills entry.
             previous_config = validate_previous_config_lenient(raw_config)
             set_raw_skill_enabled(raw_config, skill_name, enabled)

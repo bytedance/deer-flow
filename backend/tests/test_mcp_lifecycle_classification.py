@@ -1,13 +1,13 @@
-"""Stage 2 / Task 6: shared ``mcpLifecycle`` generation classification.
+"""Shared ``mcpLifecycle`` generation classification.
 
 The persisted lifecycle counters are a *second* invalidation signal beside the
 effective-content comparison. A delete + identical re-add, a disable +
 re-enable or a connection A1 -> A2 -> A1 round trip can leave the final
 effective content byte-identical while the MCP resource lifecycle advanced, so
 "equal content" must not be treated as "same identity" once a baseline was
-adopted (spec section 12 D5/D7-R1).
+adopted.
 
-These tests pin the frozen classification table:
+These tests pin the classification table:
 
 1. invalid lifecycle (incoming or applied) -> whole-pool reset
 2. both absent -> legacy, no lifecycle signal
@@ -328,7 +328,7 @@ def test_first_adoption_of_a_valid_block_retires_nothing(cache_globals, monkeypa
 
     _write_config(cfg, servers, lifecycle=_lifecycle(1, 0, {"A": 0, "B": 0}))
 
-    # D7-R1 migration grace: the first valid block is adopted, not retired from.
+    # Migration grace: the first valid block is adopted, not retired from.
     assert cache_module._classify_cache_transition() is None
     assert cache_module._mcp_applied_lifecycle is not None
     assert cache_module._mcp_applied_lifecycle.server_generations == {"A": 0, "B": 0}

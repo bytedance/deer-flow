@@ -137,7 +137,7 @@ def test_var_placeholders_and_unknown_top_level_keys_survive_the_write(tmp_path:
     ],
 )
 def test_malformed_existing_block_is_replaced_by_a_fresh_baseline(tmp_path: Path, malformed_block: object) -> None:
-    """D7-R2: an invalid block must never brick the writer that can repair it."""
+    """An invalid block must never brick the writer that can repair it."""
     config_path = tmp_path / "extensions_config.json"
     raw_data = _base_raw()
     raw_data["mcpLifecycle"] = malformed_block

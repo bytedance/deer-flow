@@ -1250,9 +1250,9 @@ def _invalidate_after_failed_fence(exc: MCPConfigWriteError) -> NoReturn:
 def _lenient_previous_mcp_config(raw_data: dict) -> ExtensionsConfig | None:
     """Validate the pre-mutation document, or ``None`` when it is unverifiable.
 
-    D7-R3: a stored server (or other stored value) that no longer validates must
+    A stored server (or other stored value) that no longer validates must
     not turn a repair into a dead end. Delegates to the shared lenient validator
-    so a *non-*``HTTPException`` escape cannot turn an R3 repair into a 500.
+    so a *non-*``HTTPException`` escape cannot turn a repair into a 500.
     Only the *previous* snapshot is lenient: the incoming candidate is still
     validated exactly as before.
     """
@@ -1262,7 +1262,7 @@ def _lenient_previous_mcp_config(raw_data: dict) -> ExtensionsConfig | None:
 def _stored_server_for_secret_merge(name: str, raw_server: Any) -> McpServerConfigResponse | None:
     """Parse a stored server for masked-secret preservation, or ``None``.
 
-    D7-R3: a stored server that no longer validates must not block a *full*
+    A stored server that no longer validates must not block a *full*
     ``PUT`` from repairing the document, so an unparseable stored entry simply
     has no secrets we can carry over and the incoming server is used as-is. The
     incoming and candidate payloads are still validated exactly as before.
@@ -1283,7 +1283,7 @@ def _fence_mcp_reconciliation(committed: CommittedMcpRevision) -> Any:
 
     The fence is derived from the *same* validated candidate and counters this
     writer just persisted, never from a second disk read: a re-read could observe
-    a later writer's revision and install the wrong epoch (spec sections 3/6).
+    a later writer's revision and install the wrong epoch.
 
     The config commit has already landed when this runs, so a failing fence is a
     *committed but not reconciled* state. This function must NOT invalidate local
@@ -1356,7 +1356,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> tuple[dict, set[st
             # Capture the real pre-mutation effective config *before* any edit. The
             # lifecycle counters are derived from this and the validated candidate,
             # never from the router-supplied ``changed`` hint. Derivation is lenient
-            # (D7-R3) so an unverifiable stored document can still be repaired here.
+            # so an unverifiable stored document can still be repaired here.
             previous_config = _lenient_previous_mcp_config(raw_data)
             raw_other_keys: dict = {}
             raw_skills: dict[str, dict] | None = None

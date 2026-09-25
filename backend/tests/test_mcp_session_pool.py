@@ -2900,7 +2900,7 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
 
 
 # ---------------------------------------------------------------------------
-# Task 4 (PR2): stdio wrappers bind to a server-scoped epoch before discovery
+# stdio wrappers bind to a server-scoped epoch before discovery
 # ---------------------------------------------------------------------------
 
 

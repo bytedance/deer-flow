@@ -566,7 +566,7 @@ def _make_session_pool_tool(
     discovery from pairing an old epoch with a replacement pool that reused the
     same initial epoch. ``binding`` is the server's epoch identity, and passing
     it to every ``get_session`` keeps per-call workspace ``cwd``/``TMPDIR`` from
-    ever being folded into that identity (I9).
+    ever being folded into that identity.
     """
     # Strip only prefixes added by the adapter. An unprefixed server may expose
     # a tool whose own name happens to start with ``<server_name>_``.
@@ -855,7 +855,7 @@ def _resolve_discovery_binding(
     server_name: str,
     connection: Mapping[str, Any],
 ) -> ServerBinding:
-    """Resolve *server_name*'s binding BEFORE the first discovery await (I9).
+    """Resolve *server_name*'s binding BEFORE the first discovery await.
 
     The fingerprint is taken from the BASE stdio connection only. Per-call
     workspace ``cwd``/``TMPDIR`` are applied to a *copy* at invocation time and

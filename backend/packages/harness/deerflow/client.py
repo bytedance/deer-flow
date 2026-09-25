@@ -283,7 +283,7 @@ class DeerFlowClient:
         # A skills edit changes no enabled server and no interceptor, so the
         # shared commit advances only ``configRevision`` -- the block must still
         # be persisted in the same write as the skill change. Deriving the
-        # previous config is lenient (D7-R3): an unverifiable stored document
+        # previous config is lenient: an unverifiable stored document
         # must not block the write.
         previous_config = validate_previous_config_lenient(config_data)
         set_raw_skill_enabled(config_data, name, enabled)
@@ -1428,7 +1428,7 @@ class DeerFlowClient:
                 # the cross-process lock before merging the replacement MCP map.
                 # Read it raw so sibling keys keep their $VAR placeholders.
                 config_data = read_raw_extensions_config(config_path)
-                # Lenient (D7-R3): a stored server that no longer validates must not
+                # Lenient: a stored server that no longer validates must not
                 # block this full replacement from repairing the document.
                 previous_config = validate_previous_config_lenient(config_data)
                 config_data["mcpServers"] = mcp_servers

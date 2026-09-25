@@ -1,29 +1,27 @@
-"""Stage 3 / Task 9: real multi-process acceptance matrix for shared lifecycle generations.
+"""Real multi-process tests for shared MCP lifecycle generations.
 
-These tests are the section-9 acceptance matrix of
-``docs/superpowers/specs/2026-09-25-mcp-shared-lifecycle-generation.md``. Each
-test drives two or more genuinely independent worker processes (independent
+Each test drives two or more genuinely independent worker processes (independent
 module globals, independent ``MCPSessionPool`` singletons) that share one
 ``extensions_config.json`` and one sidecar lock inode, so a lifecycle advance
 made by one worker must be observed and acted on by another worker's *next*
-check (consistency boundary A).
+check.
 
-RED control: the headline test below fails against the pre-Stage-2 behaviour.
-Temporarily reverting only the reader-side consumption (``_lifecycle_transition``
-returning "no signal") reproduces it: ``w1``'s next check reports
-``retired=False`` and leaves A's old binding and session in place, because the
-generation advance W2 persisted is invisible to the reader.
+The headline test below also serves as a control: reverting only the reader-side
+consumption (``_lifecycle_transition`` returning "no signal") makes it fail.
+``w1``'s next check then reports ``retired=False`` and leaves A's old binding
+and session in place, because the generation advance W2 persisted is invisible
+to the reader.
 
-Rows that are inherently single-process are called out here rather than
-duplicated:
+Properties that are inherently single-process are pinned elsewhere rather than
+duplicated here:
 
-* row 9 (HTTP cancellation + blocked subprocess exit) is a within-process
-  asyncio/thread property and is pinned by
+* HTTP cancellation with a blocked subprocess exit is a within-process
+  asyncio/thread property, pinned by
   ``tests/test_mcp_cache_reconciliation.py::test_cancelled_delete_worker_still_installs_tombstone``,
   ``::test_blocked_session_exit_does_not_block_next_config_write`` and
   ``::test_delete_then_readd_cannot_interleave_before_tombstone_installation``.
-* row 8's mid-write / ``EBUSY`` failure-injection variant is a single-writer
-  property pinned by
+* the mid-write / ``EBUSY`` failure-injection variant is a single-writer property
+  pinned by
   ``tests/test_mcp_lifecycle_failures.py::test_indeterminate_commit_retires_local_state_and_reports_unknown_outcome``;
   this module covers the post-write fence/reload failures that a second process
   can actually observe.
@@ -68,7 +66,7 @@ def _lifecycle(worker: Worker) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Row 1 — the headline scenario
+# Delete then identical re-add
 # ---------------------------------------------------------------------------
 
 
@@ -114,7 +112,7 @@ def test_headline_delete_then_identical_readd_retires_only_the_superseded_server
     assert check["sessions"]["A|t1"] is True
     assert check["sessions"]["B|t1"] is False
 
-    # Tool assembly (the other half of boundary A) must also succeed afterwards.
+    # Tool assembly must also succeed afterwards.
     refreshed = w1.send({"cmd": "refresh"})
     assert refreshed["cache_initialized"] is True
     assert refreshed["bindings"]["A"]["epoch"] > epoch_a_before
@@ -137,7 +135,7 @@ def _publish_and_open(worker: Worker, servers: dict, scopes: dict[str, str] | No
 
 
 # ---------------------------------------------------------------------------
-# Row 2 — disable then re-enable
+# Disable then re-enable
 # ---------------------------------------------------------------------------
 
 
@@ -168,7 +166,7 @@ def test_disable_then_identical_enable_retires_cross_process(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 3 — connection A1 -> A2 -> A1
+# Connection round trip A1 -> A2 -> A1
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +197,7 @@ def test_connection_round_trip_a1_a2_a1_is_detected(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 4 — mcpInterceptors X -> Y -> X
+# mcpInterceptors round trip X -> Y -> X
 # ---------------------------------------------------------------------------
 
 
@@ -231,7 +229,7 @@ def test_interceptors_x_y_x_forces_a_whole_pool_reset(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 5 — delete/re-add during a worker's tool discovery
+# Delete/re-add during a worker's tool discovery
 # ---------------------------------------------------------------------------
 
 
@@ -260,16 +258,16 @@ def test_delete_readd_during_gated_discovery_does_not_publish(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 6 — an already-held wrapper (boundary A)
+# An already-held wrapper
 # ---------------------------------------------------------------------------
 
 
 def test_already_held_wrapper_survives_until_the_next_check(spawn):
-    """Boundary A: a held wrapper keeps working until the *next* check retires it.
+    """A held wrapper keeps working until the *next* check retires it.
 
-    This is the wording of section 12 D1, asserted directly: there is no
-    immediate cross-process guarantee for a wrapper an agent already holds; the
-    next successful check installs the new epoch and fences the old binding.
+    There is no immediate cross-process guarantee for a wrapper an agent already
+    holds; the next successful check installs the new epoch and fences the old
+    binding.
     """
     spawn_workers, _config_path = spawn
     servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
@@ -288,7 +286,7 @@ def test_already_held_wrapper_survives_until_the_next_check(spawn):
     )
 
     # Before the next check the held binding is still current, so the old
-    # session may be used (the explicit non-goal of section 12 D1).
+    # session may be used (an explicit non-goal).
     held_before_check = w1.send({"cmd": "probe_held", "server": "A", "scope": "t1"})
     assert held_before_check["stale"] is False
     assert held_before_check["sessions"]["A|t1"] is False
@@ -304,7 +302,7 @@ def test_already_held_wrapper_survives_until_the_next_check(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 7 — the embedded client writer
+# The embedded client writer
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +332,7 @@ def test_embedded_client_update_follows_the_shared_protocol(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 8 — post-write fence / reload failure
+# Post-write fence / reload failure
 # ---------------------------------------------------------------------------
 
 
@@ -374,7 +372,7 @@ def test_post_write_reload_failure_keeps_the_fence_and_reports_the_commit(spawn)
 
 
 # ---------------------------------------------------------------------------
-# Row 10 — metadata / declaration order / skills are not lifecycle events
+# Metadata / declaration order / skills are not lifecycle events
 # ---------------------------------------------------------------------------
 
 
@@ -415,14 +413,14 @@ def test_metadata_order_and_skills_never_retire_sessions(spawn):
 
 
 # ---------------------------------------------------------------------------
-# Row 11 — legacy config upgrade
+# Legacy config upgrade
 # ---------------------------------------------------------------------------
 
 
 def test_legacy_upgrade_initializes_versions_and_preserves_placeholders(spawn):
     """The first commit over a legacy file adopts a baseline without a retirement.
 
-    This row is inherently single-process (it is about the commit protocol
+    This case is inherently single-process (it is about the commit protocol
     preserving bytes, not about cross-process observation); the existing
     ``tests/test_mcp_lifecycle_commit.py`` cases pin the same property directly.
     It is still driven through a real worker here for an end-to-end check.
