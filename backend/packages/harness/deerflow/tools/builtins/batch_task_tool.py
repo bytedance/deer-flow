@@ -28,6 +28,7 @@ from deerflow.subagents.batch_runtime import (
     get_subagent_batch_submitter,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 
@@ -81,7 +82,15 @@ def _bind_batch_tool(
             _explicit_batch_app_config.reset(config_token)
             _explicit_batch_submitter.reset(submitter_token)
 
-    return tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, tool.name),
+        }
+    )
 
 
 def bind_batch_tools(
