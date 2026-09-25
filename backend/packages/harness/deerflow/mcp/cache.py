@@ -83,8 +83,8 @@ _mcp_applied_path: Path | None = None
 _mcp_applied_signature: _ConfigSignature | None = None
 # The shared ``mcpLifecycle`` baseline the pool was last reconciled to.
 # ``_mcp_applied_lifecycle_invalid`` records that the applied revision carried
-# a block that was present but unverifiable (section 12 D7: never treat an
-# unverifiable version as safe).
+# a block that was present but unverifiable (never treat an unverifiable
+# version as safe).
 _mcp_applied_lifecycle: McpLifecycle | None = None
 _mcp_applied_lifecycle_invalid = False
 
@@ -205,8 +205,7 @@ class _McpReconciliationPlan:
     ``force_rebind`` names servers whose shared generation advanced even though
     their normalized base connection fingerprint is unchanged (a delete +
     identical re-add, a disable + re-enable, or an A1 -> A2 -> A1 round trip).
-    They must appear in ``active`` so the pool mints a fresh epoch for them
-    (spec section 12 D5).
+    They must appear in ``active`` so the pool mints a fresh epoch for them.
     """
 
     transition: _McpCacheTransition
@@ -276,10 +275,10 @@ def _lifecycle_identity(lifecycle: McpLifecycle | None, invalid: bool) -> tuple[
     """The *identity* of a lifecycle block, excluding ``configRevision``.
 
     ``configRevision`` counts every committed file write (including skills-only
-    writes) and is explicitly **not** a lifecycle version (spec section 12
-    D3-2): two revisions with different ``configRevision`` but equal
-    ``schemaVersion``/``globalGeneration``/``serverGenerations`` describe the
-    same MCP resource identity. ``invalid`` and the ``None`` (absent) marker are
+    writes) and is explicitly **not** a lifecycle version: two revisions with
+    different ``configRevision`` but equal ``schemaVersion``/
+    ``globalGeneration``/``serverGenerations`` describe the same MCP resource
+    identity. ``invalid`` and the ``None`` (absent) marker are
     part of the identity so a newly introduced or newly invalid block still
     counts as a change.
     """
@@ -334,7 +333,7 @@ def _revision_from_committed_revision(committed: CommittedMcpRevision) -> _McpIn
     The committed candidate's ``model_extra`` still carries the *previous*
     ``mcpLifecycle`` block: ``commit_extensions_config`` validates the candidate
     and only then overwrites the raw document, so the new counters live on the
-    returned revision object and must be taken from there (spec section 3).
+    returned revision object and must be taken from there.
     Only a stat/content signature is refreshed, so a writer can still fence the
     exact data set it committed.
     """
@@ -426,7 +425,7 @@ def _adopt_verified_revision(incoming: _McpIncomingRevision) -> None:
 
     Called (under ``_init_condition``) when the effective MCP content did not
     change, so no session is retired. It still advances the recorded
-    location/signature, and performs R1 migration adoption: the first valid
+    location/signature, and performs migration adoption: the first valid
     ``mcpLifecycle`` block seen by a process that has no baseline yet becomes the
     baseline *without* deriving any retirement from its generations.
     """
@@ -468,10 +467,9 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
 
     Returns ``(whole_pool, advanced)``: ``whole_pool`` means the pool must be
     reset unconditionally, and ``advanced`` names the servers whose generation
-    advanced and must therefore be retired + force-rebound (spec section 12 D5 /
-    D7-R1). The signal is deliberately separate from the effective-content
-    comparison: "the file changed" and "the resource lifecycle changed" are
-    different facts.
+    advanced and must therefore be retired + force-rebound. The signal is
+    deliberately separate from the effective-content comparison: "the file
+    changed" and "the resource lifecycle changed" are different facts.
 
     ``configRevision`` differences alone are never a signal.
     """
@@ -485,7 +483,7 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
     if incoming_lifecycle is None and applied is None:
         return False, frozenset()  # Legacy file: no lifecycle signal at all.
     if applied is None:
-        # R1 migration grace: adopt the first valid block without deriving any
+        # Migration grace: adopt the first valid block without deriving any
         # retirement from generations this process never observed.
         return False, frozenset()
     if incoming_lifecycle is None:
@@ -512,17 +510,17 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
 def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliationPlan | None:
     """Diff *incoming* against the applied baseline.
 
-    The effective-content diff (PR1) and the shared lifecycle classification
-    (section 12 D5) are two independent signals that are union-ed: either one
-    can require a rebuild, a per-server retirement, or a whole-pool reset.
+    The effective-content diff and the shared lifecycle classification are two
+    independent signals that are union-ed: either one can require a rebuild, a
+    per-server retirement, or a whole-pool reset.
 
     This classifier does not mutate cache state. When neither signal fires, it
     returns ``None``; the caller then adopts the new file signature (and the
-    R1 migration baseline) under ``_init_condition``.
+    migration baseline) under ``_init_condition``.
 
     Returns:
         ``None`` when the effective MCP slice *and* the shared lifecycle are
-        unchanged (PR1's skills/middleware-only no-op), otherwise the transition
+        unchanged (the skills/middleware-only no-op), otherwise the transition
         plus the exact pool operations it requires.
     """
     whole_pool, lifecycle_retire = _lifecycle_transition(incoming)
@@ -597,7 +595,7 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
     """
     global _config_path, _config_signature, _mcp_applied_path, _mcp_applied_signature
 
-    # Nothing has been published or reconciled yet: never stale (PR1 contract),
+    # Nothing has been published or reconciled yet: never stale,
     # and deployments without MCP pay no config-hashing cost.
     if not _cache_initialized and _mcp_applied_servers is None:
         if fence_in_flight_initialization and _initializing_generation is not None:
@@ -659,7 +657,7 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
     plan = _classify_against_applied(incoming)
     if plan is None:
         # The file changed, but the effective MCP slice and the shared lifecycle
-        # did not. Adopt its verified location/signature (and the R1 migration
+        # did not. Adopt its verified location/signature (and the migration
         # baseline) without interrupting existing sessions.
         logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
         _adopt_verified_revision(incoming)
@@ -760,7 +758,7 @@ def _plan_from_incoming_revision(incoming: _McpIncomingRevision, *, fence_in_fli
 
     The revision-based counterpart of :func:`_plan_cache_transition`: it performs
     no disk read at all, so a writer can fence from the exact committed revision
-    it just persisted (spec section 3/6).
+    it just persisted.
     """
     if not _cache_initialized and _mcp_applied_servers is None:
         if fence_in_flight_initialization and _initializing_generation is not None:
@@ -952,7 +950,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
         # Capture the shared lifecycle identity *before* discovery: a version
         # read only after discovery completes cannot prove which revision the
-        # returned tools were built under (spec section 12 D5).
+        # returned tools were built under.
         loaded_lifecycle, loaded_lifecycle_invalid = _lifecycle_from_config(loaded_config)
         loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
         post_path, post_sig = _current_config_state()
@@ -1008,8 +1006,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 # advanced during discovery supersedes the whole result even when
                 # the effective content stayed byte-identical. ``configRevision``
                 # is deliberately excluded -- a concurrent skills-only commit
-                # advances it without changing the MCP resource identity (spec
-                # section 12 D3-2), and must not void a valid discovery.
+                # advances it without changing the MCP resource identity, and
+                # must not void a valid discovery.
                 and _lifecycle_identity(loaded_lifecycle, loaded_lifecycle_invalid) == _lifecycle_identity(post_revision.lifecycle, post_revision.lifecycle_invalid)
             )
             if not publish:
@@ -1173,11 +1171,10 @@ def prepare_mcp_reconciliation(changed: Collection[str] | None) -> _PendingTeard
 def prepare_mcp_reconciliation_from_revision(committed: CommittedMcpRevision) -> _PendingTeardown | None:
     """Fence from one in-memory committed revision (no second disk parse).
 
-    This is the Stage 2 writer entry point: the writer already holds the exact
-    validated candidate and the counters it just committed, so the ownership
-    transfer must be derived from *that* data rather than by re-reading the file.
-    A re-read could observe a later writer's revision and fence the wrong epoch
-    (spec sections 3 and 6).
+    The writer already holds the exact validated candidate and the counters it
+    just committed, so the ownership transfer must be derived from *that* data
+    rather than by re-reading the file. A re-read could observe a later writer's
+    revision and fence the wrong epoch.
 
     The caller MUST release every config-write lock and MUST NOT hold
     ``_init_condition`` before calling :func:`finish_mcp_reconciliation` on the
@@ -1210,7 +1207,7 @@ def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
 
     This is the shared entry point for cross-process lazy detection and for
     callers that need the synchronous prepare-and-finish behavior in one call,
-    so both paths make the same session-ownership decisions (I8).
+    so both paths make the same session-ownership decisions.
 
     Args:
         changed: The server names whose effective configuration the caller just
@@ -1262,7 +1259,7 @@ def _reset_mcp_tools_cache_state_and_retire_pool_locked():
 def force_local_mcp_invalidation() -> None:
     """Conservatively retire every piece of process-local MCP state.
 
-    Config writers call this when a commit's outcome is unknown (D4) or the local
+    Config writers call this when a commit's outcome is unknown or the local
     reconciliation fence could not be installed: published tool *descriptions*
     may be retained, but no old session may stay usable while lifecycle identity
     cannot be proven.

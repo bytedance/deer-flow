@@ -113,7 +113,7 @@ def test_model_accepts_python_field_names() -> None:
     }
 
 
-# --- Task 2: lifecycle computation rules -----------------------------------
+# --- Lifecycle computation rules ---------------------------------------------
 
 _A1 = "stdio:server-a:A1"
 _A2 = "stdio:server-a:A2"

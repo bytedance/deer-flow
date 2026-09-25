@@ -52,7 +52,7 @@ _TRACKED_GLOBALS = (
     "_cache_generation",
     "_mcp_config_snapshot",
     "_initialized_without_config",
-    # PR2 pool-applied baseline: deliberately NOT cleared by
+    # Pool-applied baseline: deliberately NOT cleared by
     # ``_reset_mcp_tools_cache_state()``, so the fixture must isolate it.
     "_mcp_applied_servers",
     "_mcp_applied_order",
@@ -60,7 +60,7 @@ _TRACKED_GLOBALS = (
     "_mcp_applied_interceptors",
     "_mcp_applied_path",
     "_mcp_applied_signature",
-    # Stage 2 lifecycle baseline: same isolation requirement as the PR2 slice.
+    # Shared lifecycle baseline: same isolation requirement as the server-scoped slice.
     "_mcp_applied_lifecycle",
     "_mcp_applied_lifecycle_invalid",
 )
@@ -615,7 +615,7 @@ def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_
 
 
 def test_automatic_stale_invalidation_reconciles_without_replacing_the_pool(cache_globals, monkeypatch, tmp_path):
-    """Automatic invalidation reconciles the pool per server (PR2).
+    """Automatic invalidation reconciles the pool per server.
 
     ``get_cached_mcp_tools()`` detects runtime edits through the applied-baseline
     classifier without going through the explicit admin reset endpoint. A server
@@ -648,7 +648,7 @@ def test_automatic_stale_invalidation_reconciles_without_replacing_the_pool(cach
         result = cache_module.get_cached_mcp_tools()
 
         assert result == ["new-tools"]
-        # PR2: the pool is NOT replaced; only the changed servers retire.
+        # The pool is NOT replaced; only the changed servers retire.
         assert loaded_pools == [old_pool]
         assert session_pool_module.get_session_pool() is old_pool
         assert old_pool.active_binding("old").fingerprint is None
@@ -932,7 +932,7 @@ def test_refresh_is_noop_before_initialization(cache_globals, monkeypatch):
 def test_refresh_retires_cache_when_last_server_is_disabled(cache_globals, monkeypatch, tmp_path):
     """Disabling the last server still converges an already-initialized cache.
 
-    PR2: the removal is selective — the server is tombstoned rather than
+    The removal is selective — the server is tombstoned rather than
     replacing the whole pool — but the cache state must still be retired so the
     next assembly re-reads the config instead of silently serving stale tools.
     """
@@ -1430,7 +1430,7 @@ class TestLazyInitializationFailure:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 / Task 7: shared lifecycle publish gate
+# Shared lifecycle publish gate
 # ---------------------------------------------------------------------------
 
 
@@ -1476,7 +1476,7 @@ def test_lifecycle_advance_during_discovery_discards_and_retires_the_pool(cache_
     The publish gate must compare against the version captured *before*
     discovery; reading a version only after discovery completes and treating it
     as the start identity would publish tools built under the superseded
-    generation (spec section 12 D5).
+    generation.
     """
     from deerflow.mcp import session_pool as session_pool_module
 
@@ -1572,7 +1572,7 @@ def test_legacy_none_lifecycle_during_discovery_still_publishes(cache_globals, m
 
 
 def test_config_revision_only_commit_during_discovery_still_publishes(cache_globals, monkeypatch, tmp_path):
-    """``configRevision`` is not lifecycle identity (spec section 12 D3-2).
+    """``configRevision`` is not lifecycle identity.
 
     A concurrent skills-only commit (the shape the skills router writes) advances only
     ``configRevision``: the effective MCP content and the lifecycle identity are

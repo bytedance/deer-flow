@@ -1,10 +1,10 @@
-"""Server-scoped MCP cache reconciliation (PR2 Task 5).
+"""Server-scoped MCP cache reconciliation.
 
 ``extensions_config.json`` edits must be classified per server: only servers
 whose base stdio connection changed (or that were removed/disabled) retire their
 pooled sessions, while metadata-only edits and declaration-order changes keep
 every live session. The applied baseline must survive tool-cache clearing so
-back-to-back edits diff against the latest reconciled revision (I8), and owner
+back-to-back edits diff against the latest reconciled revision, and owner
 teardown must never run under ``cache._init_condition`` or ``pool._lock``.
 """
 
@@ -48,7 +48,7 @@ from deerflow.mcp.tasks.runtime import (
 
 _MISSING = object()
 
-# Module globals that hold cache state, including the PR2 applied baseline that
+# Module globals that hold cache state, including the applied baseline that
 # must survive ``_reset_mcp_tools_cache_state()``. Snapshotted and restored
 # around every test so nothing leaks between tests.
 _TRACKED_GLOBALS = (
@@ -283,7 +283,7 @@ class _SignalOnAcquire:
 
 
 def _record_reconcile_calls(monkeypatch) -> list[Any]:
-    """Record the committed revisions the Stage 2 writers fence from."""
+    """Record the committed revisions the config writers fence from."""
     calls: list[Any] = []
     real_prepare = mcp_router.prepare_mcp_reconciliation_from_revision
 
@@ -568,7 +568,7 @@ def test_equivalent_config_path_switch_keeps_sessions(cache_globals, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Applied baseline retention (I8)
+# Applied baseline retention
 # ---------------------------------------------------------------------------
 
 
@@ -1457,7 +1457,7 @@ def test_embedded_client_update_mcp_config_reconciles_pool(cache_globals, monkey
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 / Task 6: revision-based fence and lock discipline
+# Revision-based fence and lock discipline
 # ---------------------------------------------------------------------------
 
 
@@ -1466,7 +1466,7 @@ def test_writer_fences_from_the_in_memory_committed_revision(cache_globals, monk
 
     A second disk read would reintroduce the commit/coordination race the shared
     lifecycle generation exists to close, so the fence is fed the immutable
-    committed revision and no stable revision is re-parsed (spec section 3).
+    committed revision and no stable revision is re-parsed.
     """
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})

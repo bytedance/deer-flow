@@ -1,15 +1,14 @@
-"""Stage 1 / Task 5: migration, unverifiable versions and post-commit failures.
+"""Migration, unverifiable versions and post-commit failure handling.
 
-These tests cover the *writer-side* rulings of the frozen spec: D7 R1 (an absent
-block is migration grace, not a retirement), R2 (a malformed block is replaced by
-a fresh baseline instead of bricking the writer), R3 (an unverifiable previous
-config falls back to ``None`` so a repair can still land), and D4 (a commit whose
-outcome is unknown must retire local MCP state and never report "state
-unchanged").
+These tests cover the *writer-side* rules: an absent block is migration grace,
+not a retirement; a malformed block is replaced by a fresh baseline instead of
+bricking the writer; an unverifiable previous config falls back to ``None`` so a
+repair can still land; and a commit whose outcome is unknown must retire local
+MCP state and never report "state unchanged".
 
 Reader-side lifecycle classification, the discovery publish gate and
-``prepare_mcp_reconciliation_from_revision`` belong to Stage 2 (Tasks 6-7) and are
-deliberately not exercised here.
+``prepare_mcp_reconciliation_from_revision`` are deliberately not exercised
+here.
 """
 
 from __future__ import annotations
@@ -247,11 +246,11 @@ def _assert_stale(pool, owner_loop, name: str, binding) -> None:
 
 
 # ---------------------------------------------------------------------------
-# R1 — an absent block is migration grace, not a lifecycle event
+# An absent block is migration grace, not a lifecycle event
 # ---------------------------------------------------------------------------
 
 
-def test_r1_first_write_over_a_legacy_file_does_not_bump_preexisting_servers(tmp_path: Path) -> None:
+def test_first_write_over_a_legacy_file_does_not_bump_preexisting_servers(tmp_path: Path) -> None:
     cfg = tmp_path / "extensions_config.json"
     raw = {"mcpServers": {"A": _stdio("npx"), "B": _stdio("uvx")}, "skills": {}}
     _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
@@ -274,7 +273,7 @@ def test_r1_first_write_over_a_legacy_file_does_not_bump_preexisting_servers(tmp
     assert on_disk["serverGenerations"] == {"A": 0, "B": 0}
 
 
-def test_r1_guarantee_applies_from_the_second_commit(tmp_path: Path) -> None:
+def test_migration_guarantee_applies_from_the_second_commit(tmp_path: Path) -> None:
     cfg = tmp_path / "extensions_config.json"
     legacy = {"mcpServers": {"A": _stdio("npx"), "B": _stdio("uvx")}, "skills": {}}
     _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
@@ -295,7 +294,7 @@ def test_r1_guarantee_applies_from_the_second_commit(tmp_path: Path) -> None:
     assert on_disk["serverGenerations"]["B"] == 0
 
 
-def test_r1_router_write_over_a_legacy_file_keeps_live_sessions(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+def test_router_write_over_a_legacy_file_keeps_live_sessions(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
     pool = get_session_pool()
@@ -329,12 +328,12 @@ def _commit(cfg: Path, raw_data: dict, previous_config, new_config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# R2 — a malformed block is replaced, never left in place
+# A malformed block is replaced, never left in place
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("case", sorted(_INVALID_BLOCK_CASES))
-def test_r2_invalid_block_is_replaced_and_every_enabled_server_bumped(tmp_path: Path, case: str) -> None:
+def test_invalid_block_is_replaced_and_every_enabled_server_bumped(tmp_path: Path, case: str) -> None:
     cfg = tmp_path / "extensions_config.json"
     raw = {
         "mcpServers": {"A": _stdio("npx"), "B": _stdio("uvx")},
@@ -356,7 +355,7 @@ def test_r2_invalid_block_is_replaced_and_every_enabled_server_bumped(tmp_path: 
 
 
 def test_explicit_null_lifecycle_block_is_malformed_not_legacy(tmp_path: Path) -> None:
-    """``"mcpLifecycle": null`` is a present-but-unusable block (R2), not R1 grace."""
+    """``"mcpLifecycle": null`` is a present-but-unusable block, not migration grace."""
     cfg = tmp_path / "extensions_config.json"
     raw = {"mcpServers": {"A": _stdio("npx"), "B": _stdio("uvx")}, "skills": {}, "mcpLifecycle": None}
     cfg.write_text(json.dumps(raw), encoding="utf-8")
@@ -372,7 +371,7 @@ def test_explicit_null_lifecycle_block_is_malformed_not_legacy(tmp_path: Path) -
     }
 
 
-def test_r2_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tmp_path) -> None:
+def test_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tmp_path) -> None:
     cfg = tmp_path / "extensions_config.json"
     _write_config(
         cfg,
@@ -394,7 +393,7 @@ def test_r2_router_write_repairs_an_invalid_block(cache_globals, monkeypatch, tm
     }
 
 
-def test_r2_and_r3_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
+def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
     """Ruling 1: an unprovable baseline retires the whole pool, not only servers."""
     # (a) ordinary migration grace: absent block + valid previous config -> no bump
     graceful = tmp_path / "graceful.json"
@@ -405,7 +404,7 @@ def test_r2_and_r3_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path
     assert _lifecycle(graceful)["globalGeneration"] == 0
     assert _lifecycle(graceful)["serverGenerations"] == {"A": 0}
 
-    # (b) R2: malformed block -> fresh baseline whose global generation advances
+    # (b) malformed block -> fresh baseline whose global generation advances
     malformed = tmp_path / "malformed.json"
     malformed.write_text(
         json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 2, "configRevision": 4, "globalGeneration": 9, "serverGenerations": {"A": 3}}}),
@@ -416,7 +415,7 @@ def test_r2_and_r3_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path
     _commit(malformed, raw, previous_config, previous_config)
     assert _lifecycle(malformed)["globalGeneration"] == 1
 
-    # (c) R3: unverifiable previous document, block present and valid -> +1
+    # (c) unverifiable previous document, block present and valid -> +1
     unverifiable = tmp_path / "unverifiable.json"
     unverifiable.write_text(
         json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 1, "configRevision": 5, "globalGeneration": 4, "serverGenerations": {"A": 2}}}),
@@ -430,7 +429,7 @@ def test_r2_and_r3_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path
 
 
 # ---------------------------------------------------------------------------
-# R3 — an unverifiable previous config must not block a repair
+# An unverifiable previous config must not block a repair
 # ---------------------------------------------------------------------------
 
 _INVALID_STORED_SERVER = {"enabled": True, "type": "stdio", "command": "npx", "args": "not-a-list"}
@@ -440,7 +439,7 @@ def _stdlib_servers() -> dict:
     return {"mcpServers": {"A": _stdio("npx")}, "skills": {}}
 
 
-def test_r3_delete_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
+def test_delete_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
     cfg = tmp_path / "extensions_config.json"
     _write_config(cfg, {"A": _stdio("npx"), "broken": _INVALID_STORED_SERVER})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
@@ -458,7 +457,7 @@ def test_r3_delete_repairs_an_invalid_stored_server(cache_globals, monkeypatch, 
     }
 
 
-def test_r3_full_put_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
+def test_full_put_repairs_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
     cfg = tmp_path / "extensions_config.json"
     _write_config(cfg, {"A": _stdio("npx"), "broken": _INVALID_STORED_SERVER})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
@@ -482,7 +481,7 @@ def test_r3_full_put_repairs_an_invalid_stored_server(cache_globals, monkeypatch
     }
 
 
-def test_r3_full_put_can_replace_an_invalid_stored_server_by_name(cache_globals, monkeypatch, tmp_path) -> None:
+def test_full_put_can_replace_an_invalid_stored_server_by_name(cache_globals, monkeypatch, tmp_path) -> None:
     """The stored server is unparseable, so there are no stored secrets to merge."""
     cfg = tmp_path / "extensions_config.json"
     _write_config(cfg, {"broken": _INVALID_STORED_SERVER})
@@ -499,7 +498,7 @@ def test_r3_full_put_can_replace_an_invalid_stored_server_by_name(cache_globals,
     assert written["mcpLifecycle"]["serverGenerations"] == {"broken": 1}
 
 
-def test_r3_skills_write_survives_an_unverifiable_previous_document(monkeypatch, tmp_path) -> None:
+def test_skills_write_survives_an_unverifiable_previous_document(monkeypatch, tmp_path) -> None:
     # A non-object skills entry fails validation but is exactly what the toggle
     # repairs; the lenient previous-config derivation must not raise first.
     cfg = tmp_path / "extensions_config.json"
@@ -521,7 +520,7 @@ def test_r3_skills_write_survives_an_unverifiable_previous_document(monkeypatch,
     }
 
 
-def test_r3_client_mcp_write_survives_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
+def test_client_mcp_write_survives_an_invalid_stored_server(cache_globals, monkeypatch, tmp_path) -> None:
     import deerflow.client as client_module
     from deerflow.client import DeerFlowClient
 
@@ -544,7 +543,7 @@ def test_r3_client_mcp_write_survives_an_invalid_stored_server(cache_globals, mo
     assert written["mcpLifecycle"]["serverGenerations"] == {"B": 1}
 
 
-def test_r3_client_skill_write_survives_an_unverifiable_previous_document(monkeypatch, tmp_path) -> None:
+def test_client_skill_write_survives_an_unverifiable_previous_document(monkeypatch, tmp_path) -> None:
     import deerflow.client as client_module
     from deerflow.client import DeerFlowClient
 
@@ -566,7 +565,7 @@ def test_r3_client_skill_write_survives_an_unverifiable_previous_document(monkey
 
 
 def test_lenient_previous_config_swallows_non_http_errors(monkeypatch) -> None:
-    """A non-HTTPException escape must not turn an R3 repair into a 500."""
+    """A non-HTTPException escape must not turn a repair into a 500."""
     import deerflow.mcp.commit as commit_module
 
     def _boom(*_args, **_kwargs):
@@ -579,7 +578,7 @@ def test_lenient_previous_config_swallows_non_http_errors(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# D4 — post-commit failure semantics
+# Post-commit failure semantics
 # ---------------------------------------------------------------------------
 
 
@@ -761,7 +760,7 @@ def test_force_local_mcp_invalidation_never_raises(cache_globals, monkeypatch) -
 
 
 def test_mid_write_failure_invalidates_outside_the_config_lock(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
-    """D4: the outcome-unknown path must not wait for teardown holding the write lock."""
+    """The outcome-unknown path must not wait for teardown holding the write lock."""
     teardown_started = threading.Event()
     release_exit = threading.Event()
     _blocking_exit_session_cm(monkeypatch, teardown_started, release_exit)
@@ -824,9 +823,9 @@ def test_fence_failure_invalidates_outside_the_config_lock(cache_globals, monkey
 
 
 def test_task_config_conflict_escaping_the_fence_still_invalidates(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
-    """F2: a ``McpTaskConfigurationError`` from the fence must not skip invalidation.
+    """A ``McpTaskConfigurationError`` from the fence must not skip invalidation.
 
-    The frozen durable-task 409 is raised for a write that has *already*
+    The durable-task 409 is raised for a write that has *already*
     committed, so the local pool must be conservatively invalidated on the way
     out. Mapping straight to 409 (the pre-fix behaviour) leaves the committed
     change unfenced and an old session usable.

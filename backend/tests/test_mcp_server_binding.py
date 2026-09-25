@@ -68,7 +68,7 @@ def test_retire_all_marks_pool_retired():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: selective retirement, commit fence, cancel-safe teardown
+# Selective retirement, commit fence, cancel-safe teardown
 # ---------------------------------------------------------------------------
 
 _CONNECTION = {"transport": "stdio", "command": "x", "args": []}
@@ -250,7 +250,7 @@ async def test_force_rebind_advances_epoch_for_an_unchanged_fingerprint():
     The shared lifecycle generation can advance while the normalized base
     connection fingerprint is unchanged (delete + identical re-add). The pool
     must then replace A's epoch and detach its live session, while B -- whose
-    generation did not advance -- stays byte-identical (spec section 12 D5).
+    generation did not advance -- stays byte-identical.
     """
     pool = MCPSessionPool()
     loop = asyncio.get_running_loop()
@@ -609,7 +609,7 @@ def test_repeated_removal_does_not_mint_new_epochs():
 
 
 # ---------------------------------------------------------------------------
-# Task 4 review, FIX B: single-lock ensure_binding closes the read/install race
+# Single-lock ensure_binding closes the read/install race
 # ---------------------------------------------------------------------------
 
 
