@@ -145,17 +145,17 @@ class SlackChannel(Channel):
         # ``_connect_socket_mode`` so a connect failure gets logged: nothing
         # awaits the future ``run_in_executor`` returns, so an exception stored
         # on it would never surface.
-        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode)
+        socket_client = self._socket_client
+        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode, socket_client)
         logger.info("Slack channel started")
 
-    def _connect_socket_mode(self) -> None:
-        """Executor thread body: open the Socket Mode connection, logging a failure.
+    def _connect_socket_mode(self, socket_client: Any) -> None:
+        """Connect one start attempt's Socket Mode client if it is still current.
 
         Mirrors the Telegram and Discord channels, whose background threads log
         their errors instead of letting them vanish with the thread.
         """
-        socket_client = self._socket_client
-        if socket_client is None:
+        if socket_client is not self._socket_client:
             return
         try:
             socket_client.connect()
