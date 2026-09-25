@@ -77,7 +77,9 @@ from settings, tool results or logs.
 - Gateway lead runs and subagents bind a task store, and both use the async hook.
   The sync hook runs the same classifier on LangGraph's synchronous tool worker
   threads for embedders that run the graph synchronously. Called directly on an
-  event-loop thread, it passes the result through.
+  event-loop thread, it passes the result through. Its per-request deadline does
+  not cover shutting down that temporary event loop, which waits for a pending
+  name lookup, so a stalled DNS resolver can hold a synchronous tool call longer.
 - The embedded `DeerFlowClient` does not load `plugins:` extensions and binds no
   extension task store. Without a task store the middleware sends nothing.
 - One classifier request is made per text message of an eligible result,
@@ -88,8 +90,14 @@ from settings, tool results or logs.
   missed, as can messages past the eighth.
 - Each request has its own deadline, 3 seconds by default and at most 10. There
   are no retries or cache, and a new client is used for each tool call.
-- A missing or unusable key, provider errors, invalid or oversized responses and
-  timeouts pass the result through silently. Unexpected local errors are reported
+- Requests ask for an uncompressed response and drop an encoded one, so the
+  16 KiB response cap also bounds memory.
+- A plain-HTTP loopback endpoint ignores `HTTP_PROXY` and `ALL_PROXY`, so the key
+  and excerpts never reach a proxy in cleartext. HTTPS endpoints keep the usual
+  proxy settings.
+- A missing or unusable key, provider errors, invalid, malformed, oversized or
+  compressed responses and timeouts pass the result through silently, and one
+  failed request does not cancel the others. Unexpected local errors are reported
   by the host as extension diagnostics, and the tool result is kept. Tool failures,
   graph interrupts and cancellation propagate without repeating the tool.
 - A flag lives only as long as its task. If a run is interrupted between the tool

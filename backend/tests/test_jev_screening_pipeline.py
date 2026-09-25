@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,7 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
@@ -88,7 +90,7 @@ def _graph(scope, content, *, as_command=False, pii=False, enabled=True, message
     app_config.title.enabled = False
     app_config.memory.enabled = False
     app_config.summarization.enabled = False
-    app_config.pii_redaction.enabled = pii
+    app_config.pii_redaction = PiiRedactionConfig(enabled=pii, token_secret="offline-screening-token-secret" if pii else None)
     # Deterministic no-disk fallback exercises the actual 30,000-char boundary.
     app_config.tool_output.externalize_min_chars = 0
     extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_jev_screening:install", config={"enabled": enabled, **screening_options})])
@@ -196,12 +198,14 @@ async def test_screening_sees_host_pii_redaction_and_sanitization(offline, scope
     # TOOL_VISIBLE is outer of the host's tool-result redaction and
     # sanitization, so the excerpt that leaves the host is the redacted text.
     excerpt = json.loads(requests[0].content)["state"]["content"]
-    assert "private@example.com" not in excerpt and "[EMAIL_1]" in excerpt
+    assert "private@example.com" not in excerpt
+    token_match = re.search(r"\[EMAIL_[a-z]{27}\]", excerpt)
+    assert token_match is not None
     assert "<system-reminder>" not in excerpt
     visible = _model_tool_message(model)
     assert WARNING in visible.content
     assert "private@example.com" not in visible.content
-    assert "[EMAIL_1]" in visible.content
+    assert token_match.group() in visible.content
     assert "<system-reminder>" not in visible.content
     assert "&lt;system-reminder&gt;" in visible.content
     assert original.content == content and calls == ["fetch"]

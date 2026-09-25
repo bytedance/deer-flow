@@ -168,6 +168,33 @@ def test_list_dir_on_user_data_root_does_not_duplicate_subdir_mounts(provider):
         assert len(matches) == 1, f"{subdir} listed {len(matches)} time(s), expected exactly 1: {entries}"
 
 
+def test_list_dir_on_skills_root_lists_category_mounts(provider):
+    """Regression: with the default (non-policy-scoped) mount layout there is
+    no mapping for the aggregate ``/mnt/skills`` root itself — only the four
+    category mounts (public/custom/legacy/integrations), each pointing at its
+    own host directory. The root must still be listable: the virtual
+    sub-directory overlay in ``list_dir`` exists exactly so the agent can
+    discover the categories via ``ls /mnt/skills``, but the host ``list_dir``
+    on the unmapped root raised ``FileNotFoundError`` before the overlay ran.
+    """
+    sandbox_id = provider.acquire("alpha")
+    sbx = provider.get(sandbox_id)
+
+    # Pin the scenario: the default category layout, no aggregate root mapping.
+    mounted = {m.container_path for m in sbx.path_mappings}
+    assert "/mnt/skills" not in mounted
+    assert mounted >= {"/mnt/skills/public", "/mnt/skills/custom", "/mnt/skills/legacy", "/mnt/skills/integrations"}
+
+    entries = sbx.list_dir("/mnt/skills")
+
+    assert entries == [
+        "/mnt/skills/custom/",
+        "/mnt/skills/integrations/",
+        "/mnt/skills/legacy/",
+        "/mnt/skills/public/",
+    ]
+
+
 def test_update_file_with_virtual_path_for_remote_sync_scenario(provider):
     """This is the exact code path used by ``uploads.py:282`` and ``feishu.py:389``.
 
