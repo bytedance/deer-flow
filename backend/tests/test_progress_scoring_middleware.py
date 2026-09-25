@@ -15,17 +15,18 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from deerflow.agents.middlewares import progress_scoring_middleware as module
 from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.progress_eval_protocol import ProgressEvalStreamRedactor
 from deerflow.agents.middlewares.progress_scoring_middleware import (
     PROGRESS_EVAL_TAG,
     ProgressScoringMiddleware,
     StepEvaluation,
     _StepRecord,
-    _strip_eval_blocks,
     parse_step_evaluation,
+    strip_progress_eval_blocks,
 )
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.config.progress_scoring_config import ProgressScoringConfig
@@ -168,32 +169,140 @@ class TestParseStepEvaluation:
 
 class TestStripEvalBlocks:
     def test_strips_block_from_string(self):
-        content = f"real reply\n\n{_eval_block('{"tool_usefulness": 0, "task_progress": 0}')}\n"
-        stripped = _strip_eval_blocks(content)
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = f"real reply\n\n{_eval_block(payload)}\n"
+        stripped = strip_progress_eval_blocks(content)
         assert PROGRESS_EVAL_TAG not in stripped
         assert "real reply" in stripped
 
     def test_no_block_returns_same_object(self):
         content = "plain reply"
-        assert _strip_eval_blocks(content) is content
+        assert strip_progress_eval_blocks(content) is content
 
-    def test_block_only_content_stays(self):
-        content = _eval_block('{"tool_usefulness": 0, "task_progress": 0}')
-        # Nothing meaningful would remain; the original content is kept
-        # rather than replaced with an empty assistant message.
-        assert _strip_eval_blocks(content) == content
+    def test_block_only_content_becomes_empty(self):
+        # P2 review: a response made only of the evaluation block must not
+        # fall back to the original content and leak the block.
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = _eval_block(payload)
+        stripped = strip_progress_eval_blocks(content)
+        assert stripped == ""
 
     def test_strips_from_text_blocks(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
         content = [
             {"type": "text", "text": "real reply"},
-            {"type": "text", "text": _eval_block('{"tool_usefulness": 0, "task_progress": 0}')},
+            {"type": "text", "text": _eval_block(payload)},
         ]
-        stripped = _strip_eval_blocks(content)
+        stripped = strip_progress_eval_blocks(content)
         assert stripped == [{"type": "text", "text": "real reply"}]
 
     def test_leaves_non_text_blocks_untouched(self):
         content = [{"type": "image_url", "image_url": {"url": "x"}}]
-        assert _strip_eval_blocks(content) is content
+        assert strip_progress_eval_blocks(content) is content
+
+
+class TestStreamRedactor:
+    """ProgressEvalStreamRedactor removes blocks split across chunks."""
+
+    def _chunk(self, text, *, mid="msg-1", usage=None):
+        msg = AIMessageChunk(content=text, id=mid)
+        if usage is not None:
+            msg = msg.model_copy(update={"usage_metadata": usage})
+        return (msg, {"langgraph_node": "model"})
+
+    def _texts(self, outputs):
+        return [out[0].content for out in outputs]
+
+    def test_plain_text_passes_through(self):
+        redactor = ProgressEvalStreamRedactor()
+        outputs = redactor.push(self._chunk("hello world"))
+        assert self._texts(outputs) == ["hello world"]
+        assert outputs[0][0] is not None
+
+    def test_non_ai_messages_pass_through(self):
+        redactor = ProgressEvalStreamRedactor()
+        chunk = (ToolMessage(content="result", tool_call_id="c1"), {})
+        outputs = redactor.push(chunk)
+        assert outputs == [chunk]
+
+    def test_non_tuple_chunk_passes_through(self):
+        redactor = ProgressEvalStreamRedactor()
+        assert redactor.push("not-a-tuple") == ["not-a-tuple"]
+
+    def test_block_split_across_chunks_is_removed(self):
+        redactor = ProgressEvalStreamRedactor()
+        # Split at every boundary shape: text, partial open marker, marker
+        # body, partial close, text after close.
+        pieces = [
+            "answer text\n",
+            "``",
+            f"`{PROGRESS_EVAL_TAG}\n",
+            '{"tool_',
+            'usefulness": 0, "task_progress": 0}',
+            "\n``",
+            "`\n",
+        ]
+        emitted: list[str] = []
+        for piece in pieces:
+            emitted.extend(self._texts(redactor.push(self._chunk(piece))))
+        redactor.finish()
+        assert "".join(emitted) == "answer text\n\n"
+
+    def test_partial_marker_never_completing_is_released(self):
+        # Ordinary text that merely looks like the start of the marker must
+        # eventually reach the stream unchanged.
+        redactor = ProgressEvalStreamRedactor()
+        outputs = redactor.push(self._chunk("see ```dee"))
+        assert self._texts(outputs) == ["see "]
+        outputs = redactor.push(self._chunk("p learning rocks"))
+        assert "".join(self._texts(outputs)) == "```deep learning rocks"
+        leftovers = redactor.finish()
+        assert self._texts(leftovers) == []
+
+    def test_unterminated_block_restored_at_finish(self):
+        # The state-side regex keeps unclosed blocks, so the stream must too.
+        redactor = ProgressEvalStreamRedactor()
+        first = redactor.push(self._chunk("before "))
+        assert self._texts(first) == ["before "]
+        redactor.push(self._chunk("```" + PROGRESS_EVAL_TAG + "\n"))
+        third = redactor.push(self._chunk('{"task_progress": 0'))
+        assert self._texts(third) == [""]
+        leftovers = redactor.finish()
+        assert self._texts(leftovers) == ["```" + PROGRESS_EVAL_TAG + "\n" + '{"task_progress": 0']
+
+    def test_new_message_id_flushes_previous_leftovers(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        redactor = ProgressEvalStreamRedactor()
+        redactor.push(self._chunk("one ", mid="msg-1"))
+        redactor.push(self._chunk("two ", mid="msg-1"))
+        outputs = redactor.push(self._chunk(f"next {_eval_block(payload)}", mid="msg-2"))
+        texts = "".join(self._texts(outputs))
+        assert texts.startswith("next ")
+
+    def test_fully_dropped_chunk_kept_with_empty_content(self):
+        # A usage-only final chunk inside a block must not disappear: it is
+        # emitted with emptied content so usage metadata survives.
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        redactor = ProgressEvalStreamRedactor()
+        redactor.push(self._chunk("reply ", mid="msg-1"))
+        usage = {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+        outputs = redactor.push(self._chunk(f"{_eval_block(payload)}", mid="msg-1", usage=usage))
+        dropped = outputs[0][0]
+        assert dropped.content == ""
+        assert dropped.usage_metadata == usage
+
+    def test_list_content_blocks_redacted_statelessly(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        msg = AIMessageChunk(
+            content=[
+                {"type": "text", "text": "real reply"},
+                {"type": "text", "text": _eval_block(payload)},
+            ],
+            id="msg-1",
+        )
+        redactor = ProgressEvalStreamRedactor()
+        outputs = redactor.push((msg, {}))
+        assert outputs[0][0].content == [{"type": "text", "text": "real reply"}]
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +494,32 @@ class TestHooks:
         captured, handler = _capture_handler()
         mw.wrap_model_call(_make_request([HumanMessage(content="hi")], runtime), handler)
         assert "PROGRESS EVALUATION PROTOCOL" in captured[0].messages[-1].content
+
+    def test_injected_protocol_message_is_hidden_from_ui(self):
+        # P1 review: on_chat_model_start scans the model request backwards
+        # for the first persistable HumanMessage; the synthetic protocol
+        # message is appended last, so without the hide_from_ui marker it
+        # would be recorded as the run's human input instead of the user's
+        # request on the first lead-agent call.
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(_make_request([HumanMessage(content="real user ask")], runtime), handler)
+        injected = captured[0].messages[-1]
+        assert injected is not captured[0].messages[0]
+        assert injected.additional_kwargs.get("hide_from_ui") is True
+
+    def test_after_model_empties_block_only_response(self):
+        # P2 review: a response consisting solely of the evaluation block
+        # must be persisted as empty content, never as the leaked block.
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        state = _turn_state()
+        state["messages"][3] = AIMessage(content=_eval_block(payload))
+        result = mw.after_model(state, runtime)
+        assert result is not None
+        assert result["messages"][0].content == ""
 
     def test_no_hard_stop_or_tool_calls_strip(self):
         # The intervention is replan-first: repeated stagnant turns never

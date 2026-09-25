@@ -35,6 +35,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.progress_eval_protocol import strip_progress_eval_blocks
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
@@ -520,6 +521,12 @@ class RunJournal(BaseCallbackHandler):
                 self._seen_llm_starts.add(rid)
 
             content = message.model_dump()
+            if isinstance(message, AIMessage):
+                # The progress-scoring protocol asks the model to append a
+                # fenced self-evaluation block to its response; strip it from
+                # the durable llm.ai.response event — the after_model state
+                # rewrite happens only after this callback already fired.
+                content["content"] = strip_progress_eval_blocks(content.get("content"))
             if is_canonical_callback and caller == "lead_agent" and isinstance(message, AIMessage) and not message.tool_calls:
                 with self._skill_usage_lock:
                     skill_usages = deepcopy(list(self._skill_usages.values()))

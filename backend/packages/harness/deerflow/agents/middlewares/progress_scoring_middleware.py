@@ -49,9 +49,21 @@ Division of labor with the existing guards:
   window progress recovers to ``rearm_progress`` or an observable change
   appears, so a long legitimate workflow that replans is not nagged.
 
-The evaluation block is parsed out of the AIMessage content before the
-message continues downstream, so the UI, memory, and persisted history never
-see the protocol payload.
+The evaluation block is hidden at every boundary, not just in graph state:
+``after_model`` parses and strips it from the persisted AIMessage; the run
+journal strips it from ``llm.ai.response`` events; and
+:class:`ProgressEvalStreamRedactor` (wired into the run worker's live
+``messages`` stream) removes it from token chunks, which are published before
+``after_model`` ever runs. The injected protocol instructions themselves ride
+on a transient ``hide_from_ui`` HumanMessage, so the journal's first-human-
+input scan cannot mistake them for the user's request.
+
+The protocol payload helpers (tag, fenced-block regex, content stripping,
+streaming redactor) live in :mod:`progress_eval_protocol`, a dependency-light
+module, so the runtime layer can import them without this module's
+agent-framework imports — importing those from the runtime would form an
+import cycle (``runtime.__init__`` → ``runs.worker`` → middleware →
+``loop_detection`` → ``runtime``).
 """
 
 from __future__ import annotations
@@ -59,7 +71,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import threading
 import uuid
 from collections import OrderedDict, deque
@@ -75,6 +86,11 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
 from deerflow.agents.middlewares.loop_detection_middleware import _normalize_tool_call_args, _stable_tool_key
+from deerflow.agents.middlewares.progress_eval_protocol import (
+    _EVAL_BLOCK_RE,
+    PROGRESS_EVAL_TAG,
+    strip_progress_eval_blocks,
+)
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.runtime.events.catalog import MIDDLEWARE_PROGRESS_SCORING_TAG
 
@@ -82,15 +98,6 @@ if TYPE_CHECKING:
     from deerflow.config.progress_scoring_config import ProgressScoringConfig
 
 logger = logging.getLogger(__name__)
-
-# The fenced-block language tag the model is instructed to use for its
-# self-evaluation. Distinctive so it cannot collide with ordinary markdown.
-PROGRESS_EVAL_TAG = "deerflow-progress"
-
-_EVAL_BLOCK_RE = re.compile(
-    rf"```{PROGRESS_EVAL_TAG}[^\S\n]*\n(.*?)```",
-    re.DOTALL,
-)
 
 _SCORE_MIN = 0
 _SCORE_MAX = 3
@@ -205,44 +212,6 @@ def _content_to_text(content: str | list | None) -> str:
                 parts.append(block)
         return "\n".join(parts)
     return ""
-
-
-def _strip_eval_blocks(content: str | list | None) -> str | list | None:
-    """Remove the evaluation block(s) from AIMessage content.
-
-    Never mutates the input: returns the original object when there is
-    nothing to strip, a new value otherwise. Text blocks that become empty
-    after stripping are dropped so the UI does not render stray empty
-    assistant bubbles.
-    """
-    if isinstance(content, str):
-        return _EVAL_BLOCK_RE.sub("", content).strip() or content
-
-    if isinstance(content, list):
-        new_blocks: list = []
-        changed = False
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                stripped = _EVAL_BLOCK_RE.sub("", block["text"])
-                if stripped != block["text"]:
-                    changed = True
-                    if stripped.strip():
-                        new_blocks.append({**block, "text": stripped})
-                    continue
-                new_blocks.append(block)
-            elif isinstance(block, str):
-                stripped = _EVAL_BLOCK_RE.sub("", block)
-                if stripped != block:
-                    changed = True
-                    if stripped.strip():
-                        new_blocks.append(stripped)
-                    continue
-                new_blocks.append(block)
-            else:
-                new_blocks.append(block)
-        return new_blocks if changed else content
-
-    return content
 
 
 def _result_hash(msg: ToolMessage) -> str:
@@ -607,7 +576,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             )
             self._record_audit_event(runtime, stats, action="replan_required")
 
-        stripped = _strip_eval_blocks(messages[-1].content)
+        stripped = strip_progress_eval_blocks(messages[-1].content)
         if stripped is messages[-1].content:
             return None
         new_msg = messages[-1].model_copy(update={"content": stripped})
@@ -651,6 +620,13 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         the hint is delivered exactly once, so neither is persisted into the
         thread history. Appending after all ToolMessages keeps provider
         tool-call pairing intact, mirroring LoopDetectionMiddleware.
+
+        The message is marked ``hide_from_ui`` — the journal's existing rule
+        for framework-injected HumanMessages — so ``on_chat_model_start``'s
+        backward scan for the first persistable user message cannot mistake
+        this synthetic prompt for the run's human input (it is appended last,
+        so without the marker it would always win that scan on the first
+        lead-agent call).
         """
         scope_key = self._run_scope_key(request.runtime)
         with self._lock:
@@ -661,7 +637,11 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             parts.append(hint)
         new_messages = [
             *request.messages,
-            HumanMessage(content="\n\n".join(parts), name="progress_scoring"),
+            HumanMessage(
+                content="\n\n".join(parts),
+                name="progress_scoring",
+                additional_kwargs={"hide_from_ui": True},
+            ),
         ]
         return request.override(messages=new_messages)
 

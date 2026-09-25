@@ -445,6 +445,52 @@ class TestLlmCallbacks:
         assert model_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Show revenue"
 
     @pytest.mark.anyio
+    async def test_on_chat_model_start_skips_hidden_progress_scoring_protocol_message(self, journal_setup):
+        # The progress-scoring middleware appends its synthetic protocol
+        # instructions as the last message of the first model request; the
+        # backward first-human-input scan must skip it (hide_from_ui) and
+        # keep the user's actual request as first_human_message.
+        j, store = journal_setup
+        user = HumanMessage(content="Real question", id="human-1")
+        protocol = HumanMessage(
+            content="[PROGRESS EVALUATION PROTOCOL] append a fenced block...",
+            name="progress_scoring",
+            additional_kwargs={"hide_from_ui": True},
+        )
+
+        j.on_chat_model_start({}, [[user, protocol]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Real question"
+        events = await store.list_events("t1", "r1")
+        human_event = next(event for event in events if event["event_type"] == "llm.human.input")
+        assert human_event["content"]["content"] == "Real question"
+
+    @pytest.mark.anyio
+    async def test_on_llm_end_strips_progress_eval_block_from_ai_response(self, journal_setup):
+        # The in-band self-evaluation block is transient protocol payload:
+        # it must not reach the durable llm.ai.response event, even though
+        # the after_model state rewrite runs after this callback. Uses a
+        # real AIMessage because the strip keys off isinstance(AIMessage).
+        from langchain_core.messages import AIMessage as _AIMessage
+
+        j, store = journal_setup
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = "Answer\n```deerflow-progress\n" + payload + "\n```"
+        msg = _AIMessage(content=content, id="msg-eval", response_metadata={"model_name": "test-model"})
+        gen = MagicMock()
+        gen.message = msg
+        response = MagicMock()
+        response.generations = [[gen]]
+
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        response_event = next(event for event in events if event["event_type"] == "llm.ai.response")
+        assert response_event["content"]["content"] == "Answer"
+
+    @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()
