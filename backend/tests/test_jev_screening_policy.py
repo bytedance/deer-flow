@@ -97,6 +97,7 @@ def test_policy_is_stable_json_safe_and_does_not_expose_endpoint_prompt_or_keys(
     assert "probed" not in declared
     assert declared["enabled"] is True
     assert declared["api_key_env"] == "TYPESAFE_API_KEY"
+    assert declared["max_screened_messages"] == 8
     for name in ("endpoint_sha256", "question_sha256", "marker_sha256"):
         assert len(declared[name]) == 64 and all(c in "0123456789abcdef" for c in declared[name])
     serialized = json.dumps(asdict(first), sort_keys=True, allow_nan=False)

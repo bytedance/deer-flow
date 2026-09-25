@@ -43,8 +43,8 @@ the Gateway reports as an extension diagnostic while starting without the
 extension, unless the entry is `required: true`.
 
 **Data sharing:** `config.enabled: true` is also the consent to send up to
-`max_excerpt_chars` characters of each eligible tool result to the configured
-TypeSafe endpoint. The middleware sits outside the host's tool-result truncation,
+`max_excerpt_chars` characters from each text message of an eligible tool result,
+for at most eight messages per tool call, to the configured TypeSafe endpoint. The middleware sits outside the host's tool-result truncation,
 sanitization and PII redaction, so the excerpt is the text the model would see:
 with `pii_redaction` enabled, redacted values are replaced before the excerpt
 leaves the host. The key is read only from its named environment variable, never
@@ -52,21 +52,25 @@ from settings, tool results or logs.
 
 ## How it works
 
-1. **Detect.** The tool-call wrapper classifies the visible result of an eligible
-   tool. When the score reaches the threshold it records the tool-call ID in the
-   run's extension task store (`task_store_from_runtime`). The wrapper cannot
-   change the result: extension tool wrappers are observational, and the host's
-   isolation wrapper always returns the downstream result.
+1. **Detect.** The tool-call wrapper classifies each text message of an eligible
+   tool's visible result on its own, with one request per message. For every
+   message whose score reaches the threshold, it records that message's tool-call
+   ID in the run's extension task store (`task_store_from_runtime`). A benign
+   message with its own tool-call ID therefore does not take the warning meant for
+   another message in the same `Command`; messages that share an ID are warned
+   together. The wrapper cannot change the result: extension tool wrappers are
+   observational, and the host's isolation wrapper always returns the downstream
+   result.
 2. **Warn.** `before_model` takes the recorded IDs and returns copies of the
    matching tool messages from the latest tool step, with the warning prepended
    and the same message ID (including a valid empty string), so the messages
    reducer replaces them. The warning is added once; later model calls see the
    same message.
 3. **Declare.** `release_policy_parameters()` declares the enabled state, model,
-   threshold, excerpt limit, timeout and key variable name, plus SHA-256 hashes of
-   the endpoint, question and warning. The host's assembly descriptor unwraps the
-   isolation wrapper to read it, so changing a setting moves the fingerprint while
-   rotating a key does not.
+   threshold, excerpt limit, per-call message cap, timeout and key variable name,
+   plus SHA-256 hashes of the endpoint, question and warning. The host's assembly
+   descriptor unwraps the isolation wrapper to read it, so changing a setting moves
+   the fingerprint while rotating a key does not.
 
 ## Runtime behavior and boundaries
 
@@ -76,11 +80,14 @@ from settings, tool results or logs.
   event-loop thread, it passes the result through.
 - The embedded `DeerFlowClient` does not load `plugins:` extensions and binds no
   extension task store. Without a task store the middleware sends nothing.
-- One classifier request is made per eligible tool call containing text,
-  including `Command` results. Multimodal results are skipped. Only the excerpt is
-  classified, so instructions beyond it can be missed.
-- The request deadline defaults to 3 seconds and cannot exceed 10. There are no
-  retries or cache, and a new client is used for each result.
+- One classifier request is made per text message of an eligible result,
+  including each message of a `Command`, for at most eight messages per tool call.
+  The requests share one client and run concurrently, so one slow or failed
+  request does not hide another message's flag. Multimodal messages are skipped.
+  Only each message's excerpt is classified, so instructions beyond it can be
+  missed, as can messages past the eighth.
+- Each request has its own deadline, 3 seconds by default and at most 10. There
+  are no retries or cache, and a new client is used for each tool call.
 - A missing or unusable key, provider errors, invalid or oversized responses and
   timeouts pass the result through silently. Unexpected local errors are reported
   by the host as extension diagnostics, and the tool result is kept. Tool failures,

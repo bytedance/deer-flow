@@ -82,7 +82,9 @@ Load the example through `load_extensions()` and the host isolation wrapper, as 
 `plugins:` entry is loaded; never instantiate the middleware directly.
 `test_jev_result_screening_extension.py` checks install/config diagnostics, bounded
 requests, the task-store handover between the tool wrapper and `before_model`, copy
-semantics, fail-open provider errors and isolation diagnostics for local bugs.
+semantics, fail-open provider errors and isolation diagnostics for local bugs. It
+also pins per-message classification: a benign first message in a `Command` must
+not take the flag of an injected later one.
 `test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
 with a task store bound under the runtime-context key the Gateway worker uses; cover
 the redacted excerpt, error metadata/receipts, budget, one-time warnings including
