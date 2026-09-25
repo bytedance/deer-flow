@@ -1,10 +1,32 @@
 import json
+import logging
 
 from langchain.tools import tool
 from tavily import TavilyClient
 
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_RESULTS = 5
+
+
+def _coerce_max_results(value: object) -> int:
+    """Normalize config values before passing them to the Tavily API."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5;
+        # int() on an out-of-range float (e.g. YAML .inf) raises OverflowError.
+        count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+    if count <= 0:
+        logger.warning("Invalid Tavily max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
+        return DEFAULT_MAX_RESULTS
+    return count
 
 
 def _get_tavily_client(tool_name: str = "web_search") -> TavilyClient:
@@ -24,9 +46,9 @@ def web_search_tool(query: str, time_range: SearchTimeRange | None = None) -> st
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
-    max_results = 5
+    max_results = DEFAULT_MAX_RESULTS
     if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results")
+        max_results = _coerce_max_results(config.model_extra.get("max_results"))
 
     client = _get_tavily_client()
     search_kwargs: dict[str, object] = {"max_results": max_results}

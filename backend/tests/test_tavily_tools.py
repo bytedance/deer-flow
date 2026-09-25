@@ -142,6 +142,34 @@ def test_web_search_keeps_domain_filters_out_of_model_schema() -> None:
     assert parameters["required"] == ["query"]
 
 
+def test_coerce_max_results_accepts_valid_values() -> None:
+    from deerflow.community.tavily.tools import _coerce_max_results
+
+    assert _coerce_max_results(3) == 3
+    assert _coerce_max_results("7") == 7
+    assert _coerce_max_results(4.0) == 4
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [True, False, 3.5, float("inf"), float("-inf"), "oops", None, 0, -2],
+    ids=["bool-true", "bool-false", "fractional", "inf", "neg-inf", "string", "none", "zero", "negative"],
+)
+def test_web_search_falls_back_to_default_max_results_on_invalid_config(raw) -> None:
+    client = MagicMock()
+    client.search.return_value = _tavily_response()
+    config = ToolConfig(name="web_search", group="web", use="deerflow.community.tavily.tools:web_search_tool", api_key="search-key", max_results=raw)
+
+    with (
+        patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
+        patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client),
+    ):
+        mock_config.return_value.get_tool_config.return_value = config
+        web_search_tool.invoke({"query": "documentation"})
+
+    client.search.assert_called_once_with("documentation", max_results=5)
+
+
 @pytest.mark.parametrize("title", [None, "", "Report title"])
 def test_web_fetch_accepts_extract_results_with_optional_title(title) -> None:
     result = {"url": "https://example.com/report", "raw_content": "Important findings."}
