@@ -79,7 +79,12 @@ from deerflow.config.extensions_config import (
     atomic_write_extensions_config,
     validate_raw_extensions_config,
 )
-from deerflow.config.mcp_lifecycle import McpLifecycle, McpLifecycleError, parse_mcp_lifecycle
+from deerflow.config.mcp_lifecycle import (
+    McpLifecycle,
+    McpLifecycleError,
+    lifecycle_covers_servers,
+    parse_mcp_lifecycle,
+)
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths
 from deerflow.mcp.lifecycle_rules import compute_next_lifecycle
 
@@ -297,6 +302,17 @@ def commit_extensions_config(
             unverifiable_baseline = True
         else:
             previous = parsed
+            if previous_config is not None and not lifecycle_covers_servers(previous, old_servers):
+                # The block does not describe the revision it claims to: it is not
+                # a trusted version, so re-base it instead of carrying its
+                # counters (and lineage) forward. The reader applies the same
+                # coverage rule.
+                logger.warning(
+                    "Persisted mcpLifecycle block does not cover every enabled stdio server; replacing it with a fresh baseline",
+                )
+                previous = None
+                old_servers = {}
+                unverifiable_baseline = True
 
     new_servers = enabled_stdio_fingerprints(new_config)
     # Derive the whole-pool signal here, from the two validated configs, so no

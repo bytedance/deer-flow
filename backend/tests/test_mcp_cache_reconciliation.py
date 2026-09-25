@@ -1193,7 +1193,7 @@ def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monke
         "lifecycleId": "lineage-1",
         "configRevision": 500,
         "globalGeneration": 9,
-        "serverGenerations": {"ghost": 3},
+        "serverGenerations": {"A": 3, "B": 3, "ghost": 3},
     }
     raw["mcpLifecycle"] = injected
     cfg.write_text(json.dumps(raw), encoding="utf-8")
@@ -1212,7 +1212,7 @@ def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monke
         "lifecycleId": "lineage-1",
         "configRevision": 501,
         "globalGeneration": 9,
-        "serverGenerations": {"A": 1, "B": 0, "ghost": 3},
+        "serverGenerations": {"A": 4, "B": 3, "ghost": 3},
     }
 
 
