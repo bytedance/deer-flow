@@ -278,7 +278,11 @@ class DeerFlowClient:
 
         Works on the raw file so ``$VAR`` placeholders are never written back as
         resolved secrets. Returns the detached-owner teardown the caller must
-        finish *after* releasing the config locks.
+        hold across the reload and finish *after* releasing the config locks.
+
+        This deliberately does not reload: the caller has to capture the returned
+        teardown first, so a reload failure cannot lose the owners this write
+        already detached.
         """
         from deerflow.mcp.cache import lifecycle_changed_in_committed_revision, prepare_mcp_reconciliation_from_revision
 
@@ -310,12 +314,6 @@ class DeerFlowClient:
             raise MCPCommittedNotReconciledError(
                 "Extensions config was committed to disk but the local MCP reconciliation fence failed; the caller must conservatively invalidate local MCP state",
             ) from exc
-        try:
-            reload_extensions_config()
-        except Exception as exc:
-            raise MCPCommittedReloadFailedError(
-                "Extensions config was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
-            ) from exc
         return pending
 
     @classmethod
@@ -331,7 +329,15 @@ class DeerFlowClient:
         pending_reconciliation = None
         try:
             with extensions_config_write_lock, extensions_config_file_lock(config_path):
+                # Capture the teardown *before* reloading: a reload failure must
+                # not lose the owners this write already detached.
                 pending_reconciliation = cls._write_skill_enabled_state(config_path, name, enabled)
+                try:
+                    reload_extensions_config()
+                except Exception as exc:
+                    raise MCPCommittedReloadFailedError(
+                        "Extensions config was committed to disk and the local fence was applied, but the in-process reload failed; the change is on disk",
+                    ) from exc
         except (MCPCommitOutcomeUnknownError, MCPCommittedNotReconciledError):
             # The locks are released here; never wait for teardown holding them.
             force_local_mcp_invalidation()

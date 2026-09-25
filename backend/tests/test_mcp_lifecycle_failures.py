@@ -574,7 +574,7 @@ def test_client_skill_write_survives_an_unverifiable_previous_document(monkeypat
     cfg.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setattr(client_module, "reload_extensions_config", lambda: None)
 
-    DeerFlowClient._write_skill_enabled_state(cfg, "demo-skill", True)
+    DeerFlowClient._commit_skill_enabled_state(cfg, "demo-skill", True)
 
     written = read_raw_extensions_config(cfg)
     assert written["skills"]["demo-skill"] == {"enabled": True}
@@ -1015,3 +1015,87 @@ def test_config_load_failure_never_embeds_resolved_secrets(monkeypatch, tmp_path
     rendered = "".join(traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__))
     assert _LEAK_SECRET not in str(exc_info.value)
     assert _LEAK_SECRET not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Stored-server merge failures must not log the stored value
+# ---------------------------------------------------------------------------
+
+_STORED_LITERAL_SECRET = "sk-live-do-not-log-0123456789"
+
+
+def test_stored_server_merge_failure_never_logs_the_stored_value(cache_globals, monkeypatch, tmp_path, caplog) -> None:
+    """A full PUT that repairs an unparseable stored server must not echo it."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(
+        cfg,
+        {
+            "A": _stdio("npx"),
+            # ``env`` must be a mapping, so the credential pasted here is the
+            # failing input value and would be echoed by the exception chain.
+            "broken": {"enabled": True, "type": "stdio", "command": "npx", "args": [], "env": _STORED_LITERAL_SECRET},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    _allow_router_admin(monkeypatch)
+    _install_discovery(monkeypatch)
+
+    # The incoming replacement uses the same name as the unparseable stored
+    # entry, which is what drives the secret-preserving merge branch.
+    body = McpConfigUpdateRequest(mcp_servers={"broken": _server_model(_stdio("npx"))})
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(update_mcp_configuration(None, body))
+
+    # Render exactly what a log handler would emit, including any exc_info chain.
+    rendered = "\n".join(logging.Formatter().format(record) for record in caplog.records)
+    assert caplog.records, "the unparseable stored server should be reported"
+    assert _STORED_LITERAL_SECRET not in rendered
+
+
+# ---------------------------------------------------------------------------
+# The embedded client must hand ``pending`` over before reloading
+# ---------------------------------------------------------------------------
+
+
+def test_client_skill_reload_failure_still_reaps_the_prepared_owner(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """A reload failure must not lose the detached-owner teardown."""
+    import deerflow.client as client_module
+    from deerflow.client import DeerFlowClient
+
+    cfg = tmp_path / "extensions_config.json"
+    _publish(
+        monkeypatch,
+        cfg,
+        {"A": _stdio("npx"), "B": _stdio("uvx")},
+        lifecycle={
+            "schemaVersion": 2,
+            "lifecycleId": "lineage-1",
+            "configRevision": 5,
+            "globalGeneration": 0,
+            "serverGenerations": {"A": 0, "B": 0},
+        },
+    )
+    pool = get_session_pool()
+    session_a = _open_session(owner_loop, pool, "A")
+    binding_a_before = pool.active_binding("A")
+
+    # Corrupt the block so the skills write re-bases the lifecycle and therefore
+    # detaches A's owner before the reload runs.
+    raw = read_raw_extensions_config(cfg)
+    raw["mcpLifecycle"] = {"schemaVersion": 2, "configRevision": 1, "globalGeneration": 1, "serverGenerations": {"A": 1, "B": 1}}
+    cfg.write_text(json.dumps(raw), encoding="utf-8")
+
+    def _boom():
+        raise RuntimeError("reload exploded")
+
+    monkeypatch.setattr(client_module, "reload_extensions_config", _boom)
+
+    with pytest.raises(MCPCommittedReloadFailedError) as exc_info:
+        DeerFlowClient._commit_skill_enabled_state(cfg, "demo-skill", True)
+
+    assert "committed" in str(exc_info.value).lower()
+    # The ownership transfer already ran, so the detached owner must still be
+    # reaped even though the reload raised.
+    assert get_session_pool() is not pool
+    _assert_stale(pool, owner_loop, "A", binding_a_before)
+    assert session_a.closed is True
