@@ -169,6 +169,12 @@ def _normalized_read_range(args: dict) -> tuple[int, int | None]:
     return start_line, end_line
 
 
+# Args that narrate rather than change what runs (e.g. the UI caption on
+# bash/ls calls). Hashing them would let an actually-repeated command escape
+# detection whenever the model rewords the caption.
+_DISPLAY_ONLY_ARGS = ("description",)
+
+
 def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     """Derive a stable key from salient args without overfitting to noise."""
     if name == "read_file" and fallback_key is None:
@@ -187,7 +193,16 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     salient_fields = ("path", "url", "query", "command", "pattern", "glob", "cmd")
     stable_args = {field: args[field] for field in salient_fields if args.get(field) is not None}
     if stable_args:
-        return json.dumps(stable_args, sort_keys=True, default=str)
+        # Salient fields alone collapse calls that differ only in pagination or
+        # content args, and the fifth distinct page hard-stopped a working run;
+        # the write_file branch avoids the same collapse by hashing full args
+        # (#5871). Salient-only calls keep the exact old key. Narration args
+        # like bash's UI `description` stay out: rewording the caption must not
+        # let an actually-repeated command escape detection.
+        if len(stable_args) == len(args):
+            return json.dumps(stable_args, sort_keys=True, default=str)
+        effective_args = {k: v for k, v in args.items() if k not in _DISPLAY_ONLY_ARGS}
+        return json.dumps(effective_args, sort_keys=True, default=str)
 
     if fallback_key is not None:
         return fallback_key
