@@ -331,7 +331,7 @@ This release closes that milestone with **181 merged pull requests**.
   `UnicodeDecodeError` and was never removed or overwritten. A bare support
   directory such as `assets` also slipped through path validation and raised
   `IsADirectoryError`. Non-text content is now recorded as no previous text,
-  and a directory path is a validation error instead of a crash.
+  and a directory path is a validation error instead of a crash. ([#5893])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -6119,4 +6119,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
+[#5893]: https://github.com/bytedance/deer-flow/pull/5893
 
