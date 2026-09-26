@@ -296,6 +296,9 @@ def _make_provider(tmp_path):
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
         provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(
+            thread_name_prefix="aio-sandbox-owned-worker-test"
+        )
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -1458,6 +1461,7 @@ async def test_acquire_async_cancellation_keeps_serializer_until_started_worker_
         if successor is not None and not successor.done():
             successor.cancel()
             await asyncio.gather(successor, return_exceptions=True)
+        provider.reset()
 
 
 @pytest.mark.anyio
@@ -1465,8 +1469,11 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
     """Cancellation must not force a not-yet-started reclaim to run later."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._acquire_serializer.close()
-    provider._acquire_serializer = AcquireSerializer(max_workers=1, thread_name_prefix="aio-owned-worker-test")
+    provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+    provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="aio-owned-worker-test",
+    )
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1479,20 +1486,20 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
     reclaim_submitted = threading.Event()
     reclaim_calls = 0
 
-    executor = provider._acquire_serializer.executor
+    executor = provider._acquire_worker_executor
     original_submit = executor.submit
     submit_count = 0
 
-    def occupy_serializer_executor():
+    def occupy_lifecycle_executor():
         blocker_started.set()
         assert allow_blocker.wait(timeout=2)
 
     def reuse(*_args, **_kwargs):
-        # We are running on the serializer executor. Queue the blocker behind
-        # this worker before returning None; with max_workers=1 it starts
+        # We are running on the owned-lifecycle executor. Queue the blocker
+        # behind this worker before returning None; with max_workers=1 it starts
         # immediately after reuse returns and before the event loop can submit
         # warm reclaim.
-        original_submit(occupy_serializer_executor)
+        original_submit(occupy_lifecycle_executor)
         return None
 
     def reclaim(*_args, **_kwargs):
@@ -1504,9 +1511,9 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
         nonlocal submit_count
         submit_count += 1
         future = original_submit(*args, **kwargs)
-        # Submission 1 acquires the serializer lock; 2 runs cached reuse;
-        # 3 is warm reclaim, now queued behind occupy_serializer_executor.
-        if submit_count == 3:
+        # Submission 1 runs cached reuse; submission 2 is warm reclaim,
+        # now queued behind occupy_lifecycle_executor.
+        if submit_count == 2:
             reclaim_submitted.set()
         return future
 
@@ -1533,6 +1540,7 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
         provider._acquire_serializer.close()
+        provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
 
 @pytest.mark.anyio
