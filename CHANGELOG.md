@@ -332,6 +332,19 @@ This release closes that milestone with **181 merged pull requests**.
   directory such as `assets` also slipped through path validation and raised
   `IsADirectoryError`. Non-text content is now recorded as no previous text,
   and a directory path is a validation error instead of a crash. ([#5893])
+- **models:** `when_thinking_enabled` no longer replaces a profile's whole
+  `extra_body` on the legacy (no `reasoning:` block) path. The enable branch
+  applied the template with a shallow `dict.update`, so a profile carrying
+  `extra_body: {tool_stream: true}` beside a
+  `when_thinking_enabled.extra_body.thinking` template lost `tool_stream`
+  whenever thinking was on — while the disable branch, and the contract path,
+  already deep-merged. The legacy enable branch now deep-merges the same way;
+  template values still win on conflicts. The merge also keeps the template's
+  vLLM switch authoritative across its two spellings: a profile with
+  `chat_template_kwargs.enable_thinking: false` beside a template using the
+  legacy `thinking: true` alias no longer ends up with thinking pinned off
+  (and the mirror case can now switch it off), on both the legacy and the
+  contract path. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -6120,4 +6133,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 
