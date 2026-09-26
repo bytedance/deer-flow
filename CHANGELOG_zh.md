@@ -1182,6 +1182,14 @@
   code-span token 现在以同样方式切分 fragment 并去掉尾部
   句读标点；`references/v1.0.md#notes` 这类带点的文件名会
   保留其扩展名中的点。([#5841])
+- **技能：** 技能评审的 Markdown 链接扫描在对抗性输入下保持线性。
+  提取器曾对每个候选 opener 重复扫描同一目标串，一长串未闭合的 `[`
+  或 `](` 密集的非法目标都会让评审退化为平方复杂度——#5714 在 256 KiB
+  的 `[` 下实测 19 秒，而资源图会扫描每个 text 成员，
+  `PackageLimits.max_file_bytes` 为 64 MiB，单个大 SKILL.md 完全在影响
+  范围内。扫描现在只遍历一次候选 opener，经与基准正则的差分 fuzz 验证，
+  与 `finditer` 完全一致；已匹配区间改按位置清除，不再使用
+  `str.replace`，避免误删后方相同的文本。([#5884])
 - **配置：** 配置缓存签名的应是它实际解析的字节，而不是
   第二次读取。app-config 加载器此前打开 `config.yaml` 两次
   ——先解析一次，再对一次全新的读取做哈希来记录
@@ -5188,3 +5196,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5884]: https://github.com/bytedance/deer-flow/pull/5884

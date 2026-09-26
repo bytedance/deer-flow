@@ -124,44 +124,48 @@ def _extract_references(content: str) -> set[str]:
     # part of a real filename, and they must never see link-internal text.
     # Trailing sentence punctuation is still stripped here (#5739).
     #
-    # The link scan is closer-driven instead of a regex: `finditer` over
-    # `!?\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)` re-scans the same target run
-    # from every candidate opener, which is quadratic on content dense in "]("
-    # closers whose run never completes (#5714: "[a](" + "x]([" * 16_000 +
-    # "b y)" took 11 s). Every closer inside one failed target run ends at the
-    # same terminator and fails identically, so a failed run is skipped whole
-    # instead of retried inside — each character is then visited a constant
-    # number of times and the scan is linear.
-    residual = content
+    # The link scan is opener-driven instead of a regex: `finditer` over
+    # `!?\\[[^\\]]*]\\(([^)\\s]+)(?:\\s+"[^"]*")?\\)` re-scans the same target
+    # run from every candidate opener, which is quadratic on content dense in
+    # "](" closers whose run never completes (#5714: "[a](" + "x]([" * 16_000
+    # + "b y)" took 11 s). The scan below reproduces `finditer` exactly — the
+    # regex engine's own start-position scan — while skipping provably
+    # match-less regions whole, so each character is visited a constant number
+    # of times and the scan stays linear:
+    # - `[^\\]]*` cannot cross "]", so the only viable "]" for an opener is
+    #   the first one after it; no backtracking can rescue a failed "](".
+    # - Every opener sharing that first "]" fails the target run identically,
+    #   so a failed run is skipped whole instead of retried inside; only
+    #   openers past the last "]" before the terminator may still match and
+    #   are retried individually.
     length = len(content)
+    spans: list[tuple[int, int]] = []
     position = 0
     while True:
-        closer = content.find("](", position)
-        if closer < 0:
-            break
-        # The opener is the FIRST "[" after the last "]" before the closer:
-        # "[^\]]*" cannot cross a "]", and the leftmost match wins, so an
-        # earlier "[" would have been reported instead. The window starts where
-        # the previous closer's window ended, so this stays linear.
-        opener = -1
-        index = closer - 1
-        while index >= 0 and content[index] != "]":
-            index -= 1
-        for candidate in range(index + 1, closer):
-            if content[candidate] == "[":
-                opener = candidate
-                break
+        # A match can only start at "[" (or at the "!" of "!["): this is the
+        # regex engine's start-position scan, one candidate at a time.
+        opener = content.find("[", position)
         if opener < 0:
-            position = closer + 2
-            continue
+            break
         start = opener - 1 if opener > 0 and content[opener - 1] == "!" else opener
+        closer = content.find("]", opener + 1)
+        if closer < 0:
+            # No "]" anywhere later: no opener at/after this one can match.
+            break
+        if closer + 1 >= length or content[closer + 1] != "(":
+            # Every "[" in [opener, closer) shares this same first "]" and
+            # fails the "(" check identically: skip them all. This keeps the
+            # scan linear on opener-dense input ("[" * n + "]" * n).
+            position = closer + 1
+            continue
         # The target is a maximal run of non-")"/non-whitespace characters.
         target = closer + 2
         terminator = target
         while terminator < length and content[terminator] != ")" and not content[terminator].isspace():
             terminator += 1
         if terminator == target:
-            # "[]()" / "[]( x)": the target needs at least one character.
+            # "[]()" / "[]( x)": the target needs at least one character;
+            # every "[" in [opener, closer) fails the same way.
             position = target
             continue
         if terminator < length and content[terminator] == ")":
@@ -169,12 +173,30 @@ def _extract_references(content: str) -> set[str]:
         else:
             end = _quoted_title_end(content, terminator)
             if end < 0:
-                # No closer inside this failed run can match either.
-                position = terminator
+                # Failed target run. Openers up to the last "]" before the
+                # terminator share this same failure (their target run ends
+                # at the same terminator with the same title verdict), but an
+                # opener after that "]" may still match — its target run
+                # starts past the terminator — so only the provably failing
+                # prefix is skipped.
+                position = content.rfind("]", closer, terminator) + 1
                 continue
         refs.add(content[target:terminator].split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-        residual = residual.replace(content[start:end], " " * (end - start))
+        spans.append((start, end))
         position = end
+    # Blank matched spans by position, not by text: `str.replace` blanks an
+    # unrelated later occurrence of the same text once spans can overlap
+    # consumed text, and it re-scans the whole residual per match (O(n*m) in
+    # link count). Spans are non-overlapping and ordered, so a single pass
+    # over them blanks each exactly once.
+    parts: list[str] = []
+    cursor = 0
+    for span_start, span_end in spans:
+        parts.append(content[cursor:span_start])
+        parts.append(" " * (span_end - span_start))
+        cursor = span_end
+    parts.append(content[cursor:])
+    residual = "".join(parts)
     for match in _CODE_SPAN_RE.finditer(residual):
         token = match.group(1).strip()
         if "/" in token:

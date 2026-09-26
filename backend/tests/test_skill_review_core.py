@@ -10,6 +10,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from deerflow.skills.review import LocalDirectoryReader, analyze_skill_package, stable_json_dumps
+from deerflow.skills.review.resource_graph import _extract_references
 from deerflow.skills.review.cli import main as review_cli_main
 from deerflow.skills.review.models import PackageLimits, normalize_relative_path
 from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
@@ -293,29 +294,94 @@ def test_resource_graph_ignores_eval_fixture_references(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "make_payload",
     [
-        pytest.param("[" * 65536, id="unmatched-brackets"),
-        pytest.param("[a](" + "x]([" * 16000 + "b y)", id="closer-dense"),
+        pytest.param(lambda n: "[" * n, id="unmatched-brackets"),
+        pytest.param(lambda n: "[a](" + "x]([" * n + "b y)", id="closer-dense"),
     ],
 )
-def test_resource_graph_link_scan_stays_linear(tmp_path, payload):
+def test_resource_graph_link_scan_stays_linear(make_payload):
     # #5714: both shapes drove the markdown-link scan quadratic. A long run of
     # unmatched "[" has no "](" at all, and the "]("-dense run below never
     # completes a target: each of its candidates re-scanned the whole suffix
-    # (11 s at 16k repetitions measured before the fix). Both must stay far
-    # below the bound.
-    _write(tmp_path / "SKILL.md", _valid_skill() + "\n" + payload + "\n")
+    # (11 s at 16k repetitions measured before the fix).
+    #
+    # Assert the shape, not an absolute budget: the quadratic/linear
+    # distinction is ~4x vs ~2x per doubling, which no CI machine can
+    # confuse, while an absolute bound is a coin-flip on a slower host.
+    # _extract_references is measured directly so the skillscan/digest/eval
+    # passes add no host-dependent variance. min() over repeats keeps the
+    # tiny-input ratios stable.
+    small = make_payload(32768)
+    large = make_payload(65536)
 
+    def timed(payload):
+        return min(
+            _elapsed(_extract_references, payload) for _ in range(5)
+        )
+
+    small_elapsed = timed(small)
+    large_elapsed = timed(large)
+
+    assert small_elapsed < 1.0, f"link scan took {small_elapsed:.2f}s"
+    assert large_elapsed / small_elapsed < 3, (
+        f"link scan looks superlinear: 32K took {small_elapsed:.4f}s, "
+        f"64K took {large_elapsed:.4f}s"
+    )
+
+
+def _elapsed(fn, payload):
     started = time.monotonic()
-    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
-    elapsed = time.monotonic() - started
+    fn(payload)
+    return time.monotonic() - started
 
-    assert facts["summary"]["blockers"] == 0
-    assert not any(f["rule_id"] == "resource.missing" for f in facts["findings"])
-    # Smoke bound, not a benchmark: well under 0.1s after the fix, seconds
-    # before it. The bound only catches reintroduced superlinear behavior.
-    assert elapsed < 2.0, f"link scan took {elapsed:.2f}s"
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        pytest.param("[x]([)y](z)", {"["}, id="opener-inside-consumed-construct"),
+        pytest.param(
+            "a [x]([) references/notes.md b](x)",
+            {"[", "references/notes.md"},
+            id="no-bogus-ref-from-overlap",
+        ),
+        pytest.param("[x]([)y](z) [)y](z)", {"[", "z"}, id="blanking-keeps-later-match"),
+    ],
+)
+def test_resource_graph_link_scan_matches_finditer(payload, expected):
+    # The scan must agree with the regex it replaces exactly: `finditer`
+    # matches are non-overlapping and resume at the end of the previous
+    # match, so an opener inside an already-consumed construct can never
+    # start a new match. `[x]([)y](z)` matches `[x]([)` and stops — the `z`
+    # link is not real — while `[x]([)y](z) [)y](z)` has two genuine,
+    # non-overlapping matches that must both be found and blanked.
+    assert _extract_references(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        pytest.param('[a](foo/bar.md "Title")', {"foo/bar.md"}, id="titled-link"),
+        pytest.param(
+            '[a](foo/bar.md "Title with ) paren")',
+            {"foo/bar.md"},
+            id="paren-inside-title",
+        ),
+        pytest.param('[a](foo/bar.md "")', {"foo/bar.md"}, id="empty-title"),
+        pytest.param('[a](foo/bar.md\t"Title")', {"foo/bar.md"}, id="tab-separator"),
+        pytest.param(
+            '![a](foo/bar.png "Logo")', {"foo/bar.png"}, id="image-with-title"
+        ),
+        pytest.param('[a](foo/bar.md "unterminated', set(), id="unterminated-title"),
+    ],
+)
+def test_resource_graph_quoted_title_targets(payload, expected):
+    # The hand-rolled title parser replaces `(?:\s+"[^"]*")?`: pin its
+    # behavior on the shapes that distinguish it from the regex — the
+    # `)`-inside-title case in particular exercises `content.find('"')`
+    # against the regex's `[^"]*`.
+    assert _extract_references(payload) == expected
+
 
 
 def test_resource_graph_link_blanking_starts_at_the_leftmost_opener(tmp_path):
