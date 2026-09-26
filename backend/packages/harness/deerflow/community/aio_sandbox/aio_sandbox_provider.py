@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
 
@@ -243,6 +244,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
         self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        # Lock waiters can block every serializer worker on one hot key. Work
+        # performed *after* a key is held must therefore use a separate pool:
+        # submitting it behind those waiters makes the holder wait for workers
+        # that are themselves waiting for the holder to release the key.
+        self._acquire_worker_executor = ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker")
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -2169,7 +2175,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Async counterpart to ``_acquire_internal``."""
         await asyncio.to_thread(self._ensure_skills_projection, user_id)
         cached_id = await _run_started_acquire_worker(
-            self._acquire_serializer.executor,
+            self._acquire_worker_executor,
             self._reuse_in_process_sandbox,
             thread_id,
             user_id=user_id,
@@ -2186,7 +2192,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
         reclaimed_id = await _run_started_acquire_worker(
-            self._acquire_serializer.executor,
+            self._acquire_worker_executor,
             self._reclaim_warm_pool_sandbox,
             thread_id,
             sandbox_id,
@@ -2647,6 +2653,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
@@ -2687,3 +2694,4 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning(f"Error closing sandbox ownership store during shutdown: {e}")
 
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
