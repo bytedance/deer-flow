@@ -39,3 +39,8 @@ class UserResponse(BaseModel):
     email: str
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
+    oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
+    permissions: list[str] | None = Field(
+        None,
+        description=("Effective route permissions granted to this credential (RFC #4063 Phase 4). Only GET /api/v1/auth/me resolves them; credential-creation responses leave it None."),
+    )

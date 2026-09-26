@@ -38,7 +38,13 @@ import {
   getAgent,
 } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
-import { useThreadStream } from "@/core/threads/hooks";
+import {
+  buildHumanInputResponseText,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "@/core/messages/human-input";
+import { safeLocalStorage } from "@/core/settings/local";
+import { hasToolResult, useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -92,13 +98,14 @@ export default function NewAgentPage() {
       mode: "flash",
       is_bootstrap: true,
     },
-    onFinish() {
-      if (!agent && setupAgentStatus === "requested") {
-        setSetupAgentStatus("idle");
+    onFinish(state) {
+      if (agent || setupAgentStatus !== "requested") {
+        return;
       }
-    },
-    onToolEnd({ name }) {
-      if (name !== "setup_agent" || !agentName) return;
+      if (!agentName || !hasToolResult(state.messages, "setup_agent")) {
+        setSetupAgentStatus("idle");
+        return;
+      }
       setSetupAgentStatus("completed");
       void getAgentWithRetry(agentName).then((fetched) => {
         if (fetched) {
@@ -110,16 +117,15 @@ export default function NewAgentPage() {
       });
     },
   });
-
   useEffect(() => {
     if (typeof window === "undefined" || step !== "chat") {
       return;
     }
-    if (window.localStorage.getItem(SAVE_HINT_STORAGE_KEY) === "1") {
+    if (safeLocalStorage.getItem(SAVE_HINT_STORAGE_KEY) === "1") {
       return;
     }
     setShowSaveHint(true);
-    window.localStorage.setItem(SAVE_HINT_STORAGE_KEY, "1");
+    safeLocalStorage.setItem(SAVE_HINT_STORAGE_KEY, "1");
   }, [step]);
 
   const handleConfirmName = useCallback(async () => {
@@ -146,6 +152,27 @@ export default function NewAgentPage() {
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) when
+        // one is present, wrapped in a localised prefix so zh-CN users
+        // don't see a bare English string next to the surrounding Chinese
+        // UI. Falls back to the generic localised fallback when the backend
+        // sent no detail — `err.message` is unreliable for this branch
+        // because `checkAgentName` substitutes a generated fallback string
+        // ("Failed to check agent name: ${statusText}") when `detail` is
+        // missing, so testing `err.message` would always be truthy and the
+        // generated fallback would leak through.
+        setNameError(
+          err.detail
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.detail,
+              )
+            : t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -172,6 +199,7 @@ export default function NewAgentPage() {
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
     t.agents.nameStepInvalidError,
     threadId,
   ]);
@@ -194,6 +222,35 @@ export default function NewAgentPage() {
       );
     },
     [agentName, sendMessage, thread.isLoading, threadId],
+  );
+
+  const handleSubmitHumanInput = useCallback(
+    async (request: HumanInputRequest, response: HumanInputResponse) => {
+      if (!agentName) {
+        return false;
+      }
+
+      let sent = false;
+      await sendMessage(
+        threadId,
+        {
+          text: buildHumanInputResponseText(request, response),
+          files: [],
+        },
+        { agent_name: agentName },
+        {
+          additionalKwargs: {
+            hide_from_ui: true,
+            human_input_response: response,
+          },
+          onSent: () => {
+            sent = true;
+          },
+        },
+      );
+      return sent;
+    },
+    [agentName, sendMessage, threadId],
   );
 
   const handleSaveAgent = useCallback(async () => {
@@ -343,6 +400,9 @@ export default function NewAgentPage() {
                 className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                onSubmitHumanInput={
+                  agentName ? handleSubmitHumanInput : undefined
+                }
               />
             </div>
 
@@ -372,6 +432,7 @@ export default function NewAgentPage() {
                   </div>
                 ) : (
                   <PromptInput
+                    disabled={thread.isLoading}
                     onSubmit={({ text }) => void handleChatSubmit(text)}
                   >
                     <PromptInputTextarea

@@ -6,11 +6,12 @@ from uuid import uuid4
 from deerflow.subagents.token_collector import SubagentTokenCollector
 
 
-def _make_llm_response(content="Hello", usage=None):
+def _make_llm_response(content="Hello", usage=None, response_metadata=None):
     """Create a mock LLM response with a message."""
     msg = MagicMock()
     msg.content = content
     msg.usage_metadata = usage
+    msg.response_metadata = response_metadata or {}
 
     gen = MagicMock()
     gen.message = msg
@@ -49,6 +50,32 @@ class TestSubagentTokenCollector:
         assert records[0]["output_tokens"] == 50
         assert records[0]["total_tokens"] == 150
         assert "source_run_id" in records[0]
+
+    def test_collects_model_name_from_response_metadata(self):
+        collector = SubagentTokenCollector(caller="subagent:test")
+        usage = {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        collector.on_llm_end(
+            _make_llm_response("Hi", usage=usage, response_metadata={"model_name": "subagent-model"}),
+            run_id=uuid4(),
+        )
+
+        records = collector.snapshot_records()
+
+        assert len(records) == 1
+        assert records[0]["model_name"] == "subagent-model"
+
+    def test_collects_model_name_from_response_metadata_model_fallback(self):
+        collector = SubagentTokenCollector(caller="subagent:test")
+        usage = {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        collector.on_llm_end(
+            _make_llm_response("Hi", usage=usage, response_metadata={"model": "provider-model"}),
+            run_id=uuid4(),
+        )
+
+        records = collector.snapshot_records()
+
+        assert len(records) == 1
+        assert records[0]["model_name"] == "provider-model"
 
     def test_total_tokens_zero_uses_input_plus_output(self):
         collector = SubagentTokenCollector(caller="subagent:test")

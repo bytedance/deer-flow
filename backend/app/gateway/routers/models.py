@@ -1,10 +1,40 @@
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_config
+from app.gateway.authz import (
+    _AuthorizationUnavailable,
+    _is_internal_caller,
+    authorize_model_use,
+    resolve_model_authorization,
+)
+from app.gateway.deps import get_config, get_optional_user_from_request
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["models"])
+
+
+class ReasoningEffortCapabilitiesResponse(BaseModel):
+    """Effort values a model accepts, in display order."""
+
+    values: list[str] = Field(..., description="Accepted effort values (provider vocabulary)")
+    default: str | None = Field(default=None, description="Effort applied when the caller does not choose one")
+    aliases: dict[str, str] = Field(default_factory=dict, description="Generic DeerFlow value -> provider value")
+
+
+class ReasoningCapabilitiesResponse(BaseModel):
+    """Normalized reasoning contract (issue #5073), derived for legacy profiles."""
+
+    thinking: Literal["unsupported", "optional", "required"] = Field(..., description="Whether thinking can be toggled, is always on, or is unavailable")
+    effort: ReasoningEffortCapabilitiesResponse | None = Field(default=None, description="Effort control; null when the model exposes none")
+    history: Literal["preserve", "clear"] | None = Field(default=None, description="Reasoning-history requirement, when declared")
+    source: Literal["legacy", "contract"] = Field(..., description="Whether the profile declared a contract or the booleans were projected")
 
 
 class ModelResponse(BaseModel):
@@ -14,8 +44,21 @@ class ModelResponse(BaseModel):
     model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
-    supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
-    supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+    supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
+    supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
+    reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
+
+
+def _model_response(model: ModelConfig) -> ModelResponse:
+    return ModelResponse(
+        name=model.name,
+        model=model.model,
+        display_name=model.display_name,
+        description=model.description,
+        supports_thinking=model.supports_thinking,
+        supports_reasoning_effort=model.supports_reasoning_effort,
+        reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),
+    )
 
 
 class TokenUsageResponse(BaseModel):
@@ -37,11 +80,18 @@ class ModelsListResponse(BaseModel):
     summary="List All Models",
     description="Retrieve a list of all available AI models configured in the system.",
 )
-async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResponse:
+async def list_models(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> ModelsListResponse:
     """List all available models from configuration.
 
     Returns model information suitable for frontend display,
     excluding sensitive fields like API keys and internal configuration.
+
+    When ``authorization.enabled`` is true, only models the caller's role may
+    ``list`` are returned (filtered via ``provider.filter_resources``). A
+    provider error yields an empty list (fail-closed) or all models (fail-open).
 
     Returns:
         A list of all configured models with their metadata and token usage display settings.
@@ -56,7 +106,8 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
                     "display_name": "GPT-4",
                     "description": "OpenAI GPT-4 model",
                     "supports_thinking": false,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning": {"thinking": "unsupported", "effort": null, "history": null, "source": "legacy"}
                 },
                 {
                     "name": "claude-3-opus",
@@ -64,7 +115,8 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
                     "display_name": "Claude 3 Opus",
                     "description": "Anthropic Claude 3 Opus model",
                     "supports_thinking": true,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning": {"thinking": "optional", "effort": null, "history": null, "source": "legacy"}
                 }
             ],
             "token_usage": {
@@ -73,17 +125,29 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
         }
         ```
     """
-    models = [
-        ModelResponse(
-            name=model.name,
-            model=model.model,
-            display_name=model.display_name,
-            description=model.description,
-            supports_thinking=model.supports_thinking,
-            supports_reasoning_effort=model.supports_reasoning_effort,
-        )
-        for model in config.models
-    ]
+    visible_models = config.models
+    fail_closed = config.authorization.fail_closed
+
+    user = await get_optional_user_from_request(request)
+    if user is not None:
+        try:
+            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+        except _AuthorizationUnavailable as exc:
+            if exc.fail_closed:
+                visible_models = []
+        else:
+            if provider is not None and principal is not None:
+                try:
+                    allowed_names = provider.filter_resources(principal, "model", [m.name for m in config.models])
+                    if not isinstance(allowed_names, list) or any(not isinstance(n, str) for n in allowed_names):
+                        raise TypeError("AuthorizationProvider.filter_resources must return list[str]")
+                    allowed_set = set(allowed_names)
+                    visible_models = [m for m in config.models if m.name in allowed_set]
+                except Exception:
+                    logger.warning("Authorization provider failed while filtering models", exc_info=True)
+                    visible_models = [] if fail_closed else config.models
+
+    models = [_model_response(model) for model in visible_models]
     return ModelsListResponse(
         models=models,
         token_usage=TokenUsageResponse(enabled=config.token_usage.enabled),
@@ -96,7 +160,11 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
     summary="Get Model Details",
     description="Retrieve detailed information about a specific AI model by its name.",
 )
-async def get_model(model_name: str, config: AppConfig = Depends(get_config)) -> ModelResponse:
+async def get_model(
+    model_name: str,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> ModelResponse:
     """Get a specific model by name.
 
     Args:
@@ -106,7 +174,10 @@ async def get_model(model_name: str, config: AppConfig = Depends(get_config)) ->
         Model information if found.
 
     Raises:
-        HTTPException: 404 if model not found.
+        HTTPException: 404 if model not found; 403 if the caller's role may not
+        ``use`` the model (only when ``authorization.enabled`` is true). A
+        provider resolution error yields 403 (fail-closed) or allows the request
+        (fail-open), mirroring ``list_models``'s provider-error semantics.
 
     Example Response:
         ```json
@@ -122,11 +193,10 @@ async def get_model(model_name: str, config: AppConfig = Depends(get_config)) ->
     if model is None:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
 
-    return ModelResponse(
-        name=model.name,
-        model=model.model,
-        display_name=model.display_name,
-        description=model.description,
-        supports_thinking=model.supports_thinking,
-        supports_reasoning_effort=model.supports_reasoning_effort,
-    )
+    # Phase 3: enforce model:use authorization (deny → 403, not 404, since the
+    # model exists but the role lacks permission to use it).
+    user = await get_optional_user_from_request(request)
+    if user is not None:
+        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
+
+    return _model_response(model)

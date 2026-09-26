@@ -8,12 +8,14 @@ import {
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
+  MessageSquareTextIcon,
+  MonitorIcon,
   NotebookPenIcon,
   SearchIcon,
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -24,37 +26,50 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
+import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
+  extractContentFromMessage,
   extractReasoningContentFromMessage,
-  findToolCallResult,
+  extractTextFromMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
+import { useMaybeBrowserView } from "../browser-view";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { isSafeHref, UnsafeLink } from "./markdown-link";
+import { ToolCallDetails } from "./tool-call-details";
 
-export function MessageGroup({
-  className,
-  messages,
-  isLoading = false,
-  tokenDebugSteps = [],
-  showTokenDebugSummaries = false,
-}: {
+interface MessageGroupProps {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  deferBrowserPreviews?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
-}) {
+  threadId?: string;
+}
+
+function MessageGroupComponent({
+  className,
+  messages,
+  isLoading = false,
+  deferBrowserPreviews = false,
+  tokenDebugSteps = [],
+  showTokenDebugSummaries = false,
+  threadId,
+}: MessageGroupProps) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
@@ -62,7 +77,28 @@ export function MessageGroup({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const allSteps = useMemo(() => convertToSteps(messages), [messages]);
+  // Keep the original messages and tool associations intact. Only the display
+  // of clarification context moves outside the execution disclosure (#5503).
+  const clarificationTextSteps = useMemo(
+    () =>
+      allSteps.filter(
+        (step): step is CoTAssistantTextStep =>
+          step.type === "assistantText" && step.isClarificationContext === true,
+      ),
+    [allSteps],
+  );
+  const steps = useMemo(
+    () =>
+      allSteps.filter(
+        (step) => step.type !== "assistantText" || !step.isClarificationContext,
+      ),
+    [allSteps],
+  );
+  const stepIndexByStep = useMemo(
+    () => new Map(steps.map((step, index) => [step, index] as const)),
+    [steps],
+  );
   const debugStepByMessageId = useMemo(
     () =>
       new Map(
@@ -91,21 +127,53 @@ export function MessageGroup({
   }, [steps]);
   const aboveLastToolCallSteps = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(0, index);
     }
     return [];
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const afterLastToolCallAssistantTextSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return [];
+    }
+    const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const collapsibleAboveLastToolCallSteps = useMemo(
+    () =>
+      aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
+    [aboveLastToolCallSteps],
+  );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(index + 1).find((step) => step.type === "reasoning");
     } else {
       const filteredSteps = steps.filter((step) => step.type === "reasoning");
       return filteredSteps[filteredSteps.length - 1];
     }
-  }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  // Assistant text emitted after the trailing reasoning is the answer that
+  // reasoning produced, so it renders below the reasoning disclosure. The
+  // settled assistant bubble always paints reasoning above content, and the
+  // streaming processing group has to agree or the two swap places the moment
+  // the turn ends (#4576). Text emitted before that reasoning keeps its
+  // earlier position.
+  const belowLastReasoningAssistantTextSteps = useMemo(() => {
+    if (!lastReasoningStep) {
+      return [];
+    }
+    const index = stepIndexByStep.get(lastReasoningStep) ?? -1;
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastReasoningStep, stepIndexByStep, steps]);
+  const belowLastReasoningSteps = useMemo(
+    () => new Set<CoTStep>(belowLastReasoningAssistantTextSteps),
+    [belowLastReasoningAssistantTextSteps],
+  );
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -211,8 +279,11 @@ export function MessageGroup({
       <ToolCall
         key={step.id}
         {...step}
+        threadId={threadId}
         isLast={options?.isLast}
         isLoading={isLoading}
+        deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -220,17 +291,54 @@ export function MessageGroup({
     );
   };
 
+  const renderAssistantText = (step: CoTAssistantTextStep) => (
+    <ChainOfThoughtStep
+      key={step.id}
+      icon={MessageSquareTextIcon}
+      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
+    ></ChainOfThoughtStep>
+  );
+
+  const renderStep = (step: CoTStep) => {
+    const stepIndex = stepIndexByStep.get(step) ?? -1;
+    if (step.type === "assistantText") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        renderAssistantText(step),
+      ];
+    }
+    if (step.type === "reasoning") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        <ChainOfThoughtStep
+          key={step.id}
+          label={
+            <MarkdownContent
+              content={step.reasoning ?? ""}
+              isLoading={isLoading}
+            />
+          }
+        ></ChainOfThoughtStep>,
+      ];
+    }
+
+    return [
+      renderDebugSummary(step.messageId, stepIndex),
+      renderToolCall(step),
+    ];
+  };
+
   const lastReasoningDebugStep =
     showTokenDebugSummaries && lastReasoningStep?.messageId
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
 
-  return (
+  const processingPanel = (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && (
+      {collapsibleAboveLastToolCallSteps.length > 0 && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -242,7 +350,9 @@ export function MessageGroup({
               <span className="opacity-60">
                 {showAbove
                   ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  : t.toolCalls.moreSteps(
+                      collapsibleAboveLastToolCallSteps.length,
+                    )}
               </span>
             }
             icon={
@@ -256,40 +366,37 @@ export function MessageGroup({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {(lastToolCallStep ??
+        steps.some(
+          (step) =>
+            step.type === "assistantText" && !belowLastReasoningSteps.has(step),
+        )) && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {showAbove &&
-            aboveLastToolCallSteps.flatMap((step) => {
-              const stepIndex = steps.indexOf(step);
-              if (step.type === "reasoning") {
-                return [
-                  renderDebugSummary(step.messageId, stepIndex),
-                  <ChainOfThoughtStep
-                    key={step.id}
-                    label={
-                      <MarkdownContent
-                        content={step.reasoning ?? ""}
-                        isLoading={isLoading}
-                        rehypePlugins={rehypePlugins}
-                      />
-                    }
-                  ></ChainOfThoughtStep>,
-                ];
-              }
-
-              return [
-                renderDebugSummary(step.messageId, stepIndex),
-                renderToolCall(step),
-              ];
-            })}
-          {renderDebugSummary(
-            lastToolCallStep.messageId,
-            steps.indexOf(lastToolCallStep),
-          )}
+          {(lastToolCallStep
+            ? showAbove
+              ? aboveLastToolCallSteps
+              : aboveLastToolCallSteps.filter(
+                  (step) => step.type === "assistantText",
+                )
+            : steps.filter(
+                (step) =>
+                  step.type === "assistantText" &&
+                  !belowLastReasoningSteps.has(step),
+              )
+          ).flatMap(renderStep)}
           {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderToolCall(lastToolCallStep, { isLast: true })}
-            </FlipDisplay>
+            <>
+              {renderDebugSummary(
+                lastToolCallStep.messageId,
+                stepIndexByStep.get(lastToolCallStep) ?? -1,
+              )}
+              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                {renderToolCall(lastToolCallStep, { isLast: true })}
+              </FlipDisplay>
+              {afterLastToolCallAssistantTextSteps
+                .filter((step) => !belowLastReasoningSteps.has(step))
+                .flatMap(renderStep)}
+            </>
           )}
         </ChainOfThoughtContent>
       )}
@@ -297,7 +404,7 @@ export function MessageGroup({
         <>
           {renderDebugSummary(
             lastReasoningStep.messageId,
-            steps.indexOf(lastReasoningStep),
+            stepIndexByStep.get(lastReasoningStep) ?? -1,
           )}
           <Button
             key={lastReasoningStep.id}
@@ -344,15 +451,71 @@ export function MessageGroup({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
                   />
                 }
               ></ChainOfThoughtStep>
             </ChainOfThoughtContent>
           )}
+          {belowLastReasoningAssistantTextSteps.length > 0 && (
+            <ChainOfThoughtContent className="px-4 pb-2">
+              {belowLastReasoningAssistantTextSteps.flatMap(renderStep)}
+            </ChainOfThoughtContent>
+          )}
         </>
       )}
     </ChainOfThought>
+  );
+
+  return (
+    <>
+      {processingPanel}
+      {clarificationTextSteps.map((step) => (
+        <div key={step.id} className="w-full">
+          <MarkdownContent content={step.content} isLoading={isLoading} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+export const MessageGroup = memo(
+  MessageGroupComponent,
+  areMessageGroupPropsEqual,
+);
+MessageGroup.displayName = "MessageGroup";
+
+function areMessageGroupPropsEqual(
+  previous: MessageGroupProps,
+  next: MessageGroupProps,
+): boolean {
+  if (next.isLoading) {
+    return false;
+  }
+  return (
+    previous.className === next.className &&
+    Boolean(previous.isLoading) === Boolean(next.isLoading) &&
+    Boolean(previous.deferBrowserPreviews) ===
+      Boolean(next.deferBrowserPreviews) &&
+    Boolean(previous.showTokenDebugSummaries) ===
+      Boolean(next.showTokenDebugSummaries) &&
+    previous.threadId === next.threadId &&
+    sameReferences(previous.messages, next.messages) &&
+    sameReferences(previous.tokenDebugSteps, next.tokenDebugSteps)
+  );
+}
+
+function sameReferences<T>(
+  previous: readonly T[] | undefined,
+  next: readonly T[] | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  const previousItems = previous ?? [];
+  const nextItems = next ?? [];
+  return (
+    previousItems.length === nextItems.length &&
+    previousItems.every((item, index) => item === nextItems[index])
   );
 }
 
@@ -410,6 +573,55 @@ function DebugStepLabel({
   );
 }
 
+function browserToolLabel(
+  name: string,
+  args: Record<string, unknown>,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  switch (name) {
+    case "browser_navigate":
+      return typeof args.url === "string"
+        ? t.toolCalls.browserNavigate(args.url)
+        : t.toolCalls.browserNavigateGeneric;
+    case "browser_click":
+      return t.toolCalls.browserClick;
+    case "browser_type":
+      return t.toolCalls.browserType;
+    case "browser_snapshot":
+      return t.toolCalls.browserSnapshot;
+    case "browser_get_text":
+      return t.toolCalls.browserGetText;
+    case "browser_back":
+      return t.toolCalls.browserBack;
+    case "browser_screenshot":
+      return t.toolCalls.browserScreenshot;
+    case "browser_close":
+      return t.toolCalls.browserClose;
+    default:
+      return t.toolCalls.useTool(name);
+  }
+}
+
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+      return name;
+    default:
+      return "generic";
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -418,7 +630,12 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  deferBrowserPreview = false,
   tokenDebugStep,
+  showDetails = false,
+  resultMessage,
+  browserView,
+  threadId,
 }: {
   id?: string;
   messageId?: string;
@@ -427,11 +644,18 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
+  browserView?: BrowserViewMeta;
+  threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const browserViewPanel = useMaybeBrowserView();
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
@@ -441,8 +665,89 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (kind === "write_file" || kind === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
 
-  if (name === "web_search") {
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
+
+  if (kind === "browser") {
+    const shot = browserView?.screenshot;
+    const previewUrl =
+      shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(browserToolLabel(name, args, t))}
+        icon={MonitorIcon}
+      >
+        {previewUrl && !deferBrowserPreview && (
+          <button
+            type="button"
+            className="border-border mt-1 block w-full max-w-md cursor-pointer overflow-hidden rounded-lg border"
+            onClick={() => {
+              if (!shot) {
+                return;
+              }
+              if (browserViewPanel) {
+                browserViewPanel.pushFrame({
+                  screenshot: shot,
+                  url: browserView?.url,
+                  title: browserView?.title,
+                });
+                browserViewPanel.openPanel();
+              } else {
+                select(shot);
+                setOpen(true);
+              }
+            }}
+          >
+            <img
+              className="w-full object-contain"
+              src={previewUrl}
+              alt={browserView?.title ?? "browser view"}
+              loading="lazy"
+              decoding="async"
+            />
+            {browserView?.url && (
+              <div className="text-muted-foreground bg-muted/40 truncate px-2 py-1 text-left text-[11px]">
+                {browserView.url}
+              </div>
+            )}
+          </button>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -455,18 +760,25 @@ function ToolCall({
       >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
+            {/* Tool args and results are model- or provider-controlled, so
+                every tool link passes the same scheme allowlist as markdown
+                links and degrades to the same UnsafeLink marker. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
-                  {item.title}
-                </a>
+                {isSafeHref(item.url) ? (
+                  <a href={item.url} target="_blank" rel="noopener noreferrer">
+                    {item.title}
+                  </a>
+                ) : (
+                  <UnsafeLink href={item.url}>{item.title}</UnsafeLink>
+                )}
               </ChainOfThoughtSearchResult>
             ))}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -490,32 +802,48 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => (
-                <Tooltip key={item.image_url} content={item.title}>
-                  <a
-                    className="size-24 overflow-hidden rounded-lg object-cover"
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div className="bg-accent size-24">
-                      <img
-                        className="size-full object-cover"
-                        src={item.thumbnail_url}
-                        alt={item.title}
-                        width={100}
-                        height={100}
-                      />
-                    </div>
-                  </a>
-                </Tooltip>
-              ))}
+              results.map((item) => {
+                const thumbnail = (
+                  <div className="bg-accent size-24">
+                    <img
+                      className="size-full object-cover"
+                      src={item.thumbnail_url}
+                      alt={item.title}
+                      width={100}
+                      height={100}
+                    />
+                  </div>
+                );
+                return (
+                  <Tooltip key={item.image_url} content={item.title}>
+                    {isSafeHref(item.source_url) ? (
+                      <a
+                        className="size-24 overflow-hidden rounded-lg object-cover"
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {thumbnail}
+                      </a>
+                    ) : (
+                      <UnsafeLink
+                        href={item.source_url}
+                        className="size-24 overflow-hidden rounded-lg"
+                      >
+                        {thumbnail}
+                      </UnsafeLink>
+                    )}
+                  </Tooltip>
+                );
+              })}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
-    const url = (args as { url: string })?.url;
+  } else if (kind === "web_fetch") {
+    // Models occasionally emit non-string args mid-stream; an object here
+    // would reach the JSX below and throw.
+    const url = typeof args.url === "string" ? args.url : undefined;
     let title = url;
     if (typeof result === "string") {
       const potentialTitle = extractTitleFromMarkdown(result);
@@ -530,20 +858,23 @@ function ToolCall({
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
-              {title}
-            </a>
-          )}
+          {url &&
+            (isSafeHref(url) ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cursor-pointer"
+              >
+                {title}
+              </a>
+            ) : (
+              <UnsafeLink href={url}>{title}</UnsafeLink>
+            ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -563,7 +894,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "read_file") {
+  } else if (kind === "read_file") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -583,49 +914,35 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "write_file" || name === "str_replace") {
+  } else if (kind === "write_file" || kind === "str_replace") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
 
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
+          if (!writeFileArtifactUrl) {
+            return;
+          }
+          select(writeFileArtifactUrl);
           setOpen(true);
         }}
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -654,7 +971,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -662,7 +979,7 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -678,7 +995,16 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -697,14 +1023,68 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
+  browserView?: BrowserViewMeta;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  isClarificationContext?: boolean;
+  content: string;
+}
+
+type CoTStep = CoTAssistantTextStep | CoTReasoningStep | CoTToolCallStep;
+
+interface BrowserViewMeta {
+  screenshot: string;
+  url?: string;
+  title?: string;
+}
+
+function indexToolCallData(messages: Message[]) {
+  const toolCallResults = new Map<string, string>();
+  const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
+
+  for (const message of messages) {
+    if (message.type !== "tool" || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
+    if (!toolCallResults.has(toolCallId)) {
+      const result = extractTextFromMessage(message);
+      if (result) {
+        toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
+      }
+    }
+
+    if (!browserViews.has(toolCallId)) {
+      const browserView = (
+        message.additional_kwargs as
+          | { browser_view?: BrowserViewMeta }
+          | undefined
+      )?.browser_view;
+      if (browserView && typeof browserView.screenshot === "string") {
+        browserViews.set(toolCallId, browserView);
+      }
+    }
+  }
+
+  return { browserViews, toolCallResults, resultMessages };
+}
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  for (const message of messages) {
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
+      // Reasoning precedes the answer text it produced, so it is pushed first:
+      // step order is what the group renders in, and a message carrying both
+      // would otherwise paint its answer above its own thinking (#4576).
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
         const step: CoTReasoningStep = {
@@ -715,6 +1095,18 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         steps.push(step);
       }
+      const content = extractContentFromMessage(message);
+      if (content) {
+        steps.push({
+          id: `${message.id ?? `ai-${messageIndex}`}-content`,
+          messageId: message.id,
+          type: "assistantText",
+          content,
+          isClarificationContext: message.tool_calls?.some(
+            (toolCall) => toolCall.name === "ask_clarification",
+          ),
+        });
+      }
       for (const tool_call of message.tool_calls ?? []) {
         if (tool_call.name === "task") {
           continue;
@@ -724,12 +1116,16 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          // Persisted or mid-stream tool calls can omit args (or send null);
+          // every ToolCall branch reads them, so normalize once here.
+          args: tool_call.args ?? {},
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
+          const toolCallResult = toolCallResults.get(toolCallId);
+          step.resultMessage = resultMessages.get(toolCallId);
+          // Generic details preserve received text; specialized tools retain their parsing.
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;
@@ -737,6 +1133,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
               step.result = toolCallResult;
             }
           }
+          step.browserView = browserViews.get(toolCallId);
         }
         steps.push(step);
       }

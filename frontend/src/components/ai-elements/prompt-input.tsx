@@ -36,7 +36,7 @@ import {
 } from "@/components/ui/select";
 import type { PromptInputFilePart } from "@/core/uploads";
 import { splitUnsupportedUploadFiles } from "@/core/uploads";
-import { isIMEComposing } from "@/lib/ime";
+import { isCompositionConfirmEnter, isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
 import {
@@ -881,6 +881,7 @@ export type PromptInputTextareaProps = ComponentProps<
 
 export const PromptInputTextarea = ({
   onChange,
+  onKeyDown,
   className,
   placeholder = "What would you like to know?",
   ...props
@@ -889,8 +890,19 @@ export const PromptInputTextarea = ({
   const attachments = usePromptInputAttachments();
   const sanitizeIncomingFiles = usePromptInputValidation();
   const [isComposing, setIsComposing] = useState(false);
+  const compositionEndedAtRef = useRef(0);
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    // Drop the post-compositionend Enter before parent handlers (the skill
+    // catalog and prompt history) can treat it as a plain Enter.
+    if (isCompositionConfirmEnter(e, compositionEndedAtRef.current)) {
+      e.preventDefault();
+      return;
+    }
+    onKeyDown?.(e);
+    if (e.defaultPrevented) {
+      return;
+    }
     if (e.key === "Enter") {
       if (isIMEComposing(e, isComposing)) {
         return;
@@ -910,19 +922,6 @@ export const PromptInputTextarea = ({
       }
 
       form?.requestSubmit();
-    }
-
-    // Remove last attachment when Backspace is pressed and textarea is empty
-    if (
-      e.key === "Backspace" &&
-      e.currentTarget.value === "" &&
-      attachments.files.length > 0
-    ) {
-      e.preventDefault();
-      const lastAttachment = attachments.files.at(-1);
-      if (lastAttachment) {
-        attachments.remove(lastAttachment.id);
-      }
     }
   };
 
@@ -971,7 +970,10 @@ export const PromptInputTextarea = ({
     <InputGroupTextarea
       className={cn("field-sizing-content max-h-48 min-h-16", className)}
       name="message"
-      onCompositionEnd={() => setIsComposing(false)}
+      onCompositionEnd={() => {
+        compositionEndedAtRef.current = Date.now();
+        setIsComposing(false);
+      }}
       onCompositionStart={() => setIsComposing(true)}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}

@@ -35,7 +35,7 @@ from requests.exceptions import SSLError
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
-from deerflow.agents.lead_agent.agent import _build_middlewares
+from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.config import get_app_config
 from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -188,7 +188,7 @@ if not model_name:
     print("[FAIL] No model configured; cannot evaluate lead middleware chain.")
     raise SystemExit(8)
 
-lead_middlewares = _build_middlewares({"configurable": {}}, model_name=model_name)
+lead_middlewares = build_middlewares({"configurable": {}}, model_name=model_name)
 sub_middlewares = _build_sub_middlewares()
 
 print("[STEP 3] Simulate two sequential tool calls and check whether conversation flow aborts.")

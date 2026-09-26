@@ -1,24 +1,34 @@
-"""Tests for memory storage providers."""
+"""Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
+import json
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from deerflow.agents.memory.storage import (
+from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core import markdown_format as mf
+from deerflow.agents.memory.backends.deermem.deermem.core.markdown_storage import MarkdownMemoryStorage
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_agent_name
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
     MemoryStorage,
     create_empty_memory,
-    get_memory_storage,
+    create_storage,
+    normalize_memory_data,
 )
-from deerflow.config.memory_config import MemoryConfig
+
+
+def _storage_at(memory_file) -> FileMemoryStorage:
+    """A FileMemoryStorage rooted at the directory containing ``memory_file``."""
+    root = str(memory_file.parent.resolve())
+    return FileMemoryStorage(DeerMemConfig(storage_path=root))
 
 
 class TestCreateEmptyMemory:
     """Test create_empty_memory function."""
 
     def test_returns_valid_structure(self):
-        """Should return a valid empty memory structure."""
         memory = create_empty_memory()
         assert isinstance(memory, dict)
         assert memory["version"] == "1.0"
@@ -28,263 +38,315 @@ class TestCreateEmptyMemory:
         assert isinstance(memory["facts"], list)
 
 
+class TestNormalizeMemoryData:
+    """Test backward-compatible memory schema normalization."""
+
+    def test_normalizes_legacy_facts_without_mutating_input(self):
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+
+        normalized = normalize_memory_data(legacy)
+
+        assert legacy == {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+        assert len(normalized["facts"]) == 1
+        fact = normalized["facts"][0]
+        assert fact["id"].startswith("fact_")
+        assert fact["content"] == "User prefers conclusions first"
+        assert fact["category"] == "cognitive"
+        assert fact["confidence"] == 0.5
+        assert fact["createdAt"] == ""
+        assert fact["source"] == "unknown"
+
+
 class TestMemoryStorageInterface:
     """Test MemoryStorage abstract base class."""
 
     def test_abstract_methods(self):
-        """Should raise TypeError when trying to instantiate abstract class."""
-
         class TestStorage(MemoryStorage):
             pass
 
         with pytest.raises(TypeError):
-            TestStorage()
+            TestStorage(DeerMemConfig())
 
 
 class TestFileMemoryStorage:
-    """Test FileMemoryStorage implementation."""
+    """Test FileMemoryStorage implementation (DI: constructed with a config)."""
 
-    def test_get_memory_file_path_global(self, tmp_path):
-        """Should return global memory file path when agent_name is None."""
+    def test_get_memory_file_path_global(self, tmp_path, monkeypatch):
+        """DEERMEM_DATA_DIR as root + empty storage_path => global legacy path."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        assert storage._get_memory_file_path(None) == tmp_path / "memory.json"
 
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = tmp_path / "memory.json"
-            return mock_paths
-
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                path = storage._get_memory_file_path(None)
-                assert path == tmp_path / "memory.json"
-
-    def test_get_memory_file_path_agent(self, tmp_path):
-        """Should return per-agent memory file path when agent_name is provided."""
-
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.agent_memory_file.return_value = tmp_path / "agents" / "test-agent" / "memory.json"
-            return mock_paths
-
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            storage = FileMemoryStorage()
-            path = storage._get_memory_file_path("test-agent")
-            assert path == tmp_path / "agents" / "test-agent" / "memory.json"
+    def test_get_memory_file_path_agent(self, tmp_path, monkeypatch):
+        """Agent facts share the user's global summary JSON path."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        path = storage._get_memory_file_path("test-agent")
+        assert path == tmp_path / "memory.json"
 
     @pytest.mark.parametrize("invalid_name", ["", "../etc/passwd", "agent/name", "agent\\name", "agent name", "agent@123", "agent_name"])
     def test_validate_agent_name_invalid(self, invalid_name):
-        """Should raise ValueError for invalid agent names that don't match the pattern."""
-        storage = FileMemoryStorage()
+        """Should raise ValueError for invalid agent names."""
         with pytest.raises(ValueError, match="Invalid agent name|Agent name must be a non-empty string"):
-            storage._validate_agent_name(invalid_name)
+            validate_agent_name(invalid_name)
 
-    def test_load_creates_empty_memory(self, tmp_path):
-        """Should create empty memory when file doesn't exist."""
+    def test_load_creates_empty_memory(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        memory = storage.load()
+        assert isinstance(memory, dict)
+        assert memory["version"] == "1.0"
 
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = tmp_path / "non_existent_memory.json"
-            return mock_paths
-
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                memory = storage.load()
-                assert isinstance(memory, dict)
-                assert memory["version"] == "1.0"
-
-    def test_save_writes_to_file(self, tmp_path):
-        """Should save memory data to file."""
+    def test_save_writes_to_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
+        storage = FileMemoryStorage(DeerMemConfig())
+        result = storage.save({"version": "1.0", "facts": []})
+        assert result is True
+        assert memory_file.exists()
+        assert "facts" not in memory_file.read_text(encoding="utf-8")
 
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = memory_file
-            return mock_paths
+    def test_save_does_not_mutate_caller_dict(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        original = {"version": "1.0", "facts": []}
+        before_keys = set(original.keys())
+        storage.save(original)
+        assert set(original.keys()) == before_keys, "save() must not add keys to caller's dict"
+        assert "lastUpdated" not in original
 
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                test_memory = {"version": "1.0", "facts": [{"content": "test fact"}]}
-                result = storage.save(test_memory)
-                assert result is True
-                assert memory_file.exists()
-
-    def test_save_does_not_mutate_caller_dict(self, tmp_path):
-        """save() must not mutate the caller's dict (lastUpdated side-effect)."""
-        memory_file = tmp_path / "memory.json"
-
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = memory_file
-            return mock_paths
-
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                original = {"version": "1.0", "facts": []}
-                before_keys = set(original.keys())
-                storage.save(original)
-                assert set(original.keys()) == before_keys, "save() must not add keys to caller's dict"
-                assert "lastUpdated" not in original
-
-    def test_cache_not_corrupted_when_save_fails(self, tmp_path):
-        """Cache must remain clean when save() raises OSError.
-
-        If save() fails, the cache must NOT be updated with the new data.
-        Together with the deepcopy in updater._finalize_update(), this prevents
-        stale mutations from leaking into the cache when persistence fails.
-        """
+    def test_cache_not_corrupted_when_save_fails(self, tmp_path, monkeypatch):
+        """Cache must remain clean when save() raises OSError."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         memory_file.parent.mkdir(parents=True, exist_ok=True)
-        original_data = {"version": "1.0", "facts": [{"content": "original"}]}
         import json as _json
 
-        memory_file.write_text(_json.dumps(original_data))
+        memory_file.write_text(_json.dumps({"version": "2.0", "user": {"workContext": {"summary": "original"}}, "history": {}}))
+        storage = FileMemoryStorage(DeerMemConfig())
+        cached = storage.load()
+        assert cached["user"]["workContext"]["summary"] == "original"
 
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = memory_file
-            return mock_paths
+        with patch("builtins.open", side_effect=OSError("disk full")):
+            changed = create_empty_memory()
+            changed["user"]["workContext"]["summary"] = "mutated"
+            result = storage.save(changed)
+        assert result is False
+        after = storage.load()
+        assert after["user"]["workContext"]["summary"] == "original"
 
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                # Warm the cache
-                cached = storage.load()
-                assert cached["facts"][0]["content"] == "original"
-
-                # Simulate save failure: mkdir succeeds but open() raises
-                modified = {"version": "1.0", "facts": [{"content": "mutated"}]}
-                with patch("builtins.open", side_effect=OSError("disk full")):
-                    result = storage.save(modified)
-                assert result is False
-
-                # Cache must still reflect the original data, not the failed write
-                after = storage.load()
-                assert after["facts"][0]["content"] == "original"
-
-    def test_cache_thread_safety(self, tmp_path):
-        """Concurrent load/reload calls must not race on _memory_cache."""
+    def test_cache_thread_safety(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         memory_file.parent.mkdir(parents=True, exist_ok=True)
         import json as _json
 
         memory_file.write_text(_json.dumps({"version": "1.0", "facts": []}))
-
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = memory_file
-            return mock_paths
-
+        storage = FileMemoryStorage(DeerMemConfig())
         errors: list[Exception] = []
 
-        def load_many(storage: FileMemoryStorage) -> None:
+        def load_many(s: FileMemoryStorage) -> None:
             try:
                 for _ in range(50):
-                    storage.load()
+                    s.load()
             except Exception as exc:
                 errors.append(exc)
 
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                threads = [threading.Thread(target=load_many, args=(storage,)) for _ in range(8)]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
-
+        threads = [threading.Thread(target=load_many, args=(storage,)) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
         assert not errors, f"Thread-safety errors: {errors}"
 
-    def test_reload_forces_cache_invalidation(self, tmp_path):
-        """Should force reload from file and invalidate cache."""
+    def test_reload_forces_cache_invalidation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         memory_file.parent.mkdir(parents=True, exist_ok=True)
-        memory_file.write_text('{"version": "1.0", "facts": [{"content": "initial fact"}]}')
-
-        def mock_get_paths():
-            mock_paths = MagicMock()
-            mock_paths.memory_file = memory_file
-            return mock_paths
-
-        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
-            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
-                storage = FileMemoryStorage()
-                # First load
-                memory1 = storage.load()
-                assert memory1["facts"][0]["content"] == "initial fact"
-
-                # Update file directly
-                memory_file.write_text('{"version": "1.0", "facts": [{"content": "updated fact"}]}')
-
-                # Reload should get updated data
-                memory2 = storage.reload()
-                assert memory2["facts"][0]["content"] == "updated fact"
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "initial"}}, "history": {}}')
+        storage = FileMemoryStorage(DeerMemConfig())
+        memory1 = storage.load()
+        assert memory1["user"]["workContext"]["summary"] == "initial"
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "updated"}}, "history": {}}')
+        memory2 = storage.reload()
+        assert memory2["user"]["workContext"]["summary"] == "updated"
 
 
-class TestGetMemoryStorage:
-    """Test get_memory_storage function."""
-
-    @pytest.fixture(autouse=True)
-    def reset_storage_instance(self):
-        """Reset the global storage instance before and after each test."""
-        import deerflow.agents.memory.storage as storage_mod
-
-        storage_mod._storage_instance = None
-        yield
-        storage_mod._storage_instance = None
+class TestCreateStorage:
+    """Test create_storage(config) (replaces the old get_memory_storage() singleton)."""
 
     def test_returns_file_memory_storage_by_default(self):
-        """Should return FileMemoryStorage by default."""
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="deerflow.agents.memory.storage.FileMemoryStorage")):
-            storage = get_memory_storage()
-            assert isinstance(storage, FileMemoryStorage)
+        """Empty storage_class (default) -> FileMemoryStorage directly."""
+        assert isinstance(create_storage(DeerMemConfig()), FileMemoryStorage)
 
-    def test_falls_back_to_file_memory_storage_on_error(self):
-        """Should fall back to FileMemoryStorage if configured storage fails to load."""
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="non.existent.StorageClass")):
-            storage = get_memory_storage()
-            assert isinstance(storage, FileMemoryStorage)
+    def test_raises_on_unresolvable_storage_class(self):
+        """An unimportable storage_class raises ValueError (fail-fast), not a silent
+        FileMemoryStorage fallback -- memory is persistent state, so a wrong store
+        is a data-integrity footgun. Mirrors the manager_class resolution policy."""
+        with pytest.raises(ValueError, match="storage_class"):
+            create_storage(DeerMemConfig(storage_class="non.existent.StorageClass"))
 
-    def test_returns_singleton_instance(self):
-        """Should return the same instance on subsequent calls."""
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="deerflow.agents.memory.storage.FileMemoryStorage")):
-            storage1 = get_memory_storage()
-            storage2 = get_memory_storage()
-            assert storage1 is storage2
+    def test_raises_on_non_class_storage_class(self):
+        """A storage_class that resolves to a non-class (e.g. a function) raises
+        ValueError, not a silent fallback to FileMemoryStorage."""
+        with pytest.raises(ValueError, match="storage_class"):
+            create_storage(DeerMemConfig(storage_class="os.path.join"))
 
-    def test_get_memory_storage_thread_safety(self):
-        """Should safely initialize the singleton even with concurrent calls."""
-        results = []
+    def test_raises_on_non_subclass_storage_class(self):
+        """A storage_class that is not a MemoryStorage subclass raises ValueError,
+        not a silent fallback to FileMemoryStorage."""
+        with pytest.raises(ValueError, match="storage_class"):
+            create_storage(DeerMemConfig(storage_class="builtins.dict"))
 
-        def get_storage():
-            # get_memory_storage is called concurrently from multiple threads while
-            # get_memory_config is patched once around thread creation. This verifies
-            # that the singleton initialization remains thread-safe.
-            results.append(get_memory_storage())
+    def test_dotted_storage_class_resolves(self):
+        storage = create_storage(DeerMemConfig(storage_class="deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage"))
+        assert isinstance(storage, FileMemoryStorage)
 
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="deerflow.agents.memory.storage.FileMemoryStorage")):
-            threads = [threading.Thread(target=get_storage) for _ in range(10)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
 
-        # All results should be the exact same instance
-        assert len(results) == 10
-        assert all(r is results[0] for r in results)
+def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{"workContext":{"summary":"work","updatedAt":""}},"history":{},"facts":[]}',
+        encoding="utf-8",
+    )
+    storage = _storage_at(memory_file)
 
-    def test_get_memory_storage_invalid_class_fallback(self):
-        """Should fall back to FileMemoryStorage if the configured class is not actually a class."""
-        # Using a built-in function instead of a class
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="os.path.join")):
-            storage = get_memory_storage()
-            assert isinstance(storage, FileMemoryStorage)
+    loaded = storage.load()
 
-    def test_get_memory_storage_non_subclass_fallback(self):
-        """Should fall back to FileMemoryStorage if the configured class is not a subclass of MemoryStorage."""
-        # Using 'dict' as a class that is not a MemoryStorage subclass
-        with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_class="builtins.dict")):
-            storage = get_memory_storage()
-            assert isinstance(storage, FileMemoryStorage)
+    assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert loaded["user"]["workContext"]["summary"] == "work"
+
+
+def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{},"history":{},"facts":[{"content":"Legacy cached fact"}]}',
+        encoding="utf-8",
+    )
+
+    storage = _storage_at(memory_file)
+    first = storage.load()
+    second = storage.load()
+
+    assert second == first
+    assert second is not first
+    assert second["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+
+
+class TestMarkdownMemoryStorage:
+    """Opt-in ``storage_class="markdown"``: tolerant load path (issue #3124)."""
+
+    def _markdown_storage_at(self, memory_file) -> MarkdownMemoryStorage:
+        return MarkdownMemoryStorage(DeerMemConfig(storage_path=str(memory_file.parent.resolve())))
+
+    def test_markdown_alias_resolves(self):
+        storage = create_storage(DeerMemConfig(storage_class="markdown"))
+        assert isinstance(storage, MarkdownMemoryStorage)
+        assert isinstance(storage, FileMemoryStorage)
+
+    @pytest.mark.parametrize(("version", "expected_revision"), [("1.0", 8), ("2.0", 7)])
+    def test_corrupt_json_with_fenced_block_recovers(self, tmp_path, version, expected_revision):
+        """A partially written JSON summary that still carries a fenced
+        ```memory-json block is recovered losslessly instead of crashing."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = version
+        if version == "2.0":
+            manifest.pop("facts")  # v2 manifests keep facts in separate files.
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "recovered"}
+        fenced = '{"version": 1, "revision": 7, "user": {"lang": "zh"}\n```memory-json\n' + json.dumps(manifest, ensure_ascii=False) + "\n```"
+        memory_file.write_text(fenced, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        # Legacy manifests migrate to v2 on load and advance the revision.
+        assert loaded["version"] == "2.0"
+        assert loaded["revision"] == expected_revision
+        assert loaded["user"]["workContext"]["summary"] == "recovered"
+
+    def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
+        """Markdown without a fenced block cannot be mapped onto the manifest
+        schema losslessly: load() must not crash AND must not return an
+        invalid shape -- the file is quarantined so nothing is silently lost."""
+        memory_file = tmp_path / "memory.json"
+        body = "# DeerFlow Memory\n\n- version: 2\n- revision: 5\n\n## User\n- summary: likes tea\n"
+        memory_file.write_text(body, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()  # must not raise
+        assert isinstance(loaded, dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "unreadable file must be preserved via quarantine"
+        assert quarantined[0].read_text(encoding="utf-8") == body
+
+    def test_truncated_json_is_quarantined_before_rebuild(self, tmp_path):
+        """A truncated manifest must not be silently erased by the next save:
+        the unreadable file is quarantined (revision reset is then safe)."""
+        memory_file = tmp_path / "memory.json"
+        truncated = '{"version": "2.0", "revision": 41, "user": {"work'
+        memory_file.write_text(truncated, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == truncated
+
+    def test_fenced_block_containing_backticks_parses_losslessly(self):
+        """Remembered code snippets must not terminate the JSON block."""
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "prefers ```python\nprint('hi')\n``` snippets"}
+        rendered = "# DeerFlow Memory\n\n```memory-json\n" + json.dumps(manifest, ensure_ascii=False) + "\n```\n"
+        parsed = mf._parse_markdown_memory(rendered)
+        assert parsed == manifest
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_fenced_summary_with_trailing_code_block_loads_without_quarantine(self, tmp_path, newline):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"]["summary"] = "prefers ```python snippets```"
+        body = newline.join(["# Memory", "```memory-json", json.dumps(manifest, indent=2), "", "```", "Notes:", "```python", "print('example')", "```", ""])
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_text(body, encoding="utf-8")
+        assert mf._parse_markdown_memory(body) == manifest
+        loaded = self._markdown_storage_at(memory_file).load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "# Memory without a fence",
+            '```memory-json\n{"user": ',
+            '```memory-json\n{"user": {}}',
+            '```memory-json\n{"user": {}} trailing garbage\n```',
+            '```memory-json\n{"user": {}}\n```python\nnotes\n```',
+            "```memory-json\n[]\n```",
+            "```memory-json\nnull\n```",
+        ],
+    )
+    def test_invalid_or_non_object_fenced_summary_rejected(self, body):
+        assert mf._parse_markdown_memory(body) is None

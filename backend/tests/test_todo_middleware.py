@@ -2,21 +2,26 @@
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from langchain.agents import create_agent
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
+    ModelLengthFinishReasonMiddleware,
+)
 from deerflow.agents.middlewares.todo_middleware import (
+    TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
-    _completion_reminder_count,
     _format_todos,
     _has_tool_call_intent_or_error,
     _reminder_in_messages,
     _todos_in_messages,
 )
+from deerflow.agents.thread_state import ThreadState
 
 
 def _ai_with_write_todos():
@@ -24,7 +29,7 @@ def _ai_with_write_todos():
 
 
 def _reminder_msg():
-    return HumanMessage(name="todo_reminder", content="reminder")
+    return HumanMessage(name=TODO_REMINDER_MESSAGE_NAME, content="reminder")
 
 
 class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -57,6 +62,15 @@ def _make_runtime_for(thread_id: str, run_id: str):
     runtime = _make_runtime()
     runtime.context = {"thread_id": thread_id, "run_id": run_id}
     return runtime
+
+
+def _make_model_request(messages: list[Any], *, runtime=None) -> ModelRequest:
+    return ModelRequest(
+        model=object(),
+        messages=list(messages),
+        state={"messages": list(messages)},
+        runtime=runtime,
+    )
 
 
 def _sample_todos():
@@ -160,7 +174,7 @@ class TestBeforeModel:
         msgs = result["messages"]
         assert len(msgs) == 1
         assert isinstance(msgs[0], HumanMessage)
-        assert msgs[0].name == "todo_reminder"
+        assert msgs[0].name == TODO_REMINDER_MESSAGE_NAME
 
     def test_reminder_contains_formatted_todos(self):
         mw = TodoMiddleware()
@@ -185,11 +199,7 @@ class TestAbeforeModel:
         }
         result = asyncio.run(mw.abefore_model(state, _make_runtime()))
         assert result is not None
-        assert result["messages"][0].name == "todo_reminder"
-
-
-def _completion_reminder_msg():
-    return HumanMessage(name="todo_completion_reminder", content="finish your todos")
+        assert result["messages"][0].name == TODO_REMINDER_MESSAGE_NAME
 
 
 def _todo_completion_reminders(messages):
@@ -261,20 +271,6 @@ def _all_completed_todos():
         {"status": "completed", "content": "Step 1"},
         {"status": "completed", "content": "Step 2"},
     ]
-
-
-class TestCompletionReminderCount:
-    def test_zero_when_no_reminders(self):
-        msgs = [HumanMessage(content="hi"), _ai_no_tool_calls()]
-        assert _completion_reminder_count(msgs) == 0
-
-    def test_counts_completion_reminders(self):
-        msgs = [_completion_reminder_msg(), _completion_reminder_msg()]
-        assert _completion_reminder_count(msgs) == 2
-
-    def test_does_not_count_todo_reminders(self):
-        msgs = [_reminder_msg(), _completion_reminder_msg()]
-        assert _completion_reminder_count(msgs) == 1
 
 
 class TestToolCallIntentOrError:
@@ -360,21 +356,24 @@ class TestAfterModel:
         assert result["jump_to"] == "model"
         assert "messages" not in result
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
-        handler = MagicMock(return_value="response")
+        request = _make_model_request(state["messages"], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
 
         assert mw.wrap_model_call(request, handler) == "response"
-        request.override.assert_called_once()
-        reminder = request.override.call_args.kwargs["messages"][-1]
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        reminder = sent.messages[-1]
         assert isinstance(reminder, HumanMessage)
         assert reminder.name == "todo_completion_reminder"
         assert reminder.additional_kwargs["hide_from_ui"] is True
         assert "Step 2" in reminder.content
         assert "Step 3" in reminder.content
-        handler.assert_called_once_with("patched-request")
 
     def test_reminder_lists_only_incomplete_items(self):
         mw = TodoMiddleware()
@@ -386,12 +385,15 @@ class TestAfterModel:
         result = mw.after_model(state, runtime)
         assert result is not None
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
-        mw.wrap_model_call(request, MagicMock(return_value="response"))
-        content = request.override.call_args.kwargs["messages"][-1].content
+        request = _make_model_request(state["messages"], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
+
+        mw.wrap_model_call(request, handler)
+        content = seen[0].messages[-1].content
         assert "Step 1" not in content  # completed — should not appear
         assert "Step 2" in content
         assert "Step 3" in content
@@ -455,6 +457,41 @@ class TestAfterModel:
         }
         assert mw.after_model(state, _make_runtime()) is None
 
+    def test_does_not_reengage_when_model_length_capped_marker_present(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="nit",
+                    tool_calls=[],
+                    additional_kwargs={
+                        "model_length_termination": {
+                            "detector": "openai_compatible_length",
+                            "suppressed_tool_call_count": 1,
+                            "suppressed_tool_call_names": ["write_file"],
+                        }
+                    },
+                )
+            ],
+            "todos": _incomplete_todos(),
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_pure_text_length_cap_without_marker_still_reengages(self):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="partial answer",
+                    response_metadata={"finish_reason": "length"},
+                )
+            ],
+            "todos": _incomplete_todos(),
+        }
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        assert result["jump_to"] == "model"
+
 
 class TestAafterModel:
     def test_delegates_to_sync(self):
@@ -471,16 +508,26 @@ class TestAafterModel:
 
 
 class TestWrapModelCall:
-    def test_no_pending_reminder_passthrough(self):
+    def test_no_pending_reminder_still_injects_todo_system_prompt(self):
+        """Regression for bytedance/deer-flow#4714: the base class system-prompt
+        injection must survive the override, otherwise the model never learns
+        about `write_todos` and no todo list is ever produced."""
         mw = TodoMiddleware()
-        request = MagicMock()
-        request.runtime = _make_runtime()
-        request.messages = [HumanMessage(content="hi")]
-        handler = MagicMock(return_value="response")
+        runtime = _make_runtime()
+        request = _make_model_request([HumanMessage(content="hi")], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
 
         assert mw.wrap_model_call(request, handler) == "response"
-        request.override.assert_not_called()
-        handler.assert_called_once_with(request)
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        # No pending reminder — messages must not be augmented.
+        assert sent.messages == [HumanMessage(content="hi")]
 
     def test_pending_reminder_is_injected_once(self):
         mw = TodoMiddleware()
@@ -491,25 +538,74 @@ class TestWrapModelCall:
         }
         mw.after_model(state, runtime)
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
-        handler = MagicMock(return_value="response")
+        request = _make_model_request(state["messages"], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
 
         assert mw.wrap_model_call(request, handler) == "response"
-        injected_messages = request.override.call_args.kwargs["messages"]
-        assert injected_messages[-1].name == "todo_completion_reminder"
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        injected = sent.messages[-1]
+        assert isinstance(injected, HumanMessage)
+        assert injected.name == "todo_completion_reminder"
 
-        request.override.reset_mock()
-        handler.reset_mock()
-        handler.return_value = "second-response"
-        assert mw.wrap_model_call(request, handler) == "second-response"
-        request.override.assert_not_called()
-        handler.assert_called_once_with(request)
+        # Second call: the reminder was drained, so only the system prompt is
+        # injected and the original messages pass through untouched.
+        seen.clear()
+        assert mw.wrap_model_call(request, handler) == "response"
+        assert len(seen) == 1
+        assert seen[0].messages == state["messages"]
 
 
 class TestTodoMiddlewareAgentGraphIntegration:
+    def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
+        mw = TodoMiddleware()
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_todos",
+                            "id": "todos-1",
+                            "args": {
+                                "todos": [
+                                    {"content": "Step 1", "status": "pending"},
+                                ]
+                            },
+                        }
+                    ],
+                ),
+                AIMessage(content="final"),
+            ],
+        )
+
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[mw],
+            state_schema=ThreadState,
+        )
+
+        result = graph.invoke(
+            {"messages": [("user", "create a todo")]},
+            context={"thread_id": "schema-thread", "run_id": "schema-run"},
+        )
+
+        assert result["todos"] == [{"content": "Step 1", "status": "pending"}]
+
+        # Regression for bytedance/deer-flow#4714: the model request must carry
+        # the `write_todos` system prompt (injected by the base class), otherwise
+        # the model never produces a todo list.
+        first_model_call = model.seen_messages[0]
+        assert isinstance(first_model_call[0], SystemMessage)
+        assert "write_todos" in first_model_call[0].text
+
     def test_completion_reminder_is_transient_in_real_agent_graph(self):
         mw = TodoMiddleware()
         model = _CapturingFakeMessagesListChatModel(
@@ -559,6 +655,44 @@ class TestTodoMiddlewareAgentGraphIntegration:
         ]
         assert mw._pending_completion_reminders == {}
         assert mw._completion_reminder_counts == {}
+
+    def test_length_capped_write_file_does_not_reengage_todos(self):
+        """Reproduces the incident (thread b1723286): model emits a write_file
+        call with finish_reason=length, ModelLength suppresses it, and
+        TodoMiddleware must NOT re-engage via jump_to=model."""
+        todo_mw = TodoMiddleware()
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="nit",
+                    tool_calls=[{"name": "write_file", "id": "call_1", "args": {"path": "/mnt/user-data/outputs/report.md", "content": "# truncated report\n| ext4 | jbd2"}}],
+                    response_metadata={"finish_reason": "length", "model_name": "deepseek-v4-pro"},
+                ),
+            ],
+        )
+
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[todo_mw, ModelLengthFinishReasonMiddleware()],
+            state_schema=ThreadState,
+        )
+
+        result = graph.invoke(
+            {"messages": [("user", "write the report")], "todos": [{"content": "Phase 9: Synthesis and final report writing", "status": "in_progress"}]},
+            context={"thread_id": "cap-thread", "run_id": "cap-run"},
+        )
+
+        assert len(model.seen_messages) == 1
+        reminders_by_call = [_todo_completion_reminders(messages) for messages in model.seen_messages]
+        assert all(len(r) == 0 for r in reminders_by_call)
+
+        final_ai = result["messages"][-1]
+        assert final_ai.additional_kwargs.get("model_length_termination")
+        assert "output limit" in str(final_ai.content)
+        assert "nit" in str(final_ai.content)
+        assert result["todos"] == [{"content": "Phase 9: Synthesis and final report writing", "status": "in_progress"}]
+        assert todo_mw._pending_completion_reminders == {}
 
 
 class TestRunScopedReminderCleanup:
@@ -624,6 +758,27 @@ class TestRunScopedReminderCleanup:
 
 
 class TestAwrapModelCall:
+    def test_async_no_pending_reminder_still_injects_todo_system_prompt(self):
+        """Mirror of the sync no-reminder test: the async path must also keep the
+        base class system-prompt injection while leaving messages untouched when
+        there are no pending completion reminders."""
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        request = _make_model_request([HumanMessage(content="hi")], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        async def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
+
+        result = asyncio.run(mw.awrap_model_call(request, handler))
+        assert result == "response"
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        assert sent.messages == [HumanMessage(content="hi")]
+
     def test_async_pending_reminder_is_injected(self):
         mw = TodoMiddleware()
         runtime = _make_runtime()
@@ -633,14 +788,20 @@ class TestAwrapModelCall:
         }
         mw.after_model(state, runtime)
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
-        handler = AsyncMock(return_value="response")
+        request = _make_model_request(state["messages"], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        async def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
 
         result = asyncio.run(mw.awrap_model_call(request, handler))
         assert result == "response"
-        injected_messages = request.override.call_args.kwargs["messages"]
-        assert injected_messages[-1].name == "todo_completion_reminder"
-        handler.assert_awaited_once_with("patched-request")
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        injected = sent.messages[-1]
+        assert isinstance(injected, HumanMessage)
+        assert injected.name == "todo_completion_reminder"
+        assert injected.additional_kwargs["hide_from_ui"] is True

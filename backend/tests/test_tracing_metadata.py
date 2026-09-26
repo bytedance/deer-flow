@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from deerflow.trace_context import request_trace_context
 from deerflow.tracing import metadata as tracing_metadata
 
 
@@ -135,3 +136,28 @@ def test_thread_id_none_still_produces_metadata(monkeypatch):
 
     assert result["langfuse_session_id"] is None
     assert result["langfuse_user_id"] == "u-1"
+
+
+def test_deerflow_trace_id_comes_from_current_trace_context(monkeypatch):
+    _enable_langfuse(monkeypatch)
+
+    with request_trace_context("gateway-trace-1"):
+        result = tracing_metadata.build_langfuse_trace_metadata(
+            thread_id="thread-abc",
+            user_id="user-42",
+        )
+
+    assert result["deerflow_trace_id"] == "gateway-trace-1"
+
+
+def test_deerflow_trace_id_explicit_argument_wins(monkeypatch):
+    _enable_langfuse(monkeypatch)
+
+    with request_trace_context("ambient-trace"):
+        result = tracing_metadata.build_langfuse_trace_metadata(
+            thread_id="thread-abc",
+            user_id="user-42",
+            deerflow_trace_id="explicit-trace",
+        )
+
+    assert result["deerflow_trace_id"] == "explicit-trace"

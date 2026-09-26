@@ -1,0 +1,7 @@
+{
+  "version": "known-goal-continuation-v1",
+  "purpose": "Check applicability to a continuing known objective, separate from retrospective handoff queries whose final target service is initially unknown.",
+  "selection": "Variants 00 and 01 from each of the six fixed task families: 12 cases, no score-based selection.",
+  "change": "Reveal the exact target task as the first user goal and carry it in handoff messages. Keep all facts, corrections, distractors, gold artifact values, compression counts, tools and budgets unchanged.",
+  "reporting": "Separate diagnostic condition; do not combine its 12 cases with the primary 24-task denominator or the public QA benchmark."
+}

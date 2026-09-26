@@ -14,7 +14,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import CancelOutcome, RunManager, RunStatus
 
 THREAD_ID = "thread-cancel-test"
 
@@ -49,22 +49,22 @@ def _create_interrupted_run(mgr: RunManager) -> str:
 
 
 class TestRunManagerCancelIdempotency:
-    def test_cancel_returns_true_for_already_interrupted_run(self):
-        """cancel() must return True when the run is already interrupted."""
+    def test_cancel_returns_cancelled_for_already_interrupted_run(self):
+        """cancel() must return CancelledOutcome.cancelled when the run is already interrupted."""
 
         async def run():
             mgr = RunManager()
             record = await mgr.create(THREAD_ID)
             await mgr.set_status(record.run_id, RunStatus.running)
             first = await mgr.cancel(record.run_id)
-            assert first is True
+            assert first == CancelOutcome.cancelled
             second = await mgr.cancel(record.run_id)
-            assert second is True  # idempotent
+            assert second == CancelOutcome.cancelled  # idempotent
 
         asyncio.run(run())
 
-    def test_cancel_returns_false_for_successful_run(self):
-        """cancel() must still return False for runs that completed successfully."""
+    def test_cancel_returns_not_cancellable_for_successful_run(self):
+        """cancel() must return not_cancellable for runs that completed successfully."""
 
         async def run():
             mgr = RunManager()
@@ -72,15 +72,15 @@ class TestRunManagerCancelIdempotency:
             await mgr.set_status(record.run_id, RunStatus.running)
             await mgr.set_status(record.run_id, RunStatus.success)
             result = await mgr.cancel(record.run_id)
-            assert result is False
+            assert result == CancelOutcome.not_cancellable
 
         asyncio.run(run())
 
-    def test_cancel_returns_false_for_unknown_run(self):
+    def test_cancel_returns_not_active_locally_for_unknown_run(self):
         async def run():
             mgr = RunManager()
             result = await mgr.cancel("nonexistent-run-id")
-            assert result is False
+            assert result == CancelOutcome.not_active_locally
 
         asyncio.run(run())
 

@@ -12,8 +12,166 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
 
-# Docker Compose command with project name
-COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
+# Docker Compose command with project name.
+# Use a filename relative to DOCKER_DIR (we always `cd` there) so Windows
+# Docker Desktop does not receive a Git Bash `/c/...` path it cannot open.
+COMPOSE_FILE="docker-compose-dev.yaml"
+# Dev stack project name. `logs --prod` swaps both values for the production
+# stack started by `make up` (scripts/deploy.sh: project `deer-flow`).
+COMPOSE_PROJECT="deer-flow-dev"
+# Selected by require_compose_version: prefer the V2 plugin, else hyphenated binary.
+# Kept as an array so "docker compose" stays two words under set -u / quoting.
+COMPOSE_BIN=(docker compose)
+
+_refresh_compose_cmd() {
+    COMPOSE_CMD="${COMPOSE_BIN[*]} -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE}"
+}
+_refresh_compose_cmd
+
+# docker-compose-dev.yaml marks its env_file entries optional with the long-form
+# `- path: ... / required: false` syntax, understood by Compose v2.24.0 and up.
+# Older clients abort while parsing the file, before any preflight below can run.
+COMPOSE_MIN_VERSION="2.24.0"
+
+ensure_from_example() {
+    local dest="$1"
+    local src="$2"
+    local label="$3"
+
+    if [ -f "$dest" ]; then
+        return 0
+    fi
+    if [ -f "$src" ]; then
+        cp "$src" "$dest"
+        echo -e "${BLUE}Created ${label} from $(basename "$src")${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}✗ ${label} not found and no $(basename "$src") to copy from.${NC}"
+    echo "Create ${dest} before starting Docker."
+    exit 1
+}
+
+require_compose_file() {
+    if [ -f "$DOCKER_DIR/$COMPOSE_FILE" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}✗ ${COMPOSE_FILE} not found at ${DOCKER_DIR}/${COMPOSE_FILE}${NC}"
+    echo "Run this from the DeerFlow repository root, e.g. 'make docker-start'."
+    echo "Do not run 'docker compose -f docker/${COMPOSE_FILE}' from inside docker/ — that resolves to docker/docker/${COMPOSE_FILE}."
+    exit 1
+}
+
+# Prefer the Compose V2 plugin (`docker compose`); fall back to the legacy
+# hyphenated binary (`docker-compose`) when the plugin is missing. Whatever
+# binary answers is retained in COMPOSE_BIN / COMPOSE_CMD so start/logs/stop/
+# restart use the same executable. Must run in the current shell (not $(...))
+# so the COMPOSE_BIN assignment survives. Direct callers get no such check:
+# see CONTRIBUTING.md.
+_probe_compose() {
+    local out
+
+    out="$(docker compose version --short 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        COMPOSE_BIN=(docker compose)
+        _refresh_compose_cmd
+        COMPOSE_VERSION_RAW="$out"
+        return 0
+    fi
+    out="$(docker-compose version --short 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        COMPOSE_BIN=(docker-compose)
+        _refresh_compose_cmd
+        COMPOSE_VERSION_RAW="$out"
+        return 0
+    fi
+    COMPOSE_VERSION_RAW=""
+    return 1
+}
+
+# Fail with an actionable message instead of the parser error an older client
+# emits for the optional env_file syntax.
+require_compose_version() {
+    local raw major minor min_major min_minor
+
+    min_major="${COMPOSE_MIN_VERSION%%.*}"
+    min_minor="${COMPOSE_MIN_VERSION#*.}"
+    min_minor="${min_minor%%.*}"
+
+    COMPOSE_VERSION_RAW=""
+    _probe_compose || true
+    raw="${COMPOSE_VERSION_RAW#v}"
+    major="${raw%%.*}"
+    minor="${raw#*.}"
+    minor="${minor%%.*}"
+    major="${major//[!0-9]/}"
+    minor="${minor//[!0-9]/}"
+
+    if [ -z "$major" ] || [ -z "$minor" ]; then
+        echo -e "${YELLOW}⚠ Could not determine the Docker Compose version; ${COMPOSE_MIN_VERSION} or newer is required.${NC}"
+        return 0
+    fi
+    if [ "$major" -gt "$min_major" ] || { [ "$major" -eq "$min_major" ] && [ "$minor" -ge "$min_minor" ]; }; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}✗ Docker Compose ${raw} is too old — ${COMPOSE_MIN_VERSION} or newer is required.${NC}"
+    echo "${COMPOSE_FILE} marks its env_file entries optional using the long-form"
+    echo "'- path: ... / required: false' syntax, which your client cannot parse."
+    echo "Update Docker Desktop, or install a current Compose v2 plugin:"
+    echo "  https://docs.docker.com/compose/install/"
+    exit 1
+}
+
+# Compose interpolates ${DEER_FLOW_ROOT} into host-side paths
+# (DEER_FLOW_HOST_BASE_DIR, THREADS_HOST_PATH) that AIO/provisioner sandbox
+# modes bind-mount. Unset, those render as /backend/.deer-flow — a plausible
+# looking absolute path on the wrong root, so mounts silently miss the checkout.
+ensure_deer_flow_root() {
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
+}
+
+# Read-only with respect to configuration; safe for logs/stop/restart.
+compose_preflight() {
+    require_compose_file
+    require_compose_version
+    ensure_deer_flow_root
+}
+
+# Only `start` may create files. Compose env_file entries fail closed on Windows
+# when .env is missing ("The specified file cannot be found" /
+# "Le fichier spécifique est introuvable").
+ensure_env_files() {
+    ensure_from_example "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.example" ".env"
+    ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
+}
+
+load_proxy_env_from_dotenv() {
+    local env_file="$PROJECT_ROOT/.env"
+    local var
+    local line
+    local value
+
+    if [ ! -f "$env_file" ]; then
+        return
+    fi
+
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+        if [ -z "${!var+x}" ]; then
+            line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
+            if [ -n "$line" ]; then
+                value="${line#*=}"
+                value="${value%\"}"
+                value="${value#\"}"
+                value="${value%\'}"
+                value="${value#\'}"
+                value="${value%$'\r'}"
+                export "${var}=${value}"
+            fi
+        fi
+    done
+}
 
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
@@ -163,11 +321,34 @@ start() {
     echo "=========================================="
     echo ""
 
+    # Validate the toolchain before creating any config files below.
+    compose_preflight
+
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="frontend gateway nginx"
+    services="redis frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway provisioner nginx"
+        services="redis frontend gateway provisioner nginx"
+    fi
+
+    # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+    # Docker socket. Mount it via the opt-in docker-compose.dood.yaml overlay so
+    # the default (local) and provisioner modes never expose the host daemon.
+    # Mounting the socket = root-equivalent host control; see SECURITY.md.
+    if [ "$sandbox_mode" = "aio" ]; then
+        local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+        if [ ! -S "$docker_socket" ]; then
+            # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+            # /var/run/docker.sock into containers even though no host socket file exists.
+            if [ "$docker_socket" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+                :
+            else
+                echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
+                exit 1
+            fi
+        fi
+        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+        COMPOSE_CMD="$COMPOSE_CMD -f docker-compose.dood.yaml"
     fi
 
     echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
@@ -179,13 +360,11 @@ start() {
     fi
     echo ""
     
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
-        echo ""
-    fi
-    
+    # Set by compose_preflight above; shown because the provisioner turns it into
+    # host-side bind-mount paths.
+    echo -e "${BLUE}Using DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    echo ""
+
     # Ensure config.yaml exists before starting.
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
         if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
@@ -220,6 +399,9 @@ start() {
         fi
     fi
 
+    ensure_env_files
+    load_proxy_env_from_dotenv
+
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
@@ -237,56 +419,89 @@ start() {
     echo ""
 }
 
-# View Docker development logs
+# View Docker logs. The dev stack (make docker-start) is the default;
+# `--prod` tails the production stack started by `make up` (scripts/deploy.sh).
 logs() {
     local service=""
-    
-    case "$1" in
-        --frontend)
-            service="frontend"
-            echo -e "${BLUE}Viewing frontend logs...${NC}"
-            ;;
-        --gateway)
-            service="gateway"
-            echo -e "${BLUE}Viewing gateway logs...${NC}"
-            ;;
-        --nginx)
-            service="nginx"
-            echo -e "${BLUE}Viewing nginx logs...${NC}"
-            ;;
-        --provisioner)
-            service="provisioner"
-            echo -e "${BLUE}Viewing provisioner logs...${NC}"
-            ;;
-        "")
-            echo -e "${BLUE}Viewing all logs...${NC}"
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
-            exit 1
-            ;;
-    esac
-    
+    local is_prod=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prod)
+                is_prod=1
+                ;;
+            --frontend|--gateway|--nginx|--redis|--provisioner)
+                if [ -n "$service" ]; then
+                    echo -e "${YELLOW}Only one service option is allowed (got --$service and $1).${NC}"
+                    exit 1
+                fi
+                service="${1#--}"
+                ;;
+            *)
+                echo -e "${YELLOW}Unknown option: $1${NC}"
+                echo "Usage: $0 logs [--prod] [--frontend|--gateway|--nginx|--redis|--provisioner]"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if [ "$is_prod" = 1 ]; then
+        # Target the same project deploy.sh started. Relative paths: this
+        # runs with cwd=$DOCKER_DIR.
+        COMPOSE_FILE="docker-compose.yaml"
+        COMPOSE_PROJECT="deer-flow"
+        # deploy.sh exports these before every compose invocation so the
+        # volume specs in docker-compose.yaml interpolate; without them even
+        # `logs` fails to parse the file on checkouts without a .env.
+        export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$PROJECT_ROOT/backend/.deer-flow}"
+        export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
+        export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
+        export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$PROJECT_ROOT}"
+        export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
+        export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
+    elif [ -z "$service" ]; then
+        # The dev and production stacks use different compose projects, so
+        # `make docker-logs` after `make up` would exit with empty output;
+        # point at the production entry point instead of staying silent.
+        if [ -z "$(cd "$DOCKER_DIR" && $COMPOSE_CMD ps -q 2>/dev/null)" ]; then
+            echo -e "${YELLOW}No dev containers are running.${NC}"
+            echo "Started the production stack with 'make up'? View its logs with 'make prod-logs'."
+        fi
+    fi
+
+    compose_preflight
+
+    # Append --env-file only after compose_preflight(): its Compose detection
+    # may rebuild COMPOSE_CMD, which would drop anything appended before it.
+    if [ "$is_prod" = 1 ] && [ -f "$PROJECT_ROOT/.env" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --env-file ../.env"
+    fi
+
+    if [ -n "$service" ]; then
+        echo -e "${BLUE}Viewing $service logs...${NC}"
+    elif [ "$is_prod" = 1 ]; then
+        echo -e "${BLUE}Viewing production stack logs...${NC}"
+    else
+        echo -e "${BLUE}Viewing all logs...${NC}"
+    fi
+
     cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
 }
 
 # Stop Docker development environment
 stop() {
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
-    # running compose down to suppress "variable is not set" warnings.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
+    compose_preflight
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down
     echo "Cleaning up sandbox containers..."
-    "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
+    bash "$SCRIPT_DIR/cleanup-containers.sh" deer-flow-sandbox 2>/dev/null || true
     echo -e "${GREEN}✓ Docker services stopped${NC}"
 }
 
 # Restart Docker development environment
 restart() {
+    compose_preflight
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"
@@ -311,10 +526,12 @@ help() {
     echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
     echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
     echo "  restart           - Restart all running Docker services"
-    echo "  logs [option] - View Docker development logs"
+    echo "  logs [option] - View Docker logs (dev stack by default, production with --prod)"
+    echo "                  --prod       View production stack logs (containers from 'make up')"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
+    echo "                  --redis      View redis logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"
@@ -335,7 +552,8 @@ main() {
             restart
             ;;
         logs)
-            logs "$2"
+            shift
+            logs "$@"
             ;;
         stop)
             stop

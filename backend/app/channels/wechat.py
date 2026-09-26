@@ -8,21 +8,25 @@ import binascii
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import secrets
+import tempfile
 import time
 from collections.abc import Mapping
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.base import Channel
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +116,33 @@ def _encode_outbound_media_aes_key(aes_key: bytes) -> str:
     return base64.b64encode(aes_key.hex().encode("utf-8")).decode("utf-8")
 
 
+def _media_url_host(url: str) -> str:
+    """Best-effort host extraction for logging; never raises, never logs the URL.
+
+    CDN URLs can carry access tokens in their query strings, so only the host
+    is surfaced in skip warnings.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _media_download_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media download failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the CDN download
+    credentials — so only the class name and explicitly safe fields are ever
+    surfaced; the raw exception must not reach a ``logger.exception`` site
+    (the polling loop's per-message handler would render its traceback).
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
 def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png", "image/png"
@@ -134,6 +165,8 @@ class WechatChannel(Channel):
         - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
         - ``base_url``: (optional) iLink API base URL.
         - ``allowed_users``: (optional) List of allowed iLink user IDs. Empty = allow all.
+        - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
+          be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
         - ``state_dir``: (optional) Directory used to persist the long-poll cursor.
     """
@@ -150,6 +183,7 @@ class WechatChannel(Channel):
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
     DEFAULT_IMAGE_DOWNLOAD_DIRNAME = "downloads"
+    DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
     DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
     DEFAULT_MAX_OUTBOUND_IMAGE_BYTES = 20 * 1024 * 1024
     DEFAULT_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
@@ -239,6 +273,7 @@ class WechatChannel(Channel):
         self._max_inbound_file_bytes = self._coerce_int(config.get("max_inbound_file_bytes"), self.DEFAULT_MAX_INBOUND_FILE_BYTES)
         self._max_outbound_file_bytes = self._coerce_int(config.get("max_outbound_file_bytes"), self.DEFAULT_MAX_OUTBOUND_FILE_BYTES)
         self._allowed_file_extensions = self._coerce_str_set(config.get("allowed_file_extensions"), self.DEFAULT_ALLOWED_FILE_EXTENSIONS)
+        self._allowed_media_hosts = self._coerce_host_suffixes(config.get("allowed_media_hosts"))
         self._allowed_users: set[str] = {str(uid).strip() for uid in config.get("allowed_users", []) if str(uid).strip()}
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._ilink_bot_id = str(config.get("ilink_bot_id") or "").strip() or None
@@ -252,11 +287,21 @@ class WechatChannel(Channel):
         self._state_dir = self._resolve_state_dir(config.get("state_dir"))
         self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
         self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
-        self._load_state()
+        # NOTE: persisted state (auth token + cursor) is intentionally NOT loaded
+        # here. ChannelService._start_channel() constructs the channel directly
+        # on the async path, so filesystem IO in __init__ would block the event
+        # loop (the strict blocking-IO gate raises BlockingError on os.stat).
+        # State is loaded in start() via asyncio.to_thread instead.
 
     async def start(self) -> None:
         if self._running:
             return
+
+        # Load persisted state off the event loop before the bot_token check
+        # below: a token restored from the auth file must be visible here so
+        # the qrcode-login fallback isn't taken unnecessarily. __init__ defers
+        # this load precisely so construction stays IO-free on the async path.
+        await asyncio.to_thread(self._load_state)
 
         if not self._bot_token and not self._qrcode_login_enabled:
             logger.error("WeChat channel requires bot_token or qrcode_login_enabled")
@@ -264,7 +309,7 @@ class WechatChannel(Channel):
 
         self._main_loop = asyncio.get_running_loop()
         if self._state_dir:
-            self._state_dir.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self._state_dir.mkdir, parents=True, exist_ok=True)
 
         await self._ensure_client()
         self._running = True
@@ -339,27 +384,15 @@ class WechatChannel(Channel):
             "base_info": self._base_info(),
         }
 
-        last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                data = await self._request_json("/ilink/bot/sendmessage", payload)
-                self._ensure_success(data, "sendmessage")
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[WeChat] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
 
-        logger.error("[WeChat] send failed after %d attempts: %s", max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.is_image:
@@ -381,7 +414,7 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = attachment.actual_path.read_bytes()
+            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound image %s", attachment.actual_path)
             return False
@@ -471,7 +504,7 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = attachment.actual_path.read_bytes()
+            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound file %s", attachment.actual_path)
             return False
@@ -564,8 +597,8 @@ class WechatChannel(Channel):
                     if errcode == -14:
                         self._bot_token = ""
                         self._get_updates_buf = ""
-                        self._save_state()
-                        self._save_auth_state(status="expired", bot_token="")
+                        await asyncio.to_thread(self._save_state)
+                        await asyncio.to_thread(self._save_auth_state, status="expired", bot_token="")
                         logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
                         self._running = False
                         break
@@ -580,13 +613,30 @@ class WechatChannel(Channel):
 
                 self._update_longpoll_timeout(data)
 
+                # Each message is isolated in its own try/except: one message that
+                # fails to process (e.g. an attachment that fails to decrypt) must
+                # not abort the whole batch and strand every message after it.
+                for raw_message in data.get("msgs", []):
+                    try:
+                        await self._handle_update(raw_message)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        message_id = raw_message.get("message_id") or raw_message.get("msg_id") if isinstance(raw_message, dict) else None
+                        logger.exception(
+                            "[WeChat] failed to handle inbound message message_id=%s; skipping it and continuing with the rest of the batch",
+                            message_id,
+                        )
+
+                # The cursor is advanced only after the whole batch has been
+                # attempted (not before the loop above), so a hard crash mid-batch
+                # leaves it unmoved -- the worst case on restart is re-fetching and
+                # re-processing this batch, not silently skipping past messages
+                # that were never actually handled.
                 next_buf = data.get("get_updates_buf")
                 if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
                     self._get_updates_buf = next_buf
-                    self._save_state()
-
-                for raw_message in data.get("msgs", []):
-                    await self._handle_update(raw_message)
+                    await asyncio.to_thread(self._save_state)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -600,15 +650,31 @@ class WechatChannel(Channel):
             return
 
         chat_id = str(raw_message.get("from_user_id") or raw_message.get("ilink_user_id") or "").strip()
-        if not chat_id or not self._check_user(chat_id):
+        if not chat_id:
             return
 
         text = self._extract_text(raw_message)
+        context_token = str(raw_message.get("context_token") or "").strip()
+
+        # Handle the connect code before applying allowed_users so a browser-initiated
+        # bind can bootstrap an external identity that is not yet whitelisted.
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
+            handled = await self._bind_connection_from_connect_code(
+                chat_id=chat_id,
+                context_token=context_token,
+                code=connect_code,
+            )
+            if handled:
+                return
+
+        if not self._check_user(chat_id):
+            return
+
         files = await self._extract_inbound_files(raw_message)
         if not text and not files:
             return
 
-        context_token = str(raw_message.get("context_token") or "").strip()
         thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
 
         if context_token:
@@ -620,25 +686,74 @@ class WechatChannel(Channel):
             chat_id=chat_id,
             user_id=chat_id,
             text=text,
-            msg_type=InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT,
+            msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
             thread_ts=thread_ts,
             files=files,
             metadata={
                 "context_token": context_token,
                 "ilink_user_id": chat_id,
+                "message_id": str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip(),
                 "ref_msg": self._extract_ref_message(raw_message),
                 "raw_message": raw_message,
             },
         )
         inbound.topic_id = None
-        await self.bus.publish_inbound(inbound)
+        inbound = await self._attach_connection_identity(inbound)
+        # The iLink poll loop processes updates sequentially on the Gateway
+        # loop, so no provider-side task needs a pre-handoff reservation.
+        await self._publish_inbound_or_drop(inbound)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="wechat",
+            workspace_id=inbound.chat_id,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
+        if state is None:
+            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+            return True
+
+        if not chat_id:
+            await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="wechat",
+            external_account_id=chat_id,
+            workspace_id=chat_id,
+            metadata={
+                "context_token": context_token,
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        return True
+
+    async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
+        if not context_token:
+            return
+        await self._send_text_message(
+            chat_id=chat_id,
+            context_token=context_token,
+            text=text,
+            client_id_prefix="deerflow-connect",
+            max_retries=1,
+        )
 
     async def _ensure_authenticated(self) -> bool:
         async with self._auth_lock:
             if self._bot_token:
                 return True
 
-            self._load_auth_state()
+            await asyncio.to_thread(self._load_auth_state)
             if self._bot_token:
                 return True
 
@@ -652,11 +767,18 @@ class WechatChannel(Channel):
                 return False
             return bool(auth_state.get("bot_token"))
 
+    async def request_login_qrcode(self) -> dict[str, Any]:
+        """Request QR payload without changing the running channel's credentials."""
+        return await self._request_public_get_json("/ilink/bot/get_bot_qrcode", params={"bot_type": self._qrcode_bot_type})
+
+    async def request_login_status(self, qrcode: str, *, timeout: float | None = None, verify_code: str | None = None) -> dict[str, Any]:
+        params = {"qrcode": qrcode}
+        if verify_code:
+            params["verify_code"] = verify_code
+        return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
+
     async def _bind_via_qrcode(self) -> dict[str, Any]:
-        qrcode_data = await self._request_public_get_json(
-            "/ilink/bot/get_bot_qrcode",
-            params={"bot_type": self._qrcode_bot_type},
-        )
+        qrcode_data = await self.request_login_qrcode()
         qrcode = str(qrcode_data.get("qrcode") or "").strip()
         if not qrcode:
             raise RuntimeError("iLink get_bot_qrcode did not return qrcode")
@@ -666,7 +788,8 @@ class WechatChannel(Channel):
         if qrcode_img_content:
             logger.warning("[WeChat] qrcode_img_content=%s", qrcode_img_content)
 
-        self._save_auth_state(
+        await asyncio.to_thread(
+            self._save_auth_state,
             status="pending",
             qrcode=qrcode,
             qrcode_img_content=qrcode_img_content or None,
@@ -674,10 +797,7 @@ class WechatChannel(Channel):
 
         deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
         while time.monotonic() < deadline:
-            status_data = await self._request_public_get_json(
-                "/ilink/bot/get_qrcode_status",
-                params={"qrcode": qrcode},
-            )
+            status_data = await self.request_login_status(qrcode)
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()
@@ -688,7 +808,8 @@ class WechatChannel(Channel):
                 if ilink_bot_id:
                     self._ilink_bot_id = ilink_bot_id
 
-                return self._save_auth_state(
+                return await asyncio.to_thread(
+                    self._save_auth_state,
                     status="confirmed",
                     bot_token=token,
                     ilink_bot_id=self._ilink_bot_id,
@@ -697,7 +818,8 @@ class WechatChannel(Channel):
                 )
 
             if status in {"expired", "canceled", "cancelled", "invalid", "failed"}:
-                self._save_auth_state(
+                await asyncio.to_thread(
+                    self._save_auth_state,
                     status=status,
                     qrcode=qrcode,
                     qrcode_img_content=qrcode_img_content or None,
@@ -706,7 +828,8 @@ class WechatChannel(Channel):
 
             await asyncio.sleep(max(self._qrcode_poll_interval, 0.1))
 
-        self._save_auth_state(
+        await asyncio.to_thread(
+            self._save_auth_state,
             status="timeout",
             qrcode=qrcode,
             qrcode_img_content=qrcode_img_content or None,
@@ -864,11 +987,60 @@ class WechatChannel(Channel):
             payload["no_need_thumb"] = True
         return payload
 
-    async def _download_cdn_bytes(self, url: str, *, timeout: float | None = None) -> bytes:
+    @staticmethod
+    def _stream_cap_for(plaintext_limit: int) -> int | None:
+        """Translate a plaintext size limit into the ciphertext stream cap.
+
+        ``max_inbound_image_bytes`` / ``max_inbound_file_bytes`` bound the
+        DECRYPTED payload, but ``_download_cdn_bytes`` measures what is still
+        encrypted — AES-128-ECB with PKCS#7 padding, up to one 16-byte block
+        larger. Capping the stream at the plaintext limit would reject a
+        boundary-sized valid attachment purely for its padding, so the cap is
+        the padded size of exactly-limit plaintext. ``None``/non-positive
+        limits keep the stream uncapped, matching the ``> 0`` checks.
+        """
+        if plaintext_limit <= 0:
+            return None
+        return _encrypted_size_for_aes_128_ecb(plaintext_limit)
+
+    async def _download_cdn_bytes(self, url: str, *, timeout: float | None = None, max_bytes: int | None = None) -> bytes | None:
+        """Stream one media download, aborting in flight once it exceeds *max_bytes*.
+
+        The bytes are buffered in memory before being decrypted and persisted,
+        so an oversized attachment must be refused before it is fully read, not
+        after (mirrors ``DingTalkChannel._download_by_code``). The transfer is
+        kept undecoded — identity requested, unexpected Content-Encoding
+        refused before reading, ``aiter_raw`` used — because the transparent
+        decoder allocates the full decompressed body before yielding, which
+        would blow past the cap for a compressed response. Returns ``None``
+        when the download was aborted by the cap or rejected for its
+        encoding; other HTTP-level failures raise for the caller's
+        per-message error handling.
+        """
         client = await self._ensure_client()
-        response = await client.get(url, timeout=timeout or self.DEFAULT_CDN_TIMEOUT)
-        response.raise_for_status()
-        return response.content
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream(
+            "GET",
+            url,
+            timeout=timeout or self.DEFAULT_CDN_TIMEOUT,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
+            response.raise_for_status()
+            encoding = (response.headers.get("content-encoding") or "").strip().lower()
+            if encoding and encoding != "identity":
+                logger.warning(
+                    "[WeChat] inbound media response uses Content-Encoding %r, aborting before decode",
+                    encoding,
+                )
+                return None
+            async for chunk in response.aiter_raw():
+                total += len(chunk)
+                if max_bytes is not None and max_bytes > 0 and total > max_bytes:
+                    logger.warning("[WeChat] inbound media download exceeds %d bytes, aborting before full read", max_bytes)
+                    return None
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     async def _upload_cdn_bytes(
         self,
@@ -973,6 +1145,9 @@ class WechatChannel(Channel):
         if not full_url:
             logger.warning("[WeChat] inbound image missing full_url, skipping message_id=%s", message_id)
             return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound image URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
 
         aes_key = self._resolve_media_aes_key(item, image_item, media)
         if not aes_key:
@@ -983,7 +1158,31 @@ class WechatChannel(Channel):
             )
             return None
 
-        encrypted = await self._download_cdn_bytes(full_url)
+        # The configured limit bounds the PLAINTEXT, but the stream caps the
+        # CIPHERTEXT, which PKCS#7 padding makes up to a full block larger — a
+        # boundary-sized valid attachment must not be rejected for its padding.
+        # The exact post-decryption check below remains the authority.
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_image_bytes))
+        except httpx.HTTPError as exc:
+            # The URL-bearing exception must not escape to the polling loop's
+            # logger.exception; the attachment is dropped and the message
+            # continues, same as the other skip paths above.
+            logger.warning(
+                "[WeChat] inbound image download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
+        if encrypted is None:
+            # Neutral on purpose: None covers both the in-flight cap abort
+            # and the Content-Encoding refusal, and _download_cdn_bytes has
+            # already logged the accurate reason for either — asserting a
+            # size limit here would contradict the encoding line (the
+            # manager's reader callers use the same neutral shape).
+            logger.warning("[WeChat] inbound image skipped by download guard, message_id=%s", message_id)
+            return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_image_bytes > 0 and len(decrypted) > self._max_inbound_image_bytes:
             logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
@@ -992,7 +1191,7 @@ class WechatChannel(Channel):
         detected_image = _detect_image_extension_and_mime(decrypted)
         image_extension = detected_image[0] if detected_image else ".jpg"
         filename = _safe_media_filename("wechat-image", image_extension, message_id=message_id, index=index)
-        stored_path = self._stage_downloaded_file(filename, decrypted)
+        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
         if stored_path is None:
             return None
 
@@ -1021,6 +1220,9 @@ class WechatChannel(Channel):
         if not full_url:
             logger.warning("[WeChat] inbound file missing full_url, skipping message_id=%s", message_id)
             return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound file URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
 
         aes_key = self._resolve_media_aes_key(item, file_item, media)
         if not aes_key:
@@ -1037,13 +1239,31 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] inbound file type blocked, skipping message_id=%s filename=%s", message_id, filename)
             return None
 
-        encrypted = await self._download_cdn_bytes(full_url)
+        # Plaintext limit vs ciphertext cap: see the image path above.
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_file_bytes))
+        except httpx.HTTPError as exc:
+            # See the image path: the URL-bearing exception must not escape
+            # to the polling loop's logger.exception.
+            logger.warning(
+                "[WeChat] inbound file download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
+        if encrypted is None:
+            # Same neutral shape as the image path: the accurate reason (cap
+            # abort vs Content-Encoding refusal) is logged inside
+            # _download_cdn_bytes; asserting one here can contradict it.
+            logger.warning("[WeChat] inbound file skipped by download guard, message_id=%s", message_id)
+            return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_file_bytes > 0 and len(decrypted) > self._max_inbound_file_bytes:
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
             return None
 
-        stored_path = self._stage_downloaded_file(filename, decrypted)
+        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
         if stored_path is None:
             return None
 
@@ -1061,6 +1281,9 @@ class WechatChannel(Channel):
     def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
         download_dir = self._download_dir()
         if download_dir is None:
+            # Silent None here made an attachment vanish with no log line —
+            # the same observability gap as a mislabeled skip reason.
+            logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
             return None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
@@ -1323,9 +1546,29 @@ class WechatChannel(Channel):
         if self._auth_path:
             try:
                 self._auth_path.parent.mkdir(parents=True, exist_ok=True)
-                self._auth_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Write through a 0o600 temp file and atomically rename so the
+                # iLink bot_token is never briefly readable at umask defaults
+                # (mirrors ChannelRuntimeConfigStore._save). NamedTemporaryFile
+                # uses mkstemp, which creates the file at 0o600 from the start.
+                fd = tempfile.NamedTemporaryFile(mode="w", dir=self._auth_path.parent, suffix=".tmp", delete=False, encoding="utf-8")
+                try:
+                    json.dump(data, fd, ensure_ascii=False, indent=2)
+                    fd.close()
+                    Path(fd.name).replace(self._auth_path)
+                except BaseException:
+                    fd.close()
+                    Path(fd.name).unlink(missing_ok=True)
+                    raise
             except OSError:
                 logger.warning("[WeChat] failed to persist auth state to %s", self._auth_path)
+            else:
+                # Hardening only; the destination already inherits 0o600 from the
+                # temp file. A chmod failure on filesystems without POSIX perms
+                # must not masquerade as a persist failure.
+                try:
+                    self._auth_path.chmod(0o600)
+                except OSError:
+                    logger.debug("[WeChat] unable to chmod auth state at %s", self._auth_path, exc_info=True)
         return data
 
     @staticmethod
@@ -1351,9 +1594,10 @@ class WechatChannel(Channel):
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
         try:
-            return float(value)
-        except (TypeError, ValueError):
+            parsed = float(value)
+        except (OverflowError, TypeError, ValueError):
             return default
+        return parsed if math.isfinite(parsed) and parsed > 0 else default
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:
@@ -1368,3 +1612,52 @@ class WechatChannel(Channel):
             return set(default)
         normalized = {str(item).strip().lower() if str(item).strip().startswith(".") else f".{str(item).strip().lower()}" for item in value if str(item).strip()}
         return normalized or set(default)
+
+    def _coerce_host_suffixes(self, value: Any) -> frozenset[str]:
+        """Resolve the inbound-media host allowlist: operator suffixes plus defaults.
+
+        The configured ``cdn_base_url`` host is always admitted so a custom CDN
+        endpoint keeps working without touching ``allowed_media_hosts``.
+        Entries are host suffixes; a leading ``*.`` (a natural DNS habit) is
+        stripped so ``*.example.com`` behaves exactly like ``example.com``
+        instead of silently never matching.
+        """
+        if isinstance(value, str):
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            values = []
+        suffixes: set[str] = set()
+        for item in values:
+            text = str(item).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                suffixes.add(text)
+        suffixes.update(self.DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES)
+        cdn_host = urlparse(self._cdn_base_url).hostname
+        if cdn_host:
+            suffixes.add(cdn_host.strip().lower().lstrip("."))
+        return frozenset(suffixes)
+
+    def _is_allowed_media_url(self, url: str) -> bool:
+        """Gate inbound media fetches to the platform CDN domains.
+
+        ``full_url`` is message-payload data relayed by the platform; like the
+        DingTalk channel's ``download_code``, it is treated as untrusted input.
+        The fetch runs on the Gateway host network, so an unrestricted URL
+        would let a crafted message point it at loopback/private services.
+        Matching is dot-boundary aware, so ``notqq.com`` or
+        ``qq.com.evil.io`` never match a ``qq.com`` suffix.
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._allowed_media_hosts)

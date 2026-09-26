@@ -1,0 +1,64 @@
+---
+title: 快速上手
+description: 五分钟完成第一次委派：开启子 Agent、发一个适合并行的任务、读懂任务卡片，并知道按下停止后会发生什么。
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# 快速上手
+
+本章面向在 Web 界面里使用 DeerFlow 的用户。读完你会知道怎么让 Lead Agent 使用子 Agent、如何读任务卡片，以及结果在哪里。
+
+## 前提
+
+- 已按[快速上手](/docs/application/quick-start)完成配置并能正常对话。`config.yaml` 里的 `subagents:` 段可以完全留空，内置默认值即可使用。
+- 想用 `bash` 子 Agent，需要配置容器沙箱；或者在本地沙箱下显式设置 `sandbox.allow_host_bash: true`，这只适合完全可信的本地环境。否则目录会隐藏 `bash`。
+
+<Steps>
+
+### 开启子 Agent
+
+在输入框的模式选择器里选择 **Ultra**。界面对它的描述是"继承自 Pro 模式，可调用子代理分工协作"。Ultra 模式会在请求上下文里把 `subagent_enabled` 置为 `true`，同时开启计划模式并把推理深度默认设为 high。Flash、Thinking、Pro 模式下 Lead Agent 看不到 `task` 工具。
+
+如果你用的是 Custom Agent，该智能体设置里的**子智能体权限**选项还可能进一步收窄或禁止委派。见[子 Agent 目录](/docs/harness/subagents/catalog)。
+
+### 发一个适合拆分的任务
+
+委派不是越多越好。Lead Agent 默认直接执行，只有并行、专业能力或上下文隔离有明显净收益时才会委派。适合的任务例如：
+
+> 分别调研 A、B、C 三家公司最近一年的定价变化，各写一段结论，最后汇总成一张对比表。
+
+三个调研互相独立，可以并行，各自的浏览记录也不需要污染主对话。
+
+### 读任务卡片
+
+每个 `task` 调用在对话里对应一张子任务卡片：
+
+- **状态图标**：进行中显示旋转图标，完成显示对勾，失败显示红叉。取消、超时、轮询超时在卡片上都归为失败。
+- **模型标签与 token 总量**：显示子 Agent 实际使用的模型和累计 token。token 数在子 Agent 每次模型调用完成后更新；`token_usage.enabled: false` 时不显示。
+- **步骤时间线**：展开卡片可以看到子 Agent 的每一步，助手推理和工具调用交替出现。刷新页面后步骤会从运行事件里回填，不会丢。
+- **结果**：完成后卡片渲染子 Agent 的最终报告；失败时显示红色错误行。
+
+### 结果如何回到 Lead Agent
+
+子 Agent 的最终报告以工具结果的形式回到 Lead Agent，开头是 `Task Succeeded. Result:`。如果委派时附带了验收标准，结果末尾还会有一段 `Acceptance checklist`。Lead Agent 会基于这些内容继续工作，并在最终回复里综合。
+
+报告是子 Agent 的**自述**。运行时会核对它引用的执行回执，并在委派账本里标注未经证实的部分，Lead Agent 据此决定要不要复核。细节见[结果与验收](/docs/harness/subagents/results)。
+
+### 停止
+
+对话进行中按停止，正在运行的子 Agent 会收到取消请求。卡片会变成失败态，因为没有对应的工具结果；委派账本里的这条记录会在下一次 run 开始时被标记为 `cancelled`，Lead Agent 不会再被提示"该任务已委派，请勿重复"。
+
+</Steps>
+
+<Callout type="tip">
+  子 Agent 不能向你提问：`ask_clarification`
+  对它不可用。把需要的约束、路径和期望产出写进一句话里交给 Lead
+  Agent，它会转述给子 Agent。
+</Callout>
+
+## 下一步
+
+- 想知道有哪些子 Agent、怎样添加自己的，看[子 Agent 目录](/docs/harness/subagents/catalog)。
+- 想让子 Agent 带上父对话的背景，或者附带可自动检查的验收标准，看[委派用法](/docs/harness/subagents/delegation)。
+- 觉得子 Agent 跑得太久或太贵，看[限制、预算与容量](/docs/harness/subagents/limits)。

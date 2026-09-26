@@ -1,38 +1,14 @@
 "use client";
 
-import { css } from "@codemirror/lang-css";
-import { html } from "@codemirror/lang-html";
-import { javascript } from "@codemirror/lang-javascript";
-import { json } from "@codemirror/lang-json";
-import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { python } from "@codemirror/lang-python";
-import { languages } from "@codemirror/language-data";
-import { basicLightInit } from "@uiw/codemirror-theme-basic";
-import { monokaiInit } from "@uiw/codemirror-theme-monokai";
 import CodeMirror from "@uiw/react-codemirror";
 import { useTheme } from "next-themes";
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
+import { loadCodeEditorExtensions } from "./code-editor-extensions";
 import { useThread } from "./messages/context";
-const customDarkTheme = monokaiInit({
-  settings: {
-    background: "transparent",
-    gutterBackground: "transparent",
-    gutterForeground: "#555",
-    gutterActiveForeground: "#fff",
-    fontSize: "var(--text-sm)",
-  },
-});
-
-const customLightTheme = basicLightInit({
-  settings: {
-    background: "transparent",
-    fontSize: "var(--text-sm)",
-  },
-});
 
 export function CodeEditor({
   className,
@@ -41,7 +17,10 @@ export function CodeEditor({
   readonly,
   disabled,
   autoFocus,
+  onChange,
+  onSave,
   settings,
+  language,
 }: {
   className?: string;
   placeholder?: string;
@@ -49,26 +28,32 @@ export function CodeEditor({
   readonly?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
+  onChange?: (value: string) => void;
+  onSave?: () => void;
   settings?: unknown;
+  language?: string;
 }) {
   const {
     thread: { isLoading },
   } = useThread();
   const { resolvedTheme } = useTheme();
+  const [loaded, setLoaded] = useState<
+    Awaited<ReturnType<typeof loadCodeEditorExtensions>> | undefined
+  >();
 
-  const extensions = useMemo(() => {
-    return [
-      css(),
-      html(),
-      javascript({}),
-      json(),
-      markdown({
-        base: markdownLanguage,
-        codeLanguages: languages,
-      }),
-      python(),
-    ];
-  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setLoaded(undefined);
+    void loadCodeEditorExtensions(
+      language,
+      resolvedTheme === "dark" ? "dark" : "light",
+    ).then((extensions) => {
+      if (!cancelled) setLoaded(extensions);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [language, resolvedTheme]);
 
   return (
     <div
@@ -76,8 +61,17 @@ export function CodeEditor({
         "flex cursor-text flex-col overflow-hidden rounded-md",
         className,
       )}
+      onKeyDown={(event) => {
+        if (
+          (event.metaKey || event.ctrlKey) &&
+          event.key.toLowerCase() === "s"
+        ) {
+          event.preventDefault();
+          onSave?.();
+        }
+      }}
     >
-      {isLoading ? (
+      {isLoading || !loaded ? (
         <Textarea
           className={cn(
             "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
@@ -89,14 +83,15 @@ export function CodeEditor({
         />
       ) : (
         <CodeMirror
-          readOnly={readonly ?? disabled}
+          editable={readonly !== true && disabled !== true}
+          readOnly={readonly === true || disabled === true}
           placeholder={placeholder}
           className={cn(
             "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
             "px-2 py-0! [&_.cm-line]:px-2! [&_.cm-line]:py-0!",
           )}
-          theme={resolvedTheme === "dark" ? customDarkTheme : customLightTheme}
-          extensions={extensions}
+          theme={loaded.theme}
+          extensions={loaded.extensions}
           basicSetup={{
             foldGutter:
               (settings as { foldGutter?: boolean })?.foldGutter ?? false,
@@ -106,6 +101,7 @@ export function CodeEditor({
               (settings as { lineNumbers?: boolean })?.lineNumbers ?? false,
           }}
           autoFocus={autoFocus}
+          onChange={onChange}
           value={value}
         />
       )}

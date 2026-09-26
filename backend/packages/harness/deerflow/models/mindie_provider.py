@@ -43,9 +43,14 @@ def _fix_messages(messages: list) -> list:
             fixed.append(AIMessage(content=full_text.strip() or " "))
             continue
 
-        # Wrap tool execution results in XML tags and convert to HumanMessage
+        # Wrap tool execution results in XML tags and convert to HumanMessage.
+        # Escape the tool output so a result containing a literal "</tool_response>"
+        # (e.g. from read_file on an untrusted file, bash output, or an MCP tool the
+        # ToolResultSanitizationMiddleware allowlist does not cover) cannot close the
+        # framing early and inject trailing text into the turn — matching the escaping
+        # already applied to tool-call names/args above.
         if isinstance(msg, ToolMessage):
-            tool_result_text = f"<tool_response>\n{text}\n</tool_response>"
+            tool_result_text = f"<tool_response>\n{html.escape(text, quote=False)}\n</tool_response>"
             fixed.append(HumanMessage(content=tool_result_text))
             continue
 
@@ -233,17 +238,28 @@ class MindIEChatModel(ChatOpenAI):
             msg = gen.message
             content = msg.content
             standard_tool_calls = getattr(msg, "tool_calls", [])
+            # Attach the full response's terminal usage to the *last* simulated
+            # chunk (OpenAI terminal-frame style) so add_usage() counts it once.
+            usage_metadata = getattr(msg, "usage_metadata", None)
 
             # Yield text in chunks to allow downstream UI/Markdown parsers to render smoothly
             if isinstance(content, str) and content:
                 chunk_size = 15
                 for i in range(0, len(content), chunk_size):
                     chunk_text = content[i : i + chunk_size]
-                    chunk_msg = AIMessageChunk(content=chunk_text, id=msg.id, response_metadata=msg.response_metadata if i == 0 else {})
+                    # Without tool calls the last text chunk terminates the stream.
+                    is_final_chunk = i + chunk_size >= len(content)
+                    chunk_msg = AIMessageChunk(
+                        content=chunk_text,
+                        id=msg.id,
+                        response_metadata=msg.response_metadata if i == 0 else {},
+                        usage_metadata=usage_metadata if (not standard_tool_calls and is_final_chunk) else None,
+                    )
                     yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info if i == 0 else None)
 
                 if standard_tool_calls:
-                    yield ChatGenerationChunk(message=AIMessageChunk(content="", id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", [])))
+                    # Tool-call chunk terminates the stream: carry the usage here.
+                    yield ChatGenerationChunk(message=AIMessageChunk(content="", id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []), usage_metadata=usage_metadata))
             else:
-                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []))
+                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []), usage_metadata=usage_metadata)
                 yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info)

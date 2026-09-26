@@ -10,10 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.skills.package_paths import is_eval_fixture_skill_md
+from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.validation import _validate_skill_frontmatter
 
 SKILLS_PUBLIC_DIR = Path(__file__).resolve().parents[2] / "skills" / "public"
-BUNDLED_SKILL_DIRS = sorted(p.parent for p in SKILLS_PUBLIC_DIR.rglob("SKILL.md"))
+
+
+BUNDLED_SKILL_DIRS = sorted(p.parent for p in SKILLS_PUBLIC_DIR.rglob("SKILL.md") if not is_eval_fixture_skill_md(p.relative_to(SKILLS_PUBLIC_DIR)))
 
 
 @pytest.mark.parametrize(
@@ -25,7 +29,26 @@ def test_bundled_skill_frontmatter_is_valid(skill_dir: Path) -> None:
     valid, msg, name = _validate_skill_frontmatter(skill_dir)
     assert valid, f"{skill_dir.relative_to(SKILLS_PUBLIC_DIR)}: {msg}"
     assert name, f"{skill_dir.relative_to(SKILLS_PUBLIC_DIR)}: no name extracted"
+    assert name == skill_dir.name, f"{skill_dir.relative_to(SKILLS_PUBLIC_DIR)}: frontmatter name {name!r} must match directory name {skill_dir.name!r}"
 
 
 def test_skills_public_dir_has_skills() -> None:
     assert BUNDLED_SKILL_DIRS, f"no SKILL.md found under {SKILLS_PUBLIC_DIR}"
+
+
+def test_vercel_deploy_commands_use_the_mounted_script_path() -> None:
+    skills = get_or_new_skill_storage(skills_path=SKILLS_PUBLIC_DIR.parent).load_skills(enabled_only=False)
+    skill = next(skill for skill in skills if skill.name == "vercel-deploy")
+    mounted_script = f"{skill.get_container_path()}/scripts/deploy.sh"
+    content = skill.skill_file.read_text(encoding="utf-8")
+
+    assert content.count(mounted_script) == 4
+    assert content.count("deploy.sh") == content.count(mounted_script)
+
+
+def test_runtime_registry_excludes_skill_reviewer_eval_fixtures() -> None:
+    skills = get_or_new_skill_storage(skills_path=SKILLS_PUBLIC_DIR.parent).load_skills(enabled_only=False)
+    names = {skill.name for skill in skills}
+
+    assert "skill-reviewer" in names
+    assert all("evals/fixtures" not in skill.skill_file.as_posix() for skill in skills)

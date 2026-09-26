@@ -25,6 +25,8 @@ from collections.abc import AsyncIterator
 from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.persistence.postgres_schema import create_schema_sql, dsn_with_search_path, normalize_libpq_dsn
+from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.checkpointer.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_INSTALL,
@@ -45,6 +47,61 @@ def _prepare_database_sqlite_checkpointer_path(db_config) -> str:
     conn_str = db_config.checkpointer_sqlite_path
     ensure_sqlite_parent_dir(conn_str)
     return conn_str
+
+
+def _build_postgres_pool(conn_string: str, schema: str = ""):
+    """Build an AsyncConnectionPool with TCP keepalive and connection checking."""
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+
+    kwargs = {
+        "autocommit": True,
+        "prepare_threshold": 0,
+        "row_factory": dict_row,
+        "keepalives": 1,
+        "keepalives_idle": 60,
+        "keepalives_interval": 10,
+        "keepalives_count": 6,
+    }
+    # Inject search_path into the DSN (merging with any libpq options already in
+    # the conn string) rather than via kwargs["options"], which psycopg applies
+    # *on top of* the conninfo and would silently drop a DSN-supplied option
+    # such as statement_timeout. This also strips a SQLAlchemy ``+driver``
+    # suffix so libpq can parse the DSN. Matches the sync/DSN paths.
+    dsn = dsn_with_search_path(normalize_libpq_dsn(conn_string), schema)
+
+    return AsyncConnectionPool(
+        dsn,
+        kwargs=kwargs,
+        check=AsyncConnectionPool.check_connection,
+    )
+
+
+async def _ensure_postgres_schema_with_pool(pool, schema: str) -> None:
+    """Create the configured schema before LangGraph creates its tables."""
+    statement = create_schema_sql(schema)
+    if statement is None:
+        return
+    # Drain the connection's exit like the pool context around it: caller
+    # cancellation must not leave the connection checked out while the pool's
+    # own teardown runs (backend-ownership invariant in runtime/AGENTS.md).
+    async with drained_async_context(pool.connection()) as conn:
+        await conn.execute(statement)
+
+
+def _ensure_postgres_imports():
+    """Import and return (AsyncPostgresSaver, AsyncConnectionPool), raising ImportError on failure."""
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError as exc:
+        raise ImportError(POSTGRES_INSTALL) from exc
+
+    try:
+        from psycopg_pool import AsyncConnectionPool
+    except ImportError as exc:
+        raise ImportError(POSTGRES_INSTALL) from exc
+
+    return AsyncPostgresSaver, AsyncConnectionPool
 
 
 # ---------------------------------------------------------------------------
@@ -68,21 +125,20 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = await asyncio.to_thread(_prepare_sqlite_checkpointer_path, config.connection_string or "store.db")
-        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+        async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
         return
 
     if config.type == "postgres":
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        except ImportError as exc:
-            raise ImportError(POSTGRES_INSTALL) from exc
-
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresSaver.from_conn_string(config.connection_string) as saver:
+        AsyncPostgresSaver, _ = _ensure_postgres_imports()
+        pool = _build_postgres_pool(config.connection_string, config.postgres_schema)
+        async with drained_async_context(pool):
+            await _ensure_postgres_schema_with_pool(pool, config.postgres_schema)
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
@@ -111,21 +167,20 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = await asyncio.to_thread(_prepare_database_sqlite_checkpointer_path, db_config)
-        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+        async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
         return
 
     if db_config.backend == "postgres":
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        except ImportError as exc:
-            raise ImportError(POSTGRES_INSTALL) from exc
-
         if not db_config.postgres_url:
             raise ValueError("database.postgres_url is required for the postgres backend")
 
-        async with AsyncPostgresSaver.from_conn_string(db_config.postgres_url) as saver:
+        AsyncPostgresSaver, _ = _ensure_postgres_imports()
+        pool = _build_postgres_pool(db_config.postgres_url, db_config.postgres_schema)
+        async with drained_async_context(pool):
+            await _ensure_postgres_schema_with_pool(pool, db_config.postgres_schema)
+            saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
             yield saver
         return
@@ -134,24 +189,14 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
-    """Async context manager that yields a checkpointer for the caller's lifetime.
-    Resources are opened on enter and closed on exit -- no global state::
-
-        async with make_checkpointer(app_config) as checkpointer:
-            app.state.checkpointer = checkpointer
-
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+async def _select_inner_checkpointer(app_config: AppConfig) -> AsyncIterator[Checkpointer]:
+    """Yield the raw checkpointer selected by *app_config* (no delta-cache wrapping).
 
     Priority:
     1. Legacy ``checkpointer:`` config section (backward compatible)
     2. Unified ``database:`` config section
     3. Default InMemorySaver
     """
-
-    if app_config is None:
-        app_config = get_app_config()
-
     # Legacy: standalone checkpointer config takes precedence
     if app_config.checkpointer is not None:
         async with _async_checkpointer(app_config.checkpointer) as saver:
@@ -169,3 +214,44 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
     from langgraph.checkpoint.memory import InMemorySaver
 
     yield InMemorySaver()
+
+
+@contextlib.asynccontextmanager
+async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
+    """Async context manager that yields a checkpointer for the caller's lifetime.
+    Resources are opened on enter and closed on exit -- no global state::
+
+        async with make_checkpointer(app_config) as checkpointer:
+            app.state.checkpointer = checkpointer
+
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+
+    Backend selection priority:
+    1. Legacy ``checkpointer:`` config section (backward compatible)
+    2. Unified ``database:`` config section
+    3. Default InMemorySaver
+
+    When the effective checkpoint channel mode is ``delta`` (the process-frozen
+    mode wins, falling back to ``database.checkpoint_channel_mode``), the raw
+    saver is wrapped in a :class:`CachedHistorySaver` backed by a history cache
+    whose lifetime equals this context manager's.
+    """
+    from deerflow.runtime.checkpoint_mode import frozen_checkpoint_channel_mode
+
+    if app_config is None:
+        app_config = get_app_config()
+
+    async with _select_inner_checkpointer(app_config) as saver:
+        db_config = getattr(app_config, "database", None)
+        mode = frozen_checkpoint_channel_mode() or (db_config.checkpoint_channel_mode if db_config is not None else "full")
+        if mode == "delta":
+            from deerflow.runtime.checkpoint_cache.provider import (
+                checkpoint_cache_key_prefix,
+                make_checkpoint_cache,
+            )
+            from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+
+            async with make_checkpoint_cache(app_config, serde=saver.serde) as cache:
+                yield CachedHistorySaver(saver, cache, key_prefix=checkpoint_cache_key_prefix(app_config))
+        else:
+            yield saver

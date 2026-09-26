@@ -1,0 +1,218 @@
+---
+title: Operating Checkpoints
+description: Backend independence, the retention and prune constraint in delta mode, the one remaining import-time patch, dependency floors, how to run both checkpoint benchmarks, and what differs on the TUI and embedded paths.
+---
+
+import { Callout } from "nextra/components";
+
+# Operating Checkpoints
+
+Delta mode changes where thread state is stored, not which backend stores it. This chapter covers the operational consequences: backend choice, retention and prune constraints, the one remaining compatibility patch, the dependency floors that keep upstream bugs out, how to measure both modes, and the differences an operator sees on the TUI and embedded path.
+
+## Backends
+
+The mode is a property of the compiled graph's channel table, not of the saver, so all three backends serve both modes:
+
+| `database.backend` | Saver | Both modes | Notes |
+| --- | --- | --- | --- |
+| `memory` | `InMemorySaver` | Yes | Process-local, lost on restart; mode semantics are identical |
+| `sqlite` | SQLite saver | Yes | Channel values live inside the serialized checkpoint payload; there is no separate blob table |
+| `postgres` | Postgres saver | Yes | `checkpoints` plus a separate `checkpoint_blobs` table; writes live in `checkpoint_writes` |
+
+Two process-level rules bind regardless of backend, and neither is enforced by the backend itself:
+
+- **Mode must match.** Every process sharing one checkpoint database must use the same `database.checkpoint_channel_mode`. The mode is baked into each compiled graph's channel table, not stored per checkpoint.
+- **Cadence must match.** `database.checkpoint_delta.snapshot_frequency` is baked into the channel table the same way. It is deliberately not stamped into checkpoint metadata, so a mismatch is undetectable per checkpoint and remains an operator responsibility. The fail-closed gate enforces the *mode* only; there is no runtime cadence comparison.
+
+Delta mode changes the storage shape on every backend: per-step checkpoints carry no full `messages` blob, so the marginal cost of a step no longer scales with the history. Retained storage still includes a full-list `_DeltaSnapshot` every `snapshot_frequency` writes, so after N turns it grows as O(N²/K + N) with K = `snapshot_frequency` — reduced by roughly K, not linear. Plan capacity from the retained total; see [Checkpoints and Delta Channels](/docs/harness/checkpoints) and [Channel Modes](/docs/harness/checkpoints/modes).
+
+## Retention and pruning
+
+### Writes rows are replay state, not garbage
+
+In `full` mode every checkpoint re-snapshots the accumulated messages, so discarding an intermediate checkpoint is at least conceptually possible. In `delta` mode the per-step payloads live in the **writes** table, and they are load-bearing replay state: deleting them severs the ancestor chain a later materialization depends on.
+
+| Mode | Where per-step payloads live |
+| --- | --- |
+| `full` | Re-snapshotted into the checkpoint payload |
+| `delta` | The writes table; a full value is snapshotted only every `snapshot_frequency` steps |
+
+The retention contract suite pins this shape directly. Its growth baseline asserts that a delta thread ends with `write_rows > 0` ("delta mode must land per-step payloads in writes"), while full mode re-snapshots everything into the checkpoint payload. Byte comparisons between the two are cadence- and backend-dependent, so only the shape is asserted.
+
+### The naive prune failure
+
+<Callout type="warning">
+  A naive `keep_latest` that drops intermediate checkpoints and their writes can
+  sever the chain: the surviving "latest" checkpoint is rarely a snapshot point
+  itself, so its delta channels would silently reconstruct as empty. No error is
+  raised — `get_delta_channel_history` simply returns no `seed`.
+</Callout>
+
+Upstream documents three safe options for a graph that uses `DeltaChannel`:
+
+- Walk back from each kept checkpoint and preserve every ancestor (plus its writes) up to the nearest one whose `channel_values` already contains a `_DeltaSnapshot` for every delta-backed key.
+- Force a fresh snapshot on the kept checkpoint before deleting ancestors, rewriting `channel_values[k] = _DeltaSnapshot(value)` for each delta channel `k`.
+- Skip pruning threads whose graph uses `DeltaChannel` until one of the above is implemented.
+
+The same warning extends to `adelete_for_runs` and `copy_thread`: deleting a run's ancestor writes (or the only `_DeltaSnapshot` blob) breaks reconstruction for any delta channel that depended on those rows.
+
+### The protected set
+
+| # | Never delete without the stated compensation |
+| --- | --- |
+| 1 | **Explicit resume targets** — any `checkpoint_id` a client may still resume to. A policy may expire these, but only with an explicit TTL semantic agreed up front |
+| 2 | **Branch ancestors** — every checkpoint on the parent chain from a branchable head back to, and including, the checkpoint before the oldest branchable message. Deleting any node on that walk breaks branch and regenerate, and it fails loudly rather than silently |
+| 3 | **Pending writes** — rows in the writes table are uncommitted or in-flight state, not garbage |
+| 4 | **Duration-only chain links** — a duration-only checkpoint a later run has forked from is a chain link; deleting it requires grafting the fork onto the grandparent in the same change. A bare leaf is safe; a link is not |
+| 5 | **Latest resumable state per thread** — the newest checkpoint must stay addressable so a thread can always continue |
+
+### What may actually be deleted today
+
+Exactly two shapes are proven safe, and the retention service implements only those:
+
+| Shape | Default | Why it is safe |
+| --- | --- | --- |
+| Trailing duration-only leaves | On | `persist_run_durations` appends metadata-only checkpoints after a run finishes; while no later run has forked from one, it is nobody's ancestor |
+| Leaf sibling branches | Off (opt-in) | A checkpoint forked off an older turn that has no children. Opt-in because a superseded line's checkpoints may still be explicit resume targets a client holds, hence the `protect_checkpoint_ids` escape hatch |
+
+Two mechanical constraints come with deletion:
+
+- **Joint table deletion, orphan-first.** Deleting a checkpoint row requires deciding which writes and blob rows are orphaned; a row is an orphan only if no *surviving* checkpoint references it, computed in a whole-thread pass. A real duration-only leaf is not payload-free — it materializes the parent's values — and on Postgres its blob rows are the same rows backing its parent.
+- **All-or-nothing.** A partial deletion that leaves a dangling parent link converts a cleanup into a thread-level outage: branch and regenerate fail loudly for every later turn.
+
+There is also a history fast-path interaction to sequence around: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. Deleting the leaf makes the next history read fall back to store scans and re-persist a fresh leaf, so any wiring must sequence retention away from history reads or spare cache-carrying leaves.
+
+### Policy defaults
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prune_trailing_duration_leaves` | `True` | Delete a duration-only leaf no later run has forked from |
+| `prune_leaf_sibling_branches` | `False` | Delete leaf sibling branches (opt-in) |
+| `protect_checkpoint_ids` | `frozenset()` | Explicit ids that are never deleted |
+| `strict_pending_write_guard` | `True` | Treat any checkpoint that still owns writes rows as protected |
+| `max_delete_per_run` | `None` | Optional cap on deletions per run |
+
+### There is no production trigger yet
+
+The retention service (`backend/app/gateway/checkpoint_retention.py`) ships **without a production trigger**: where retention is invoked from — post-run hook, scheduler, or explicit admin action — is a maintainer decision that lands with the contract itself. Nothing in DeerFlow calls it, and there is no production caller of `prune` or `aprune` either: in the pinned environment only the base implementation defines them, and it raises `NotImplementedError`.
+
+Treat this as unfinished work rather than a safe default. The executable contract proves the branch-ancestor, explicit-resume-target, pending-writes, leaf-duration, and leaf-sibling scenarios against the **full-mode** state schema; only the growth baseline is delta-shaped. Delta-specific prune safety is neither proved by the suite nor implemented.
+
+## The one remaining patch
+
+One compatibility patch remains, and it is applied at import time of the module itself. The module lives at the package root so it can be imported from `deerflow.agents.thread_state` without pulling in the heavier `deerflow.runtime` package, and it is anchored there so every process that builds a DeerFlow graph — Gateway, workers, in-process LangGraph runtime, tests — runs with it in place.
+
+| Aspect | Detail |
+| --- | --- |
+| Subject | `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty (MISSING) channel |
+| Tracking issue | DeerFlow **#4380** |
+| Symptom it prevents | Channels whose type is a Union (`SandboxState \| None`, `GoalState \| None`, and similar) have no constructible default, so they start MISSING. A replace-style write into a fresh thread (thread branching) or a never-written channel (state update) then persists the `Overwrite` wrapper itself into the checkpoint, and the next consumer crashes with `TypeError: 'Overwrite' object is not subscriptable` |
+| Scope | Intercepts only the empty-channel plus leading-`Overwrite` case. Later plain values are ignored, and a second `Overwrite` in the same super-step raises `InvalidUpdateError` with `Can receive only one Overwrite value per super-step.`. Everything else delegates to the upstream implementation |
+| Consistency side effect | `DeltaChannel.update` already unwraps in the same situation, so the patch also removes a behavioural inconsistency between the two reducer channel types |
+
+The guard is a **behavioural probe, not a version pin**. The probe builds a `BinaryOperatorAggregate` over a Union type (so the channel starts MISSING) and checks whether reading it yields the `Overwrite` wrapper; if upstream already unwraps, the probe reports the bug as absent and the patch stands down. Application is idempotent, and on unexpected failure it logs `Failed to apply the BinaryOperatorAggregate Overwrite first-write patch; leaving the upstream implementation untouched.` and leaves upstream intact.
+
+<Callout type="warning">
+  Do not re-add a version-guarded saver patch. The previous guard here read
+  `langgraph`'s version, but `InMemorySaver` ships in the independently released
+  `langgraph-checkpoint` distribution, so that guard could not see the real
+  dependency. The former `InMemorySaver` delta-history patch was removed rather
+  than guarded: upstream fixed the dropped first post-migration write in
+  `langgraph-checkpoint` 4.2.0 (upstream #8526) while keeping its own override,
+  which a behavioural probe cannot detect.
+</Callout>
+
+## Dependency floors and the regression gate
+
+The dependency floor is what keeps the removed saver bug out, so the floors are load-bearing rather than cosmetic:
+
+| Distribution | Floor | Why |
+| --- | --- | --- |
+| `langgraph-checkpoint` | `>=4.2.0,<5.0` | 4.2.0 fixes the dropped first post-migration write (upstream #8526). A 4.1.x resolution would silently reintroduce it, and `langgraph`'s own `langgraph-checkpoint>=4.1.0` constraint does not exclude that version |
+| `langgraph-checkpoint-postgres` | `>=3.1.2,<3.2` | 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.1 walks past them to the thread root |
+| `langgraph-checkpoint-sqlite` | `>=3.1.1,<3.2` | Pinned alongside the other savers |
+
+The regression gate is `backend/tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`: it fails when the 4.2.0 fix is absent, and a full-to-delta migration must keep replaying on the same thread. The pinned environment resolves `langgraph 1.2.9`, `langgraph-checkpoint 4.2.0`, and `langgraph-checkpoint-postgres 3.1.2`.
+
+There is no runtime version check or warning. The only version signal an operator sees is a trigger-skipped test naming the pinned version, for example the `#8448` Postgres skip or the `#8382` replay-order skip.
+
+## Running the benchmarks
+
+Two scripts cover the two layers, and each has a summarizer. All ratios they emit are `delta/full`, and timing thresholds are not CI gates.
+
+| Script | Layer | What it measures |
+| --- | --- | --- |
+| `scripts/benchmark/checkpoint/bench_channels.py` | Channel layer | Paired `full` and `delta` message-only StateGraphs in a fresh child process per case, using a sync `InMemorySaver` or `SqliteSaver`, so reducer, serialization, and saver costs stay separate from Gateway scheduling. Postgres cases are opt-in through `TEST_POSTGRES_URI` |
+| `scripts/benchmark/checkpoint/bench_production.py` | Production layer | Graph-level `ainvoke` turns through the real lead-agent graph (scripted deterministic model, real `AsyncSqliteSaver`), then `GET /threads/{id}/state` and `POST /threads/{id}/history` through the real Gateway route stack, split into cold and warm samples |
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
+  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
+  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
+  /tmp/checkpoint-bench.jsonl
+```
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
+  --turns 10,100,500,1000,2000 --payload-bytes 128 \
+  --snapshot-frequencies 10,50,100,500,1000 \
+  --repetitions 7 --output /tmp/production-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
+  /tmp/production-bench.jsonl
+```
+
+The channel controller alternates mode order between cases and rejects performance data when the paired modes materialize different state; the production controller pairs every delta frequency against the same full row and fails both rows of a pair when materialized or wire digests diverge.
+
+### The measured numbers that exist in the repository
+
+Only three measured values are committed, all from the operational-limits notes on the first benchmark runs:
+
+| Observation | Value |
+| --- | --- |
+| Delta mode at `snapshot_frequency=1000`, 500 turns | Roughly 1100–1200 s wall clock, so the default `--timeout-seconds 900` is insufficient. Pass an explicit timeout for any large matrix |
+| Delta mode at `snapshot_frequency=1000`, 2000 turns | Roughly 45 minutes; treat the 2000-turn corner as practical only at small snapshot frequencies |
+| Full mode, 2000 turns, SQLite | Roughly a 33 GB database file. Point `TMPDIR` at real disk, not tmpfs, or the run dies mid-case |
+
+One related route constraint is often mistaken for a benchmark limit: the history route clamps `limit` to 100, so `--history-limits` values above 100 are measured and reported at the clamped limit.
+
+<Callout type="warning">
+  Two classes of number must not be presented as measurements. **Synthetic test
+  fixtures** — the ratio literals the summarizer unit tests feed in, such as
+  `ratio_write_total_ms: 0.5`, `ratio_logical_checkpoint_bytes: 0.2`,
+  `delta_snapshot_write_spike: 5.0`, and `delta_cache_effect_ms: 45.0` —
+  describe fixture inputs, not observed runs. And a storage-reduction ratio
+  quoted for a 200-turn run in the untracked worktree RFC is upstream-derived,
+  not measured here, and the local follow-up plan explicitly forbids citing it
+  for the current configuration — do not use it in performance claims. No
+  benchmark result files are committed at all.
+</Callout>
+
+## TUI and embedded differences
+
+The `deerflow` console script is `deerflow.tui.cli:main`; `--print` and `--json` are headless variations of it, and the rest is a Textual TUI. Both use the embedded client, which differs from the Gateway in ways that matter for delta mode.
+
+| Aspect | Gateway (async) | TUI / embedded (sync) |
+| --- | --- | --- |
+| Checkpointer | The async provider builds and wraps the saver per process | `get_checkpointer()` returns the process-wide **sync** singleton |
+| History cache backend | `memory` and `redis` | `memory` only |
+| Failed agent build | `full` mode degrades to raw checkpointer reads; `delta` re-raises | No degraded path at all |
+| Cross-mode mismatch | HTTP 409 on state and history routes; a run fails with an SSE `error` frame or an error run record | Raised in-process before the agent is built or the graph streams |
+| Freeze | Frozen at Gateway startup from the startup config snapshot | `DeerFlowClient.__init__` freezes mode and cadence from its own `AppConfig`, with the same restart-required semantics |
+
+Three consequences are worth stating plainly:
+
+- **Redis is rejected on the sync path.** Selecting `database.checkpoint_cache.type: redis` raises `ValueError("database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.")` at checkpointer construction, so a configuration that is valid for the Gateway can break the TUI. The rejection is honest rather than a fallback: the sync path is process-local anyway.
+- **There is no degraded read path.** Delta materialization needs the graph's channel table, and the TUI has no equivalent to the Gateway's raw-checkpoint fallback.
+- **An uncaught mismatch is a traceback on the headless runners.** The embedded client raises `CheckpointModeMismatchError` in-process — no HTTP status, no run record, no SSE frame — and the CLI dispatches straight to its print or JSON runner without a handler, so `--print` and `--json` fail with a Python traceback on stderr. The Textual TUI is the exception: its `stream_actions()` helper catches every exception from `client.stream()` and emits `AssistantError` plus `RunEnded`, so an interactive user sees the failure in the UI instead.
+
+Third-party embedders hit a related guard: `create_deerflow_agent` with `checkpoint_channel_mode="delta"` **and** a checkpointer is rejected with `ValueError`, because graphs built there bypass checkpoint-mode marker injection and the fail-closed compatibility gate, so a mixed-mode store would silently corrupt thread state. Delta without a checkpointer is ephemeral and allowed; persisted delta graphs must go through the guarded application paths (`make_lead_agent` or `DeerFlowClient`).
+
+## See also
+
+- [Channel Modes](/docs/harness/checkpoints/modes) — the mode marker, the fail-closed gate, and the HTTP boundary.
+- [Snapshot Cadence](/docs/harness/checkpoints/cadence) — how `snapshot_frequency` trades checkpoint size against materialization cost.
+- [History Cache](/docs/harness/checkpoints/history-cache) — the performance-only cache whose policies are safe to differ across workers.
+- [Troubleshooting](/docs/harness/checkpoints/troubleshooting) — the symptom index for every failure signature above.

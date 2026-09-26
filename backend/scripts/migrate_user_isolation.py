@@ -1,4 +1,4 @@
-"""One-time migration: move legacy thread dirs and memory into per-user layout.
+"""One-time migration: move legacy thread dirs, memory, agents, skills, and the global USER.md profile into per-user layout.
 
 Usage:
     PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
@@ -130,6 +130,88 @@ def migrate_agents(
     return report
 
 
+def migrate_skills(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Move legacy global custom skills into per-user layout.
+
+    Legacy layout:  ``{base_dir}/skills/custom/{name}/``
+    Per-user layout: ``{base_dir}/users/{user_id}/skills/custom/{name}/``
+
+    Pre-existing per-user custom skills take precedence: if a destination
+    already exists for a skill name, the legacy copy is moved to
+    ``{base_dir}/migration-conflicts/skills/{name}/`` for manual review.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy custom skills (defaults to
+            ``"default"``, matching ``DEFAULT_USER_ID`` for no-auth setups).
+        dry_run: If True, only log what would happen.
+
+    Returns:
+        List of migration report entries, one per legacy custom skill directory found.
+    """
+    report: list[dict] = []
+    legacy_custom = paths.base_dir / "skills" / "custom"
+    if not legacy_custom.exists():
+        logger.info("No legacy skills/custom directory found — nothing to migrate.")
+        return report
+
+    dest_root = paths.user_custom_skills_dir(user_id)
+
+    # Migrate .history directory first (skill operation logs)
+    legacy_history = legacy_custom / ".history"
+    if legacy_history.exists() and legacy_history.is_dir():
+        dest_history = dest_root / ".history"
+        if dest_history.exists():
+            conflicts_history = paths.base_dir / "migration-conflicts" / "skills" / ".history"
+            logger.warning("Conflict for .history: moved legacy to %s", conflicts_history)
+            if not dry_run:
+                conflicts_history.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_history), str(conflicts_history))
+        else:
+            logger.info("Migrating .history -> %s", dest_history)
+            if not dry_run:
+                dest_root.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_history), str(dest_history))
+
+    for skill_dir in sorted(legacy_custom.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        # Skip internal directories (.history is managed per-user now)
+        if skill_dir.name.startswith("."):
+            continue
+        skill_name = skill_dir.name
+        dest = dest_root / skill_name
+
+        entry = {"skill": skill_name, "user_id": user_id, "action": ""}
+
+        if dest.exists():
+            conflicts_dir = paths.base_dir / "migration-conflicts" / "skills" / skill_name
+            entry["action"] = f"conflict -> {conflicts_dir}"
+            if not dry_run:
+                conflicts_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(skill_dir), str(conflicts_dir))
+            logger.warning("Conflict for skill %s: moved legacy copy to %s", skill_name, conflicts_dir)
+        else:
+            entry["action"] = f"moved -> {dest}"
+            if not dry_run:
+                dest_root.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(skill_dir), str(dest))
+            logger.info("Migrated skill %s -> user %s", skill_name, user_id)
+
+        report.append(entry)
+
+    # Clean up empty legacy custom dir (keep skills/ parent — public/ is still in use)
+    if not dry_run and legacy_custom.exists() and not any(legacy_custom.iterdir()):
+        legacy_custom.rmdir()
+
+    return report
+
+
 def migrate_memory(
     paths: Paths,
     user_id: str = "default",
@@ -162,6 +244,44 @@ def migrate_memory(
         shutil.move(str(legacy_mem), str(dest))
 
 
+def migrate_user_profile(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Move the legacy global USER.md profile into per-user layout.
+
+    The profile became per-user (``{base_dir}/users/{user_id}/USER.md``) so
+    one user's prompt context can never leak into another's; without this
+    migration an existing single-user or auth-disabled installation would
+    see ``content: null`` after upgrading and later strand the old file
+    next to a newly created per-user one.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy profile.
+        dry_run: If True, only log.
+    """
+    legacy_profile = paths.base_dir / "USER.md"
+    if not legacy_profile.exists():
+        logger.info("No legacy USER.md found — nothing to migrate.")
+        return
+
+    dest = paths.user_md_file(user_id)
+    if dest.exists():
+        legacy_backup = paths.base_dir / "USER.legacy.md"
+        logger.warning("Destination %s exists; renaming legacy to %s", dest, legacy_backup)
+        if not dry_run:
+            legacy_profile.rename(legacy_backup)
+        return
+
+    logger.info("Migrating USER.md -> %s", dest)
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_profile), str(dest))
+
+
 def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
     """Query threads_meta table for thread_id -> user_id mapping.
 
@@ -192,7 +312,9 @@ def main() -> None:
         "--user-id",
         default="default",
         metavar="USER_ID",
-        help=("User ID to claim un-owned legacy data (global memory.json and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."),
+        help=(
+            "User ID to claim un-owned legacy data (global memory.json, USER.md profile, and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."
+        ),
     )
     args = parser.parse_args()
 
@@ -208,7 +330,9 @@ def main() -> None:
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
     migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
+    migrate_user_profile(paths, user_id=args.user_id, dry_run=args.dry_run)
     agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
+    skill_report = migrate_skills(paths, user_id=args.user_id, dry_run=args.dry_run)
 
     if report:
         logger.info("Thread migration report:")
@@ -224,6 +348,13 @@ def main() -> None:
     else:
         logger.info("No agents to migrate.")
 
+    if skill_report:
+        logger.info("Skill migration report:")
+        for entry in skill_report:
+            logger.info("  skill=%s user=%s action=%s", entry["skill"], entry["user_id"], entry["action"])
+    else:
+        logger.info("No skills to migrate.")
+
     unowned = [e for e in report if e["user_id"] == "default"]
     if unowned:
         logger.warning("%d thread(s) had no owner and were assigned to 'default':", len(unowned))
@@ -234,6 +365,13 @@ def main() -> None:
         logger.warning(
             "%d legacy agent(s) were assigned to '%s'. If those agents belonged to other users, move them manually under {base_dir}/users/<user_id>/agents/.",
             len(agent_report),
+            args.user_id,
+        )
+
+    if skill_report:
+        logger.warning(
+            "%d legacy custom skill(s) were assigned to '%s'. If those skills belonged to other users, move them manually under {base_dir}/users/<user_id>/skills/custom/.",
+            len(skill_report),
             args.user_id,
         )
 

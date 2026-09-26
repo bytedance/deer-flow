@@ -3,7 +3,7 @@ title: 记忆系统
 description: 记忆是 DeerFlow Harness 的一个运行时功能。它不是简单的对话日志，而是跨多个独立会话持久化、在未来对话中影响 Agent 行为的结构化事实和上下文摘要存储。
 ---
 
-import { Callout, Cards } from "nextra/components";
+import { Callout } from "nextra/components";
 
 # 记忆系统
 
@@ -28,11 +28,14 @@ import { Callout, Cards } from "nextra/components";
 
 ## 工作原理
 
-记忆由 `MemoryMiddleware` 管理，在每次 Lead Agent 轮次上运行：
+记忆支持两种运行模式：
 
-1. **注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
-2. **学习**：对话结束后，后台任务提取新事实并更新相关记忆类别。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
-3. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+1. **两种模式都会注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
+2. **中间件模式（默认）**：`MemoryMiddleware` 在每次 Lead Agent 轮次结束后运行，过滤对话、排队后台更新并自动提取新事实。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
+3. **工具模式（实验性）**：DeerFlow 注册 `memory_search`、`memory_add`、`memory_update`、`memory_delete` 四个工具，并跳过 `MemoryMiddleware`。模型自行决定何时搜索或写入记忆，因此效果取决于模型的工具调用行为。这些显式 CRUD 工具不是被动的陈旧性复核路径；启用工具模式意味着运营方选择由模型主动更新/删除记忆，而不是依赖中间件的陈旧性保护栏。
+4. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+
+在工具模式中，四个 `memory_*` 工具名是保留名。如果 MCP 服务或自定义工具已经使用 `memory_search`、`memory_add`、`memory_update` 或 `memory_delete`，已有工具会保留该名称，冲突的记忆工具会被跳过并记录告警。
 
 ## 配置
 
@@ -40,13 +43,19 @@ import { Callout, Cards } from "nextra/components";
 memory:
   enabled: true
 
+  # 运行模式：
+  #   middleware - 默认；每轮结束后被动后台提取
+  #   tool - 实验性；模型直接调用 memory_* 工具
+  mode: middleware
+
   # 全局记忆文件的存储路径。
   # 默认：{base_dir}/memory.json（解析为 backend/.deer-flow/memory.json）
   # 绝对路径按原样使用，相对路径相对于 base_dir 解析。
   storage_path: memory.json
 
-  # 存储类（默认：基于文件的 JSON 存储）
-  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+  # 存储类（留空 = FileMemoryStorage，即默认的基于文件的 JSON 存储，不走 importlib；
+  # 自定义实现填 `module.Class` 点号路径）
+  storage_class: ""
 
   # 处理排队记忆更新前等待的秒数（防抖）
   debounce_seconds: 30
@@ -90,14 +99,23 @@ DeerFlow 支持两级记忆：
 
 ## 自定义存储后端
 
-`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage` 并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
+`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage`（位于 `deerflow.agents.memory.backends.deermem.deermem.core.storage`）并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
 
 ```yaml
 memory:
-  storage_class: mypackage.storage.RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
 
-如果配置的类无法加载，系统回退到默认的 `FileMemoryStorage` 并记录错误。
+该值是 `module.Class` 点号路径，且存储类会按 `cls(config)` 构造——完整接口见「自定义」页面的「自定义记忆存储」。
+
+如果配置的类无法导入、不是 `MemoryStorage` 的子类，或无法构造，系统**不会**回退到 `FileMemoryStorage`，而是在构建记忆管理器时直接抛出：
+
+```
+ValueError: backend_config.storage_class='mypackage.storage.NotThere' failed to load: No module named 'mypackage'. Refusing to silently fall back because memory is persistent state.
+```
+
+由于 storage 在 `model_post_init()` 中装配，这个错误会以 pydantic 的 `ValidationError` 形式从 `DeerMem` 构造函数冒出来。
 
 ## 禁用记忆
 

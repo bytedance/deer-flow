@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.authz.outcome import pop_authorization_outcome
 from deerflow.guardrails.builtin import AllowlistProvider
 from deerflow.guardrails.middleware import GuardrailMiddleware
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
@@ -15,10 +16,33 @@ from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, Gua
 # --- Helpers ---
 
 
-def _make_tool_call_request(name: str = "bash", args: dict | None = None, call_id: str = "call_1"):
+class _FakeRuntime:
+    def __init__(self, context: dict | None = None):
+        self.context = context or {}
+
+
+class _FakeJournal:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def record_middleware(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("journal unavailable")
+        self.calls.append(kwargs)
+
+
+def _make_tool_call_request(
+    name: str = "bash",
+    args: dict | None = None,
+    call_id: str = "call_1",
+    *,
+    context: dict | None = None,
+):
     """Create a mock ToolCallRequest."""
     req = MagicMock()
     req.tool_call = {"name": name, "args": args or {}, "id": call_id}
+    req.runtime = _FakeRuntime(context)
     return req
 
 
@@ -60,6 +84,28 @@ class _ExplodingProvider:
 
 
 class TestAllowlistProvider:
+    def test_release_policy_contract_has_stable_identity_and_effective_rules(self):
+        provider = AllowlistProvider(
+            allowed_tools=["web_search", "read_file"],
+            denied_tools=["bash"],
+        )
+        middleware = GuardrailMiddleware(provider, fail_closed=True, passport="ops-policy")
+
+        policy = middleware.release_policy_parameters()
+
+        assert policy == {
+            "fail_closed": True,
+            "passport": "ops-policy",
+            "policy": {
+                "id": "deerflow.guardrails.allowlist",
+                "version": "1.0.0",
+            },
+            "provider_parameters": {
+                "allowed_tools": ["read_file", "web_search"],
+                "denied_tools": ["bash"],
+            },
+        }
+
     def test_no_restrictions_allows_all(self):
         provider = AllowlistProvider()
         req = GuardrailRequest(tool_name="bash", tool_input={})
@@ -90,6 +136,19 @@ class TestAllowlistProvider:
         req = GuardrailRequest(tool_name="web_search", tool_input={})
         decision = provider.evaluate(req)
         assert decision.allow is True
+
+    def test_empty_allowlist_blocks_all(self):
+        """An explicitly empty allowlist means "permit no tools" and must fail closed.
+
+        Regression test: a truthiness check would collapse ``[]`` into the
+        ``None`` sentinel ("no allowlist -> allow all"), silently letting every
+        tool through when the operator intended to permit none.
+        """
+        provider = AllowlistProvider(allowed_tools=[])
+        for tool in ("bash", "web_search", "read_file"):
+            decision = provider.evaluate(GuardrailRequest(tool_name=tool, tool_input={}))
+            assert decision.allow is False, f"empty allowlist should block {tool!r}"
+            assert decision.reasons[0].code == "oap.tool_not_allowed"
 
     def test_both_allowed_and_denied(self):
         provider = AllowlistProvider(allowed_tools=["bash", "web_search"], denied_tools=["bash"])
@@ -299,6 +358,331 @@ class TestGuardrailMiddleware:
         with pytest.raises(GraphBubbleUp):
             asyncio.run(run())
 
+    # Journal: a denied tool call records the complete guardrail audit event.
+    def test_denied_tool_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
+        req = _make_tool_call_request(
+            "bash",
+            args={"command": "cat secret.txt"},
+            call_id="tool_call_1",
+            context={
+                "__run_journal": journal,
+                "user_role": "user",
+            },
+        )
+        result = mw.wrap_tool_call(req, MagicMock())
+
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["tag"] == "guardrail"
+        assert event["name"] == "GuardrailMiddleware"
+        assert event["hook"] == "wrap_tool_call"
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["tool_name"] == "bash"
+        assert changes["tool_call_id"] == "tool_call_1"
+        assert changes["agent_id"] == "agent_id"
+        assert changes["is_subagent"] is False
+        assert changes["user_role"] == "user"
+        assert changes["allow"] is False
+        assert changes["policy_id"] == "test.deny.v1"
+        assert changes["reason_codes"] == ["oap.denied"]
+        assert changes["reason_messages"] == ["all tools blocked"]
+        assert changes["fail_closed"] is True
+        assert changes["provider_error"] is False
+        assert "tool_input" not in changes
+        assert "args" not in changes
+        assert "command" not in changes
+        assert "user_id" not in changes
+        assert "oauth_provider" not in changes
+        assert "oauth_id" not in changes
+
+    # Journal: a fail-closed provider error is recorded as a denied tool call.
+    def test_fail_closed_provider_error_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=True)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        handler = MagicMock()
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_not_called()
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["allow"] is False
+        assert changes["reason_codes"] == ["oap.evaluator_error"]
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is True
+
+    # Journal: a fail-open provider error is recorded without blocking the tool.
+    def test_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        expected = MagicMock()
+        handler = MagicMock(return_value=expected)
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_called_once_with(req)
+        assert result is expected
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "allow_tool_call_after_provider_error"
+        changes = event["changes"]
+        assert changes["allow"] is True
+        assert changes["reason_codes"] == ["oap.evaluator_error"]
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is False
+
+    # Journal: ordinary allowed decisions do not create guardrail audit events.
+    def test_allowed_tool_does_not_record_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request("web_search", context={"__run_journal": journal})
+        expected = MagicMock()
+        handler = MagicMock(return_value=expected)
+
+        result = mw.wrap_tool_call(req, handler)
+
+        assert result is expected
+        assert journal.calls == []
+
+    # Journal: a recording failure must not alter the guardrail denial outcome.
+    def test_guardrail_event_recording_failure_warns_without_changing_denial(self, caplog):
+        journal = _FakeJournal(fail=True)
+        mw = GuardrailMiddleware(_DenyAllProvider())
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        handler = MagicMock()
+
+        with caplog.at_level("WARNING"):
+            result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_not_called()
+        assert result.status == "error"
+        assert "oap.denied" in result.content
+        assert "Failed to record middleware:guardrail event" in caplog.text
+
+    # Journal: the async denial path records the same guardrail audit event.
+    def test_async_denied_tool_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
+        req = _make_tool_call_request(
+            "bash",
+            call_id="async_call_1",
+            context={"__run_journal": journal},
+        )
+
+        async def handler(r):
+            return MagicMock()
+
+        async def run():
+            return await mw.awrap_tool_call(req, handler)
+
+        result = asyncio.run(run())
+
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["tag"] == "guardrail"
+        assert event["hook"] == "wrap_tool_call"
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["tool_name"] == "bash"
+        assert changes["tool_call_id"] == "async_call_1"
+        assert changes["agent_id"] == "agent_id"
+        assert changes["is_subagent"] is False
+        assert changes["allow"] is False
+        assert changes["provider_error"] is False
+
+    # Journal: the async fail-open path records the error and still runs the tool.
+    def test_async_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        expected = MagicMock()
+
+        async def handler(r):
+            return expected
+
+        async def run():
+            return await mw.awrap_tool_call(req, handler)
+
+        result = asyncio.run(run())
+
+        assert result is expected
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "allow_tool_call_after_provider_error"
+        changes = event["changes"]
+        assert changes["allow"] is True
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is False
+
+
+class TestGuardrailRequestAttribution:
+    """Tests for GuardrailRequest runtime attribution fields."""
+
+    def _make_runtime_mock(self, context: dict | None = None):
+        runtime = MagicMock()
+        runtime.context = context
+        return runtime
+
+    def _make_request(self, runtime=None, tool_call: dict | None = None):
+        req = MagicMock()
+        req.runtime = runtime
+        req.tool_call = tool_call or {"name": "bash", "args": {}}
+        req.tool = None
+        req.state = {}
+        return req
+
+    def _capture_guardrail_request(self, req):
+        captured = {}
+
+        class CaptureProvider:
+            name = "capture"
+
+            def evaluate(self, request):
+                captured["request"] = request
+                return GuardrailDecision(allow=True)
+
+            async def aevaluate(self, request):
+                return self.evaluate(request)
+
+        mw = GuardrailMiddleware(CaptureProvider())
+        mw.wrap_tool_call(req, MagicMock())
+        return captured["request"]
+
+    def test_no_attribution_fields_are_none(self):
+        req = self._make_request(runtime=None, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.user_role is None
+        assert guardrail_request.oauth_provider is None
+        assert guardrail_request.oauth_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id is None
+        assert guardrail_request.channel_user_id is None
+        assert guardrail_request.is_internal is False
+        assert guardrail_request.authz_attributes == {}
+
+    def test_only_user_id_present(self):
+        runtime = self._make_runtime_mock(context={"user_id": "user_abc"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role is None
+        assert guardrail_request.oauth_provider is None
+        assert guardrail_request.oauth_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id is None
+
+    def test_authenticated_user_context_present(self):
+        attributes = {"department": "engineering"}
+        runtime = self._make_runtime_mock(
+            context={
+                "user_id": "user_abc",
+                "user_role": "admin",
+                "oauth_provider": "github",
+                "oauth_id": "gh_123",
+                "channel_user_id": "channel_123",
+                "is_internal": True,
+                "authz_attributes": attributes,
+            }
+        )
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role == "admin"
+        assert guardrail_request.oauth_provider == "github"
+        assert guardrail_request.oauth_id == "gh_123"
+        assert guardrail_request.channel_user_id == "channel_123"
+        assert guardrail_request.is_internal is True
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+        attributes["department"] = "changed"
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+    def test_non_mapping_authz_attributes_raise_type_error(self):
+        runtime = self._make_runtime_mock(context={"authz_attributes": ["not", "a", "mapping"]})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+            self._capture_guardrail_request(req)
+
+    def test_only_run_id_present(self):
+        runtime = self._make_runtime_mock(context={"run_id": "run_xyz"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id == "run_xyz"
+        assert guardrail_request.tool_call_id is None
+
+    def test_only_tool_call_id_present(self):
+        req = self._make_request(runtime=None, tool_call={"name": "web_search", "args": {"query": "test"}, "id": "call_42"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_42"
+
+    def test_all_attribution_fields_present(self):
+        runtime = self._make_runtime_mock(
+            context={
+                "user_id": "user_abc",
+                "user_role": "user",
+                "oauth_provider": "google",
+                "oauth_id": "google_123",
+                "run_id": "run_xyz",
+                "is_subagent": True,
+            }
+        )
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_all"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_abc"
+        assert guardrail_request.user_role == "user"
+        assert guardrail_request.oauth_provider == "google"
+        assert guardrail_request.oauth_id == "google_123"
+        assert guardrail_request.run_id == "run_xyz"
+        assert guardrail_request.tool_call_id == "call_all"
+        assert guardrail_request.is_subagent is True
+
+    def test_partial_attribution_fields_present(self):
+        runtime = self._make_runtime_mock(context={"user_id": "user_partial"})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_partial"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id == "user_partial"
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_partial"
+
+    def test_empty_context_with_tool_call(self):
+        runtime = self._make_runtime_mock(context={})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}, "id": "call_empty_context"})
+
+        guardrail_request = self._capture_guardrail_request(req)
+
+        assert guardrail_request.user_id is None
+        assert guardrail_request.run_id is None
+        assert guardrail_request.tool_call_id == "call_empty_context"
+
 
 # --- Config tests ---
 
@@ -342,3 +726,86 @@ class TestGuardrailsConfig:
             assert config.enabled is True
         finally:
             reset_guardrails_config()
+
+
+class TestGuardrailWritesAuthorizationOutcome:
+    def test_allow_writes_allowed_outcome_with_policy_identity(self):
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request(call_id="c1")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c1")
+        assert outcome is not None
+        assert outcome.decision == "allowed"
+        assert outcome.reason_codes == ("oap.allowed",)
+        assert outcome.policy_id  # non-empty resolved identity
+
+    def test_deny_writes_denied_outcome_with_real_policy_id(self):
+        mw = GuardrailMiddleware(_DenyAllProvider())
+        req = _make_tool_call_request(call_id="c2")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c2")
+        assert outcome is not None
+        assert outcome.decision == "denied"
+        assert outcome.policy_id == "test.deny.v1"
+        assert "oap.denied" in outcome.reason_codes
+
+    def test_fail_closed_provider_error_writes_denied_outcome(self):
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=True)
+        req = _make_tool_call_request(call_id="c3")
+        mw.wrap_tool_call(req, MagicMock())
+        outcome = pop_authorization_outcome(req.runtime.context, "c3")
+        assert outcome is not None and outcome.decision == "denied"
+        assert "oap.evaluator_error" in outcome.reason_codes
+
+    def test_async_allow_writes_allowed_outcome(self):
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request(call_id="c4")
+
+        async def handler(_req):
+            return MagicMock()
+
+        asyncio.run(mw.awrap_tool_call(req, handler))
+        outcome = pop_authorization_outcome(req.runtime.context, "c4")
+        assert outcome is not None and outcome.decision == "allowed"
+
+    def test_recording_the_outcome_does_not_recompute_the_providers_full_declaration(self):
+        """Per-tool-call bookkeeping must not pay for provider_parameters.
+
+        ``release_policy_parameters()`` (the middleware's own public method) is
+        the expensive path: for AllowlistProvider it sorts the allow/deny sets.
+        Building an AuthorizationOutcome only needs policy id/version, so it
+        must resolve those directly rather than going through the provider's
+        full declaration and discarding everything else.
+        """
+        calls = 0
+
+        class _CountingProvider(AllowlistProvider):
+            def release_policy_parameters(self) -> dict[str, object]:
+                nonlocal calls
+                calls += 1
+                return super().release_policy_parameters()
+
+        mw = GuardrailMiddleware(_CountingProvider(allowed_tools=["bash"]))
+        req = _make_tool_call_request(call_id="c5", name="bash")
+        mw.wrap_tool_call(req, MagicMock())
+        assert calls == 0
+
+        assert mw.release_policy_parameters()["provider_parameters"] == {"allowed_tools": ["bash"], "denied_tools": []}
+        assert calls == 1
+
+    def test_the_outcome_store_is_bounded_so_an_unpopped_run_cannot_grow_forever(self):
+        """No production caller pops outcomes today, so the store must self-limit."""
+        from deerflow.authz.outcome import _MAX_TRACKED_OUTCOMES
+
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        # Seeded non-empty: _FakeRuntime's ``context or {}`` fallback would
+        # otherwise hand each call an unrelated fresh dict instead of this one.
+        context: dict = {"seed": True}
+        for i in range(_MAX_TRACKED_OUTCOMES + 10):
+            req = _make_tool_call_request(call_id=f"call-{i}", context=context)
+            mw.wrap_tool_call(req, MagicMock())
+
+        store = context["__authorization_outcome"]
+        assert len(store) == _MAX_TRACKED_OUTCOMES
+        assert "call-0" not in store
+        assert f"call-{_MAX_TRACKED_OUTCOMES + 9}" in store

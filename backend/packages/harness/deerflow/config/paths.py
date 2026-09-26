@@ -1,15 +1,22 @@
+import hashlib
+import logging
 import os
 import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.utils.thread_id import validate_thread_id
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
-_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_INTEGRATION_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+_UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
+_SAFE_USER_ID_DIGEST_HEX_LEN = 16
+
+logger = logging.getLogger(__name__)
 
 
 def _default_local_base_dir() -> Path:
@@ -19,9 +26,7 @@ def _default_local_base_dir() -> Path:
 
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
-    if not _SAFE_THREAD_ID_RE.match(thread_id):
-        raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
-    return thread_id
+    return validate_thread_id(thread_id)
 
 
 def _validate_user_id(user_id: str) -> str:
@@ -29,6 +34,48 @@ def _validate_user_id(user_id: str) -> str:
     if not _SAFE_USER_ID_RE.match(user_id):
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return user_id
+
+
+def _validate_integration_id(integration_id: str) -> str:
+    """Validate an integration ID before using it in filesystem paths."""
+    if not _SAFE_INTEGRATION_ID_RE.match(integration_id):
+        raise ValueError(f"Invalid integration_id {integration_id!r}: only alphanumeric characters, dots, hyphens, and underscores are allowed.")
+    # The charset allows dots for names like ``some.integration``; reject the
+    # bare ``.``/``..`` path components so a future caller cannot escape the
+    # per-integration namespace via ``_join_host_path(..., integration_id, ...)``.
+    if integration_id in {".", ".."}:
+        raise ValueError(f"Invalid integration_id {integration_id!r}: '.' and '..' are not allowed.")
+    return integration_id
+
+
+def _validate_project_id(project_id: str) -> str:
+    """Validate a project ID before using it in filesystem paths."""
+    if not _SAFE_USER_ID_RE.match(project_id):
+        raise ValueError(f"Invalid project_id {project_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return project_id
+
+
+def make_safe_user_id(raw: str) -> str:
+    """Normalize an external identity into the user-id charset (``[A-Za-z0-9_-]``).
+
+    IM channel ids (Feishu/Slack/Telegram) may contain characters that
+    :func:`_validate_user_id` rejects. Already-safe ids pass through unchanged;
+    lossy ones get a short digest suffix so two distinct inputs never share a
+    storage bucket.
+    """
+    if not raw:
+        raise ValueError("user_id must be a non-empty string.")
+    sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw)
+    if sanitized == raw:
+        return raw
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
+    return f"{sanitized}-{digest}"
+
+
+def _legacy_safe_user_id(raw: str, sanitized: str) -> str:
+    """Bucket name produced by the previous (SHA-1) digest revision for ``raw``."""
+    digest = hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:_SAFE_USER_ID_DIGEST_HEX_LEN]
+    return f"{sanitized}-{digest}"
 
 
 def _join_host_path(base: str, *parts: str) -> str:
@@ -66,18 +113,21 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
-        ├── agents/
+        ├── agents/                 <-- legacy shared layout (read-only fallback)
         │   └── {agent_name}/
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        └── threads/
-            └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+        ├── users/{user_id}/
+        │   ├── USER.md       <-- per-user profile (storage/retrieval via the user-profile routes)
+        │   ├── agents/...    <-- per-user custom agents (current layout)
+        │   ├── skills/...    <-- per-user custom skills
+        │   └── threads/
+        │       └── {thread_id}/
+        │           └── user-data/  <-- mounted as /mnt/user-data/ inside sandbox
+        │               ├── workspace/     <-- /mnt/user-data/workspace/
+        │               ├── uploads/       <-- /mnt/user-data/uploads/
+        │               └── outputs/       <-- /mnt/user-data/outputs/
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -125,10 +175,13 @@ class Paths:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
 
-    @property
-    def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+    def user_md_file(self, user_id: str) -> Path:
+        """Path to a user-scoped profile file: `{base_dir}/users/{user_id}/USER.md`.
+
+        The profile is per-user (like custom skills/agents) so one user's
+        prompt context can never be written or injected for another user.
+        """
+        return self.user_dir(user_id) / "USER.md"
 
     @property
     def agents_dir(self) -> Path:
@@ -139,6 +192,19 @@ class Paths:
         ``migrate_user_isolation.py`` script.
         """
         return self.base_dir / "agents"
+
+    @property
+    def managed_subagents_dir(self) -> Path:
+        """Deployment-level managed subagent definitions.
+
+        Each definition is stored as its own JSON file so an atomic replace
+        never targets a mounted directory or a single shared manifest file.
+        """
+        return self.base_dir / "managed-subagents"
+
+    def managed_subagent_file(self, name: str) -> Path:
+        """Path to one managed subagent definition."""
+        return self.managed_subagents_dir / f"{name.lower()}.json"
 
     def agent_dir(self, name: str) -> Path:
         """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
@@ -151,6 +217,32 @@ class Paths:
     def user_dir(self, user_id: str) -> Path:
         """Directory for a specific user: `{base_dir}/users/{user_id}/`."""
         return self.base_dir / "users" / _validate_user_id(user_id)
+
+    def prepare_user_dir_for_raw_id(self, raw_user_id: str) -> str:
+        """Return the safe user ID and migrate this ID's legacy unsafe-id bucket.
+
+        A previous branch revision used SHA-1 for unsafe external user IDs.
+        New IDs use SHA-256; the legacy bucket name is recomputed from the same
+        raw ID, so only this user's own old bucket can ever be moved — a
+        different raw ID sharing the sanitized prefix produces a different
+        legacy digest and is never touched.
+        """
+        safe_user_id = make_safe_user_id(raw_user_id)
+        sanitized = _UNSAFE_USER_ID_CHAR_RE.sub("-", raw_user_id)
+        if safe_user_id == raw_user_id:
+            return safe_user_id
+
+        users_dir = self.base_dir / "users"
+        target_dir = users_dir / safe_user_id
+        legacy_dir = users_dir / _legacy_safe_user_id(raw_user_id, sanitized)
+        try:
+            if target_dir.exists() or not legacy_dir.is_dir():
+                return safe_user_id
+            legacy_dir.rename(target_dir)
+            logger.info("Migrated legacy unsafe-id user directory to the current digest format")
+        except OSError:
+            logger.exception("Failed to migrate legacy unsafe-id user directory")
+        return safe_user_id
 
     def user_memory_file(self, user_id: str) -> Path:
         """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
@@ -167,6 +259,66 @@ class Paths:
     def user_agent_memory_file(self, user_id: str, agent_name: str) -> Path:
         """Per-user per-agent memory: `{base_dir}/users/{user_id}/agents/{name}/memory.json`."""
         return self.user_agent_dir(user_id, agent_name) / "memory.json"
+
+    def user_skills_dir(self, user_id: str) -> Path:
+        """Per-user root for that user's custom skills: `{base_dir}/users/{user_id}/skills/`."""
+        return self.user_dir(user_id) / "skills"
+
+    def user_custom_skills_dir(self, user_id: str) -> Path:
+        """Per-user custom skills directory: `{base_dir}/users/{user_id}/skills/custom/`.
+
+        This is the user-scoped replacement for the global ``{base_dir}/skills/custom/``
+        directory. Custom skills are written here; public skills remain under the
+        global ``{base_dir}/skills/public/`` (read-only).
+        """
+        return self.user_skills_dir(user_id) / "custom"
+
+    def integration_skills_dir(self) -> Path:
+        """Globally installed managed integration skills.
+
+        Layout: ``{base_dir}/integrations/skills/{provider}/{skill}/``. The
+        package contents are shared and read-only; credentials and enabled
+        state remain user-scoped elsewhere under ``users/{user_id}``.
+        """
+        return self.base_dir / "integrations" / "skills"
+
+    @property
+    def skills_view_dir(self) -> Path:
+        """Global sandbox-visible skills projection: ``{base_dir}/skills_view/``."""
+        return self.base_dir / "skills_view"
+
+    @property
+    def public_skills_view_dir(self) -> Path:
+        """Enabled public skills exposed to sandboxes."""
+        return self.skills_view_dir / "public"
+
+    def user_skills_view_dir(self, user_id: str) -> Path:
+        """Per-user sandbox-visible skills projection root."""
+        return self.user_dir(user_id) / "skills_view"
+
+    def user_custom_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled custom skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "custom"
+
+    def user_legacy_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled legacy skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "legacy"
+
+    def user_integration_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled managed integration skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "integrations"
+
+    def thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> Path:
+        """Sandbox-visible skill projection scoped to one user/thread.
+
+        The directory lives below the thread root so ordinary thread deletion
+        also removes its policy projection.
+        """
+        return self.thread_dir(thread_id, user_id=user_id) / "skills_view"
+
+    def host_thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> str:
+        """Host path for a thread-scoped skill projection."""
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "skills_view")
 
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
@@ -212,6 +364,43 @@ class Paths:
         """
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
 
+    def user_projects_dir(self, user_id: str) -> Path:
+        """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        return self.user_dir(user_id) / "projects"
+
+    def user_project_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for one project: ``users/{user_id}/projects/{project_id}/``."""
+        return self.user_projects_dir(user_id) / _validate_project_id(project_id)
+
+    def project_documents_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for a project's document shelf.
+
+        Layout (Phase-2 spec §6.2): ``.staging/{uuid}`` for in-flight bytes,
+        then one exclusive namespace per row at
+        ``{sha256[:2]}/{sha256}/{document_id}/original/{name}`` with an
+        optional ``derived/converted.md`` companion.
+        """
+        return self.user_project_dir(user_id, project_id) / "documents"
+
+    def project_document_path(self, user_id: str, relpath: str) -> Path:
+        """Resolve a shelf ``stored_relpath`` to its absolute host path.
+
+        ``stored_relpath`` is stored relative to ``users/{user_id}/projects/``
+        (it begins with ``{project_id}/documents/``) so a restore can re-point
+        a row without moving bytes. Resolution mirrors
+        :meth:`resolve_virtual_path`: join under the user projects root,
+        resolve, then re-check confinement — a relpath that escapes the root
+        is rejected. Relpaths only ever come from server-generated content
+        addresses, never from request text (§12).
+        """
+        base = self.user_projects_dir(user_id).resolve()
+        actual = (base / relpath).resolve()
+        try:
+            actual.relative_to(base)
+        except ValueError:
+            raise ValueError("Access denied: path traversal detected") from None
+        return actual
+
     def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for the ACP workspace of a specific thread.
@@ -256,6 +445,22 @@ class Paths:
     def host_acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
         """Host path for the ACP workspace mount source."""
         return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "acp-workspace")
+
+    def host_user_custom_skills_dir(self, user_id: str) -> str:
+        """Host path for a user's custom skills directory, preserving Windows path syntax."""
+        return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "skills", "custom")
+
+    def host_integration_skills_dir(self) -> str:
+        """Host path for globally installed managed integration skills."""
+        return _join_host_path(self._host_base_dir_str(), "integrations", "skills")
+
+    def host_user_integration_config_dir(self, user_id: str, integration_id: str) -> str:
+        """Host path for a user's managed integration runtime config directory."""
+        return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "integrations", _validate_integration_id(integration_id), "config")
+
+    def host_user_integration_data_dir(self, user_id: str, integration_id: str) -> str:
+        """Host path for a user's managed integration runtime data directory."""
+        return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "integrations", _validate_integration_id(integration_id), "data")
 
     def ensure_thread_dirs(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Create all standard sandbox directories for a thread.

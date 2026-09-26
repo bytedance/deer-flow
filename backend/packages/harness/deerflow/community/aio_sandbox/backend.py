@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from urllib.parse import urlparse
 
 import httpx
 import requests
@@ -15,7 +18,43 @@ from .sandbox_info import SandboxInfo
 logger = logging.getLogger(__name__)
 
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
+def sandbox_http_trust_env(sandbox_url: str) -> bool:
+    """Whether HTTP clients for *sandbox_url* should inherit proxy settings.
+
+    Local Docker, DooD, and Kubernetes sandbox endpoints are control-plane
+    connections, not internet traffic. Sending them through ``HTTP_PROXY`` can
+    produce a misleading proxy-generated 502 even though the sandbox container
+    is healthy (#3441). External fully-qualified hosts retain normal environment
+    proxy behavior.
+    """
+    try:
+        hostname = (urlparse(sandbox_url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return True
+    if not hostname:
+        return True
+    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return "." in hostname
+    return not (address.is_loopback or address.is_private or address.is_link_local)
+
+
+# The readiness deadline the local-container provider paths (sync and async)
+# enforce before destroying a sandbox that never became ready. Tests that
+# validate the shipped image must use this same budget: a longer one can
+# pass while every real acquisition still fails.
+SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
+
+
+def wait_for_sandbox_ready(
+    sandbox_url: str,
+    timeout: int = 30,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
     Args:
@@ -26,18 +65,28 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
         True if sandbox is ready, False otherwise.
     """
     start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5)
-            if response.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(1)
+    with requests.Session() as session:
+        session.trust_env = sandbox_http_trust_env(sandbox_url)
+        if headers:
+            session.headers.update(headers)
+        while time.time() - start_time < timeout:
+            try:
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+                if response.status_code == 200:
+                    return True
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(1)
     return False
 
 
-async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+async def wait_for_sandbox_ready_async(
+    sandbox_url: str,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Async variant of sandbox readiness polling.
 
     Use this from async runtime paths so sandbox startup waits do not block the
@@ -47,7 +96,13 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    client_kwargs: dict[str, object] = {
+        "timeout": 5,
+        "trust_env": sandbox_http_trust_env(sandbox_url),
+    }
+    if headers:
+        client_kwargs["headers"] = dict(headers)
+    async with httpx.AsyncClient(**client_kwargs) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -74,7 +129,16 @@ class SandboxBackend(ABC):
     """
 
     @abstractmethod
-    def create(self, thread_id: str | None, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
+    def create(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        user_id: str | None = None,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
+    ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
         Args:
@@ -82,6 +146,14 @@ class SandboxBackend(ABC):
             sandbox_id: Deterministic sandbox identifier.
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
                 Ignored by backends that don't manage containers (e.g., remote).
+            user_id: User bucket that the sandbox should mount or provision for.
+            provision_lark_cli_runtime: Ask the backend to provision the sandbox
+                lark-cli runtime via its native mechanism (e.g. the provisioner's
+                init container + emptyDir). Backends that can't do this ignore it.
+            provision_lark_cli_broker: Ask the backend to provision a lark-cli
+                broker sidecar (Pattern B, issue #4338) so credentials stay out of
+                the sandbox. Supersedes ``provision_lark_cli_runtime`` when the
+                backend supports it; backends that can't do this ignore it.
 
         Returns:
             SandboxInfo with connection details.
@@ -123,7 +195,10 @@ class SandboxBackend(ABC):
             sandbox_id: The deterministic sandbox ID to look for.
 
         Returns:
-            SandboxInfo if found and healthy, None otherwise.
+            SandboxInfo if found, including ``requires_replacement=True`` when
+            the backend can identify an incompatible persisted provisioning
+            policy without safely adopting it. Enumeration must not destroy
+            resources; the provider owns replacement fencing. None otherwise.
         """
         ...
 
@@ -137,6 +212,9 @@ class SandboxBackend(ABC):
         The default implementation returns an empty list, which is correct
         for backends that don't manage local containers (e.g., RemoteSandboxBackend
         delegates lifecycle to the provisioner which handles its own cleanup).
+        Enumeration must be read-only. Backends report resources that need
+        replacement through ``SandboxInfo.requires_replacement`` so the
+        provider can apply ownership and local teardown fencing first.
 
         Returns:
             A list of SandboxInfo for all currently running sandboxes.

@@ -76,12 +76,11 @@ if [ "$mode" = "docker" ]; then
         all_passed=false
     fi
 else
-    summary_hint="logs/{langgraph,gateway,frontend,nginx}.log"
+    summary_hint="logs/{gateway,frontend,nginx}.log"
     print_step "1. Checking local service ports..."
     check_listen_port "Nginx" 2026
     check_listen_port "Frontend" 3000
     check_listen_port "Gateway" 8001
-    check_listen_port "LangGraph" 2024
 fi
 echo ""
 
@@ -104,8 +103,8 @@ else
 fi
 echo ""
 
-echo "5. Checking LangGraph service..."
-check_http_status "LangGraph service" "http://localhost:2024/" "200|301|302|307|308|404"
+echo "5. Checking LangGraph-compatible Gateway API..."
+check_http_status "LangGraph-compatible Gateway API" "http://localhost:2026/api/langgraph/assistants/lead_agent" "200|401"
 echo ""
 
 echo "=========================================="

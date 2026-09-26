@@ -1,0 +1,18 @@
+{{- if .Values.persistence.home.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "deer-flow.homePVC" . }}
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.home.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.home.size | quote }}
+  {{- with .Values.persistence.home.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end -}}

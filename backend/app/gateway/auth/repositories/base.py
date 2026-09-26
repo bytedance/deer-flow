@@ -30,7 +30,26 @@ class UserRepository(ABC):
             user: User object to create
 
         Returns:
-            Created User with ID assigned
+            Created User with ID assigned. ``email`` is the canonical
+            (lowercase) stored form, which may differ in case from what was
+            passed in -- implementations mutate the input ``user`` in place
+            to reflect this rather than returning a fresh object.
+
+        Raises:
+            ValueError: If email already exists
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def create_first_admin(self, user: User) -> User | None:
+        """Create *user* as the first admin, atomically.
+
+        Implementations must read the admin count and insert in one
+        serialized transaction: a count-then-create pair lets two concurrent
+        first-boot requests both find an empty system.
+
+        Returns:
+            The created User, or None if an admin already exists.
 
         Raises:
             ValueError: If email already exists
@@ -69,7 +88,9 @@ class UserRepository(ABC):
             user: User object with updated fields
 
         Returns:
-            Updated User
+            Updated User. ``email`` is the canonical (lowercase) stored
+            form -- implementations mutate the input ``user`` in place to
+            reflect this rather than returning a fresh object.
 
         Raises:
             UserNotFoundError: If no row exists for ``user.id``. This is
@@ -81,6 +102,11 @@ class UserRepository(ABC):
     @abstractmethod
     async def count_users(self) -> int:
         """Return total number of registered users."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_user_ids(self) -> list[str]:
+        """Return every registered user ID in deterministic creation order."""
         raise NotImplementedError
 
     @abstractmethod

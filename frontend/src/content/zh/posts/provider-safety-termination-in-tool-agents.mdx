@@ -14,7 +14,7 @@ tags:
 
 这类半截工具调用不应被当成正常意图执行。一个被截断的 `write_file` 可能写出不完整的报告；一个被截断的 `bash` 调用可能带着残缺参数进入沙箱；Agent 看到失败结果后还可能继续重试，反复触发同一条安全规则。
 
-[PR #3035](https://github.com/bytedance/deer-flow/pull/3035) 处理的就是这个边界：当 provider 用安全信号中止生成，同时响应仍带有工具调用时，DeerFlow 应先压制这些工具调用，再把这一轮作为安全中止事件记录下来。
+[对应的实现提交](https://github.com/bytedance/deer-flow/commit/be0eae9825619b63ca0c67b253d40b5eee76a2d6) 处理的就是这个边界：当 provider 用安全信号中止生成，同时响应仍带有工具调用时，DeerFlow 应先压制这些工具调用，再把这一轮作为安全中止事件记录下来。
 
 ## 为什么需要单独处理安全中止
 

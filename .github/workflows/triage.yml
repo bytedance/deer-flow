@@ -1,0 +1,223 @@
+name: Triage
+
+# One workflow for all event-driven PR/issue labeling. Replaces the former
+# pr-labeler / pr-triage / issue-triage workflows (and drops actions/labeler).
+#
+# Design notes:
+#   * All jobs are pure-metadata: they read changed-file lists / PR fields / the
+#     review payload via the API and write labels. PR code is NEVER checked out
+#     or executed, so pull_request_target is safe here.
+#   * Each job only reconciles labels in namespaces IT owns
+#     (area:* / size/* / risk:* / needs-validation). It never touches labels
+#     applied by maintainers or other tools (bug, priority, etc.). first-time-
+#     contributor and reviewing are add-only.
+#   * State is read LIVE (listFiles + listLabelsOnIssue) at run time, not from
+#     the (stale) event payload, so rapid synchronize events converge instead
+#     of thrashing.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ── PR: area / size / risk / needs-validation / first-time ─────────────────
+  pr-labels:
+    if: github.event_name == 'pull_request_target' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    concurrency:
+      group: triage-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Apply PR labels from live state
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const num = pr.number;
+
+            // ---- live changed files ----
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: num, per_page: 100,
+            });
+            const paths = files.map(f => f.filename);
+            const m = (re) => paths.some(p => re.test(p));
+
+            // ---- area: replaces .github/labeler.yml (path -> area) ----
+            const AREA_RULES = [
+              ['area:frontend', [/^frontend\//]],
+              ['area:backend',  [/^backend\/app\//, /^backend\/packages\/harness\/deerflow\/(runtime|persistence|config|tools|guardrails|tracing|models|utils|uploads)\//]],
+              ['area:agents',   [/^backend\/packages\/harness\/deerflow\/(agents|subagents|reflection)\//, /(^|\/)langgraph\.json$/, /^backend\/.*\/prompts\//]],
+              ['area:sandbox',  [/^docker\//, /^backend\/packages\/harness\/deerflow\/sandbox\//, /(^|\/)Dockerfile$/]],
+              ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend\/src\/core\/skills\//]],
+              ['area:mcp',      [/^backend\/packages\/harness\/deerflow\/mcp\//, /^frontend\/src\/core\/mcp\//]],
+              ['area:ci',       [/^\.github\//, /^scripts\//]],
+              ['area:docs',     [/^docs\//, /\.mdx?$/]],
+              ['area:deps',     [/(^|\/)(pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml)$/]],
+            ];
+            const areaLabels = AREA_RULES
+              .filter(([, res]) => res.some(re => m(re)))
+              .map(([label]) => label);
+
+            // ---- size: additions+deletions, excluding lockfiles/snapshots ----
+            const EXCLUDE_SIZE = /(^|\/)(uv\.lock|pnpm-lock\.yaml|package-lock\.json)$|\.snap$/;
+            const churn = files
+              .filter(f => !EXCLUDE_SIZE.test(f.filename))
+              .reduce((s, f) => s + (f.additions || 0) + (f.deletions || 0), 0);
+            const sizeLabel =
+              churn < 20 ? 'size/XS' :
+              churn < 100 ? 'size/S' :
+              churn < 300 ? 'size/M' :
+              churn < 700 ? 'size/L' : 'size/XL';
+
+            // ---- risk ----
+            const docsOnly = paths.length > 0 && paths.every(p =>
+              /\.(md|mdx|txt)$/i.test(p) || p.startsWith('docs/') ||
+              /\.(png|jpe?g|gif|svg|webp|ico)$/i.test(p));
+            const highRisk =
+              m(/^backend\/app\/gateway\//) ||
+              m(/^backend\/packages\/harness\/deerflow\/(agents|subagents|sandbox)\//) ||
+              m(/(^|\/)langgraph\.json$/) ||
+              m(/(^|\/)(auth|authz|security)/i) ||
+              m(/(pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml)$/) ||
+              m(/^docker\//) ||
+              m(/^\.github\/workflows\//);
+            const riskLabel = docsOnly ? 'risk:low' : (highRisk ? 'risk:high' : 'risk:medium');
+
+            // ---- needs-validation: front/back contract surface ----
+            const contract =
+              m(/^backend\/app\/gateway\//) ||
+              m(/^backend\/packages\/harness\/deerflow\/(agents|subagents)\//) ||
+              m(/(^|\/)langgraph\.json$/) ||
+              m(/^frontend\/src\/core\/(api|threads|messages)\//);
+
+            // ---- live current labels (NOT the stale event payload) ----
+            const current = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number: num, per_page: 100,
+            })).map(l => l.name);
+            const hasSkip = current.includes('skip-validation');
+
+            // Reconcile ONLY namespaces we own; never touch others.
+            const owned = (n) =>
+              n.startsWith('area:') || n.startsWith('size/') ||
+              n.startsWith('risk:') || n === 'needs-validation';
+            const desired = new Set([...areaLabels, sizeLabel, riskLabel]);
+            if (contract && !hasSkip) desired.add('needs-validation');
+
+            const toRemove = current.filter(n => owned(n) && !desired.has(n));
+            const toAdd = [...desired].filter(n => !current.includes(n));
+
+            // first-time-contributor: add-only, on opened, real users only.
+            if (context.payload.action === 'opened' &&
+                pr.user.type === 'User' &&
+                ['FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER'].includes(pr.author_association) &&
+                !current.includes('first-time-contributor')) {
+              toAdd.push('first-time-contributor');
+            }
+
+            for (const name of toRemove) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: num, name });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }
+            if (toAdd.length) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: num, labels: toAdd });
+            }
+            core.info(`area=[${areaLabels.join(',')}] ${sizeLabel} ${riskLabel} churn=${churn} ` +
+              `validation=${desired.has('needs-validation')} ` +
+              `(+${toAdd.join(',') || '-'} / -${toRemove.join(',') || '-'})`);
+
+  # ── PR: reviewing label on a maintainer's human review ─────────────────────
+  reviewing:
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: triage-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Add reviewing label for maintainer reviews
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const num = context.payload.pull_request.number;
+            const review = context.payload.review;
+            const assoc = review.author_association;     // payload field; no API call
+            const type = review.user && review.user.type;
+
+            // author_association is NONE for every automated reviewer
+            // (Copilot, CodeRabbit, Codex, Sourcery, ...), so this allowlist
+            // drops them all without a denylist — and never calls the
+            // collaborators API that 404s on "Copilot is not a user".
+            // user.type === 'User' guards the rare bot-added-as-collaborator case.
+            if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(assoc) || type !== 'User') {
+              core.info(`reviewer ${review.user && review.user.login} assoc=${assoc} type=${type}; skipping.`);
+              return;
+            }
+
+            const labels = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number: num, per_page: 100,
+            })).map(l => l.name);
+            if (labels.includes('reviewing')) {
+              core.info('Already labeled reviewing; skipping.');
+              return;
+            }
+            try {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: num, labels: ['reviewing'],
+              });
+              core.info('Added "reviewing".');
+            } catch (e) {
+              if (e.status === 403) core.info('No permission to label (expected on some fork PRs).');
+              else throw e;
+            }
+
+  # ── Issue: needs-triage on every new issue ────────────────────────────────
+  issue-triage:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: triage-issue-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Add needs-triage label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+
+            // Read live labels (not the event payload) so labels added at creation
+            // time via the API or by another automation are seen — consistent with
+            // the live-state reads in the PR jobs above.
+            const current = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
+              owner, repo, issue_number, per_page: 100,
+            })).map(l => l.name);
+            if (current.includes('needs-triage')) {
+              core.info('Issue already has needs-triage; nothing to do.');
+              return;
+            }
+            // Self-heal: create the label if it does not exist yet.
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: 'needs-triage', color: 'fef2c0',
+                description: 'Awaiting maintainer triage',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = already exists
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: ['needs-triage'],
+            });
+            core.info(`Added needs-triage to #${issue_number}.`);

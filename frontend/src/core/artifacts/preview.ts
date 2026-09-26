@@ -1,3 +1,9 @@
+export function getTabularDelimiter(
+  language: string | null,
+): "," | "\t" | null {
+  return language === "csv" ? "," : language === "tsv" ? "\t" : null;
+}
+
 export type ArtifactViewMode = "code" | "preview";
 
 type ArtifactPreviewMessage = {
@@ -175,8 +181,14 @@ export function appendHtmlPreviewBaseHref(
 
   const baseHref = htmlBaseHref(url, currentHref);
   const baseElement = `<base href="${escapeHtmlAttribute(baseHref)}">`;
-  if (/<head[^>]*>/i.exec(content)) {
-    return content.replace(/<head([^>]*)>/i, `<head$1>${baseElement}`);
+  // "(?:\s[^>]*)?" keeps the tag-name boundary so `<header>` (a common
+  // leading tag in agent-generated fragments) is not mistaken for `<head>`;
+  // mirrors appendHtmlPreviewScrollRestoration below.
+  if (/<head(?:\s[^>]*)?>/i.test(content)) {
+    return content.replace(
+      /<head(?:\s[^>]*)?>/i,
+      (headTag) => `${headTag}${baseElement}`,
+    );
   }
   return `${baseElement}${content}`;
 }

@@ -1,0 +1,202 @@
+---
+title: 运行时模型
+description: Gateway 如何在启动时加载扩展、同一份不可变快照如何跟随每次运行进入其子 Agent、应用与任务作用域及其 ExtensionData 存储、通知循环与故障放行规则，以及诊断信息的去向。
+---
+
+import { Callout } from "nextra/components";
+
+# 运行时模型
+
+本章说明 `install()` 返回之后宿主如何对待一个扩展：每份状态在什么时候存在、一次运行使用哪份快照、回调太慢或失败时会发生什么。编写任何要保存状态的贡献之前，请先读完本章。
+
+## 加载
+
+扩展只加载一次，发生在 Gateway 构建 FastAPI 应用的时候。顺序如下：
+
+1. Gateway 从 `config.yaml` 读取 `plugins:` 列表。`config.yaml` 存在但校验失败属于配置错误，会中止启动；只有文件缺失是被容忍的，此时不加载任何扩展。
+2. 按列表顺序处理每个条目：
+   1. 如果条目声明了 `table_prefix`，先注册该前缀，即使条目已禁用。见[表前缀](#表前缀)。
+   2. 如果 `enabled` 为 `false`，跳过该条目，不导入任何东西。
+   3. 导入 `use` 路径，它必须解析为一个可调用对象。
+   4. 如果带有 `@extension(api=...)` 标记，就对照宿主的 `API_VERSION` 检查。见[版本检查](#版本检查)。
+   5. 以条目 `config` 的浅拷贝调用 `install(registry, config)`。
+3. 完成的注册表被冻结成不可变的 `LoadedExtensions`，发布为进程级集合，并保存到 `app.state.extensions`。
+4. 所有宿主路由挂载完毕之后，再挂载扩展贡献的路由。
+
+加载结束时 Gateway 打印一行汇总：
+
+```text
+Extensions loaded: 2/3 (acme_audit:install, acme_costs:install)
+```
+
+总数包含已禁用的条目，所以 `2/3` 既可能是一个失败，也可能是一个被禁用。每个失败都有自己的一行 `Extension <use>: ...` 错误。
+
+### 按位置回滚
+
+`install()` 注册的一切都归属到它的条目。如果 `install()` 中途抛异常，宿主会精确移除这次调用开始以来的注册，然后继续处理下一个条目。注册了一半的扩展比没有更危险，因为它产出的数据看起来是完整的。
+
+回滚按位置而不是按名称进行，所以两个条目可以共用同一个 `use`、配不同的 `config`。第二个实例失败时，绝不会移除第一个实例的注册。
+
+### `required`
+
+在默认的 `required: false` 下，第 2.3 到 2.5 步的任何失败都只记日志并跳过该扩展。在 `required: true` 下，同样的失败会抛出 `ExtensionLoadError`，Gateway 不会启动：
+
+```text
+ExtensionLoadError: required extension acme_audit:install failed to install
+```
+
+`required: true` 只留给缺了就会让部署出错的扩展，例如强制审计轨迹。从这种失败中恢复需要 shell 权限去编辑 `config.yaml`。
+
+### 版本检查
+
+没有标记时跳过检查。否则，1.0 之前的规则是：major 和 minor 与宿主相同，且 patch 不高于宿主；1.0 之后将是：major 相同，且 minor 和 patch 不高于宿主。以宿主 `0.2.1` 为例：
+
+| `@extension(api=...)`         | 结果                                               |
+| ----------------------------- | -------------------------------------------------- |
+| 未装饰                        | 加载                                               |
+| `"0.2"`、`"0.2.0"`、`"0.2.1"` | 加载                                               |
+| `"0.2.2"`                     | 拒绝：扩展可能用到本宿主没有的新增内容             |
+| `"0.1.9"`、`"0.3.0"`、`"1.0"` | 拒绝：1.0 之前的 minor 不同，或 major 不同         |
+| `"0.2.x"`                     | 拒绝：不是点分数字版本                             |
+
+拒绝信息会给出应安装的范围：
+
+```text
+Extension acme_audit:install: extension requires extension-api 0.2.2, host provides 0.2.1. Install a matching version: pip install 'deerflow-extension-api>=0.2.2,<0.3'
+```
+
+这个标记是为 `--no-deps` 安装和 editable checkout 准备的安全网。包里对 `deerflow-extension-api` 声明的依赖范围才是主要的兼容性机制。
+
+### 表前缀
+
+使用自己的数据库表（有自己的 SQLAlchemy `MetaData` 和迁移链）的扩展，要声明它拥有的前缀：
+
+```yaml filename="config.yaml"
+plugins:
+  - name: acme
+    use: acme_audit:install
+    table_prefix: acme_
+```
+
+宿主会把带这个前缀的表排除在 `alembic revision --autogenerate` 之外，所以宿主迁移永远不会提议删除它们。即使条目被禁用或加载失败，前缀也会注册，因为这些表可能已经存在。空前缀在配置校验时就会被拒绝。与宿主表名冲突的前缀总是中止启动，无论 `required` 是什么。
+
+## 快照
+
+`LoadedExtensions` 是不可变的。每次 Lead 运行在开始时解析它一次，并把同一个对象用于任务存储、生命周期通知和 Agent 构建。运行还会把快照发布到运行时上下文，`task` 工具再读回来，所以它委派的每个子 Agent 都用与 Lead Agent 相同的扩展版本构建。调用方在这个宿主内部键下提供的值永远不会被信任。
+
+不发布快照的调用方，例如嵌入式 `DeerFlowClient` 或独立的 LangGraph Server，会回退到进程级集合。
+
+因为只在启动时加载，Gateway 运行期间进程级集合不会变化。按运行绑定对替换该集合的宿主和测试才有意义，它保证一次运行永远不会混用两个版本。
+
+## 作用域与存储
+
+宿主给扩展的是 `ExtensionData` 存储，而不是让它们自己保存全局状态。每个存储属于一个作用域，作用域结束时被丢弃。
+
+| 作用域     | `scope_id`                                       | 创建时机                                 | 丢弃时机                 |
+| ---------- | ------------------------------------------------ | ---------------------------------------- | ------------------------ |
+| 应用       | `"app"`                                          | 启动时注册表冻结之时                     | 随 Gateway 进程          |
+| Lead 任务  | 运行 id                                          | 运行开始、`on_task_start` 之前           | `on_task_stop` 之后      |
+| 子 Agent 任务 | 发起委派的 tool-call id；没有时为子 Agent 执行 id | 子 Agent 的 `on_task_start` 之前       | 其 `on_task_stop` 之后   |
+| 分离       | `"detached"`                                     | 为一次没有活跃任务的通知创建             | 该通知结束之后           |
+
+每个回调收到的都是当前作用域的存储，所以你永远不需要自己保存一个，也不需要检查它是否过期。
+
+只有注册了至少一个中间件贡献者、任务生命周期贡献者、系统模型观察者或上下文压缩观察者时，才会分配任务存储。只注册服务、路由或组装观察者的扩展不会给运行增加任何开销。
+
+应用存储由进程内所有扩展共享。这是安全的，因为存储以类型为键，见下文。
+
+### 分离存储
+
+有些通知没有活跃任务。记忆抽取通常在运行结束后于后台线程执行，上下文压缩观察者总是在轮次之外分派。它们会收到一个全新的存储，`scope_id` 为 `"detached"`。写进去的东西在通知结束后立即丢弃，所以需要比调用活得更久的值请写进应用存储。
+
+## ExtensionData
+
+```python
+class ExtensionData:
+    scope_id: str
+    def get(self, typ: type[T]) -> T | None
+    def get_or_init(self, typ: type[T], init: Callable[[], T]) -> T
+    def set(self, value: T) -> None
+    def remove(self, typ: type[T]) -> T | None
+```
+
+- **以类型为键。** `set(value)` 严格按 `type(value)` 存储，子类是不同的键。为你要保存的每个值定义一个小类。除非两个扩展共用同一个类，否则不会冲突。
+- **线程安全。** 每个方法都持有一把可重入锁，所以同一个存储可以在不同线程上被中间件、生命周期钩子和观察者使用。
+- **`init` 在锁内执行。** `get_or_init` 在持锁状态下调用 `init()`，所以两个并发调用方不会创建出两个值。保持 `init` 轻量：构造一个空容器，把重的惰性工作放进容器内部。
+- **值的同步由你负责。** 存储保护的是它自己的映射，而不是里面的对象。被并发工具调用更新的计数器需要自己的锁，[内置示例](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example)就是这么做的。
+
+```python
+from dataclasses import dataclass, field
+from threading import Lock
+
+
+@dataclass
+class ToolCallCount:
+    value: int = 0
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def increment(self) -> None:
+        with self._lock:
+            self.value += 1
+
+
+counts = task_store.get_or_init(ToolCallCount, ToolCallCount)
+counts.increment()
+```
+
+## 宿主策略
+
+`HostPolicySnapshot` 是宿主实际执行的限制的一个窄投影，通过 `AgentBuildContext.policy` 和 `ExtensionRuntimeDeps.policy` 交给扩展。每个字段都有默认值，所以之后新增字段仍然兼容。
+
+| 字段                    | `config.yaml` 中的来源                  | 未启用时          |
+| ----------------------- | --------------------------------------- | ----------------- |
+| `token_budget_enabled`  | `token_budget.enabled`                  | `False`           |
+| `max_input_tokens`      | `token_budget.max_input_tokens`         | `None`            |
+| `max_output_tokens`     | `token_budget.max_output_tokens`        | `None`            |
+| `max_total_tokens`      | `token_budget.max_tokens`               | `None`            |
+| `budget_warn_fraction`  | `token_budget.warn_threshold`           | `None`            |
+| `budget_hard_fraction`  | `token_budget.hard_stop_threshold`      | `None`            |
+| `max_subagents_per_run` | Lead Agent 实际生效的每次运行委派总数   | 子 Agent 为 `None` |
+
+token 预算未启用时，五个 token 字段都是 `None`。子 Agent 的构建上下文投影的是子 Agent 的预算（`subagents.token_budget`，配置了按 Agent 覆盖时用覆盖值），而不是 Lead Agent 的。
+
+## 通知与故障放行
+
+任务生命周期钩子和观察者都通过同一个辅助函数通知，规则处处相同：
+
+- **注册顺序。** 贡献者按注册顺序逐个运行。
+- **隔离。** 一个贡献者抛出的异常会连同其入口点记入日志，不会跳过下一个。
+- **共享一个预算。** 任务生命周期通知给所有贡献者合计 **3 秒**，Lead 运行和子 Agent 都一样。预算耗尽时仍在运行的贡献者会被取消，它之后的每个贡献者都被跳过并记录警告：
+
+  ```text
+  Extension acme_audit:install: on_task_start timed out for task 7f3c...; the 3.0s notification budget was spent
+  Extension acme_costs:install: on_task_start skipped for task 7f3c...; the 3.0s notification budget was spent
+  ```
+
+  `on_task_start` 和 `on_task_stop` 各自单独计算预算。生命周期钩子只做簿记，慢的工作交给[服务](/docs/harness/extensions/services-and-routes)。
+- **同一个循环。** Gateway 把它的服务事件循环注册为扩展通知循环。子 Agent 可能运行在自己的事件循环上，但它们的生命周期钩子和观察者通知都会分派到 Gateway 循环。这样扩展只会在拥有这些资源的循环上使用它启动的资源，例如客户端和连接池。
+
+### 取消
+
+`asyncio.CancelledError` 到达贡献者有两种互不相关的原因，宿主按其来源区分：
+
+- **宿主任务正在被取消**，例如用户按了停止或 Gateway 正在关闭。异常会传播，剩下的贡献者不再调用。
+- **贡献者自己抛出了它**，例如基于取消实现的内部超时。异常会像其他异常一样被兜住，记为 `raised CancelledError`，下一个贡献者照常运行。自己引发的取消不会把一次本来成功的运行变成已取消。
+
+`KeyboardInterrupt` 和 `SystemExit` 总是会传播。
+
+### 关闭
+
+关闭时，Gateway 在刷写记忆之前就停止接受新的即发即弃观察（记忆、上下文压缩、被取消的系统调用）。通知循环会保留到进行中的运行和子 Agent 排空为止，所以它们的 `on_task_stop` 钩子仍会执行。
+
+## 诊断
+
+诊断是归属到某个扩展的问题。每条诊断都会以入口点为前缀写入 Gateway 日志。加载失败、中间件构建与隔离失败、路由挂载被拒，以及服务启动与停止失败，还会被收集到 `app.state.extension_diagnostics` 上的一个实时列表里，只保留最近的 **1000** 条。它没有 HTTP 端点，运维人员请查看 Gateway 日志。
+
+任务生命周期钩子和观察者的失败只记日志，不会进入这个列表。
+
+<Callout type="info">
+  要确认扩展已加载，找启动时的 `Extensions loaded: N/M (...)` 这一行。没有这一行说明
+  Gateway 根本没读到 `plugins:` 列表，例如条目写进了 `extensions_config.json`
+  而不是 `config.yaml`。
+</Callout>
