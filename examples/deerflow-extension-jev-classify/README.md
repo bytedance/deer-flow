@@ -118,6 +118,15 @@ carries a code such as `http_401`, `timeout`, `network`, `invalid_response`,
   and closes the client. An HTTP 401, 402, 403 or 429 stops further batches.
   A plugin bug fails its batch with `internal` and a type-name-only log line,
   never the whole call.
+- **Not a production contract, and not sharing the host's transport.** This example
+  implements its own HTTP path, including its own `choice`-question shape, size
+  packing and `deadline_seconds` bound, and it does not retry a failed batch,
+  unlike the host's shared TypeSafe client (`packages/harness/deerflow/typesafe/`,
+  used by `deerflow.guardrails.typesafe`), which owns retry/backoff, one error
+  taxonomy and the two-layer response contract. The extension is a separately
+  distributed package and must not import host internals, so sharing that transport
+  needs a publishable client package — option A of the shared Jev/TypeSafe client
+  design, deferred to a later review.
 - Item text is data: the default instruction says so, and nothing from the
   items or responses is copied into error messages. The only backend-supplied
   text in a result is the served model name, kept to a short identifier.

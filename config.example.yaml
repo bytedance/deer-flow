@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 49
+config_version: 50
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2188,6 +2188,61 @@ memory:
   # exposing query-aware search (mem0 does this). Tool calls go through the
   # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
+  # Pre-extraction cost gate (optional, OFF by default). Decides whether a batch
+  # of new conversation is worth paying for the extraction LLM call, using one
+  # `noul` question ("does this contain durable, cross-task, user-level
+  # information?").
+  #   off (default) - no request, no behavior change.
+  #   shadow - decide and record the verdict, still extract (the safe first step).
+  #   enforce - a low-probability batch skips the call AND advances the watermark,
+  #     so that batch is consumed as "nothing durable here". Enable only after the
+  #     measurement gate in the memory pre-screening design §5
+  #     passes; `skip_threshold` below is provisional and unmeasured.
+  # The failure direction is always extraction: an error, timeout, unusable
+  # response, missing verdict, or an over-limit batch extracts as usual. A skip is
+  # not a safety boundary, gates no execution, and changes no post-extraction
+  # gate (confidence / scope / durability / authority / dedup / eviction).
+  #
+  # EGRESS: the formatted conversation text (user + final assistant turns, which
+  # may contain file paths or credentials) is sent to the TypeSafe API -- a second
+  # destination beyond your own extraction model. Existing memory is never sent.
+  # `pii_redaction_middleware` does not cover this path.
+  #
+  # NOTE: a batch is not judged at all while `staleness_review_enabled` (true
+  # below) or `consolidation_enabled` is on -- a skip would also skip that batch's
+  # maintenance review -- and never on the emergency (pre-summarization) flush or
+  # the shutdown drain. With the defaults shipped here, shadow/enforce therefore
+  # sees no batches until staleness_review_enabled is turned off.
+  # prescreen:
+  #   mode: off
+  #   use: deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen
+  #   config:
+  #     skip_threshold: 0.2          # p below this skips; provisional, unmeasured
+  #     max_state_chars: 6000        # characters of the judged batch; over it extracts
+  #     cache_size: 256              # digest-keyed, successful verdicts only
+  #     cache_ttl_seconds: 300.0
+  #     # Connection/model/timeouts come from the top-level `typesafe:` block
+  #     # unless set here (api_key_env / api_key / base_url / model / timeout /
+  #     # deadline_seconds / max_attempts / retry_backoff).
+  #
+  # Signal classification (optional, OFF by default): two `noul` questions per
+  # batch ("does this explicitly endorse / reject something the user stated
+  # earlier?") mapped to the deterministic `reinforcement` / `correction` hints.
+  #   off (default) - no request.
+  #   shadow - decide and record only.
+  #   hints - merge the labels into the extraction hint text and, only while the
+  #     pre-screen is in `enforce`, veto a skip the model endorsed.
+  # A model verdict never decides extraction, never drives deletion, and never
+  # satisfies the reinforcement evidence gate (that gate stays deterministic).
+  # signal_classification:
+  #   mode: off
+  #   use: deerflow.agents.memory.signals.typesafe:TypeSafeSignalClassifier
+  #   combine: auto                  # auto | always | never: request sharing with the pre-screen
+  #   config:
+  #     hint_threshold: 0.5          # provisional, unmeasured
+  #     max_state_chars: 6000        # a mismatch with prescreen => each side keeps its own request
+  #     cache_size: 256
+  #     cache_ttl_seconds: 300.0
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
@@ -2984,6 +3039,31 @@ run_ownership:
 #       #           timeout / deadline_seconds / max_attempts / retry_backoff /
 #       #           max_state_chars / cache_size / cache_ttl_seconds /
 #       #           instructions / criteria
+
+# ============================================================================
+# TypeSafe (Jev) Client Defaults (optional)
+# ============================================================================
+# One block for every TypeSafe consumer: the guardrail risk gate
+# (guardrails.provider.config) and, once enabled, memory pre-screening and
+# signal classification. Each consumer overrides what it needs in its own
+# `config`; precedence is consumer config > this block > built-in defaults.
+#
+# Not here, on purpose: failure policy (the gate denies on error, the memory
+# paths carry on), cache settings, thresholds and question content. Those are
+# the consumer's own; two consumers with different thresholds can still share
+# one request, and each publishes its own policy identity.
+#
+# Credentials: prefer api_key_env. `api_key` here puts the key in this file.
+#
+# typesafe:
+#   api_key_env: TYPESAFE_API_KEY        # default; the variable holding the key
+#   # api_key: <explicit key>            # alternative to api_key_env
+#   base_url: https://api.typesafe.ai    # default
+#   model: jev-latest                    # default; pin an exact version for traceability
+#   timeout: 5.0                         # per-request timeout (seconds)
+#   deadline_seconds: 10.0               # whole-evaluation budget (seconds)
+#   max_attempts: 2                      # includes the first; 429/529 and transport errors only
+#   retry_backoff: 0.5                   # base seconds of exponential backoff
 
 # ============================================================================
 # Authorization Configuration

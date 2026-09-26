@@ -180,7 +180,7 @@ class DeerMem(MemoryManager):
         ``model_post_init`` (shared with direct construction).
         """
         config_dict = dict(backend_config or {})
-        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback"):
+        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback", "judge"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
         if "host_llm" not in config_dict:
@@ -199,6 +199,16 @@ class DeerMem(MemoryManager):
         instance = cls(backend_config=config_dict, mode=mode, callbacks=host_hooks.get("callbacks"))
         instance.backend_config = dict(backend_config or {})
         return instance
+
+    def refresh_judge(self, judge: Any) -> None:
+        """Replace the injected memory judge after a host config hot-reload.
+
+        ``self._config`` is shared with the updater and the update queue, so
+        mutating the parsed config reaches every judging call site without
+        rebuilding storage, the LLM, or the queue. ``judge=None`` (both sides
+        now off) disables judging on the next batch.
+        """
+        self._config.judge = judge
 
     # ── Write ────────────────────────────────────────────────────────────
     def add(

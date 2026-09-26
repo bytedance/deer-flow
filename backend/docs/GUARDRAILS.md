@@ -468,6 +468,30 @@ guardrails:
 | `max_state_chars` | `4000` | Argument text above this is denied locally. |
 | `cache_size` / `cache_ttl_seconds` | `256` / `300` | FIFO cache keyed by `(tool, arguments)`; `0` disables it. |
 
+The eight connection settings (`api_key` / `api_key_env` / `base_url` / `model` / `timeout` / `deadline_seconds` / `max_attempts` / `retry_backoff`) may instead live once in a top-level `typesafe:` block and be shared by every TypeSafe consumer; a value written here still wins (see "Shared client" below).
+
+**Shared client.** The transport half of this provider — authentication, client lifecycle, retry and backoff, the deadline budget, response parsing and the error taxonomy, UTF-8 wire-size counting — lives in `packages/harness/deerflow/typesafe/` and is shared with the other host-side TypeSafe consumers (memory pre-screening and signal classification, planned). Everything that makes this a *gate* stays in the provider: the state it builds, its question and rubric, its threshold and direction, its local preflight, its cache, and the rule that an error denies. The same rule holds in the other direction: nothing in the shared client knows what a "risky tool call" is, and a change that would move a failure policy, a threshold or a cache into it is a design change, not a refactor.
+
+**Effective configuration.** Connection settings resolve with the precedence consumer `config` > top-level `typesafe:` > built-in defaults, so an existing `guardrails.provider.config` keeps working unchanged while a deployment with several TypeSafe consumers shares one block:
+
+```yaml
+typesafe:                # optional; only the connection/model/timeout defaults
+  api_key_env: TYPESAFE_API_KEY
+  model: jev-latest
+  timeout: 5.0
+
+guardrails:
+  enabled: true
+  fail_closed: true
+  provider:
+    use: deerflow.guardrails.typesafe:TypeSafeGuardrailProvider
+    config:
+      threshold: 0.5     # consumer policy stays here
+      tools: ["bash"]
+```
+
+A question-level failure is reported per question by the shared parser and mapped back to this provider's own error by the adapter, so the gate's behavior is unchanged: a response whose envelope is usable but whose answer for `risky_tool_call` is missing or malformed still raises `TypeSafeGuardrailError` (`invalid_response`) and, with `fail_closed: true`, still denies. `max_state_chars` remains a **character** count of the canonical argument JSON — the shared client can report a payload's UTF-8 byte size for consumers that need it, but it changes no limit here, because one CJK character is three bytes and a byte limit would move this fallback boundary.
+
 **Allowed tools (`allowed_tools`).** A hard permission list, not an exemption from evaluation. Omitted, no list is enforced (the probe scope decides what is evaluated). Set to `[]`, no tool may run. Set to a list, only those tools may run — a call to any other tool is refused locally (`typesafe.tool_not_allowed`) with no state built, no request and no cache entry, and the refusal is a guardrail decision, so `fail_closed: false` cannot reopen it. A listed tool is **still** probed and still denied when its risk probability reaches `threshold`; the list answers "may this tool run at all", the risk gate answers "is this particular call safe". It is checked before `tools`, so a tool outside the list is refused even when `tools` would have skipped probing it — an unlisted tool must not inherit an allow from being out of probe scope. The provider has no denylist: express deny rules and per-role limits in `authorization.*`.
 
 **What is sent.** The tool name plus the call's full argument JSON, under `state.tool_call`. The provider does **not** redact: arguments can carry user content, file paths, shell commands or secrets, and `pii_redaction_middleware` does not apply on this path. Narrow `tools` to the tools that can cause side effects, and clear the egress with your data-protection owner before enabling.
@@ -631,6 +655,7 @@ guardrails:
 cd backend
 uv run python -m pytest tests/test_guardrail_middleware.py -v
 uv run python -m pytest tests/test_typesafe_guardrail_provider.py -v
+uv run python -m pytest tests/test_typesafe_client.py tests/test_typesafe_config.py -v
 uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 ```
 
@@ -654,6 +679,15 @@ uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 `tests/blocking_io/test_typesafe_guardrail_provider.py` -- anchor that drives `aevaluate` against a real loopback HTTP
 server, with a meta-check proving the sync path on the loop trips the Blockbuster gate.
 
+`tests/test_typesafe_client.py` / `tests/test_typesafe_config.py` -- the shared client the provider is now built on:
+- Per-question partial success: a valid answer survives an invalid or missing one, each failure category is reported
+  separately, an answer for a question that was never asked is ignored, and a missing *envelope* still fails the whole request
+- The gate's own question-level failure still surfaces as `TypeSafeGuardrailError` / `invalid_response`
+- `wire_size` matches what httpx sends, counts UTF-8 bytes, and leaves the gate's `max_state_chars` a character count
+- Precedence consumer `config` > top-level `typesafe` > built-in defaults, and `mode: off` resolving no credential at all
+- `sharing_key` (internal: credential fingerprint, connection settings, input limit, transport factory) versus
+  `release_policy_parameters()` (public: behaviour, never the credential)
+
 ## Files
 
 ```
@@ -662,17 +696,27 @@ packages/harness/deerflow/guardrails/
     provider.py              # GuardrailProvider protocol, GuardrailRequest, GuardrailDecision
     middleware.py             # GuardrailMiddleware (AgentMiddleware subclass)
     builtin.py               # AllowlistProvider (zero deps)
-    typesafe.py              # TypeSafeGuardrailProvider (System One HTTP risk gate)
+    typesafe.py              # TypeSafeGuardrailProvider (state, question, threshold, cache, failure policy)
+
+packages/harness/deerflow/typesafe/
+    __init__.py              # Public exports + the shared/not-shared boundary
+    client.py                # TypeSafeClient: request, retry, deadline, response parsing, wire_size
+    connection.py            # Effective connection: precedence, credential fingerprint, sharing_key inputs
+    errors.py                # One error taxonomy (transport / http_status / invalid_response / deadline)
+    validation.py            # Eager config-value validation shared with consumers
 
 packages/harness/deerflow/config/
     guardrails_config.py     # GuardrailsConfig Pydantic model + singleton
+    typesafe_config.py       # Top-level `typesafe:` defaults + singleton
 
 packages/harness/deerflow/agents/middlewares/
     tool_error_handling_middleware.py  # Registers GuardrailMiddleware in chain
 
-config.example.yaml          # Four provider options documented
+config.example.yaml          # Four provider options + the top-level `typesafe:` defaults
 tests/test_guardrail_middleware.py  # 25 tests
 tests/test_typesafe_guardrail_provider.py  # TypeSafe provider + middleware integration
+tests/test_typesafe_client.py  # Shared client: partial success, wire size
+tests/test_typesafe_config.py  # Precedence, mode off, the two identities
 tests/blocking_io/test_typesafe_guardrail_provider.py  # Async path must stay off the loop
 docs/GUARDRAILS.md           # This file
 ```

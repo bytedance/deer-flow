@@ -1,5 +1,4 @@
 """Configuration for the memory mechanism (host-shared fields only).
-
 DeerMem-private fields live in ``backends/deermem/config.py`` (``DeerMemConfig``),
 reached via ``backend_config`` (a dict the factory passes to the backend's
 ``__init__``). This module holds ONLY the host-shared fields every backend /
@@ -10,15 +9,17 @@ makes backends swappable and portable (DeerMem's knobs do not leak onto the
 shared contract).
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
-_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
+_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config", "prescreen", "signal_classification"})
 
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
@@ -50,6 +51,37 @@ _LEGACY_DEERMEM_FIELDS = frozenset(
         "model_name",
     }
 )
+
+
+class MemoryPrescreenConfig(BaseModel):
+    """Host-shared pre-screen slot: a cost gate over the extraction call.
+
+    ``off`` (default) resolves no class path, constructs nothing and validates no
+    credentials, so an unconfigured deployment behaves exactly as before.
+    ``shadow`` decides and records without changing anything; ``enforce`` may
+    actually skip the extraction call, which requires the measured gate in the
+    pre-screening design §5.
+    """
+
+    mode: Literal["off", "shadow", "enforce"] = Field(default="off", description="off = no request and no behavior change; shadow = decide + record; enforce = a skip actually saves the extraction call")
+    use: str | None = Field(default=None, description="Provider class path, e.g. deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen")
+    config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific settings passed as kwargs")
+
+
+class MemorySignalClassificationConfig(BaseModel):
+    """Host-shared signal-classification slot: additive hint labels (and one narrow veto).
+
+    ``hints`` merges the model's labels into the extraction hint text and may veto
+    a pre-screen skip under ``prescreen.mode: enforce``. It never decides
+    extraction on its own and never drives deletion.
+    """
+
+    mode: Literal["off", "shadow", "hints"] = Field(default="off", description="off = no request; shadow = record only; hints = merge labels into the hint text (and, under pre-screen enforce, allow a veto)")
+    use: str | None = Field(default=None, description="Provider class path, e.g. deerflow.agents.memory.signals.typesafe:TypeSafeSignalClassifier")
+    combine: Literal["auto", "always", "never"] = Field(
+        default="auto", description="Request combination with the pre-screen: auto shares when every effective client setting matches, always requires it, never splits every side into its own request"
+    )
+    config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific settings passed as kwargs")
 
 
 class MemoryConfig(BaseModel):
@@ -109,6 +141,29 @@ class MemoryConfig(BaseModel):
             "they do not belong on the shared `MemoryConfig` schema."
         ),
     )
+
+    prescreen: MemoryPrescreenConfig = Field(
+        default_factory=MemoryPrescreenConfig,
+        description="Pre-extraction cost gate (off by default): decide whether a batch is worth an extraction call.",
+    )
+    signal_classification: MemorySignalClassificationConfig = Field(
+        default_factory=MemorySignalClassificationConfig,
+        description="Signal-classification hints (off by default): reinforcement/correction labels from the batch text, plus a narrow veto over a pre-screen skip.",
+    )
+
+    @model_validator(mode="after")
+    def _check_judging_slots_are_usable(self) -> MemoryConfig:
+        """A configured judging slot must name a provider (fail fast, never silently off).
+
+        An enabled mode without ``use`` would look configured while doing nothing.
+        The provider's own validation (credentials, thresholds, limits) runs when
+        the memory backend is built, so a bad deployment fails there rather than
+        on the first batch.
+        """
+        for name, slot in (("prescreen", self.prescreen), ("signal_classification", self.signal_classification)):
+            if slot.mode != "off" and not slot.use:
+                raise ValueError(f"memory.{name}.use is required when mode={slot.mode!r}")
+        return self
 
 
 def should_use_memory_tools(config: MemoryConfig) -> bool:
