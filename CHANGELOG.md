@@ -323,6 +323,12 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **projects:** The conversation-files view no longer shows an empty heading
+  for a member thread that has no title yet. A thread's `display_name` is
+  `null` on the wire until title generation has run (or if it never does), but
+  the file-group type declared it as a required string and rendered it as-is,
+  so files uploaded before the first reply sat under a blank line. Such groups
+  now read "Untitled", matching the project's thread list.
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
