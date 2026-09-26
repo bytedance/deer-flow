@@ -146,6 +146,11 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
+        else:
+            # Checkpoints written before breakpoints were placed on copies can
+            # carry markers on old blocks; a thread with more than four of them
+            # must not stay broken just because caching was switched off.
+            self._strip_cache_control(payload)
 
         if self.auto_thinking_budget:
             self._apply_thinking_budget(payload)
@@ -209,9 +214,9 @@ class ClaudeChatModel(ChatAnthropic):
         """
         MAX_CACHE_BREAKPOINTS = 4
 
-        # Stripping also leaves every list and message dict below owned by this
-        # payload, so a candidate slot can be replaced without touching the
-        # caller's objects.
+        # Must run first: stripping leaves every list and message dict below
+        # owned by this payload, which is what makes replacing a candidate
+        # slot (and writing msg["content"]) safe for any payload.
         self._strip_cache_control(payload)
 
         # Collect candidate slots (list, index) in document order:
@@ -273,17 +278,21 @@ class ClaudeChatModel(ChatAnthropic):
     def _strip_cache_control(payload: dict) -> None:
         """Remove cache_control markers without writing into the payload's objects.
 
-        OAuth requests are stripped before they reach Anthropic, and prompt
-        caching strips before placing its own breakpoints.
+        Every request is stripped: prompt caching strips before placing its own
+        breakpoints, a request without caching is stripped in
+        ``_get_request_payload``, and OAuth requests again before they reach
+        Anthropic.
 
         The payload shares objects with the caller.  langchain-anthropic passes
         Claude-native blocks (an image or document with a ``source``, a search
-        result) and list-form system blocks through by reference, and the tool
-        definitions are the tool binding's own dicts.  Changing them in place
-        changes the thread's messages, and a marker written there is
-        checkpointed with them.  So the system, message, content and tool
-        lists and every message dict are replaced with copies, and a block
-        that carries a marker is copied without it.
+        result) and list-form system blocks through by reference, and a reused
+        tool binding passes its own tool dicts.  Changing them in place changes
+        the thread's messages, and a marker written there is checkpointed with
+        them.  So a block that carries a marker is copied without it, and the
+        system, message, content and tool lists and every message dict are
+        replaced with copies.  langchain-anthropic already builds fresh message
+        dicts and content lists, so those copies are defensive; they are what
+        lets ``_apply_prompt_caching`` write into them for any payload.
         """
 
         def without_markers(items: list) -> list:

@@ -65,8 +65,9 @@ the same policy first so run metadata reports the effective values. Design note:
 
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 
-- The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and tool definitions are the binding's own dicts. `_apply_prompt_caching` and `_strip_cache_control` replace the lists they change and copy a block before adding or removing `cache_control`. Writing in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
-- `_apply_prompt_caching` owns every breakpoint in the request: it drops markers already present, including ones older checkpoints still carry, before placing at most four. Pinned by `tests/test_claude_provider_prompt_caching.py`
+- The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
+- Every request goes through `_strip_cache_control`, with caching on or off, so markers stored by older checkpoints never reach the API. It copies a marked block without its marker and replaces the system, message, content and tool lists and every message dict with copies; langchain-anthropic already builds fresh message dicts and content lists, so that part is defensive
+- `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
 
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 

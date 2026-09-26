@@ -296,6 +296,23 @@ def test_repeated_requests_leave_thread_messages_unmarked(model):
     assert all(message.content == [_native_image()] for message in history if isinstance(message, HumanMessage))
 
 
+@pytest.mark.parametrize("enable_prompt_caching", [True, False])
+def test_markers_stored_in_the_thread_stop_reaching_the_api(model, enable_prompt_caching):
+    """Threads checkpointed before the fix carry a marker on every such block.
+
+    Recovery must not depend on caching being on: switching it off is the
+    obvious reaction to the 400s, and five stored markers still exceed the limit.
+    """
+    model.enable_prompt_caching = enable_prompt_caching
+    stored = {**_native_image(), "cache_control": {"type": "ephemeral"}}
+    history: list = [SystemMessage(content="You are helpful.")]
+    for turn in range(1, 6):
+        history.append(HumanMessage(content=[dict(stored)], id=f"human-{turn}"))
+        payload = model._get_request_payload(history)
+        assert _count_cache_control(payload) <= (4 if enable_prompt_caching else 0), f"turn {turn}"
+        history.append(AIMessage(content=f"answer {turn}", id=f"ai-{turn}"))
+
+
 def test_markers_already_in_the_request_are_replaced(model):
     """Checkpoints written by older versions can carry markers on old blocks."""
     stale = [{**_native_image(), "cache_control": {"type": "ephemeral"}} for _ in range(5)]
