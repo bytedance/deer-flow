@@ -26,6 +26,7 @@ import {
 } from "@/core/models/management";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { ImageModelSettings } from "./image-model-settings";
 import { SettingsSection } from "./settings-section";
 
 export function ModelSettingsPage() {
@@ -63,82 +64,85 @@ export function ModelSettingsPage() {
     }
   }
   return (
-    <SettingsSection title={text.title} description={text.description}>
-      {!canManage ? (
-        <p>{text.adminOnly}</p>
-      ) : (
-        <div className="space-y-4">
-          <div className="flex gap-2">
-            <Button disabled={pending} onClick={() => setEditing("new")}>
-              {text.add}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={pending || catalog.isFetching}
-              onClick={() => void catalog.refetch()}
-            >
-              {text.reload}
-            </Button>
-          </div>
-          {catalog.isLoading && <p role="status">{text.loading}</p>}
-          {catalog.error && (
-            <div role="alert">
-              <p>{text.failed}</p>
+    <div className="space-y-8">
+      <SettingsSection title={text.title} description={text.description}>
+        {!canManage ? (
+          <p>{text.adminOnly}</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex gap-2">
+              <Button disabled={pending} onClick={() => setEditing("new")}>
+                {text.add}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={pending || catalog.isFetching}
+                onClick={() => void catalog.refetch()}
+              >
+                {text.reload}
+              </Button>
             </div>
-          )}
-          {catalog.data?.models.length === 0 && <p>{text.empty}</p>}
-          {catalog.data?.models.map((model) => (
-            <div
-              key={`${model.source}:${model.name}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
-            >
-              <div>
-                <p className="font-medium">
-                  {model.display_name || model.name}
-                </p>
-                <p className="text-muted-foreground text-sm">
-                  {model.model} ·{" "}
-                  {model.source === "config"
-                    ? text.yaml
-                    : model.enabled
-                      ? text.enabled
-                      : text.disabled}
-                </p>
-                {model.source === "managed" && model.conflict && (
-                  <p role="alert">{text.conflict}</p>
+            {catalog.isLoading && <p role="status">{text.loading}</p>}
+            {catalog.error && (
+              <div role="alert">
+                <p>{text.failed}</p>
+              </div>
+            )}
+            {catalog.data?.models.length === 0 && <p>{text.empty}</p>}
+            {catalog.data?.models.map((model) => (
+              <div
+                key={`${model.source}:${model.name}`}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
+              >
+                <div>
+                  <p className="font-medium">
+                    {model.display_name || model.name}
+                  </p>
+                  <p className="text-muted-foreground text-sm">
+                    {model.model} ·{" "}
+                    {model.source === "config"
+                      ? text.yaml
+                      : model.enabled
+                        ? text.enabled
+                        : text.disabled}
+                  </p>
+                  {model.source === "managed" && model.conflict && (
+                    <p role="alert">{text.conflict}</p>
+                  )}
+                </div>
+                {model.source === "managed" && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={pending || model.conflict}
+                      onClick={() => setEditing(model)}
+                    >
+                      {text.edit}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={pending || model.conflict}
+                      onClick={() => void toggle(model)}
+                    >
+                      {model.enabled ? text.disable : text.enable}
+                    </Button>
+                  </div>
                 )}
               </div>
-              {model.source === "managed" && (
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={pending || model.conflict}
-                    onClick={() => setEditing(model)}
-                  >
-                    {text.edit}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={pending || model.conflict}
-                    onClick={() => void toggle(model)}
-                  >
-                    {model.enabled ? text.disable : text.enable}
-                  </Button>
-                </div>
-              )}
-            </div>
-          ))}
-          {editing && (
-            <ModelEditor
-              key={`${user?.id}:${editing === "new" ? "new" : editing.name}`}
-              model={editing === "new" ? undefined : editing}
-              close={() => setEditing(null)}
-              saved={refresh}
-            />
-          )}
-        </div>
-      )}
-    </SettingsSection>
+            ))}
+            {editing && (
+              <ModelEditor
+                key={`${user?.id}:${editing === "new" ? "new" : editing.name}`}
+                model={editing === "new" ? undefined : editing}
+                close={() => setEditing(null)}
+                saved={refresh}
+              />
+            )}
+          </div>
+        )}
+      </SettingsSection>
+      {canManage && <ImageModelSettings />}
+    </div>
   );
 }
 

@@ -1,5 +1,19 @@
 ### Configuration System
 
+Managed image profiles use `image_generation.py` and the same encrypted JSON
+catalog primitive as managed chat models. The image catalog lives at
+`runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
+in SQL or `config.yaml`. One profile may be enabled; its revision fences
+updates and capability test results. An enabled managed image profile takes
+priority over legacy `sandbox.environment` image variables on each controlled
+image request. Disabled profiles do not shadow legacy variables. The
+`ImageConnectionStatus` enum is specific to image readiness: the existing IM
+channel connection state does not represent generation versus reference edit.
+Legacy AIO image variables are inherited at container creation and do not
+require its per-command environment API; managed profiles do. Changing legacy
+variables requires restarting the Gateway and recreating existing sandboxes.
+Readiness probes originate in the Gateway; actual sandbox egress can differ.
+
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
 The per-assembly snapshot owns these settings; no run-context override exists.

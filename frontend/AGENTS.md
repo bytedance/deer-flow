@@ -57,6 +57,13 @@ Run status `unmet` identifies a finished occurrence whose scheduled goal was not
 
 ## Architecture
 
+The administrator-only Models settings page also renders an image provider
+section. It calls `/api/image-generation/profiles`, stores no API key in browser
+state after save, and shows separate generation and reference-edit test
+results. The saved profile applies to new image tool calls without refreshing
+the frontend or restarting a sandbox. The API projects a dedicated image
+readiness status; it is separate from chat-model and channel connection types.
+
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
                                               ├── Sub-Agents
