@@ -1536,6 +1536,85 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
 
 
 @pytest.mark.anyio
+async def test_acquire_async_lock_waiters_do_not_starve_holder_worker(tmp_path, monkeypatch):
+    """Lock waiters must not occupy the executor needed by the lock holder."""
+    provider = _make_provider(tmp_path)
+    provider._acquire_serializer.close()
+    provider._acquire_serializer = AcquireSerializer(
+        max_workers=2,
+        thread_name_prefix="aio-holder-deadlock-test",
+    )
+
+    projection_started = threading.Event()
+    allow_projection = threading.Event()
+    waiter_workers_started = threading.Event()
+    count_lock = threading.Lock()
+    started_workers = 0
+    projection_calls = 0
+
+    executor = provider._acquire_serializer.executor
+    original_submit = executor.submit
+
+    def tracking_submit(func, /, *args, **kwargs):
+        def tracked():
+            nonlocal started_workers
+            with count_lock:
+                started_workers += 1
+                if started_workers >= 3:
+                    waiter_workers_started.set()
+            return func(*args, **kwargs)
+
+        return original_submit(tracked)
+
+    def ensure_projection(_user_id):
+        nonlocal projection_calls
+        projection_calls += 1
+        if projection_calls == 1:
+            projection_started.set()
+            assert allow_projection.wait(timeout=2)
+
+    monkeypatch.setattr(executor, "submit", tracking_submit)
+    monkeypatch.setattr(provider, "_ensure_skills_projection", ensure_projection)
+    monkeypatch.setattr(
+        provider,
+        "_reuse_in_process_sandbox",
+        lambda *_args, **_kwargs: "sandbox-cached",
+    )
+
+    owner = asyncio.create_task(
+        provider.acquire_async("thread-holder-deadlock", user_id="default")
+    )
+    successors: list[asyncio.Task[str]] = []
+    try:
+        assert await asyncio.to_thread(projection_started.wait, 2)
+        successors = [
+            asyncio.create_task(
+                provider.acquire_async("thread-holder-deadlock", user_id="default")
+            )
+            for _ in range(2)
+        ]
+        # Submission 1 acquired the holder's key. Submissions 2 and 3 are now
+        # both running in the bounded serializer pool, blocked on that same key.
+        assert await asyncio.to_thread(waiter_workers_started.wait, 2)
+
+        allow_projection.set()
+        assert await asyncio.wait_for(owner, timeout=1) == "sandbox-cached"
+        assert await asyncio.wait_for(
+            asyncio.gather(*successors),
+            timeout=1,
+        ) == ["sandbox-cached", "sandbox-cached"]
+    finally:
+        allow_projection.set()
+        if not owner.done():
+            owner.cancel()
+        for task in successors:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(owner, *successors, return_exceptions=True)
+        provider.reset()
+
+
+@pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
     """Async cached reuse must keep backend health checks off the event loop."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
