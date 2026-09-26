@@ -134,6 +134,39 @@ Docker 部署时，`localhost` 指向 DeerFlow 容器本身。请改用容器能
   </Tabs.Tab>
 </Tabs>
 
+#### 推理能力契约
+
+`supports_thinking` 和 `supports_reasoning_effort` 只能表示"有没有这个开关"。当 provider 的约定与 DeerFlow 的通用假设不同——例如 thinking 无法关闭，或 effort 取值不是 `minimal/low/medium/high`——可以改为声明映射形式的 `reasoning` 块。此时这两个布尔值会由契约推导，聊天界面只提供模型接受的取值，并且所有模型调用（对话、总结、标题生成、子代理）都遵循同一套策略。已有的 Ollama `reasoning: true` / `false`，以及 gpt-oss 一类模型使用的 `low` / `medium` / `high` 档位字符串，仍是 ChatOllama 原生参数，不会启用此契约。
+
+```yaml
+models:
+  - name: glm-5.3-flash
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: glm-5.3-flash
+    api_base: https://api.z.ai/api/paas/v4
+    api_key: $ZAI_API_KEY
+    supports_vision: true
+    reasoning:
+      thinking: required            # unsupported | optional | required
+      dialect: openai_extra_body    # auto | openai_extra_body | anthropic | vllm_chat_template | ollama | none
+      history: clear                # preserve | clear
+      effort:
+        values: [low, high, max]    # provider 自己的取值
+        default: high               # 调用方未指定时使用
+        aliases:                    # DeerFlow 通用取值 -> provider 取值
+          minimal: low
+          medium: high
+    extra_body:
+      tool_stream: true
+```
+
+- `thinking: required` 会在后台调用请求关闭 thinking 时仍保持开启；设置 `on_disable_request: reject` 则改为让这类调用直接失败。
+- 不在 `values` 中的 effort 取值会先经 `aliases` 映射，否则回退到 `default`，绝不会原样发给 provider。出于同样的原因，写在 profile 或 `when_thinking_enabled` / `when_thinking_disabled` 模板里的 effort 取值也会在启动时对照 `values` 校验。
+- 修改 `effort.path` 时，请移除 profile 和 thinking 模板中旧的 `reasoning_effort` 字段；契约会在启动时拒绝这类冲突配置。切换到未声明该取值的旧模型时，聊天界面也会丢弃记住的 provider 专属 effort 档位。
+- `default` 同样作用于从不指定 effort 的调用方——总结、标题生成和子代理——所以请选一个你愿意为每次后台调用付费的档位（上例用 `high`，`max` 仍可在输入框里手动选择）。
+- `dialect: auto`（默认值）会根据 `when_thinking_enabled` 推断开关 payload，因此已有配置可以直接加上 `reasoning` 而无需改写模板。未声明 `reasoning` 块的配置行为完全不变。
+- 自相矛盾的配置（例如 `required` 同时配置了 `when_thinking_disabled`）会在启动时报错。
+
 ### 沙箱
 
 ```yaml

@@ -6,9 +6,10 @@ handles token usage accumulation.
 
 Key design decisions:
 - on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
-- on_chat_model_start captures the first user-visible prompt as llm.human.input and
-  extracts the first human message for run.input, because it is more reliable than
-  on_chain_start (fires on every node) — messages here are fully structured.
+- on_chat_model_start reconciles consumed middleware tool results and captures the
+  first user-visible prompt as llm.human.input. It extracts the first human message
+  for run.input because it is more reliable than on_chain_start (fires on every
+  node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
 - on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
 - Token usage accumulated in memory, written to RunRow on run completion
@@ -34,6 +35,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+_MAX_RUN_SKILL_SNAPSHOTS = 64
 
 
 @dataclass
@@ -288,6 +291,10 @@ class RunJournal(BaseCallbackHandler):
         self._memory_context_recorded = False
         self._tool_promotion_claim_lock = threading.Lock()
         self._claimed_tool_promotions: set[str] = set()
+        # Only lead producers receive this journal in runtime.context. Keep
+        # display snapshots separate from tool/secret authorization state.
+        self._skill_usage_lock = threading.Lock()
+        self._skill_usages: dict[str, dict[str, Any]] = {}
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -406,7 +413,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Capture the first user-visible prompt as llm.human.input.
+        """Capture consumed tool results and the first user-visible prompt.
 
         This is also the canonical place to extract the first human message:
         messages are fully structured here, it fires only on real LLM calls,
@@ -427,6 +434,9 @@ class RunJournal(BaseCallbackHandler):
 
         # Capture the first user message sent to the lead agent in this run.
         caller = self._identify_caller(tags)
+        if caller == "lead_agent":
+            for batch in messages:
+                self._reconcile_consumed_tool_messages(batch)
         if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
@@ -509,11 +519,18 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
+            content = message.model_dump()
+            if is_canonical_callback and caller == "lead_agent" and isinstance(message, AIMessage) and not message.tool_calls:
+                with self._skill_usage_lock:
+                    skill_usages = deepcopy(list(self._skill_usages.values()))
+                if skill_usages:
+                    content["additional_kwargs"] = {**content.get("additional_kwargs", {}), SKILL_USAGES_KEY: skill_usages}
+
             response_events.append(
                 self._make_event(
                     event_type=LLM_AI_RESPONSE_EVENT.event_type,
                     category=LLM_AI_RESPONSE_EVENT.category,
-                    content=message.model_dump(),
+                    content=content,
                     metadata={
                         "caller": caller,
                         "usage": usage_dict,
@@ -620,6 +637,30 @@ class RunJournal(BaseCallbackHandler):
 
     # -- Internal methods --
 
+    def record_skill_usage(self, usage: Mapping[str, Any]) -> None:
+        """Capture first-load display evidence from a successful lead producer.
+
+        Tool wrappers run after ``on_tool_end`` serialized the raw response;
+        slash producers register before invoking their model handler. The next
+        terminal lead response carries these snapshots in the history feed so
+        pagination and checkpoint compaction do not lose the menu's evidence.
+        No event-store or other loop-bound work happens on this producer path.
+        """
+        with self._skill_usage_lock:
+            if self._closed:
+                return
+            path = usage.get("path")
+            content = usage.get("content")
+            if not isinstance(path, str) or not path or not isinstance(content, str):
+                return
+            if path in self._skill_usages or len(self._skill_usages) >= _MAX_RUN_SKILL_SNAPSHOTS:
+                return
+            snapshot = deepcopy(dict(usage))
+            if len(content) > MAX_SKILL_SNAPSHOT_CHARS:
+                snapshot["content"] = content[:MAX_SKILL_SNAPSHOT_CHARS]
+                snapshot["partial"] = True
+            self._skill_usages[path] = snapshot
+
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
         tool_call_id = getattr(message, "tool_call_id", None)
@@ -636,11 +677,23 @@ class RunJournal(BaseCallbackHandler):
             return tool_call.get(key)
         return getattr(tool_call, key, None)
 
+    @staticmethod
+    def _is_ai_message(message: Any) -> bool:
+        return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+    def _has_current_run_tool_call(self, message: Any) -> bool:
+        if not self._is_ai_message(message):
+            return False
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            tool_call_id = self._tool_call_value(tool_call, "id")
+            if isinstance(tool_call_id, str) and tool_call_id in self._current_run_tool_call_names:
+                return True
+        return False
+
     def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
         if caller != "lead_agent":
             return
-        is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
-        if not is_ai_message:
+        if not self._is_ai_message(message):
             return
         tool_calls = getattr(message, "tool_calls", None) or []
         if not isinstance(tool_calls, list):
@@ -695,12 +748,41 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
 
-    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
-        for message in self._final_output_messages(outputs):
+    def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
+        for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
+
+    def _reconcile_consumed_tool_messages(self, messages: Iterable[Any]) -> None:
+        """Reconcile results after the latest current-run tool call."""
+        suffix = self._current_run_tool_call_suffix(messages)
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
+
+    def _current_run_tool_call_suffix(self, messages: Iterable[Any]) -> list[Any] | None:
+        """Return messages after the latest current-run AI tool-call boundary."""
+        batch = list(messages)
+        boundary = None
+        has_ai_message = False
+        for index, message in enumerate(batch):
+            if not self._is_ai_message(message):
+                continue
+            has_ai_message = True
+            if self._has_current_run_tool_call(message):
+                boundary = index
+        if boundary is not None:
+            return batch[boundary + 1 :]
+        # Some callback fixtures provide only the tool result. Preserve that
+        # fallback, but never scan a history containing AI messages without a
+        # current-run boundary.
+        return batch if not has_ai_message else None
+
+    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
+        suffix = self._current_run_tool_call_suffix(self._final_output_messages(outputs))
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
 
     def _make_event(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> dict:
         return {
@@ -1156,6 +1238,8 @@ class RunJournal(BaseCallbackHandler):
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
         self._closed = True
+        with self._skill_usage_lock:
+            self._skill_usages.clear()
         self._store = None
         self._progress_reporter = None
         self._buffer.clear()

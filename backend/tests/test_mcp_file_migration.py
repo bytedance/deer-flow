@@ -212,6 +212,125 @@ class TestRewriteLocalPathsInText:
 
         assert result == f"Screenshot saved to {VIRTUAL_PATH_PREFIX}/workspace/absolute-output/page.png"
 
+    def test_new_absolute_path_with_spaces_is_rewritten(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "reports/final report.txt")
+        text = f'Saved as "{src}" and ready.'
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert result == f'Saved as "{VIRTUAL_PATH_PREFIX}/workspace/reports/final report.txt" and ready.'
+
+    def test_new_relative_path_with_spaces_is_rewritten(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "final reports/result.txt")
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                "Saved as final reports/result.txt.",
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/final reports/result.txt."
+
+    def test_new_dot_relative_path_with_spaces_is_rewritten(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "final reports/result.txt")
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                "Saved as ./final reports/result.txt.",
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/final reports/result.txt."
+
+    def test_changed_path_with_spaces_outside_user_data_is_untouched(self, tmp_path: Path, paths: Paths):
+        outside = tmp_path / "outside report.txt"
+        outside.write_text("outside", encoding="utf-8")
+        text = f"Saved as {outside}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[outside],
+            )
+
+        assert result == text
+
+    @pytest.mark.skipif(os.name == "nt", reason="exercises POSIX file URI spellings")
+    def test_new_file_uri_with_literal_spaces_is_rewritten(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        text = f"Saved as file://{src}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/final report.txt"
+
+    def test_changed_path_with_spaces_does_not_rewrite_longer_name(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        text = f"Backup: {src}.bak"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == text
+
+    def test_changed_path_with_spaces_does_not_rewrite_whitespace_suffix(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        longer = _workspace_file(paths, "final report.txt copy")
+        text = f"Backup: {longer}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == text
+
+    def test_changed_path_with_spaces_followed_by_prose_is_untouched(self, paths: Paths):
+        src = _workspace_file(paths, "final report.txt")
+        text = f"Saved as {src} and ready."
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                changed_files=[src],
+            )
+
+        assert result == text
+
     def test_tmpdir_output_under_workspace_is_rewritten(self, paths: Paths):
         src = _workspace_file(paths, ".mcp/tmp/page.png")
         text = f"Saved to {src}"
@@ -319,6 +438,59 @@ class TestRewriteLocalPathsInText:
             )
 
         assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/page-2026-06-16T10-21-46-864Z.yml."
+
+    @pytest.mark.parametrize(
+        "other_path",
+        [
+            r"C:\outside\page.yml",
+            pytest.param(
+                r"\\server\share\page.yml",
+                marks=pytest.mark.skipif(os.name == "nt", reason="resolving a UNC path on Windows can contact an SMB server"),
+            ),
+            r"missing\page.yml",
+            r"page.yml\inner.txt",
+            "missing/page.yml",
+            "page.yml/inner.txt",
+        ],
+    )
+    def test_bare_filename_does_not_rewrite_path_segments(self, paths: Paths, other_path: str):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "page.yml")
+        text = f"Saved as page.yml. Other path: `{other_path}`."
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/page.yml. Other path: `{other_path}`."
+
+    def test_bare_filename_before_markdown_hard_break_is_left_untouched(self, paths: Paths):
+        """A trailing backslash before a newline is treated as a path separator.
+
+        That position is more often a Markdown hard line break, so a genuine bare
+        filename there keeps its literal spelling instead of becoming a virtual
+        path. A backslash is also a legal filename character on POSIX, so this
+        forgoes one rewrite rather than risk corrupting a real path reference.
+        """
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "page.yml")
+        text = "Saved as page.yml\\\nnext line"
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                CallToolResult(content=[TextContent(type="text", text=text)]),
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == text
 
     def test_bare_filename_without_changed_file_is_left_untouched(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
@@ -628,6 +800,22 @@ class TestConvertCallToolResultRewrites:
             )
 
         assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/page-2026.yml"
+
+    def test_text_path_with_spaces_rewritten_from_changed_files(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        src = _workspace_file(paths, "report with spaces.txt")
+        result = CallToolResult(content=[TextContent(type="text", text=f"Saved as {src}")], isError=False)
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(
+                result,
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+                changed_files=[src],
+            )
+
+        assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/report with spaces.txt"
 
     def test_no_context_does_not_rewrite(self, paths: Paths):
         src = _workspace_file(paths, "x.png", content=b"png")

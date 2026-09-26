@@ -9,11 +9,11 @@ import logging
 import os
 from typing import Any
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
-# Requests has no default timeout. This bounds local connect/read inactivity;
+# httpx defaults to a 5s timeout. This bounds local connect/read inactivity;
 # fetch_timeout and fetch_navigation_timeout configure the remote crawl only.
 _REQUEST_TIMEOUT_SECONDS = 30
 
@@ -46,7 +46,7 @@ class InfoQuestClient:
             logger.debug(config_details)
             logger.debug("\n" + "*" * 70 + "\n")
 
-    def fetch(self, url: str, return_format: str = "html") -> str:
+    async def fetch(self, url: str, return_format: str = "html") -> str:
         if logger.isEnabledFor(logging.DEBUG):
             url_truncated = url[:50] + "..." if len(url) > 50 else url
             logger.debug(
@@ -56,7 +56,7 @@ class InfoQuestClient:
                 f"has_timeout_filter={self.fetch_timeout > 0} | timeout_filter={self.fetch_timeout} | "
                 f"has_fetch_time_filter={self.fetch_time > 0} | fetch_time_filter={self.fetch_time} | "
                 f"has_navigation_timeout_filter={self.fetch_navigation_timeout > 0} | navi_timeout_filter={self.fetch_navigation_timeout} | "
-                f"request_type=sync"
+                f"request_type=async"
             )
 
         # Prepare headers
@@ -67,7 +67,8 @@ class InfoQuestClient:
 
         logger.debug("Sending crawl request to InfoQuest API")
         try:
-            response = requests.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data, timeout=_REQUEST_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                response = await client.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data, timeout=_REQUEST_TIMEOUT_SECONDS)
 
             # Check if status code is not 200
             if response.status_code != 200:
@@ -152,13 +153,13 @@ class InfoQuestClient:
 
         return data
 
-    def web_search_raw_results(
+    async def web_search_raw_results(
         self,
         query: str,
         site: str,
         output_format: str = "JSON",
     ) -> dict:
-        """Get results from the InfoQuest Web-Search API synchronously."""
+        """Get results from the InfoQuest Web-Search API asynchronously."""
         headers = self._prepare_headers()
 
         params = {"format": output_format, "query": query}
@@ -168,7 +169,8 @@ class InfoQuestClient:
         if site != "":
             params["site"] = site
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
         # Print partial response for debugging
@@ -235,7 +237,7 @@ class InfoQuestClient:
 
         return clean_results
 
-    def web_search(
+    async def web_search(
         self,
         query: str,
         site: str = "",
@@ -249,12 +251,12 @@ class InfoQuestClient:
                 f"query_truncated={query_truncated} | "
                 f"has_time_filter={self.search_time_range > 0} | time_filter={self.search_time_range} | "
                 f"has_site_filter={bool(site)} | site={site} | "
-                f"request_type=sync"
+                f"request_type=async"
             )
 
         try:
             logger.debug("InfoQuest Web-Search - Executing search with parameters")
-            raw_results = self.web_search_raw_results(
+            raw_results = await self.web_search_raw_results(
                 query,
                 site,
                 output_format,
@@ -268,7 +270,7 @@ class InfoQuestClient:
 
                 result_json = json.dumps(cleaned_results, indent=2, ensure_ascii=False)
 
-                logger.debug(f"InfoQuest Web-Search - Search tool execution completed | mode=synchronous | results_count={len(cleaned_results)}")
+                logger.debug(f"InfoQuest Web-Search - Search tool execution completed | mode=asynchronous | results_count={len(cleaned_results)}")
                 return result_json
 
             elif "content" in raw_results:
@@ -282,7 +284,7 @@ class InfoQuestClient:
                 return json.dumps(raw_results, indent=2, ensure_ascii=False)
 
         except Exception as e:
-            error_message = f"InfoQuest Web-Search - Search tool execution failed | mode=synchronous | error={str(e)}"
+            error_message = f"InfoQuest Web-Search - Search tool execution failed | mode=asynchronous | error={str(e)}"
             logger.error(error_message)
             return f"Error: {error_message}"
 
@@ -316,13 +318,13 @@ class InfoQuestClient:
 
         return clean_results
 
-    def image_search_raw_results(
+    async def image_search_raw_results(
         self,
         query: str,
         site: str = "",
         output_format: str = "JSON",
     ) -> dict:
-        """Get image search results from the InfoQuest Web-Search API synchronously."""
+        """Get image search results from the InfoQuest Web-Search API asynchronously."""
         headers = self._prepare_headers()
 
         params = {"format": output_format, "query": query, "search_type": "Images"}
@@ -343,7 +345,8 @@ class InfoQuestClient:
         elif self.image_size:
             logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
         # Print partial response for debugging
@@ -354,7 +357,7 @@ class InfoQuestClient:
 
         return response_json
 
-    def image_search(
+    async def image_search(
         self,
         query: str,
         site: str = "",
@@ -369,12 +372,12 @@ class InfoQuestClient:
                 f"has_site_filter={bool(site)} | site={site} | "
                 f"image_search_time_range={self.image_search_time_range if self.image_search_time_range >= 1 and self.image_search_time_range <= 365 else 'default'} | "
                 f"image_size={self.image_size} |"
-                f"request_type=sync"
+                f"request_type=async"
             )
 
         try:
             logger.info("InfoQuest Image Search - Executing search with parameters")
-            raw_results = self.image_search_raw_results(
+            raw_results = await self.image_search_raw_results(
                 query,
                 site,
                 output_format,
@@ -389,7 +392,7 @@ class InfoQuestClient:
 
                 result_json = json.dumps(cleaned_results, indent=2, ensure_ascii=False)
 
-                logger.debug(f"InfoQuest Image Search - Image search tool execution completed | mode=synchronous | results_count={len(cleaned_results)}")
+                logger.debug(f"InfoQuest Image Search - Image search tool execution completed | mode=asynchronous | results_count={len(cleaned_results)}")
                 return result_json
 
             elif "content" in raw_results:
@@ -403,6 +406,6 @@ class InfoQuestClient:
                 return json.dumps(raw_results, indent=2, ensure_ascii=False)
 
         except Exception as e:
-            error_message = f"InfoQuest Image Search - Image search tool execution failed | mode=synchronous | error={str(e)}"
+            error_message = f"InfoQuest Image Search - Image search tool execution failed | mode=asynchronous | error={str(e)}"
             logger.error(error_message)
             return f"Error: {error_message}"

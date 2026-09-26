@@ -17,6 +17,47 @@ while handing off to the wait queue.
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
 - Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
 
+### Reasoning Capability Contract (`packages/harness/deerflow/models/reasoning.py`)
+
+Mapping-valued `ModelConfig.reasoning` (issue #5073) is an optional declarative contract beside
+the legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
+`unsupported | optional | required`, `on_disable_request` (`keep_enabled` or
+`reject`, required-thinking only), the payload `dialect` (`auto` infers it from
+`when_thinking_enabled`), the reasoning `history` requirement, and an `effort`
+vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
+A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for
+gpt-oss style models) remains a native ChatOllama provider setting; the factory
+forwards it on the legacy path, and the assembly descriptor keeps it — like a
+declared contract's `dialect` / `history` — inside `model_parameters` so
+request-affecting reasoning settings move the fingerprint. When the block is
+present the booleans are derived from it and contradictory
+profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
++ an enable template, a `default` outside `values`, an explicit boolean that
+disagrees, an effort value at `effort.path` in the profile or in the
+`when_thinking_*` / `thinking` templates that the contract rejects, a `path` that
+is not a dotted identifier or would overwrite a whole mapping, or a stale
+`reasoning_effort` key beside a custom effort path). The factory strips a
+generic effort key from runtime overrides for custom-path contracts. `default` also
+governs callers that never choose an effort (summarization, title, subagents), so
+shipped profiles keep it below the provider's deepest level.
+
+`resolve_reasoning_contract` turns any profile (legacy or declared) into an
+immutable `ReasoningContract`, `resolve_reasoning_request` applies a caller's
+generic `thinking_enabled` / `reasoning_effort` to it, and
+`reasoning_capabilities_payload` projects it for `/api/models` and
+`DeerFlowClient` (`reasoning` object, `source: legacy|contract`).
+`create_chat_model` is the single enforcement point for every caller (lead agent,
+subagents, summarization, title, one-shot utilities): a required-thinking model
+never enters the disable branch, effort is mapped through aliases or the default
+and otherwise dropped, and `dialect` synthesizes the on/off payload when no
+template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
+byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
+OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
+the same policy first so run metadata reports the effective values. Design note:
+`docs/plans/2026-09-23-reasoning-capability-contract.md`; tests:
+`tests/test_reasoning_contract.py`, the contract section of
+`tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
+
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
