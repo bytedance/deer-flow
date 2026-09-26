@@ -1474,53 +1474,50 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
     provider._last_activity = {}
     provider._lock = aio_mod.threading.Lock()
 
-    ensure_started = threading.Event()
-    allow_ensure = threading.Event()
     blocker_started = threading.Event()
     allow_blocker = threading.Event()
     reclaim_submitted = threading.Event()
     reclaim_calls = 0
 
-    def blocking_ensure(_user_id):
-        ensure_started.set()
-        assert allow_ensure.wait(timeout=2)
+    executor = provider._acquire_serializer.executor
+    original_submit = executor.submit
+    submit_count = 0
+
+    def occupy_serializer_executor():
+        blocker_started.set()
+        assert allow_blocker.wait(timeout=2)
+
+    def reuse(*_args, **_kwargs):
+        # We are running on the serializer executor. Queue the blocker behind
+        # this worker before returning None; with max_workers=1 it starts
+        # immediately after reuse returns and before the event loop can submit
+        # warm reclaim.
+        original_submit(occupy_serializer_executor)
+        return None
 
     def reclaim(*_args, **_kwargs):
         nonlocal reclaim_calls
         reclaim_calls += 1
         return "sandbox-reclaimed"
 
-    monkeypatch.setattr(provider, "_ensure_skills_projection", blocking_ensure)
-    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
-
-    executor = provider._acquire_serializer.executor
-    original_submit = executor.submit
-    submit_count = 0
-
     def tracking_submit(*args, **kwargs):
         nonlocal submit_count
         submit_count += 1
         future = original_submit(*args, **kwargs)
-        if submit_count >= 2:
+        # Submission 1 acquires the serializer lock; 2 runs cached reuse;
+        # 3 is warm reclaim, now queued behind occupy_serializer_executor.
+        if submit_count == 3:
             reclaim_submitted.set()
         return future
 
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", reuse)
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
     monkeypatch.setattr(executor, "submit", tracking_submit)
 
     owner = asyncio.create_task(provider.acquire_async("thread-queued-reclaim", user_id="default"))
-    blocker = None
     try:
-        assert await asyncio.to_thread(ensure_started.wait, 2)
-
-        def occupy_serializer_executor():
-            blocker_started.set()
-            assert allow_blocker.wait(timeout=2)
-
-        blocker = original_submit(occupy_serializer_executor)
         assert await asyncio.to_thread(blocker_started.wait, 2)
-
-        allow_ensure.set()
         assert await asyncio.to_thread(reclaim_submitted.wait, 2)
 
         owner.cancel()
@@ -1528,18 +1525,15 @@ async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(
             await owner
 
         allow_blocker.set()
-        await asyncio.to_thread(blocker.result, 2)
         await asyncio.sleep(0.05)
         assert reclaim_calls == 0
     finally:
-        allow_ensure.set()
         allow_blocker.set()
         if not owner.done():
             owner.cancel()
             await asyncio.gather(owner, return_exceptions=True)
-        if blocker is not None and not blocker.done():
-            await asyncio.to_thread(blocker.result, 2)
         provider._acquire_serializer.close()
+
 
 @pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
