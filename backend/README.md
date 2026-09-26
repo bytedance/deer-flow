@@ -118,6 +118,8 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+Jina AI web fetch follows HTTP redirects from its API endpoint, including temporary redirects that retain the POST body.
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
