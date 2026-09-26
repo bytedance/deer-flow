@@ -65,6 +65,8 @@ def normalize_filename(filename: str) -> str:
     safe = Path(filename).name
     if not safe or safe in {".", ".."}:
         raise ValueError(f"Filename is unsafe: {filename!r}")
+    if "\x00" in safe:
+        raise ValueError(f"Filename contains NUL: {filename!r}")
     # Reject backslashes — on Linux Path.name keeps them as literal chars,
     # but they indicate a Windows-style path that should be stripped or rejected.
     if "\\" in safe:

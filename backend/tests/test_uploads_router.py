@@ -1049,6 +1049,33 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
 
 
+def test_upload_files_skips_nul_filename_without_rolling_back_valid_file(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="valid.txt", file=BytesIO(b"kept")),
+                    UploadFile(filename="report\x00.pdf", file=BytesIO(b"invalid")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert [file.filename for file in result.files] == ["valid.txt"]
+    assert (thread_uploads_dir / "valid.txt").read_bytes() == b"kept"
+
+
 def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
