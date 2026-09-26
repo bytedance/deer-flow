@@ -431,7 +431,7 @@ class E2BSandbox(Sandbox):
                 continue
             if entry != root and not entry.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path(entry[len(root) :].lstrip("/")):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -513,7 +513,7 @@ class E2BSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path(file_path[len(root) :].lstrip("/")):
                 continue
             if glob is not None:
                 # Restrict to the caller's real directory scope -- the

@@ -954,7 +954,18 @@ class AioSandbox(Sandbox):
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            root_path = path.rstrip("/") or "/"
+            root_prefix = root_path if root_path == "/" else f"{root_path}/"
+            # Ignore checks apply to paths below the requested root only; the
+            # absolute path may match an ignore pattern through an ancestor
+            # (e.g. a ``build`` parent), which must not hide results the caller
+            # explicitly asked for (#5666).
+            filtered = [
+                file_path
+                for file_path in files
+                if (file_path == root_path or file_path.startswith(root_prefix))
+                and not should_ignore_path(file_path[len(root_path) :].lstrip("/"))
+            ]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
@@ -966,7 +977,9 @@ class AioSandbox(Sandbox):
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry.path):
+            # Only paths below the requested root are ignore-checked; the root
+            # itself (or an ignored ancestor) must not hide the results (#5666).
+            if should_ignore_path(entry.path[len(root_path) :].lstrip("/")):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1018,7 +1031,7 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path(file_path):
+            if should_ignore_path(file_path[len(root) :].lstrip("/")):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

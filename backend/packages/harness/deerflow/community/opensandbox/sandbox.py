@@ -355,7 +355,11 @@ class OpenSandboxSandbox(Sandbox):
         root_prefix = root if root == "/" else f"{root}/"
         for entry in output.text.splitlines():
             # Do NOT strip: trailing whitespace can be part of the filename.
-            if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path(entry):
+            if (
+                not entry
+                or (entry != root and not entry.startswith(root_prefix))
+                or should_ignore_path(entry[len(root) :].lstrip("/"))
+            ):
                 continue
             relative = entry[len(root) :].lstrip("/")
             if relative and path_matches(pattern, relative):
@@ -414,7 +418,7 @@ class OpenSandboxSandbox(Sandbox):
                 line_number = int(line_number_text)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path(file_path[len(root) :].lstrip("/")):
                 continue
             if glob is not None:
                 if file_path != root and not file_path.startswith(root_prefix):

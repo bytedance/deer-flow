@@ -403,7 +403,7 @@ class TenkiSandbox(Sandbox):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path(entry[len(root) :].lstrip("/")):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -464,7 +464,7 @@ class TenkiSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path(file_path[len(root) :].lstrip("/")):
                 continue
             if glob is not None:
                 # Match the caller's real directory scope: a pattern like
