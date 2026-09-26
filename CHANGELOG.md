@@ -330,7 +330,7 @@ This release closes that milestone with **181 merged pull requests**.
   healthy. The dev compose file has stripped the IPv6 listen when
   `/proc/net/if_inet6` is absent since #2027, and the Helm chart mirrors it;
   the production compose file was the one launcher still without the guard.
-  It now uses the same launcher, and starts nginx with `exec` so it is PID 1.
+  It now uses the same launcher, and starts nginx with `exec` so it is PID 1. ([#5900])
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),
@@ -6128,4 +6128,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5900]: https://github.com/bytedance/deer-flow/pull/5900
 
