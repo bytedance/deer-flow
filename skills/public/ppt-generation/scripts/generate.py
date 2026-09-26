@@ -7,11 +7,14 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
+from progress import ProgressError, require_complete
+
 
 def generate_ppt(
     plan_file: str,
     slide_images: list[str],
     output_file: str,
+    progress_file: str | None = None,
 ) -> str:
     """
     Generate a PowerPoint presentation from slide images.
@@ -20,6 +23,7 @@ def generate_ppt(
         plan_file: Path to JSON file containing presentation plan
         slide_images: List of paths to slide images in order
         output_file: Path to output PPTX file
+        progress_file: Optional progress record binding the plan and verified images
 
     Returns:
         Status message
@@ -55,6 +59,8 @@ def generate_ppt(
         raise ValueError(
             f"Expected {len(slides_info)} slide images, received {len(slide_images)}"
         )
+    if progress_file is not None:
+        require_complete(progress_file, plan_file, slide_images)
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
@@ -155,6 +161,10 @@ if __name__ == "__main__":
         required=True,
         help="Output path for generated PPTX file",
     )
+    parser.add_argument(
+        "--progress-file",
+        help="Optional progress record that verifies every slide before composition",
+    )
 
     args = parser.parse_args()
 
@@ -164,11 +174,14 @@ if __name__ == "__main__":
                 args.plan_file,
                 args.slide_images,
                 args.output_file,
+                args.progress_file,
             )
         )
     except Exception as exc:
         code = (
-            "PPT_INPUT_MISSING"
+            "PPT_PROGRESS_INVALID"
+            if isinstance(exc, ProgressError)
+            else "PPT_INPUT_MISSING"
             if isinstance(exc, FileNotFoundError)
             else "PPT_INVALID_INPUT"
             if isinstance(exc, ValueError)
