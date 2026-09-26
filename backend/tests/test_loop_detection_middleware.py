@@ -283,7 +283,8 @@ class TestGenericToolKey:
     Keying only the first salient field (``path``/``url``/``query``/...) collapsed
     distinct calls onto one key: paging a URL or a search, or rewriting one
     skill file with new content, hard-stopped on its fifth *distinct* call.
-    Only narration (``description``) may vary without making a call new.
+    Only a sandbox tool's UI narration (``description``) may vary without
+    making a call new.
     """
 
     @staticmethod
@@ -303,12 +304,45 @@ class TestGenericToolKey:
     def test_non_salient_args_affect_hash(self, name, first, second):
         assert _hash_tool_calls([self._call(name, first)]) != _hash_tool_calls([self._call(name, second)])
 
-    def test_description_does_not_affect_hash(self):
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            ("bash", {"command": "make test"}),
+            ("ls", {"path": "/w"}),
+            ("glob", {"path": "/w", "pattern": "*.py"}),
+            ("grep", {"path": "/w", "pattern": "foo"}),
+        ],
+    )
+    def test_sandbox_ui_narration_does_not_affect_hash(self, name, args):
         """Regression guard for #1905: rewording the narration must not dodge detection."""
-        first = self._call("bash", {"command": "make test", "description": "run the tests"})
-        second = self._call("bash", {"command": "make test", "description": "retry the tests once more"})
+        first = self._call(name, {**args, "description": "run it"})
+        second = self._call(name, {**args, "description": "run it once more"})
 
         assert _hash_tool_calls([first]) == _hash_tool_calls([second])
+
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            ("update_agent", {}),
+            ("setup_agent", {"soul": "You are helpful."}),
+            ("create_issue", {"title": "Crash on start"}),
+        ],
+    )
+    def test_description_payload_affects_hash(self, name, args):
+        """``description`` is the operation's payload outside the sandbox narration tools."""
+        first = self._call(name, {**args, "description": "Reviews pull requests."})
+        second = self._call(name, {**args, "description": "Reviews pull requests and triages issues."})
+
+        assert _hash_tool_calls([first]) != _hash_tool_calls([second])
+
+    def test_description_only_agent_updates_do_not_hard_stop(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for version in range(6):
+            call = self._call("update_agent", {"description": f"Assistant v{version}"})
+            assert mw._apply(_make_state(tool_calls=[call]), runtime) is None, f"update to v{version} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
 
     def test_paging_a_url_does_not_hard_stop(self):
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)

@@ -101,8 +101,11 @@ _MAX_PENDING_WARNINGS_PER_RUN = 4
 # Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
 # runs to the last line, which is not the same window as any numbered bound.
 _OPEN_ENDED_READ = "end"
-# Free-text arguments that explain a call without changing what it does.
-_NARRATION_ARG_FIELDS = frozenset({"description"})
+# Sandbox tools on the generic key path whose ``description`` is only the UI
+# explanation of the call. Elsewhere ``description`` can be the operation's
+# payload (``update_agent``/``setup_agent`` persist it; MCP tools such as
+# ``create_issue`` send it), so it stays in the key.
+_UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
 
@@ -192,11 +195,12 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     # Every other argument can change what the call does: keying only a salient
     # field (``path``/``url``/``query``...) collapsed paging a URL or a search
     # (``start_index``, ``page``, ``cursor``) and rewriting one skill file onto a
-    # single key, so the fifth *distinct* call hard-stopped the run. Only the
-    # narration the model attaches to a call is dropped, so rewording it cannot
-    # make a repeated call look new (#1905).
-    stable_args = {field: value for field, value in args.items() if field not in _NARRATION_ARG_FIELDS}
-    return json.dumps(stable_args, sort_keys=True, default=str)
+    # single key, so the fifth *distinct* call hard-stopped the run. A sandbox
+    # tool's UI narration is dropped, so rewording it cannot make a repeated
+    # call look new (#1905).
+    if name in _UI_NARRATION_TOOLS:
+        args = {field: value for field, value in args.items() if field != "description"}
+    return json.dumps(args, sort_keys=True, default=str)
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
