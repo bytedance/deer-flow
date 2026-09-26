@@ -329,6 +329,14 @@ This release closes that milestone with **181 merged pull requests**.
   the file-group type declared it as a required string and rendered it as-is,
   so files uploaded before the first reply sat under a blank line. Such groups
   now read "Untitled", matching the project's thread list. ([#5879])
+- **skills:** Deleting a custom skill whose package directory is an
+  operator-managed symlink now succeeds. The storage contract accepts a
+  one-level link under `custom/`, but `delete_custom_skill` removed the
+  package with `shutil.rmtree`, which refuses symlinks: the delete failed with
+  `OSError` after its history record had been written, the user's projected
+  skill view was cleared on the way out, and `DELETE /api/skills/custom/{name}`
+  answered 500. The link itself is now removed; the external tree it points
+  at is never touched. ([#5881])
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
@@ -6101,4 +6109,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
+[#5881]: https://github.com/bytedance/deer-flow/pull/5881
 
