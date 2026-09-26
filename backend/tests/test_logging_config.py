@@ -753,6 +753,347 @@ def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
     assert sandbox.getMessage() == "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing"
 
 
+def _emit_real_header_parse_warning(url: str, raw: bytes, *, json_format: bool = False) -> str:
+    """Drive urllib3's own header-parse warning end to end and return the log line.
+
+    ``http.client.parse_headers`` + ``assert_header_parsing`` build the real
+    ``HeaderParsingError``, and the emission copies ``connection.py`` including
+    ``exc_info=True``, so the result is what a handler's formatter writes - not
+    just ``record.getMessage()``.
+    """
+    import http.client
+    import io
+
+    from urllib3.exceptions import HeaderParsingError
+    from urllib3.util.response import assert_header_parsing
+
+    from deerflow.logging_config import UrlRedactionFilter
+
+    headers = http.client.parse_headers(io.BytesIO(raw))
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    if json_format:
+        from deerflow.logging_config import JsonTraceFormatter
+
+        handler.setFormatter(JsonTraceFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(UrlRedactionFilter())
+    root.handlers = [handler]
+    root.setLevel(logging.WARNING)
+    try:
+        try:
+            assert_header_parsing(headers)
+            raise AssertionError("expected HeaderParsingError")
+        except (HeaderParsingError, TypeError) as hpe:
+            logging.getLogger("urllib3.connection").warning("Failed to parse headers (url=%s): %s", url, hpe, exc_info=True)
+        return stream.getvalue()
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
+def test_url_redaction_filter_collapses_credentials_in_a_header_parse_dump() -> None:
+    """urllib3's header-parse warning embeds the raw response header block.
+
+    ``connection.py:575-581`` logs ``Failed to parse headers (url=%s): %s`` at
+    WARNING with ``exc_info=True``, and the pinned 2.7.0 ``HeaderParsingError``
+    stringifies as ``"<defects>, unparsed data: <payload!r>"`` - the payload
+    being everything after the FIRST malformed line of the response. Every
+    credential-bearing field therefore sits behind that break, repr-escaped onto
+    one physical line whose breaks are the literal four characters ``\\r\\n``.
+    Field order is the response's choice, so both a leading ``Location`` and a
+    leading ``Set-Cookie`` must collapse, and the emitted traceback must not
+    re-carry the block the message line just lost.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    secrets = ("SignedPathSecret", "CookieSecret", "TokenSecret", "UrlSecret", "session=", "Bearer ")
+    blocks = (
+        # Location first: the signed origin-form target leads the payload.
+        b"bad line\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\nSet-Cookie: session=CookieSecret; Path=/\r\nWWW-Authenticate: Bearer TokenSecret\r\nContent-Type: application/json\r\n\r\n",
+        # Set-Cookie first: the credentials trail it.
+        b"bad line\r\nSet-Cookie: session=CookieSecret; Path=/\r\nWWW-Authenticate: Bearer TokenSecret\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\nContent-Type: application/json\r\n\r\n",
+    )
+
+    for raw in blocks:
+        formatted = _emit_real_header_parse_warning(url, raw)
+        for secret in secrets:
+            assert secret not in formatted, secret
+        # Field names, the non-sensitive field and the defect itself stay.
+        assert "Set-Cookie: <redacted>" in formatted
+        assert "WWW-Authenticate: <redacted>" in formatted
+        assert "Location: <redacted>" in formatted
+        assert "Content-Type: application/json" in formatted
+        assert "bad line" in formatted
+
+
+def test_url_redaction_filter_collapses_credentials_behind_escaped_bare_cr_separators() -> None:
+    """A payload separated on bare CR alone must collapse too.
+
+    ``http.client`` accepts ``\\r`` as a line terminator even though RFC 9112
+    defines only CRLF, so ``parse_headers`` + ``assert_header_parsing`` yield a
+    ``HeaderParsingError`` whose payload carries every field after a bare-CR
+    break. That block reaches the record through ``!r``, so its separators are
+    the two characters ``\\r`` rather than the four of ``\\r\\n``: a splitter
+    that knows escaped CRLF and escaped LF but not escaped bare CR keeps the
+    whole dump in one segment. No field name then sits at a segment start, the
+    anchor never fires, and the cookie and the signed ``Location`` are logged
+    verbatim in both the message and the ``exc_text`` that repeats it, and the
+    deployed JSON format renders the same repr, so it must collapse there too.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\rSet-Cookie: session=BareCRSecret\rLocation: /p?sig=LocationSecret\r\r"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    # ``logging.enhance.format=json`` is the Gateway's setting, and its formatter
+    # renders the exception itself rather than the filter's redacted exc_text.
+    for out in (formatted, _emit_real_header_parse_warning(url, raw, json_format=True)):
+        for secret in ("BareCRSecret", "LocationSecret", "session=", "UrlSecret"):
+            assert secret not in out, secret
+    # The names survive for operator legibility, and so does the malformed line.
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "Location: <redacted>" in formatted
+    assert "bad line" in formatted
+
+
+def test_url_redaction_filter_collapses_folded_continuations_and_proxy_auth_info() -> None:
+    """A collapsed field's value can continue on the following line, and
+    ``Proxy-Authentication-Info`` is the proxy-side twin of a field already on
+    the list.
+
+    RFC 5322 obs-fold marks a continuation with a leading SP/HTAB, and this
+    warning dumps malformed upstream bytes, so folded lines cannot be assumed
+    absent: replacing only the matched segment would log ``Set-Cookie:
+    <redacted>`` followed by the still-plain ``CookieSecret; Path=/``. A
+    non-sensitive field keeps its own continuation, which is what bounds the
+    rewrite to the fields this pass actually collapses.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b'bad line\r\nSet-Cookie: session=\r\n CookieSecret; Path=/\r\nProxy-Authentication-Info: nextnonce="ProxySecret"\r\nContent-Type: application/json\r\n\tcharset=utf-8\r\n\r\n'
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("CookieSecret", "ProxySecret", "session=", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "Proxy-Authentication-Info: <redacted>" in formatted
+    # The continuation is part of the collapsed field, so it goes too.
+    assert "Set-Cookie: <redacted>\\r\\n<redacted>" in formatted
+    assert "Content-Type: application/json" in formatted
+    assert "charset=utf-8" in formatted
+
+
+def test_url_redaction_filter_collapses_a_credential_folded_under_an_unlisted_field() -> None:
+    """A folded credential is still that header's value, whatever field it folds under.
+
+    Under RFC 7230 unfolding ``X-Trace: keep\\r\\n Authorization: Bearer …`` is one
+    header whose value carries the bearer token, so the fold is a credential leak
+    even though the field it attaches to is not on the list. Anchoring the field
+    name only at the segment start let exactly this segment through while the
+    unindented ``Set-Cookie`` right after it collapsed, which is the proof the
+    pass ran rather than that a name matched.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nX-Trace: keep\r\n Authorization: Bearer FoldSecret\r\nSet-Cookie: session=CookieSecret\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("FoldSecret", "CookieSecret", "Bearer", "UrlSecret"):
+        assert secret not in formatted, secret
+    # The fold marker and the name stay for operator legibility, and the
+    # non-sensitive field the credential folded under keeps its own value.
+    assert " Authorization: <redacted>" in formatted
+    assert "X-Trace: keep" in formatted
+    assert "Set-Cookie: <redacted>" in formatted
+
+
+def test_url_redaction_filter_collapses_an_escaped_htab_continuation() -> None:
+    """A tab continuation reaches the log as ``\\t``, not as a real HTAB.
+
+    ``HeaderParsingError`` renders the payload with ``!r``, so the RFC 5322
+    marker in front of a folded value survives into the record as the two
+    characters backslash-t. A fold test that uses a space for the sensitive
+    continuation therefore never asks the walk about that spelling, and a
+    bearer token sitting behind it is logged whole.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie: session=AlphaSecret\r\n\tBetaSecret; Path=/\r\nContent-Type: application/json\r\n\tcharset=utf-8\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("AlphaSecret", "BetaSecret", "session=", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>\\r\\n<redacted>" in formatted
+    # The asymmetry holds under the escaped spelling: a continuation that names
+    # no credential field stays, so this pass cannot be replaced by "fold
+    # everything whitespace-led".
+    assert "Content-Type: application/json" in formatted
+    assert "\\tcharset=utf-8" in formatted
+
+
+def test_url_redaction_filter_collapses_a_credential_entirely_inside_the_fold() -> None:
+    """An empty first segment does not mean the folded field has no value.
+
+    ``Set-Cookie:\\r\\n CookieSecret`` puts the whole value on the continuation.
+    Gating the fold walk on the matched segment having a non-empty value
+    skipped the walk for exactly this shape, so the credential was logged
+    while a same-shaped field with a value collapsed. The field itself stays
+    as written — nothing on that segment was redacted.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie:\r\n GammaSecret; Path=/\r\nX-Other: keep\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("GammaSecret", "UrlSecret"):
+        assert secret not in formatted, secret
+    assert "Set-Cookie:\\r\\n<redacted>" in formatted
+    assert "X-Other: keep" in formatted
+
+
+def test_url_redaction_filter_collapses_dump_credentials_in_json_logging_too() -> None:
+    """JSON output must not reopen the leak the text path closes.
+
+    ``JsonTraceFormatter`` renders the exception itself rather than going
+    through ``logging.Formatter.format``, so it can discard a filter's redacted
+    ``exc_text`` and re-emit the payload; the Gateway runs with
+    ``logging.enhance.format=json``, which makes that the deployed path.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\r\nSet-Cookie: session=CookieSecret; Path=/\r\nLocation: /tenant-42/reports/q1?sig=SignedPathSecret\r\n\r\n"
+
+    formatted = _emit_real_header_parse_warning(url, raw, json_format=True)
+    for secret in ("SignedPathSecret", "CookieSecret", "UrlSecret", "session="):
+        assert secret not in formatted, secret
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "unparsed data:" in formatted  # the shape stays diagnosable
+
+
+def test_url_redaction_filter_collapses_credentials_carried_by_the_traceback() -> None:
+    """The warning's traceback text is a second copy of the dump.
+
+    ``logging.Formatter.format`` appends ``formatException`` to any record that
+    carries ``exc_info``, independently of the format string, and that text ends
+    with the exception's own ``unparsed data: '<payload>'`` line. Redacting the
+    message alone leaves the credentials in the log whole, so the filter
+    pre-populates ``exc_text`` - the Formatter only recomputes it when unset.
+    """
+    from urllib3.exceptions import HeaderParsingError
+
+    from deerflow.logging_config import UrlRedactionFilter
+
+    payload = "Set-Cookie: session=CookieSecret\r\n"
+    record = logging.LogRecord("urllib3.connection", logging.WARNING, __file__, 1, "Failed to parse headers (url=%s): %s", ("https://cdn.example.com/tenant-42/x?sig=UrlSecret", HeaderParsingError([], payload)), None)
+    record.exc_info = (HeaderParsingError, HeaderParsingError([], "Set-Cookie: session=CookieSecret\r\n"), None)
+
+    assert UrlRedactionFilter().filter(record) is True
+    assert record.exc_text is not None
+    assert "CookieSecret" not in record.getMessage() + record.exc_text
+    assert "Set-Cookie: <redacted>" in record.exc_text
+    assert "unparsed data:" in record.exc_text
+
+
+def test_url_redaction_filter_does_not_format_exceptions_of_other_records() -> None:
+    """The traceback pass is gated on urllib3's own literal, like the dump pass.
+
+    Formatting an arbitrary record's exception to scan it would cost every error
+    log a ``linecache`` read for no redaction benefit, so a record that is not
+    urllib3's header-parse warning keeps its ``exc_text`` unset.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    record = logging.LogRecord("deerflow.something", logging.ERROR, __file__, 1, "upstream call failed", (), None)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        import sys
+
+        record.exc_info = sys.exc_info()
+
+    assert UrlRedactionFilter().filter(record) is True
+    assert record.exc_text is None
+
+
+def test_url_redaction_filter_anchors_every_repr_form_of_the_payload() -> None:
+    """The dump pass anchors on the payload's own delimiters, not on guesses.
+
+    ``HeaderParsingError`` renders ``unparsed_data`` through ``!r``, so the field
+    lines are separated by the four characters ``\\r\\n`` and the first field
+    follows the repr's opening quote - which is ``'``, ``"``, ``b'`` or ``b"``
+    depending on the payload's type and on whether the value holds a quote. Each
+    of those is an anchor this pass must recognise, or the field glued to it
+    stays whole.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    cases = [
+        # First field glued to the repr's opening quote.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'Set-Cookie: session=CookieSecret\\r\\nContent-Type: text/plain\\r\\n'""",
+            "Set-Cookie: <redacted>",
+            "Content-Type: text/plain",
+        ),
+        # The payload holds an apostrophe, so repr switches to double quotes.
+        (
+            '''Failed to parse headers (url=https://h/p): [D], unparsed data: "Set-Cookie: it's-CookieSecret\\r\\n"''',
+            "Set-Cookie: <redacted>",
+            None,
+        ),
+        # Bytes payload.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: b'Set-Cookie: session=CookieSecret\\r\\n'""",
+            "Set-Cookie: <redacted>",
+            None,
+        ),
+        # A later field carries an absolute URL: its secret is the credential
+        # field's own, and the field collapses before the URL pass could need it.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'bad\\r\\nLocation: https://cdn.example/tenant-42/x?sig=SignedPathSecret\\r\\n'""",
+            "Location: <redacted>",
+            None,
+        ),
+        # Single-character escape break instead of the CRLF pair.
+        (
+            """Failed to parse headers (url=https://h/p): [D], unparsed data: 'bad\\nWWW-Authenticate: Bearer TokenSecret\\n'""",
+            "WWW-Authenticate: <redacted>",
+            None,
+        ),
+    ]
+    secrets = ("CookieSecret", "SignedPathSecret", "TokenSecret")
+
+    for message, collapsed, kept_field in cases:
+        record = logging.LogRecord("urllib3.connection", logging.WARNING, __file__, 1, message, (), None)
+        assert UrlRedactionFilter().filter(record) is True
+        formatted = record.getMessage()
+        for secret in secrets:
+            assert secret not in formatted, (message, secret)
+        assert "unparsed data:" in formatted
+        assert collapsed in formatted, formatted
+        if kept_field:
+            assert kept_field in formatted, formatted
+
+
+def test_url_redaction_filter_leaves_header_looking_text_outside_the_dump_alone() -> None:
+    """The dump pass is gated on urllib3's own literal, not on header syntax.
+
+    A ``Set-Cookie:`` shaped line in some other component's log is that
+    component's data, and rewriting it here would silently widen a URL
+    redactor into a general PII filter.
+    """
+    from deerflow.logging_config import UrlRedactionFilter
+
+    record = logging.LogRecord(
+        "deerflow.something",
+        logging.INFO,
+        __file__,
+        1,
+        "parsed upstream reply: Set-Cookie: session=OtherCookieSecret",
+        (),
+        None,
+    )
+
+    assert UrlRedactionFilter().filter(record) is True
+    assert "OtherCookieSecret" in record.getMessage()
+
+
 def test_url_redaction_filter_redirecting_covers_all_relative_ref_forms() -> None:
     """Round-15 residual: a Redirecting slot stayed verbatim unless it
     started with "/", but the Location field-value grammar (RFC 3986

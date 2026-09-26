@@ -231,7 +231,13 @@ class LocalSkillStorage(SkillStorage):
                 )
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
-            if target.exists():
+            if target.is_symlink():
+                # An operator-linked package (see
+                # ``_is_external_skill_directory_symlink``): the skill is the
+                # link, and the external tree is not ours to delete.
+                # ``shutil.rmtree`` refuses symlinks, so unlink instead.
+                target.unlink()
+            elif target.exists():
                 shutil.rmtree(target)
 
     def _skill_projection_mutation(
