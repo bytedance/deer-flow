@@ -326,6 +326,7 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_JOURNAL_UNSETTLED_ERROR = "Run event journal did not settle before terminal receipt"
 
 
 def _empty_delivery_content() -> dict[str, Any]:
@@ -1561,33 +1562,81 @@ async def run_agent(
             # crash window where a terminal run could otherwise outlive its receipt.
             # A fenced worker leaves receipt recovery to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
+                settled = False
+                journal_failure: BaseException | None = None
                 try:
-                    await journal.flush()
-                except Exception:
-                    logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
-
-                if delivery_content is None:
-                    if produced_output_paths is None:
-                        produced_output_paths = await _produced_output_paths(
-                            pre_run_workspace_snapshot,
-                            thread_id=thread_id,
-                            user_id=workspace_changes_user_id,
-                            extra_excluded_dir_names=workspace_excluded_dir_names,
-                        )
-                    delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
-                receipt_persisted = await _persist_delivery_receipt(
-                    event_store,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    content=delivery_content,
-                )
-                if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
-                    await run_manager.set_status(
-                        run_id,
-                        RunStatus.error,
-                        error=_DELIVERY_RECEIPT_FAILED_ERROR,
-                        persist=False,
+                    # The bounded flush reports whether its drain deadline was
+                    # met, not whether the write that missed it can still land,
+                    # so ``False`` is a "not yet": settle it before the receipt
+                    # and before the durable terminal row. D1 operational cost:
+                    # this settle is deliberately unbounded and precedes
+                    # ``bridge.publish_end``, so a hung store holds the durable
+                    # run ``running`` and stream consumers wait for the end frame
+                    # until lease expiry or a worker restart.
+                    settled = await journal.flush()
+                    if not settled:
+                        settled = await journal.flush_until_settled()
+                    if not settled:
+                        # Explicit invariant; not ``assert``, which ``python -O``
+                        # strips. ``flush_until_settled`` settles or raises.
+                        raise RuntimeError("journal did not settle before terminal receipt")
+                except asyncio.CancelledError as exc:
+                    # An interrupted barrier is not evidence of a settled
+                    # journal, and the interrupt must not be swallowed. Defer it
+                    # past the terminal bookkeeping below so the run still gets a
+                    # real durable outcome, and keep it out of the success path.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
                     )
+                    journal_failure = exc
+                except Exception as exc:
+                    journal_failure = exc
+
+                if journal_failure is not None:
+                    # Recovery only backfills a zero-delivery receipt and cannot
+                    # replay this run's volatile journal batches, so publishing
+                    # either the receipt or a durable success here would lose the
+                    # journal tail and misreport the run. Route the failure
+                    # through the same terminal path a failed receipt takes; a
+                    # run already heading to a non-success outcome (interrupted,
+                    # error) keeps it.
+                    logger.error(
+                        "Run %s: journal did not settle before its terminal receipt (%r); refusing a successful ordered completion",
+                        run_id,
+                        journal_failure,
+                    )
+                    if record.status == RunStatus.success:
+                        await run_manager.set_status(
+                            run_id,
+                            RunStatus.error,
+                            error=_JOURNAL_UNSETTLED_ERROR,
+                            persist=False,
+                        )
+
+                if settled:
+                    if delivery_content is None:
+                        if produced_output_paths is None:
+                            produced_output_paths = await _produced_output_paths(
+                                pre_run_workspace_snapshot,
+                                thread_id=thread_id,
+                                user_id=workspace_changes_user_id,
+                                extra_excluded_dir_names=workspace_excluded_dir_names,
+                            )
+                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                    receipt_persisted = await _persist_delivery_receipt(
+                        event_store,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        content=delivery_content,
+                    )
+                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                        await run_manager.set_status(
+                            run_id,
+                            RunStatus.error,
+                            error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                            persist=False,
+                        )
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

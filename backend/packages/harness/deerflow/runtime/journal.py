@@ -14,6 +14,52 @@ Key design decisions:
 - on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
+
+Write-ownership invariants (keep these when changing buffering or progress):
+- Owner: the exact ``put_batch`` task that started owns an ambiguous write until
+  its outcome is applied; no successor may overtake it, and a best-effort
+  progress snapshot stays owned until it settles.
+- Deadline: ordinary ``flush()`` is bounded and returns ``False`` while a
+  predecessor is still in flight; ``flush_until_settled()`` and
+  ``close(flush=True)`` drain without a deadline -- they settle buffer, detached
+  writes and threshold wrappers for as long as that takes, and raise instead of
+  returning ``False``.
+- Outcomes: success advances ``feed_generation``; only an explicitly failed or
+  cancelled write prepends its batch once for retry; an unresolved write is never
+  requeued, and caller cancellation re-raises after the outcome is handled.
+- Closed-state gate: every requeue site funnels through one ``_requeue_batch()``
+  helper, which discards the batch with a warning once ``_closed`` is set. A late
+  outcome -- a cancelled wrapper, a failed write, a detached write settling after
+  the lease was lost -- therefore cannot repopulate a journal whose store is gone.
+- Ownership of the settled drain: ``flush_until_settled()`` runs the drain in its
+  own task and joins it without ever cancelling it, so a cancelled caller stops
+  waiting without abandoning the drain. The received cancellation is re-raised
+  only after the drain's outcome is applied; a definite write failure is reported
+  first, and a store cancelling its own write is reported as that failure instead
+  of masquerading as caller cancellation. That conversion happens where the write
+  outcome is applied, so it covers both the bounded ``flush()`` and the settled
+  drain: only a cancellation the caller itself requested is re-raised as
+  ``CancelledError``.
+- Precedence while joining: ``_await_owned_task()`` treats only a
+  ``CancelledError`` actually delivered to its own wait as its caller's request,
+  and defers to a definite child failure. The joining caller then suppresses
+  exactly the requests it received (``uncancel()`` balanced against the count on
+  entry) and reports the failure, so a failed write never turns into a successful
+  detach and an already-handled stale request is never re-reported as new.
+- Teardown: ``close(flush=True)`` creates at most one ``_close_owned()`` owner --
+  the settled drain *and* the dependency detach, with no await between them -- and
+  every concurrent caller joins that same owner without abandoning it. A failed
+  or cancelled owner is dropped so a later ``close()`` retries what it retained,
+  while a successful one makes close idempotent. Only a successful drain
+  detaches; a definite write failure is reported first and leaves the store, the
+  buffer and the progress callback attached for a later retry, and a caller
+  cancellation is re-raised after the owned close's outcome is applied, so it
+  never turns a failed write into a successful detach. ``close(flush=False)``
+  fences the store first, then cancels and globally retains the pending progress
+  snapshot before its first await, so a caller cancelled again while a threshold
+  wrapper stops cannot skip either cleanup. An already-started write stays
+  supervised; a wrapper that suppresses its cancellation stays retained until its
+  own outcome settles, and no new durable write starts after the lease is lost.
 """
 
 from __future__ import annotations
@@ -36,6 +82,7 @@ from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
+from deerflow.runtime.cancellation import wait_for_task_until
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -56,6 +103,9 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+_CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
+_cancelling_progress_tasks: set[asyncio.Future[Any]] = set()
+_retained_cleanup_tasks: set[asyncio.Future[Any]] = set()
 _MAX_RUN_SKILL_SNAPSHOTS = 64
 
 
@@ -65,6 +115,12 @@ class _PendingLlmResponse:
     events: list[dict]
     message_count: int
     last_ai_message: str | None
+
+
+@dataclass
+class _DetachedFlush:
+    batch: list[dict]
+    started: bool = False
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -219,6 +275,97 @@ def build_checkpoint_history_seed_events(
     )
 
 
+async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
+    """Join an owned task without cancelling it or losing its outcome.
+
+    The caller's cancellation stops this wait but must not abandon ``task``:
+    the write or drain it owns has to reach a terminal outcome before the
+    cancellation is re-raised. Only a ``CancelledError`` actually delivered
+    here makes this wait treat the caller as cancelled — a request handled at
+    an earlier checkpoint is not new. A received cancellation is either
+    propagated, leaving the caller's count untouched, or — when a definite
+    child failure replaces it — suppressed together with the other requests
+    made while joining, so the count returns to what it was on entry.
+    """
+    current = asyncio.current_task()
+    cancellations_on_entry = current.cancelling() if current is not None else 0
+    cancellation_received = False
+    try:
+        # Also observes a cancellation requested before this call.
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        cancellation_received = True
+    while not task.done():
+        try:
+            # Unlike ``gather``/``await task``, ``asyncio.wait`` does not cancel
+            # the task it observes, so repeated cancellation cannot lose it.
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            cancellation_received = True
+    try:
+        result = task.result()
+    except asyncio.CancelledError:
+        # The owned task itself was cancelled; that cancellation is not ours to
+        # absorb, so keep propagating it without touching the count.
+        raise
+    except BaseException:
+        # A definite child failure wins over the cancellation received here, so
+        # the requests made while joining are suppressed: uncancel exactly those,
+        # never the count that was already there when this call started.
+        if current is not None:
+            for _ in range(current.cancelling() - cancellations_on_entry):
+                current.uncancel()
+        raise
+    if cancellation_received:
+        raise asyncio.CancelledError
+    return result
+
+
+def _retain_cleanup_task(task: asyncio.Future[Any]) -> None:
+    """Keep global supervision of a cancelled-but-still-running cleanup task.
+
+    A lost-lease close cancels the threshold wrappers it owns and must not wait
+    indefinitely for one that suppresses its cancellation. Registering the task
+    here keeps it referenced and its outcome observed past the close caller's own
+    cancellation; the done callback discards it once it reaches a terminal
+    outcome and retrieves whatever it raised, so a late failure is never reported
+    as an unretrieved task exception.
+    """
+    if task in _retained_cleanup_tasks:
+        return
+    _retained_cleanup_tasks.add(task)
+    task.add_done_callback(_finish_retained_cleanup_task)
+
+
+def _finish_retained_cleanup_task(task: asyncio.Future[Any]) -> None:
+    _retained_cleanup_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+async def _await_cancelled_tasks(tasks: tuple[asyncio.Task[None], ...]) -> None:
+    """Join already-cancelled cleanup tasks without trapping a cancelled caller.
+
+    ``asyncio.wait`` observes the tasks without cancelling them, so a caller that
+    is cancelled again resumes immediately instead of staying behind a wrapper
+    that suppresses its own cancellation. The received cancellation is forwarded
+    to every wrapper still running and then re-raised; each task remains
+    registered in ``_retained_cleanup_tasks`` until it reaches a terminal
+    outcome, so none of them is left unsupervised.
+    """
+    pending = set(tasks)
+    try:
+        await asyncio.wait(pending)
+    except asyncio.CancelledError:
+        for task in pending:
+            task.cancel()
+        raise
+
+
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
@@ -264,6 +411,10 @@ class RunJournal(BaseCallbackHandler):
         self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._explicit_flush_in_progress = False
+        self._active_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
+        self._detached_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
+        self._flush_lock = asyncio.Lock()
+        self._close_owner_task: asyncio.Task[None] | None = None
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -917,39 +1068,230 @@ class RunJournal(BaseCallbackHandler):
             return
         # Skip if a flush is already in flight — avoids concurrent writes
         # to the same SQLite file from multiple fire-and-forget tasks.
-        if self._pending_flush_tasks or self._explicit_flush_in_progress:
+        if self._pending_flush_tasks or self._detached_write_tasks or self._active_write_tasks or self._explicit_flush_in_progress:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # No event loop — keep events in buffer for later async flush.
             return
-        batch = self._buffer.copy()
+        detached = _DetachedFlush(self._buffer.copy())
         self._buffer.clear()
-        task = loop.create_task(self._flush_async(batch))
+        task = loop.create_task(self._flush_async(detached.batch, detached=detached))
         self._pending_flush_tasks.add(task)
-        task.add_done_callback(self._on_flush_done)
+        task.add_done_callback(lambda completed: self._on_flush_done(completed, detached=detached))
 
-    async def _flush_async(self, batch: list[dict]) -> None:
+    async def _put_batch_cancellation_safe(self, batch: list[dict], *, register_active: bool = False) -> bool:
+        """Write one batch without guessing the outcome of an interrupted write.
+
+        A ``CancelledError`` is ambiguous only while the caller's own request may
+        still be pending. Once the caller is known not to be cancelling, the only
+        cancellation that can arrive is the store cancelling its own write, and
+        that is a definite failure: it is converted into a ``RuntimeError`` with
+        the batch retained for retry, so a bounded ``flush()`` never reports it as
+        caller cancellation.
+        """
+        store = self._store
+        if store is None:
+            return True
+        write_task = asyncio.create_task(store.put_batch(batch))
+        write_task.set_name(f"deerflow-journal-put-batch-{self.run_id}")
+        if register_active:
+            # A write started by an explicit flush is fenced here from creation
+            # until the owner applies its terminal outcome. No done-callback is
+            # used: a completed task is not yet an applied outcome, and releasing
+            # the fence early would let a successor threshold flush overtake a
+            # failed batch before it is re-buffered.
+            self._active_write_tasks[write_task] = batch
+        deadline = asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        current_task = asyncio.current_task()
+        cancelling_on_entry = current_task.cancelling() if current_task is not None else 0
+        cancellation_observed = False
         try:
-            store = self._store
-            if store is None:
-                return
-            await store.put_batch(batch)
+            # An uncontended flush lock does not suspend, so a cancellation
+            # requested before flush() may still be waiting for injection here.
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancellation_observed = True
+        completed = await wait_for_task_until(write_task, deadline=deadline)
+        caller_cancelling = cancellation_observed or (current_task is not None and current_task.cancelling() > cancelling_on_entry)
+        if not completed:
+            self._active_write_tasks.pop(write_task, None)
+            self._track_detached_write(write_task, batch)
+            logger.warning(
+                "Timed out after %.1f seconds waiting for journal write for run %s; %d events continue in the background",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                self.run_id,
+                len(batch),
+            )
+            if caller_cancelling:
+                raise asyncio.CancelledError
+            return False
+
+        if caller_cancelling:
+            try:
+                write_task.result()
+            except asyncio.CancelledError:
+                self._requeue_batch(batch, context="Journal write was cancelled while draining cancellation")
+            except BaseException as error:
+                self._requeue_batch(
+                    batch,
+                    context="Journal write failed while draining cancellation",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            else:
+                self._feed_generation += 1
+            self._active_write_tasks.pop(write_task, None)
+            raise asyncio.CancelledError
+
+        try:
+            write_task.result()
+        except asyncio.CancelledError as error:
+            # ``caller_cancelling`` is already false here, so this cancellation
+            # is the store cancelling its own write -- not a host request. A
+            # bounded ``flush()`` must report that as a definite failure, not
+            # re-raise it as caller cancellation that the worker barrier would
+            # classify as a host interrupt (D2c).
+            self._requeue_batch(batch, context="Journal write was cancelled")
+            self._active_write_tasks.pop(write_task, None)
+            raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
+        except Exception as error:
+            self._requeue_batch(
+                batch,
+                context="Journal write failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            self._active_write_tasks.pop(write_task, None)
+            raise
+        self._feed_generation += 1
+        self._active_write_tasks.pop(write_task, None)
+        return True
+
+    def _track_detached_write(self, task: asyncio.Future[Any], batch: list[dict]) -> None:
+        """Retain an ambiguous write until its terminal outcome is known."""
+        if task in self._detached_write_tasks:
+            return
+        self._detached_write_tasks[task] = batch
+        task.add_done_callback(self._resolve_detached_write)
+
+    def _requeue_batch(
+        self,
+        batch: list[dict],
+        *,
+        context: str | None = None,
+        exc_info: tuple[type[BaseException], BaseException, Any] | None = None,
+    ) -> None:
+        """Return a failed or cancelled batch to the buffer unless the journal is fenced.
+
+        Every requeue site funnels through here so the closed-state gate lives in
+        one place: once ``close(flush=False)`` has dropped the store, a late
+        outcome -- a cancelled wrapper, a failed write, or a detached write that
+        settles after the lease was lost -- must not repopulate a journal with
+        nothing left to write to (D3). Such a batch is retired with a warning
+        instead. ``context`` names the outcome in that warning and in the ordinary
+        "returning to buffer" warning; paths that already report their own
+        requeue stay silent by leaving it unset.
+        """
+        if self._closed:
+            logger.warning(
+                "%s for run %s; discarding %d events because the journal lost its store",
+                context or "Journal batch",
+                self.run_id,
+                len(batch),
+                exc_info=exc_info,
+            )
+            return
+        if context is not None:
+            logger.warning(
+                "%s for run %s; returning %d events to buffer",
+                context,
+                self.run_id,
+                len(batch),
+                exc_info=exc_info,
+            )
+        self._buffer = batch + self._buffer
+
+    def _resolve_detached_write(self, task: asyncio.Future[Any]) -> None:
+        """Apply one late write outcome exactly once."""
+        batch = self._detached_write_tasks.pop(task, None)
+        if batch is None:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError as exc:
+            error = exc
+        if error is None:
             self._feed_generation += 1
+            return
+        self._requeue_batch(
+            batch,
+            context="Detached journal write failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    async def _await_write_predecessors(self, *, settle: bool) -> bool:
+        """Observe predecessor writes without cancelling or overtaking them."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        current_task = asyncio.current_task()
+        cancelling_on_entry = current_task.cancelling() if current_task is not None else 0
+        if not self._detached_write_tasks and not self._pending_flush_tasks:
+            # No predecessor to drain: leave an already-queued cancellation for
+            # the write path to observe after it confirms the durable write.
+            return True
+        cancellation_observed = False
+        try:
+            # A lock acquisition that does not suspend may not have delivered an
+            # already-requested cancellation yet. Observe it here so a queued
+            # cancellation is not silently absorbed by the bounded write wait.
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancellation_observed = True
+        while True:
+            detached = tuple(self._detached_write_tasks)
+            pending = tuple(self._pending_flush_tasks)
+            if not detached and not pending:
+                if cancellation_observed:
+                    raise asyncio.CancelledError
+                return True
+            for task in detached:
+                if settle:
+                    await asyncio.wait({task})
+                    self._resolve_detached_write(task)
+                elif await wait_for_task_until(task, deadline=deadline):
+                    self._resolve_detached_write(task)
+            for task in pending:
+                if settle:
+                    await asyncio.wait({task})
+                else:
+                    await wait_for_task_until(task, deadline=deadline)
+            await asyncio.sleep(0)
+            if not settle:
+                if cancellation_observed or (current_task is not None and current_task.cancelling() > cancelling_on_entry):
+                    raise asyncio.CancelledError
+                if loop.time() >= deadline:
+                    return not (self._detached_write_tasks or self._pending_flush_tasks)
+
+    async def _flush_async(self, batch: list[dict], *, detached: _DetachedFlush | None = None) -> None:
+        if detached is not None:
+            detached.started = True
+        try:
+            await self._put_batch_cancellation_safe(batch)
         except Exception:
             logger.warning(
-                "Failed to flush %d events for run %s — returning to buffer",
+                "Failed to flush %d events for run %s",
                 len(batch),
                 self.run_id,
                 exc_info=True,
             )
-            # Return failed events to buffer for retry on next flush
-            self._buffer = batch + self._buffer
 
-    def _on_flush_done(self, task: asyncio.Task) -> None:
+    def _on_flush_done(self, task: asyncio.Task, *, detached: _DetachedFlush) -> None:
         self._pending_flush_tasks.discard(task)
         if task.cancelled():
+            # An already-started write was never the wrapper's to requeue, and a
+            # journal that lost its store has nothing left to write to (D3).
+            if not detached.started:
+                self._requeue_batch(detached.batch)
             return
         exc = task.exception()
         if exc:
@@ -1193,47 +1535,148 @@ class RunJournal(BaseCallbackHandler):
             content=self.get_delivery_content(),
         )
 
-    async def flush(self) -> None:
-        """Force flush remaining buffer. Called in worker's finally block."""
+    async def flush(self) -> bool:
+        """Flush remaining buffer; return True once every predecessor settled."""
+        async with self._flush_lock:
+            settled = await self._flush_locked()
+        if not settled:
+            logger.warning(
+                "Journal flush for run %s did not settle within the drain deadline; pending_flushes=%d active_writes=%d detached_writes=%d",
+                self.run_id,
+                len(self._pending_flush_tasks),
+                len(self._active_write_tasks),
+                len(self._detached_write_tasks),
+            )
+        return settled
+
+    async def _flush_until_settled_owned(self) -> bool:
+        """Drain predecessors and buffer inside the task that owns the drain.
+
+        The drain runs in its own task, so the joining caller's cancellation
+        never reaches it and the only ``CancelledError`` that can arrive is the
+        store cancelling its own write. That is a definite write failure (the
+        caller never requested it), so it is converted into an ordinary failure
+        with the batch retained for retry instead of surfacing as caller
+        cancellation.
+        """
+        async with self._flush_lock:
+            try:
+                return await self._flush_locked(settle_predecessors=True)
+            except asyncio.CancelledError as error:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    # The owned drain itself was cancelled: keep propagating.
+                    raise
+                raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
+
+    async def flush_until_settled(self) -> bool:
+        """Flush in order and return ``True`` only after every predecessor settled.
+
+        ``settle`` waits without a deadline, so this returns ``True`` on success
+        or raises (for example on caller cancellation or a durable write
+        failure); it never reports ``False`` for an unresolved predecessor. The
+        drain is owned by its own task, so cancelling this caller stops waiting
+        without abandoning it: the cancellation is re-raised only after the
+        drain's outcome has been applied, and a definite write failure is
+        reported instead of it.
+        """
+        task = asyncio.create_task(self._flush_until_settled_owned())
+        return await _await_owned_task(task)
+
+    async def _flush_locked(self, *, settle_predecessors: bool = False) -> bool:
         if self._closed:
-            return
+            return True
         self._explicit_flush_in_progress = True
         try:
             self._commit_pending_llm_response()
-            if self._pending_flush_tasks:
-                await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-            while self._pending_progress_task is not None:
-                pending_progress_task = self._pending_progress_task
-                if pending_progress_task.done():
-                    if self._pending_progress_task is pending_progress_task:
-                        self._pending_progress_task = None
-                    break
-                if self._pending_progress_delayed:
-                    pending_progress_task.cancel()
-                    await asyncio.gather(pending_progress_task, return_exceptions=True)
-                    if self._pending_progress_task is pending_progress_task:
-                        self._pending_progress_task = None
-                    self._progress_dirty = False
-                    self._pending_progress_delayed = False
-                    break
-                await asyncio.gather(pending_progress_task, return_exceptions=True)
-                if self._pending_progress_task is pending_progress_task:
-                    self._pending_progress_task = None
+            while True:
+                predecessors_settled = await self._await_write_predecessors(settle=settle_predecessors)
+                if not predecessors_settled:
+                    return False
+                await self._quiesce_progress()
 
-            while self._buffer:
-                batch = self._buffer[: self._flush_threshold]
-                del self._buffer[: self._flush_threshold]
-                try:
-                    store = self._store
-                    if store is None:
-                        return
-                    await store.put_batch(batch)
-                    self._feed_generation += 1
-                except Exception:
-                    self._buffer = batch + self._buffer
-                    raise
+                while self._buffer:
+                    batch = self._buffer[: self._flush_threshold]
+                    del self._buffer[: self._flush_threshold]
+                    settled = await self._put_batch_cancellation_safe(batch, register_active=True)
+                    if not settled:
+                        if settle_predecessors:
+                            # A write timed out and became detached; await its settle.
+                            break
+                        return False
+                    if settle_predecessors and (self._detached_write_tasks or self._pending_flush_tasks):
+                        break
+
+                if settle_predecessors:
+                    if not (self._buffer or self._detached_write_tasks or self._pending_flush_tasks):
+                        return True
+                    continue
+                return not (self._buffer or self._detached_write_tasks or self._pending_flush_tasks)
         finally:
             self._explicit_flush_in_progress = False
+
+    async def _quiesce_progress(self) -> None:
+        while True:
+            progress_task = self._pending_progress_task
+            if progress_task is None:
+                return
+            if self._pending_progress_delayed and not progress_task.done():
+                self._cancel_and_retain_progress_task(progress_task)
+                await asyncio.gather(progress_task, return_exceptions=True)
+                if self._pending_progress_task is progress_task:
+                    self._pending_progress_task = None
+                    self._pending_progress_delayed = False
+                    self._progress_dirty = False
+                    return
+                continue
+            if not progress_task.done():
+                try:
+                    done, _ = await asyncio.wait(
+                        {asyncio.shield(progress_task)},
+                        timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.CancelledError:
+                    self._cancel_and_retain_progress_task(progress_task)
+                    raise
+                if not done:
+                    logger.warning(
+                        "Timed out after %.1f seconds waiting for run progress snapshot for run %s; cancelling it and retaining ownership until cancellation settles",
+                        _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                        self.run_id,
+                    )
+                    self._cancel_and_retain_progress_task(progress_task)
+                    await asyncio.sleep(0)
+                    if not progress_task.done():
+                        return
+                try:
+                    progress_task.exception()
+                except asyncio.CancelledError:
+                    pass
+            else:
+                try:
+                    progress_task.exception()
+                except asyncio.CancelledError:
+                    pass
+
+            await asyncio.sleep(0)
+            if self._pending_progress_task is progress_task:
+                self._pending_progress_task = None
+                self._pending_progress_delayed = False
+                self._progress_dirty = False
+                return
+
+    def _on_progress_task_done(self, task: asyncio.Future[Any]) -> None:
+        if self._pending_progress_task is not task:
+            return
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+
+    def _cancel_and_retain_progress_task(self, task: asyncio.Future[Any]) -> None:
+        if task not in _cancelling_progress_tasks:
+            _cancelling_progress_tasks.add(task)
+            task.add_done_callback(_cancelling_progress_tasks.discard)
+        task.cancel()
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
@@ -1264,35 +1707,78 @@ class RunJournal(BaseCallbackHandler):
         self._first_human_msg = None
         self._llm_error_fallback_message = None
 
+    async def _close_owned(self) -> None:
+        """Own one complete close: the settled drain and the dependency detach.
+
+        Both halves run in this task with no intervening await, so a cancelled
+        ``close`` caller stops waiting without abandoning either. Only a
+        *successful* drain reaches the detach: a definite write failure
+        propagates with the store, the buffer and the progress callback still
+        attached, so a later ``close`` retries instead of discarding the tail of
+        the run event stream.
+        """
+        await self._flush_until_settled_owned()
+        self._detach_runtime_dependencies()
+
     async def close(self, *, flush: bool = True) -> None:
         """Release run-scoped references, optionally flushing buffered events."""
         if self._closed:
             return
         if flush:
-            # A failed terminal write returns its batch to ``_buffer``. Keep the
-            # store and all buffered state attached so a later close/flush can retry
-            # instead of silently discarding the tail of the run event stream.
-            await self.flush()
-            self._detach_runtime_dependencies()
+            # Every concurrent ``close(flush=True)`` joins the same owned close,
+            # so the settled drain and the detach happen exactly once. The
+            # joining caller may be cancelled: it stops waiting without
+            # abandoning the owned close, and its cancellation is re-raised only
+            # after that close's outcome has been applied. A definite write
+            # failure is reported first (``_await_owned_task`` suppresses the
+            # received cancellation in its favour) and leaves the store and all
+            # buffered state attached for a later retry.
+            owner = self._close_owner_task
+            if owner is None or owner.done():
+                # Join an owner only while it is in flight: a completed owner
+                # never detaches again, so a later ``close()`` starts a fresh
+                # one that retries whatever a failed owner retained.
+                owner = asyncio.create_task(self._close_owned())
+                self._close_owner_task = owner
+            try:
+                await _await_owned_task(owner)
+            finally:
+                if owner.done() and self._close_owner_task is owner:
+                    # A failed or cancelled close never detached. Drop it rather
+                    # than retain a failed task (and its traceback) as the
+                    # journal's close owner.
+                    if owner.cancelled() or owner.exception() is not None:
+                        self._close_owner_task = None
             return
 
         # A worker that lost its lease must detach without starting another
-        # durable write. Drop dependencies before cancelling already-scheduled
-        # work so tasks that have not begun observe the detached state. The
-        # final detach must survive a second cancellation while those tasks stop.
+        # durable write. Fence the store first, then identify and cancel every
+        # task this close owns *before* the first await: the caller can be
+        # cancelled repeatedly while those tasks stop, and a later cancellation
+        # must not skip the progress cleanup or abandon a still-running threshold
+        # wrapper without supervision. The final detach must survive such a
+        # second cancellation while those tasks stop.
         self._closed = True
         self._store = None
         self._progress_reporter = None
+
+        # A best-effort progress snapshot must never block a fenced worker from
+        # tearing down. Cancel it and retain global supervision until it settles,
+        # before any await that could re-raise the caller's cancellation.
+        pending_progress_task = self._pending_progress_task
+        if pending_progress_task is not None:
+            self._cancel_and_retain_progress_task(pending_progress_task)
+
+        pending_flush_tasks = tuple(self._pending_flush_tasks)
+        for task in pending_flush_tasks:
+            # Retain before cancelling: a wrapper that suppresses its cancellation
+            # stays supervised until its own outcome-handling path settles, even
+            # when the close caller is cancelled again while it stops.
+            _retain_cleanup_task(task)
+            task.cancel()
         try:
-            pending_flush_tasks = tuple(self._pending_flush_tasks)
-            for task in pending_flush_tasks:
-                task.cancel()
             if pending_flush_tasks:
-                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
-            pending_progress_task = self._pending_progress_task
-            if pending_progress_task is not None:
-                pending_progress_task.cancel()
-                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                await _await_cancelled_tasks(pending_flush_tasks)
         finally:
             self._detach_runtime_dependencies()
 
@@ -1315,6 +1801,7 @@ class RunJournal(BaseCallbackHandler):
             return
         self._progress_dirty = False
         self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
+        self._pending_progress_task.add_done_callback(self._on_progress_task_done)
 
     def _schedule_delayed_progress_flush(self, delay: float) -> None:
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
@@ -1326,6 +1813,7 @@ class RunJournal(BaseCallbackHandler):
         delay = max(0.0, delay)
         self._pending_progress_delayed = delay > 0
         self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+        self._pending_progress_task.add_done_callback(self._on_progress_task_done)
 
     async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
         if self._progress_reporter is None:
