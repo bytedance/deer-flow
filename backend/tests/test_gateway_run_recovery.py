@@ -19,6 +19,7 @@ from deerflow.persistence import thread_meta as thread_meta_module
 from deerflow.runtime import END_SENTINEL, MemoryStreamBridge, RunManager
 from deerflow.runtime.checkpointer import async_provider as checkpointer_module
 from deerflow.runtime.events import store as event_store_module
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
@@ -31,7 +32,7 @@ class _FakeRunManager:
     """RunManager double that records startup reconciliation calls."""
 
     instances: list[_FakeRunManager] = []
-    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", status=RunStatus.error)]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
     def __init__(
@@ -67,6 +68,9 @@ class _FakeRunManager:
 
     async def start_heartbeat(self) -> None:
         pass
+
+    async def terminalize_recovered_runs(self, recovered_runs) -> bool:
+        return await self.on_orphans_recovered(recovered_runs)
 
     async def stop_heartbeat(self) -> None:
         pass
@@ -253,7 +257,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", status=RunStatus.error)]
     _FakeRunManager.latest_by_thread = {}
 
     async def fake_init_engine_from_config(_database):

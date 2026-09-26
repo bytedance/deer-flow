@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -253,43 +253,34 @@ def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str,
     ]
 
 
-async def _persist_delivery_receipt(
-    event_store: Any,
+async def _persist_terminal_event_with_retry(
+    operation: Callable[[], Awaitable[Any]],
     *,
-    thread_id: str,
     run_id: str,
-    content: dict[str, Any],
+    description: str,
+    exhausted_message: str,
 ) -> bool:
-    """Persist a terminal receipt with short bounded retries.
-
-    The owning worker still knows the real terminal outcome and renews its
-    lease while this coroutine runs. Retrying here handles transient event
-    store failures without handing a successful run to orphan recovery, which
-    cannot reconstruct either the terminal status or the detailed receipt.
-    """
+    """Retry terminal singleton writes while preserving caller cancellation."""
     attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         try:
-            await event_store.put_if_absent(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content=content,
-            )
+            await operation()
             return True
         except Exception:
             if attempt == attempts - 1:
                 logger.warning(
-                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
+                    "Failed to persist %s for run %s after %d attempts; %s",
+                    description,
                     run_id,
                     attempts,
+                    exhausted_message,
                     exc_info=True,
                 )
                 return False
             delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
             logger.warning(
-                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                "Failed to persist %s for run %s (attempt %d/%d); retrying in %.1fs",
+                description,
                 run_id,
                 attempt + 1,
                 attempts,
@@ -301,6 +292,28 @@ async def _persist_delivery_receipt(
     return False  # pragma: no cover - loop always returns
 
 
+async def _persist_delivery_receipt(
+    event_store: Any,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+) -> bool:
+    """Retry the known delivery outcome before terminalizing its RunRow."""
+    return await _persist_terminal_event_with_retry(
+        lambda: event_store.put_if_absent(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="run.delivery",
+            category="outputs",
+            content=content,
+        ),
+        run_id=run_id,
+        description="delivery receipt",
+        exhausted_message="applying terminal delivery semantics without a receipt",
+    )
+
+
 async def _persist_authoritative_terminal_event(
     event_store: Any,
     *,
@@ -308,39 +321,19 @@ async def _persist_authoritative_terminal_event(
     content: Any,
 ) -> bool:
     """Persist ``run.end`` after the RunRow outcome with bounded retries."""
-    attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
-    for attempt in range(attempts):
-        try:
-            await persist_run_terminal_event(
-                event_store,
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-                status=record.status,
-                content=content,
-                user_id=record.user_id,
-            )
-            return True
-        except Exception:
-            if attempt == attempts - 1:
-                logger.warning(
-                    "Failed to persist authoritative terminal event for run %s after %d attempts; RunRow remains authoritative",
-                    record.run_id,
-                    attempts,
-                    exc_info=True,
-                )
-                return False
-            delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
-            logger.warning(
-                "Failed to persist authoritative terminal event for run %s (attempt %d/%d); retrying in %.1fs",
-                record.run_id,
-                attempt + 1,
-                attempts,
-                delay,
-                exc_info=True,
-            )
-            await asyncio.sleep(delay)
-
-    return False  # pragma: no cover - loop always returns
+    return await _persist_terminal_event_with_retry(
+        lambda: persist_run_terminal_event(
+            event_store,
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            status=record.status,
+            content=content,
+            user_id=record.user_id,
+        ),
+        run_id=record.run_id,
+        description="authoritative terminal event",
+        exhausted_message="RunRow remains authoritative",
+    )
 
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
@@ -1749,7 +1742,12 @@ async def run_agent(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
                     )
-            await bridge.publish_end(run_id)
+            # All checkpoint/output writes and completion observers are done.
+            # END lets the client submit its next message, so local teardown
+            # must not leave that request behind a finalizing barrier.
+            await run_manager.set_finalizing(run_id, False)
+            if not record.ownership_lost:
+                await bridge.publish_end(run_id)
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
@@ -1810,7 +1808,10 @@ async def run_agent(
 
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
-                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                # The bridge may be shared (Redis); only the owning producer
+                # may remove its stream after the late-subscriber window.
+                if not record.ownership_lost:
+                    _create_contextless_task(bridge.cleanup(run_id, delay=60))
                 # Preserve the existing five-minute grace period for local
                 # join/status paths, then release the terminal record, completed
                 # task, and request payload. Durable run history remains available

@@ -4316,6 +4316,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
+        set_finalizing=AsyncMock(),
         cleanup=AsyncMock(),
     )
     record = RunRecord(
@@ -4396,6 +4397,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
+        set_finalizing=AsyncMock(),
         cleanup=AsyncMock(),
     )
     record = RunRecord(

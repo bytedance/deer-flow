@@ -191,12 +191,13 @@ class MemoryRunStore(RunStore):
             return False
         # Guard: only transition rows that are still active. ``interrupted``
         # is included for the rollback path (``interrupted → error`` finalize).
-        if run["status"] not in ("pending", "running", "interrupted"):
+        # A local finalizer can also clear its marker after any terminal outcome.
+        if run["status"] not in ("pending", "running", "interrupted") and run.get("stop_reason") != LOCAL_FINALIZER_PENDING_STOP_REASON:
             return False
         run["status"] = status
         if error is not None:
             run["error"] = error
-        if stop_reason is not None:
+        if stop_reason is not None or run.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
@@ -210,6 +211,7 @@ class MemoryRunStore(RunStore):
         owner_worker_id,
         error=None,
         stop_reason=None,
+        grace_seconds=0,
     ):
         run = self._runs.get(run_id)
         if run is None or run.get("owner_worker_id") != owner_worker_id:
@@ -219,7 +221,7 @@ class MemoryRunStore(RunStore):
         local_finalizer_source = run.get("status") not in ("pending", "running") and run.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON
         if not (active_source or local_finalizer_source or rollback_refinement):
             return False
-        if (active_source or local_finalizer_source) and is_lease_expired(run.get("lease_expires_at"), grace_seconds=0):
+        if (active_source or local_finalizer_source) and is_lease_expired(run.get("lease_expires_at"), grace_seconds=grace_seconds):
             return False
         return await self.update_status(
             run_id,
@@ -243,6 +245,7 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = "running"
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return True
 
     async def update_model_name(self, run_id, model_name):
@@ -417,6 +420,7 @@ class MemoryRunStore(RunStore):
         run["owner_worker_id"] = owner_worker_id
         run["stop_reason"] = recovery_stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return run
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
@@ -467,11 +471,12 @@ class MemoryRunStore(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        grace_seconds: int = 0,
     ) -> StatusFinalization:
         run = self._runs.get(run_id)
         if run is None or run.get("owner_worker_id") != owner_worker_id:
             return StatusFinalization(finalized=False)
-        if is_lease_expired(run.get("lease_expires_at"), grace_seconds=0):
+        if is_lease_expired(run.get("lease_expires_at"), grace_seconds=grace_seconds):
             return StatusFinalization(finalized=False)
         if run.get("cancel_action") is not None:
             return StatusFinalization(
@@ -486,6 +491,7 @@ class MemoryRunStore(RunStore):
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return StatusFinalization(finalized=True)
 
     async def claim_for_takeover(
@@ -506,7 +512,7 @@ class MemoryRunStore(RunStore):
         lease = run.get("lease_expires_at")
         if not is_lease_expired(lease, grace_seconds=grace_seconds):
             return False
-        run["status"] = "error"
+        run["status"] = "interrupted" if run.get("cancel_action") is not None else "error"
         run["error"] = error
         if stop_reason is not None:
             run["stop_reason"] = stop_reason

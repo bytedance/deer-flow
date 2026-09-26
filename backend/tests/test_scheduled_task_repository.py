@@ -302,7 +302,7 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
         )
         assert reconciled == 1
         assert (await task_run_repo.list_by_task("task-live"))[0]["status"] == "running"
-        assert (await task_run_repo.list_by_task("task-expired"))[0]["status"] == "interrupted"
+        assert (await task_run_repo.list_by_task("task-expired"))[0]["status"] == "failed"
         recovered = await durable_run_repo.get("run-expired", user_id=None)
         assert recovered is not None
         assert recovered["status"] == "error"

@@ -261,7 +261,7 @@ async def test_pending_cancel_stops_waiting_for_prior_finalization():
     outcome = await run_manager.cancel(record.run_id)
     await asyncio.wait_for(record.task, timeout=0.2)
 
-    assert outcome == CancelOutcome.cancelled
+    assert outcome == CancelOutcome.requested
     assert prior.finalizing is True
     assert factory_called is False
     assert record.status == RunStatus.interrupted
@@ -314,7 +314,7 @@ async def test_rollback_before_checkpoint_boundary_never_deletes_existing_thread
     record.task = task
     await asyncio.wait_for(running_status_started.wait(), timeout=1)
 
-    assert await run_manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    assert await run_manager.cancel(record.run_id, action="rollback") == CancelOutcome.requested
     await asyncio.wait_for(task, timeout=1)
 
     assert record.status == RunStatus.error
@@ -3993,7 +3993,7 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
+    """A fenced worker leaves the stream and durable outcome to its new owner."""
     run_manager = RunManager()
     record = await run_manager.create("thread-lease-lost")
     record.ownership_lost = True
@@ -4030,7 +4030,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.publish_end.assert_not_awaited()
 
 
 @pytest.mark.anyio

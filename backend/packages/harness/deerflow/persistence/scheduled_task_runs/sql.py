@@ -758,7 +758,7 @@ class ScheduledTaskRunRepository:
         lease, belongs to another process and must survive this startup.
         """
         recovered_run_ids: list[str] = []
-        deferred_terminal_rows: list[tuple[str, str, str, str, str | None]] = []
+        deferred_terminal_rows: list[tuple[str, str, str]] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -800,21 +800,7 @@ class ScheduledTaskRunRepository:
                         # parent row active until the post-commit callback
                         # succeeds so another scheduler can retry after a crash.
                         recovered_run_ids.append(candidate.run_id)
-                        if candidate.status == "success":
-                            terminal_status, terminal_error = "success", None
-                        elif candidate.status in {"error", "timeout"}:
-                            terminal_status, terminal_error = "failed", candidate.error
-                        else:
-                            terminal_status, terminal_error = "interrupted", candidate.error or error
-                        deferred_terminal_rows.append(
-                            (
-                                row.id,
-                                row.task_id,
-                                candidate.run_id,
-                                terminal_status,
-                                terminal_error,
-                            )
-                        )
+                        deferred_terminal_rows.append((row.id, row.task_id, candidate.run_id))
                         continue
                 if candidate is not None and candidate.status not in {"pending", "running"}:
                     row.lease_owner = None
@@ -861,15 +847,7 @@ class ScheduledTaskRunRepository:
                             # transaction. Leave the scheduled row executing as
                             # a retryable outbox until events and stream END are
                             # confirmed outside this SQL session.
-                            deferred_terminal_rows.append(
-                                (
-                                    row.id,
-                                    row.task_id,
-                                    candidate.run_id,
-                                    "interrupted",
-                                    error,
-                                )
-                            )
+                            deferred_terminal_rows.append((row.id, row.task_id, candidate.run_id))
                             continue
                     else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
@@ -902,7 +880,7 @@ class ScheduledTaskRunRepository:
             # their executing status makes the next reconciliation retry the
             # idempotent callback.
             async with self._sf() as session:
-                for row_id, task_id, run_id, terminal_status, terminal_error in deferred_terminal_rows:
+                for row_id, task_id, run_id in deferred_terminal_rows:
                     task = await session.get(
                         ScheduledTaskRow,
                         task_id,
@@ -920,8 +898,18 @@ class ScheduledTaskRunRepository:
                         continue
                     self._associate_scheduled_run(row, candidate)
                     self._associate_task_with_run(task, row, candidate)
-                    row.status = terminal_status
-                    row.error = terminal_error
+                    # Use the committed outcome for both a fresh takeover and
+                    # a retried callback. A requested cancellation recovers as
+                    # interrupted; an ordinary expired run recovers as error.
+                    if candidate.status == "success":
+                        row.status = "success"
+                        row.error = None
+                    elif candidate.status in {"error", "timeout"}:
+                        row.status = "failed"
+                        row.error = candidate.error
+                    else:
+                        row.status = "interrupted"
+                        row.error = candidate.error or error
                     row.finished_at = now
                     row.lease_owner = None
                     row.lease_expires_at = None

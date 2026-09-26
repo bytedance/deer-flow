@@ -308,7 +308,7 @@ class TestWaitForRunCompletion:
         asyncio.run(run())
 
     def test_sse_consumer_terminal_missing_stream_with_receipt_yields_end(self) -> None:
-        """A missing stream is recoverable only with durable tail evidence."""
+        """Durable tail evidence recovers a missing stream without waiting."""
         from app.gateway.services import sse_consumer
         from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -653,7 +653,7 @@ class TestWaitForRunCompletion:
 
         asyncio.run(run())
 
-    def test_missing_stream_still_requires_authoritative_completion_evidence(
+    def test_recent_missing_stream_waits_for_authoritative_completion_evidence(
         self,
     ) -> None:
         from app.gateway.services import _terminal_record_stream_missing

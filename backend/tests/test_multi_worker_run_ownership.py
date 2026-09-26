@@ -688,7 +688,9 @@ async def test_admission_commits_local_finalizer_marker_before_worker_receipt(
     durable = await store.get(old.run_id)
     assert durable is not None
     assert durable["status"] == (RunStatus.interrupted.value if strategy == "interrupt" else RunStatus.error.value)
-    assert durable.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON
+    # The receipt now exists and the worker finished its tail, so recovery
+    # must not mistake this completed run for an unfinished local finalizer.
+    assert durable.get("stop_reason") is None
     delivery = await events.list_events(
         old.thread_id,
         old.run_id,
@@ -774,7 +776,7 @@ async def test_direct_cancel_fences_admission_before_durable_terminal_write(
     monkeypatch.setattr(manager, "set_status", pause_worker_terminal_status)
 
     cancel_task = asyncio.create_task(manager.cancel(old.run_id, action="rollback"))
-    assert await asyncio.wait_for(cancel_task, timeout=1) == CancelOutcome.cancelled
+    assert await asyncio.wait_for(cancel_task, timeout=1) == CancelOutcome.requested
     await asyncio.wait_for(worker_terminal_staged.wait(), timeout=1)
 
     store.create_thread_operation_atomic = AsyncMock(
@@ -876,7 +878,7 @@ async def test_pending_direct_cancel_signals_wrapper_before_atomic_recovery(
             break
         await asyncio.sleep(0)
 
-    assert outcome == CancelOutcome.cancelled
+    assert outcome == CancelOutcome.requested
     assert old.ownership_lost is False
     assert old.finalizing is False
     assert old.terminal_status_persistence_inflight == 0
@@ -1839,7 +1841,7 @@ async def test_periodic_reconciliation_logs_recovered_run_ids_when_callback_fail
         await manager._reconcile_orphans_periodic()
         await asyncio.sleep(0)
 
-    assert "Periodic orphan recovery callback failed for 2 run(s)" in caplog.text
+    assert "Recovered-run callback failed for 2 run(s)" in caplog.text
     assert "periodic-orphan-1" in caplog.text
     assert "periodic-orphan-2" in caplog.text
 
@@ -3702,7 +3704,7 @@ async def test_first_cancel_action_wins_when_retry_lands_on_owner():
 
     try:
         assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
-        assert await owner.cancel(record.run_id, action="interrupt") == CancelOutcome.cancelled
+        assert await owner.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
         await asyncio.sleep(0)
 
         assert record.abort_action == "rollback"
@@ -3752,7 +3754,7 @@ async def test_active_local_cancel_leaves_inflight_row_for_crash_recovery():
     record.task = asyncio.create_task(crash_before_terminal_tail())
     await asyncio.wait_for(worker_started.wait(), timeout=1)
 
-    assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.requested
     with pytest.raises(asyncio.CancelledError):
         await record.task
 
@@ -3784,7 +3786,9 @@ async def test_active_local_cancel_leaves_inflight_row_for_crash_recovery():
     assert [item.run_id for item in recovered] == [record.run_id]
     recovered_row = await store.get(record.run_id)
     assert recovered_row is not None
-    assert recovered_row["status"] == RunStatus.error.value
+    # Recovery preserves the accepted user cancellation rather than replacing
+    # it with a generic worker-crash outcome.
+    assert recovered_row["status"] == RunStatus.interrupted.value
     assert recovered_row["owner_worker_id"] == "worker-b"
     assert recovered_row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
     delivery = await events.list_events(
@@ -3800,7 +3804,7 @@ async def test_active_local_cancel_leaves_inflight_row_for_crash_recovery():
     assert len(delivery) == 1
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {
-        "status": RunStatus.error.value,
+        "status": RunStatus.interrupted.value,
         "recovered": True,
         "authoritative": True,
     }
@@ -3826,7 +3830,7 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
     record.task = asyncio.create_task(asyncio.sleep(3600))
 
     try:
-        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.unknown
         assert record.abort_event.is_set()
         assert record.abort_action == "rollback"
 
@@ -3880,7 +3884,7 @@ async def test_owner_cancel_uses_store_while_terminal_status_is_staged_locally()
     # Event-store finalization stages success in memory before persisting it.
     record.status = RunStatus.success
 
-    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.requested
     stored = await store.get(record.run_id)
     assert stored is not None
     assert stored["status"] == "running"
@@ -4394,7 +4398,7 @@ async def test_expired_owner_cannot_finalize_before_heartbeat_tick():
     )
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
-    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    expired = (datetime.now(UTC) - timedelta(seconds=manager.grace_seconds + 1)).isoformat()
     record.lease_expires_at = expired
     store._runs[record.run_id]["lease_expires_at"] = expired
 

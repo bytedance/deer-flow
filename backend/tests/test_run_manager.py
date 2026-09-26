@@ -747,7 +747,9 @@ async def test_terminalize_recovered_runs_reports_incomplete_observability():
     assert record is not None
 
     assert await manager.terminalize_recovered_runs([record]) is False
-    callback.assert_awaited_once_with([record])
+    # Keep the parent retryable without closing its stream before both
+    # singleton writes succeed.
+    callback.assert_not_awaited()
 
 
 @pytest.mark.anyio

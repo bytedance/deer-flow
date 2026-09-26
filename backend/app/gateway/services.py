@@ -95,6 +95,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
+from deerflow.utils.time import is_lease_expired
 
 logger = logging.getLogger(__name__)
 
@@ -253,29 +254,35 @@ async def _terminal_record_stream_missing(
     record: RunRecord,
     run_mgr: RunManager,
 ) -> bool:
-    """Require durable completion evidence before replacing a missing stream."""
+    """Check completion without entering a stream that has no retained data."""
     if not _run_is_terminal(record):
         return False
+    if not await _stream_is_missing(bridge, record.run_id):
+        return False
+    return await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge)
+
+
+async def _stream_is_missing(bridge: StreamBridge, run_id: str) -> bool:
+    """Do not confuse an unavailable existence probe with an absent stream."""
     stream_exists = getattr(bridge, "stream_exists", None)
     if stream_exists is None:
         return False
     try:
-        stream_missing = not bool(await stream_exists(record.run_id))
+        return not bool(await stream_exists(run_id))
     except Exception:
         logger.debug(
             "Failed to probe stream existence for terminal run %s",
-            sanitize_log_param(record.run_id),
+            sanitize_log_param(run_id),
             exc_info=True,
         )
         return False
-    if not stream_missing:
-        return False
-    return await _terminal_completion_observed_after_heartbeat(record, run_mgr)
 
 
 async def _terminal_completion_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,
+    *,
+    bridge: StreamBridge | None = None,
 ) -> bool:
     """Return whether durable evidence makes a missing bridge END recoverable.
 
@@ -287,7 +294,11 @@ async def _terminal_completion_observed_after_heartbeat(
     New-runtime ``run.end`` events carry an explicit authoritative marker and
     are written after the terminal row; either pair acts as a durable outbox if
     bridge END publication is lost. Legacy unmarked ``run.end`` rows are not
-    trusted because their tail ordering is unknown.
+    trusted because their tail ordering is unknown. If the entire stream is
+    absent, legacy rows and lost in-memory event stores instead recover after
+    the terminal row's grace window and any owner lease have elapsed. Retained
+    streams never use that compatibility fallback, so delayed tail frames stay
+    readable. Absence is freshly checked rather than negatively cached.
     """
     task = record.task
     if not (record.store_only or record.ownership_lost or task is None or task.done()):
@@ -303,7 +314,31 @@ async def _terminal_completion_observed_after_heartbeat(
         return True
     if refreshed.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
         return await run_mgr.recover_expired_local_finalizer(refreshed)
-    return False
+    if bridge is None:
+        return False
+    if not is_lease_expired(refreshed.lease_expires_at, grace_seconds=run_mgr.grace_seconds):
+        return False
+    if not is_lease_expired(refreshed.updated_at or refreshed.created_at, grace_seconds=run_mgr.grace_seconds):
+        return False
+    return await _stream_is_missing(bridge, record.run_id)
+
+
+def _missing_stream_frame(record: RunRecord, last_event_id: str | None, *, emit_gap: bool) -> str:
+    if not emit_gap:
+        return format_sse("end", None)
+    # A creating-endpoint retry must reload durable state rather than treating
+    # an empty replay as proof that the completed run produced nothing.
+    return format_sse(
+        "gap",
+        {
+            "code": "stream_replay_gap",
+            "run_id": record.run_id,
+            "requested_event_id": last_event_id,
+            "earliest_available_event_id": None,
+            "latest_available_event_id": None,
+            "recovery": "reload_durable_state",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2297,22 +2332,7 @@ async def sse_consumer(
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record, run_mgr):
-        if emit_gap_on_missing_stream:
-            # Creating-endpoint retry: a bare `end` looks like the run
-            # produced nothing. Point the client at durable state instead.
-            yield format_sse(
-                "gap",
-                {
-                    "code": "stream_replay_gap",
-                    "run_id": record.run_id,
-                    "requested_event_id": last_event_id,
-                    "earliest_available_event_id": None,
-                    "latest_available_event_id": None,
-                    "recovery": "reload_durable_state",
-                },
-            )
-            return
-        yield format_sse("end", None)
+        yield _missing_stream_frame(record, last_event_id, emit_gap=emit_gap_on_missing_stream)
         return
 
     gap_emitted = False
@@ -2337,8 +2357,9 @@ async def sse_consumer(
                 return
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _terminal_completion_observed_after_heartbeat(record, run_mgr):
-                    yield format_sse("end", None)
+                if await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge):
+                    gap_emitted = emit_gap_on_missing_stream and await _stream_is_missing(bridge, record.run_id)
+                    yield _missing_stream_frame(record, last_event_id, emit_gap=gap_emitted)
                     return
                 yield ": heartbeat\n\n"
                 continue
@@ -2417,7 +2438,7 @@ async def wait_for_run_completion(
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break
-                if entry is HEARTBEAT_SENTINEL and await _terminal_completion_observed_after_heartbeat(record, run_mgr):
+                if entry is HEARTBEAT_SENTINEL and await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge):
                     completed = True
                     return True
                 if await request.is_disconnected():

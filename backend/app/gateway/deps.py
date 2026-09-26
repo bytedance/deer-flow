@@ -214,20 +214,12 @@ async def _publish_recovered_run_stream_end(
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
     all_streams_terminalized = True
     for record in recovered_runs:
-        stream_exists = getattr(bridge, "stream_exists", None)
-        if stream_exists is not None:
-            try:
-                if not await stream_exists(record.run_id):
-                    # Do not create an END-only retained stream: an idempotent
-                    # retry needs the missing key to synthesize a gap and reload
-                    # durable state. Existing blocked subscribers terminate on
-                    # the explicit recovery stop reason at their next heartbeat.
-                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
-                    continue
-            except Exception:
-                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
         try:
-            await bridge.publish_end(record.run_id)
+            publish_recovered_end = getattr(type(bridge), "publish_recovered_end", StreamBridge.publish_recovered_end)
+            if not await publish_recovered_end(bridge, record.run_id):
+                # Missing streams preserve the durable-reload gap; an existing
+                # END already has its cleanup scheduled by the first publisher.
+                continue
         except Exception:
             all_streams_terminalized = False
             logger.warning(
@@ -307,8 +299,9 @@ async def _mark_latest_startup_recovered_threads_error(
     thread_store: ThreadMetaStore,
     recovered_runs: list[RunRecord],
 ) -> None:
-    """Project startup recovery before request-serving concurrency begins.
+    """Project the recovered outcome before request-serving concurrency begins.
 
+    Accepted cancellations remain interrupted instead of becoming errors.
     This helper must remain on the pre-``yield`` startup path. ``ThreadMetaStore``
     has no ``latest_run_id`` column, so it cannot express an atomic conditional
     update keyed by the recovered run. Periodic recovery deliberately skips this
@@ -328,9 +321,9 @@ async def _mark_latest_startup_recovered_threads_error(
         if not latest_runs or latest_runs[0].run_id not in recovered_run_ids:
             continue
         try:
-            await thread_store.update_status(thread_id, "error", user_id=None)
+            await thread_store.update_status(thread_id, latest_runs[0].status.value, user_id=None)
         except Exception:
-            logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
+            logger.warning("Failed to update thread %s during run reconciliation", thread_id, exc_info=True)
 
 
 async def _terminalize_recovered_runs(
@@ -620,12 +613,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        await _terminalize_recovered_runs(
-            app.state.stream_bridge,
-            recovered_runs,
-            cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
-        )
+        await app.state.run_manager.terminalize_recovered_runs(recovered_runs)
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
             app.state.thread_store,

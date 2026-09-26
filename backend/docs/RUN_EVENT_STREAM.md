@@ -168,6 +168,12 @@ a fresh owner-scoped read only when the terminal `RunRow.status` matches a
 marked `run.end`, or when the stronger `run.delivery` receipt is present. An
 older unmarked `run.end` is preserved for history but is not safe liveness
 evidence because its ordering relative to late visible frames is unknown.
+An entirely missing stream has a separate compatibility path: after fresh
+owner-scoped terminal-state and missing-stream checks, no active local producer,
+and expiration of both the lease and terminal timestamp grace, consumers may
+complete even if the event journal was lost or only legacy events exist.
+This never truncates a retained stream or bypasses `local_finalizer_pending`.
+Creating retries receive `gap` (reload durable state); observers receive `end`.
 Consumers must not depend on backend-identical nested output values.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
@@ -250,7 +256,9 @@ be used by new producers.
   terminalize, but there is no historical terminal-row scan. A terminal row
   plus a matching `metadata.authoritative: true` event can recover a missing
   bridge END; older unmarked `run.end` rows remain legacy graph-completion
-  markers, are not rewritten, and cannot enable that shortcut.
+  markers, are not rewritten, and cannot enable that shortcut for retained
+  streams. The bounded missing-stream compatibility path above provides
+  liveness, not reconstruction of lost event evidence.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.
