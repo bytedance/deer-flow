@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
+import errno
 import hashlib
 import logging
 import math
@@ -123,6 +124,21 @@ def _lock_file_exclusive(lock_file) -> None:
 
     lock_file.seek(0)
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _try_lock_file_exclusive(lock_file) -> bool:
+    """Attempt the cross-process lock once without blocking the worker thread."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # pragma: no cover - Windows
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            return False
+        raise
+    return True
 
 
 def _unlock_file(lock_file) -> None:
@@ -2189,8 +2205,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False
         try:
-            await run_sync_lifecycle_operation(_lock_file_exclusive, lock_file)
-            locked = True
+            while not locked:
+                locked = await run_sync_lifecycle_operation(_try_lock_file_exclusive, lock_file)
+                if not locked:
+                    await asyncio.sleep(0.02)
             # Re-check in-process caches under the file lock in case another
             # thread in this process won the race while we were waiting.
             cached_id = await run_sync_lifecycle_operation(self._recheck_cached_sandbox, thread_id, sandbox_id, user_id=effective_user_id)
