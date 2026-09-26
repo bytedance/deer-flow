@@ -187,7 +187,11 @@ def test_legacy_aio_profile_uses_container_environment_without_bash_exec(monkeyp
     profile = ImageGenerationProfile(provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-secret")
     monkeypatch.setattr(image_tool, "get_app_config", config)
     monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "sandbox_environment", None))
-    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: object.__new__(AioSandbox))
+    sandbox = object.__new__(AioSandbox)
+    sandbox._id = "base-container-id"
+    sandbox._deerflow_base_identity = sandbox.id
+    sandbox._deerflow_managed_image_local = True
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
     monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: False)
     captured = {}
 
@@ -205,6 +209,65 @@ def test_legacy_aio_profile_uses_container_environment_without_bash_exec(monkeyp
     failure = image_tool.generate_image_tool.func(SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
     assert "IMAGE_GENERATION_FAILED" in failure
     assert "synthetic-secret" not in failure
+
+
+def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_module
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.config import image_generation as image_config
+    from deerflow.sandbox import tools as sandbox_tools
+
+    managed = ManagedImageGenerationProfile(
+        name="image",
+        provider="openai",
+        model="test-image",
+        base_url="https://images.example/v1",
+        api_key="managed-secret",
+        revision="revision-1",
+    )
+    settings = config()
+    settings.sandbox.environment = {
+        "IMAGE_GENERATION_PROVIDER": "gemini",
+        "GEMINI_IMAGE_MODEL": "gemini-image",
+        "GEMINI_API_KEY": "legacy-secret",
+    }
+    stored = [managed]
+    monkeypatch.setattr(image_config, "ManagedImageGenerationProfileStore", lambda: SimpleNamespace(list=lambda: stored))
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: settings)
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: settings)
+    provider = object.__new__(AioSandboxProvider)
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda *_args: "base-container-id")
+    sandbox = object.__new__(AioSandbox)
+    sandbox._id = provider._image_profile_sandbox_id("base-container-id", managed.revision)
+    provider._bind_image_profile_context(sandbox, "thread", "user")
+    assert sandbox._deerflow_image_profile_revision == managed.revision
+    monkeypatch.setattr(sandbox, "supports_command_environment", lambda: False)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
+    monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: False)
+    commands = []
+
+    def execute(_sandbox, command, *, runtime, env, timeout):
+        commands.append(env)
+        return re.search(r"__DEERFLOW_IMAGE_OK_[a-f0-9]+__", command).group()
+
+    monkeypatch.setattr(sandbox_tools, "_execute_bash_command", execute)
+    args = (SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
+    assert image_tool.generate_image_tool.func(*args).startswith("Successfully generated")
+    assert commands == [None]
+
+    # The active sandbox is held across calls. Rebinding after the managed
+    # profile is disabled erases its revision marker, but not its identity.
+    stored[0] = managed.model_copy(update={"enabled": False})
+    selected_profile, source, _ = image_tool.resolve_image_generation_profile(settings.sandbox.environment)
+    assert source == "sandbox_environment"
+    assert selected_profile.provider.value == "gemini"
+    provider._bind_image_profile_context(sandbox, "thread", "user")
+    assert sandbox._deerflow_image_profile_revision is None
+    assert "IMAGE_PROFILE_CHANGED" in image_tool.generate_image_tool.func(*args)
+    assert commands == [None]
 
 
 @pytest.mark.parametrize("supports_env", [True, False])
