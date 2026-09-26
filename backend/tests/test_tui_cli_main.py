@@ -4,8 +4,17 @@ import json
 
 import pytest
 
+from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY
 from deerflow.client import StreamEvent
 from deerflow.tui import cli
+
+# Every headless run carries the tool-approval downgrade: the TUI has no approval
+# surface yet, so it must not let a gated tool park a run nobody can resume. The
+# assertions below are about the recursion-limit kwarg and spell out both rather
+# than filtering, so the kwargs a headless run sends stay fully pinned. Drop this
+# entry in the change that gives the TUI an approval prompt. See
+# ``tests/test_tool_approval_client_downgrade.py``.
+_DOWNGRADE = {DISABLE_TOOL_APPROVAL_KEY: True}
 
 
 class _FakeClient:
@@ -45,14 +54,14 @@ def test_main_print_passes_explicit_recursion_limit(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_make_session", _FakeSession)
     rc = cli.main(["--recursion-limit", "250", "--print", "hello"])
     assert rc == 0
-    assert _FakeSession.latest.client.chat_kwargs == {"recursion_limit": 250}
+    assert _FakeSession.latest.client.chat_kwargs == {**_DOWNGRADE, "recursion_limit": 250}
 
 
 def test_main_print_omits_default_recursion_limit(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_make_session", _FakeSession)
     rc = cli.main(["--print", "hello"])
     assert rc == 0
-    assert _FakeSession.latest.client.chat_kwargs == {}
+    assert _FakeSession.latest.client.chat_kwargs == _DOWNGRADE
 
 
 def test_main_json_emits_ndjson_stream_events(monkeypatch, capsys):
@@ -69,7 +78,7 @@ def test_main_json_passes_explicit_recursion_limit(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_make_session", _FakeSession)
     rc = cli.main(["--recursion-limit", "250", "--json", "hello"])
     assert rc == 0
-    assert _FakeSession.latest.client.stream_kwargs == {"recursion_limit": 250}
+    assert _FakeSession.latest.client.stream_kwargs == {**_DOWNGRADE, "recursion_limit": 250}
 
 
 def test_invalid_recursion_limit_fails_before_session_creation(monkeypatch):

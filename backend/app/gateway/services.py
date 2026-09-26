@@ -40,6 +40,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
@@ -654,11 +655,105 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 #
 #   ``channel_name``        — trusted channel identity used by interaction policy.
 #
+#   ``disable_tool_approval`` — the tool-approval counterpart of
+#                              ``disable_clarification``: a real ``interrupt()``
+#                              would park the run in the checkpoint with no
+#                              client able to resume it, so non-interactive
+#                              callers auto-approve instead.
+#
 # These are produced server-side by the channel run policies
 # (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
 # which reach the Gateway over the internally-authenticated request channel, so
 # they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name", "disable_tool_approval"})
+
+# Keys forwarded from ``body.context`` into ``config['context']`` only, exactly
+# like :data:`_CONTEXT_RUNTIME_ONLY_KEYS`, but which an **external** client may
+# legitimately supply — so they are deliberately *not* part of
+# :data:`_INTERNAL_ONLY_CONTEXT_KEYS` and survive
+# :func:`strip_internal_context_keys`.
+#
+#   ``tool_approval_omit``  — tool names the human chose to stop being asked
+#                              about ("don't ask again"). The browser's own
+#                              approval card is the producer, so gating it on
+#                              ``internal`` would make that button inert; it is
+#                              scoped to one caller's session and re-sent with
+#                              every run rather than persisted to config.
+#
+# Client-supplied means untrusted shape, so every key here is normalized on the
+# way in rather than forwarded verbatim — see
+# :func:`_sanitize_tool_approval_omit`. The middleware only ever stringifies
+# what it is handed, so a malformed payload would otherwise surface as tool
+# names that can never match instead of an error.
+_CONTEXT_CLIENT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"tool_approval_omit"})
+
+# Upper bound on the "don't ask again" list. It rides on every run of a session,
+# so a client cannot grow it without limit.
+MAX_TOOL_APPROVAL_OMIT_ENTRIES = 100
+
+# Longest accepted tool name in that list. Comfortably above any real name.
+_MAX_TOOL_APPROVAL_OMIT_NAME_LENGTH = 128
+
+
+def _sanitize_tool_approval_omit(raw: Any) -> list[str] | None:
+    """Coerce a client-supplied ``tool_approval_omit`` into a list of names.
+
+    The middleware stringifies whatever it is handed, so normalizing here is
+    what keeps a malformed payload from arriving as tool names that can never
+    match. A bare string is accepted as a single name; everything unusable is
+    dropped, order is preserved, and duplicates are collapsed.
+
+    Args:
+        raw: The value as the client sent it.
+
+    Returns:
+        The accepted names, or ``None`` when nothing usable remains — so the
+        key is omitted entirely rather than forwarded as an empty list.
+    """
+    if isinstance(raw, str):
+        candidates: list[Any] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        candidates = list(raw)
+    else:
+        return None
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        name = candidate.strip()
+        if not name or len(name) > _MAX_TOOL_APPROVAL_OMIT_NAME_LENGTH or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= MAX_TOOL_APPROVAL_OMIT_ENTRIES:
+            break
+    return names or None
+
+
+def sanitize_tool_approval_omit_in_config(config: dict[str, Any]) -> None:
+    """Normalize ``config['context']['tool_approval_omit']`` regardless of how it arrived.
+
+    :func:`merge_run_context_overrides` only sanitizes the copy it merges in
+    from ``body.context``. ``build_run_config`` copies a client-supplied
+    ``body.config['context']`` (or ``['configurable']``, merged into
+    ``configurable`` only — this key never lives there) largely verbatim, so a
+    client naming ``tool_approval_omit`` there instead of in ``body.context``
+    bypasses :func:`_sanitize_tool_approval_omit` entirely and reaches
+    ``runtime.context`` — and the middleware — unsanitized. Call this once,
+    after all config assembly, so both paths yield the same shape (or the key
+    is dropped) no matter which one the client used.
+    """
+    context = config.get("context")
+    if not isinstance(context, dict) or "tool_approval_omit" not in context:
+        return
+    sanitized = _sanitize_tool_approval_omit(context["tool_approval_omit"])
+    if sanitized is None:
+        context.pop("tool_approval_omit", None)
+    else:
+        context["tool_approval_omit"] = sanitized
+
 
 # Every run-context key an external client may never supply, in either section.
 # The two sets differ only in *where* a legitimate internal caller's value lands
@@ -708,11 +803,18 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     by :func:`strip_internal_context_keys`.
 
     A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
-    and then into ``config['context']`` only, never ``configurable``. These are
-    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
-    keeping them out of ``configurable`` avoids persisting a short-lived token in the
-    checkpoint store.
+    ``disable_clarification``, ``disable_tool_approval``) is likewise forwarded only
+    when ``internal`` is True, and then into ``config['context']`` only, never
+    ``configurable``. These are secrets / runtime flags read by tools and middlewares
+    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
+    short-lived token in the checkpoint store.
+
+    :data:`_CONTEXT_CLIENT_RUNTIME_ONLY_KEYS` lands in the same place but is *not*
+    gated on ``internal``: ``tool_approval_omit`` is produced by the browser's own
+    approval card, so gating it would make that button inert. Being client-supplied
+    means the shape is untrusted, so it is normalized by
+    :func:`_sanitize_tool_approval_omit` on the way through rather than forwarded
+    verbatim.
     """
     if not context:
         return
@@ -732,6 +834,15 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         for key in _CONTEXT_RUNTIME_ONLY_KEYS:
             if key in context and isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
+    # Same destination, but legitimately client-supplied, so no ``internal`` gate —
+    # only shape normalization, since the value is untrusted.
+    for key in _CONTEXT_CLIENT_RUNTIME_ONLY_KEYS:
+        if key not in context or not isinstance(runtime_context, dict):
+            continue
+        value = _sanitize_tool_approval_omit(context[key]) if key == "tool_approval_omit" else context[key]
+        if value is None:
+            continue
+        runtime_context.setdefault(key, value)
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
@@ -1815,6 +1926,46 @@ async def start_run(
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
 
+        # Tool approval raises a real LangGraph ``interrupt()``, which parks the run
+        # in the checkpoint until a client resumes it with ``Command(resume=...)``.
+        # No HTTP client bundled with this repo has an approval surface yet — the
+        # web UI does not consume ``__interrupt__`` — so every Gateway run
+        # auto-approves; without this an approval-gated tool would hang the thread
+        # with nobody able to answer. The embedded ``DeerFlowClient`` does not pass
+        # through here, so ``tools[].interrupt_on`` and ``DeerFlowClient.resume()``
+        # stay usable for the callers that implement the resume protocol.
+        #
+        # Deliberately unconditional rather than per-caller: the Gateway cannot
+        # tell a browser session from a custom API client (both arrive as ordinary
+        # authenticated REST calls), and auto-approving a caller that *could* have
+        # resumed is strictly better than parking one that cannot. This mirrors
+        # ``ChannelManager._apply_channel_policy``, which does the same for every
+        # IM channel. Narrow this in the change that gives an HTTP client a real
+        # approval surface.
+        #
+        # Assigned (not ``setdefault``) and placed after ``strip_internal_context_keys``
+        # so a client copy of this internal-only key cannot pre-empt the server's
+        # value with ``False``. Unconditional within this branch:
+        # ``build_run_config`` rejects a non-mapping ``context`` and turns ``null``
+        # into ``{}``, so this is always a dict by here — an ``isinstance`` guard
+        # would silently skip the downgrade if that ever stopped holding, which is
+        # the failure this must not have.
+        #
+        # Skipped for a resume, and that exclusion is load-bearing rather than an
+        # optimization. Downgrading a resume does not auto-approve it — it makes
+        # the middleware return before re-entering ``interrupt()``, so LangGraph
+        # discards the posted ``decisions`` with no error, leaves the gated
+        # ``tool_calls`` on the original ``AIMessage`` unanswered, and lets the
+        # tools node run them with pre-review args. A ``reject`` would execute.
+        # A caller posting decisions is by definition the human on the other end,
+        # which is exactly the client this downgrade exists to protect from a park
+        # it cannot answer. Reachable because a thread parked by an embedded
+        # ``DeerFlowClient`` on a shared checkpointer is visible here, and
+        # ``GET /threads/{id}.interrupts`` plus ``docs/API.md`` tell clients to
+        # resume it this way.
+        if not isinstance(graph_input, Command):
+            config.setdefault("context", {})[DISABLE_TOOL_APPROVAL_KEY] = True
+
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
@@ -1876,6 +2027,10 @@ async def start_run(
             )
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
+        # Sanitize regardless of whether tool_approval_omit arrived via
+        # body.context (already normalized on merge) or a verbatim-copied
+        # body.config['context'] -- both must yield the same shape.
+        sanitize_tool_approval_omit_in_config(config)
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(
             config,

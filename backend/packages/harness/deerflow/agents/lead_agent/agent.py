@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -38,6 +38,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+from deerflow.agents.middlewares.human_in_the_loop import create_interrupt_middleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
@@ -75,6 +76,9 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +502,7 @@ def build_middlewares(
     authorization_provider=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
+    tools: Sequence[BaseTool] | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -529,6 +534,9 @@ def build_middlewares(
             keep advertised and enforced task concurrency aligned after reloads.
         extensions: Loaded extensions whose middleware contributions are merged
             into the final stack. Defaults to the process-wide set.
+        tools: The agent's assembled tools. Only used to capture argument
+            schemas for tool-approval ``edit`` decisions, which LangGraph's
+            batch-mode interrupt cannot recover at execution time.
 
     Returns:
         List of middleware instances.
@@ -749,6 +757,24 @@ def build_middlewares(
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    # Tool approval must sit BEFORE ClarificationMiddleware in this list.
+    # ``after_model`` dispatch runs the list in reverse, so appending earlier
+    # means running later: Clarification first, then tool approval. That order
+    # matters because Clarification drops the sibling tool calls of a
+    # clarification request; approving them first would ask the human to review
+    # calls that are about to be discarded.
+    #
+    # Registered unconditionally: a park is only answerable by a client that can
+    # read ``__interrupt__`` and post ``Command(resume={"decisions": [...]})``, so
+    # the clients that cannot do that opt out per run instead — Gateway HTTP runs
+    # and the TUI both send ``disable_tool_approval``, which auto-approves here.
+    # Gating the registration itself would make ``tools[].interrupt_on`` and
+    # ``DeerFlowClient.resume()`` unreachable for every caller, including the
+    # embedded clients that do implement the resume protocol.
+    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
+    if interrupt_middleware:
+        middlewares.append(interrupt_middleware)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
@@ -1123,6 +1149,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             user_id=resolved_user_id,
             authorization_provider=_authz_provider,
             subagent_execution_capacity=subagent_execution_capacity,
+            tools=final_tools,
         )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -1254,6 +1281,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         user_id=resolved_user_id,
         authorization_provider=_authz_provider,
         subagent_execution_capacity=subagent_execution_capacity,
+        tools=final_tools,
     )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,

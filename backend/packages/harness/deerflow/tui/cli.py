@@ -266,7 +266,7 @@ def _run_print(plan: LaunchPlan) -> int:
         return 2
     session = _make_session()
     thread_id = session.resolve_thread(plan)
-    answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan))
+    answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan), disable_tool_approval=True)
     print(answer)
     return 0
 
@@ -278,7 +278,7 @@ def _run_json(plan: LaunchPlan) -> int:
         return 2
     session = _make_session()
     thread_id = session.resolve_thread(plan)
-    for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+    for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan), disable_tool_approval=True):
         payload = {"type": event.type, "data": event.data}
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
         sys.stdout.flush()

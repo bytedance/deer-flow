@@ -1743,6 +1743,8 @@ class ChannelManager:
           ``ClarificationMiddleware`` would otherwise dead-end a webhook
           run waiting for a synchronous reply that only arrives as a
           later, separate webhook delivery.
+        * ``disable_tool_approval`` for **every** channel — tool approval
+          uses a real ``interrupt()``, and no channel can resume one yet.
         * Channel-specific credentials provider — e.g. the GitHub channel
           installs a token-mint callable so ``bash_tool`` can resolve a
           fresh installation token on every invocation (longer than the
@@ -1757,6 +1759,21 @@ class ChannelManager:
         flags like ``fire_and_forget`` without doing a second dict
         lookup.
         """
+        # Tool approval raises a real LangGraph ``interrupt()``, which parks
+        # the run in the checkpoint until a client resumes it with
+        # ``Command(resume=...)``. No channel has an approval surface yet, so
+        # every channel run auto-approves; without this an approval-gated tool
+        # would hang the thread with nobody able to answer. This is set for
+        # ALL channels, including interactive ones and those with no
+        # CHANNEL_RUN_POLICY entry, so it must precede the early return below.
+        #
+        # Deliberately unconditional rather than per-channel: an interactive
+        # channel like Feishu *could* carry an approval, but only once it can
+        # also send the resume — until then, letting it park is strictly worse
+        # than auto-approving. Narrow this to non-interactive channels only in
+        # the change that gives an interactive channel a real approval surface.
+        run_context["disable_tool_approval"] = True
+
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is None:
             return None

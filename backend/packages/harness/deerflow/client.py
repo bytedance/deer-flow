@@ -32,9 +32,11 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY, TOOL_APPROVAL_OMIT_KEY
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
@@ -55,7 +57,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
-from deerflow.runtime import CheckpointStateAccessor
+from deerflow.runtime import CheckpointStateAccessor, serialize_interrupts
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
@@ -125,7 +127,7 @@ def _run_async_from_sync(coro):
     return asyncio.run(coro)
 
 
-StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
+StreamEventType = Literal["values", "messages-tuple", "custom", "interrupt", "end"]
 
 
 @dataclass
@@ -135,6 +137,9 @@ class StreamEvent:
     Event types align with the LangGraph SSE protocol:
         - ``"values"``: State snapshot (title, messages, artifacts, summary_text).
         - ``"messages-tuple"``: Per-message update (AI text, tool calls, tool results).
+        - ``"interrupt"``: The run is parked awaiting human input (tool approval).
+          Payload is ``{"interrupts": [{"id", "value"}, ...]}``. Resume with
+          :meth:`DeerFlowClient.resume`; until then the run makes no progress.
         - ``"end"``: Stream finished.
 
     Attributes:
@@ -457,6 +462,7 @@ class DeerFlowClient:
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
                     subagent_execution_capacity=subagent_execution_capacity,
+                    tools=final_tools,
                 ),
                 self._checkpoint_channel_mode,
                 self._checkpoint_snapshot_frequency,
@@ -620,6 +626,39 @@ class DeerFlowClient:
             return "\n".join(pieces) if pieces else ""
         return str(content)
 
+    def _resume_baseline_messages(self, checkpointer: Any, checkpoint_config: dict[str, Any]) -> list[Any]:
+        """Messages already in the checkpoint a resume continues from.
+
+        A resume needs this because it passes ``Command(resume=...)`` and appends
+        no ``HumanMessage``, so the ``run_id`` marker that normally separates this
+        turn from history never appears in the snapshot.
+
+        Read through :class:`CheckpointStateAccessor` rather than off the raw
+        saver: in ``delta`` mode a non-snapshot checkpoint omits ``messages`` from
+        ``channel_values`` altogether, and a snapshot checkpoint holds a
+        ``_DeltaSnapshot`` wrapper instead of a message sequence. The accessor
+        materializes through the graph's channel table, so both modes answer the
+        same question.
+
+        Best effort: without a baseline the stream is noisy, so a failure here
+        must not fail the resume.
+        """
+        if checkpointer is None or self._agent is None:
+            return []
+        try:
+            accessor = CheckpointStateAccessor.bind(self._agent, checkpointer, mode=self._checkpoint_channel_mode)
+            snapshot = _run_async_from_sync(accessor.aget(checkpoint_config))
+            values = getattr(snapshot, "values", None)
+            messages = values.get("messages") if isinstance(values, dict) else None
+        except Exception:
+            logger.debug("Could not read a resume baseline for thread %s", checkpoint_config, exc_info=True)
+            return []
+        if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes)):
+            return []
+        # Materialization yields real messages; anything else is a shape we do
+        # not understand and must not seed ids from.
+        return [message for message in messages if hasattr(message, "content")]
+
     # ------------------------------------------------------------------
     # Public API — threads
     # ------------------------------------------------------------------
@@ -776,11 +815,55 @@ class DeerFlowClient:
     # Public API — conversation
     # ------------------------------------------------------------------
 
+    def resume(
+        self,
+        decisions: Sequence[Mapping[str, Any]],
+        *,
+        thread_id: str,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
+        """Resume a run parked on a tool-approval interrupt.
+
+        Pairs with the ``interrupt`` event emitted by :meth:`stream`. The run
+        continues inside the middleware that raised the interrupt, so no new
+        ``HumanMessage`` is appended — the decisions replace the interrupt's
+        return value.
+
+        Args:
+            decisions: One decision per interrupted tool call, in the order the
+                interrupt listed them. Each is a mapping with a ``type`` of
+                ``approve``, ``edit``, ``reject``, or ``respond``, plus that
+                type's own fields (``edited_action`` for ``edit``, ``message``
+                for ``reject`` / ``respond``).
+            thread_id: The parked thread. Required — a resume has no meaning
+                without the checkpoint holding the pending interrupt.
+            **kwargs: Same overrides as :meth:`stream`.
+
+        Yields:
+            The same event types as :meth:`stream`, continuing the turn. A
+            further ``interrupt`` event can follow if the run parks again.
+
+        Raises:
+            ValueError: If ``thread_id`` is empty or ``decisions`` is empty.
+        """
+        if not thread_id:
+            raise ValueError("resume() requires the thread_id of the parked run")
+        if not decisions:
+            raise ValueError("resume() requires at least one decision")
+
+        yield from self.stream(
+            "",
+            thread_id=thread_id,
+            resume={"decisions": [dict(decision) for decision in decisions]},
+            **kwargs,
+        )
+
     def stream(
         self,
         message: str,
         *,
         thread_id: str | None = None,
+        resume: Any = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn with a DeerFlow request trace context.
@@ -789,6 +872,10 @@ class DeerFlowClient:
         for the turn so logs, Langfuse metadata, and delegated work correlate.
         A caller that opened its own scope with ``request_trace_context`` keeps
         that id; otherwise the turn gets a fresh one.
+
+        When ``resume`` is not ``None``, *message* is ignored and the turn
+        continues a parked interrupt instead of starting a new one. Prefer
+        :meth:`resume`, which builds the payload for you.
         """
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
@@ -802,7 +889,7 @@ class DeerFlowClient:
         # Per-step set/reset keeps LangGraph node execution and its log
         # records inside the binding while returning control to the caller
         # with the ContextVar restored.
-        inner = self._stream_turn(message, thread_id=thread_id, **kwargs)
+        inner = self._stream_turn(message, thread_id=thread_id, resume=resume, **kwargs)
         _EXHAUSTED = object()
         try:
             while True:
@@ -835,6 +922,7 @@ class DeerFlowClient:
         message: str,
         *,
         thread_id: str | None = None,
+        resume: Any = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn, yielding events incrementally.
@@ -986,8 +1074,19 @@ class DeerFlowClient:
 
         self._ensure_agent(config, context=context)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        # A resume continues inside the middleware that raised the interrupt,
+        # so it must NOT append a HumanMessage: the graph input is the resume
+        # value itself, which becomes the return value of ``interrupt()``.
+        state: dict[str, Any] | Command
+        if resume is not None:
+            state = Command(resume=resume)
+        else:
+            state = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+        if resume is None and kwargs.get(DISABLE_TOOL_APPROVAL_KEY):
+            context[DISABLE_TOOL_APPROVAL_KEY] = True
+        if kwargs.get(TOOL_APPROVAL_OMIT_KEY):
+            context[TOOL_APPROVAL_OMIT_KEY] = kwargs[TOOL_APPROVAL_OMIT_KEY]
         if self._agent_name:
             context["agent_name"] = self._agent_name
 
@@ -998,6 +1097,12 @@ class DeerFlowClient:
         # AI text already emitted per id. A replacement that appends to it (a
         # guard's stop notice) only needs the part that was added.
         sent_text_by_id: dict[str, str] = {}
+        # Tool calls already emitted per id, serialized for comparison. A tool
+        # approval ``edit`` rewrites a message's arguments under its own id, and
+        # a resume replays the parked snapshot before the rewritten one, so the
+        # replacement has to be recognized and re-emitted rather than treated as
+        # a text-only follow-up.
+        sent_tool_calls_by_id: dict[str, list[dict[str, Any]]] = {}
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
@@ -1014,6 +1119,29 @@ class DeerFlowClient:
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        # A resume appends no ``HumanMessage``, so the ``run_id`` marker used
+        # below never appears and the baseline must come from the checkpoint.
+        #
+        # The trailing AI message is held out of ``historical_message_ids`` but
+        # still counted in ``counted_usage_ids``, because those two answer
+        # different questions. It carries the gated tool calls and ``edit``
+        # rewrites its args under the same id, so suppressing it as history would
+        # drop the human's edit. Re-emitting it is harmless: clients merge a
+        # ``messages-tuple`` event into the message with that id, which is how an
+        # edit reaches them at all — and the "same id, replaced" branch below
+        # re-emits changed tool calls so the rewrite is not lost either. Its
+        # ``usage_metadata`` is another matter — the tokens were spent on the turn
+        # that parked and were counted there, so counting them again would bill
+        # this resume for the park's model call.
+        if resume is not None:
+            baseline = self._resume_baseline_messages(checkpointer, checkpoint_config)
+            reviewable = next((index for index in range(len(baseline) - 1, -1, -1) if isinstance(baseline[index], AIMessage)), None)
+            for index, msg in enumerate(baseline):
+                if msg_id := getattr(msg, "id", None):
+                    counted_usage_ids.add(msg_id)
+                    if index != reviewable:
+                        historical_message_ids.add(msg_id)
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
             """Add *usage* to cumulative totals if this id has not been counted.
@@ -1111,6 +1239,7 @@ class DeerFlowClient:
                     elif msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg_chunk.tool_calls)
                         additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
                         yield self._ai_tool_calls_event(
                             msg_id,
@@ -1125,6 +1254,13 @@ class DeerFlowClient:
                 continue
 
             # mode == "values"
+            # ``values`` snapshots carry ``__interrupt__`` when the graph parks
+            # on a real ``interrupt()`` (tool approval). It is emitted as its
+            # own event rather than folded into the snapshot below, because a
+            # parked run produces no further messages until ``resume()``.
+            if interrupt_payload := serialize_interrupts(chunk.get("__interrupt__")):
+                yield StreamEvent(type="interrupt", data={"interrupts": interrupt_payload})
+
             messages = chunk.get("messages", [])
 
             current_user_index = next(
@@ -1148,6 +1284,18 @@ class DeerFlowClient:
                         text = self._extract_text(msg.content)
                         sent_text = sent_text_by_id.get(msg_id, "")
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, self._serialize_additional_kwargs(msg))
+                        # An approval ``edit`` replaces this message's tool calls
+                        # under the same ids. Without this the stream would keep
+                        # reporting the pre-review arguments while the tools node
+                        # runs the edited ones. The comparison is over the whole
+                        # list because the event carries the whole list: clients
+                        # merge it onto the message by id, so emitting only the
+                        # changed call would drop its siblings.
+                        tool_calls = self._serialize_tool_calls(msg.tool_calls) if msg.tool_calls else []
+                        if tool_calls and tool_calls != sent_tool_calls_by_id.get(msg_id):
+                            sent_tool_calls_by_id[msg_id] = tool_calls
+                            yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)
+                            additional_kwargs_delta = None
                         if len(text) > len(sent_text) and text.startswith(sent_text):
                             sent_text_by_id[msg_id] = text
                             yield self._ai_text_event(msg_id, text[len(sent_text) :], None, additional_kwargs_delta)
@@ -1166,6 +1314,7 @@ class DeerFlowClient:
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
                         if msg_id in pending_tool_call_ids and msg.tool_calls:
                             pending_tool_call_ids.discard(msg_id)
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg.tool_calls)
                             yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)
                         elif additional_kwargs_delta:
                             # Metadata-only follow-up: ``messages-tuple`` has no
@@ -1182,6 +1331,8 @@ class DeerFlowClient:
 
                     if msg.tool_calls:
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if msg_id:
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg.tool_calls)
                         yield self._ai_tool_calls_event(
                             msg_id,
                             msg.tool_calls,

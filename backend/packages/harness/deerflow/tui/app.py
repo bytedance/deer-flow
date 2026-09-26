@@ -613,7 +613,12 @@ class DeerFlowTUI(App):
         )
 
     def _stream_worker(self, text: str, thread_id: str) -> None:
-        kwargs: dict = {}
+        # Tool approval raises a real LangGraph ``interrupt()`` that parks the run
+        # until a client posts ``Command(resume=...)``. This app has no approval
+        # surface yet, so an approval-gated tool would hang the session with
+        # nobody able to answer; auto-approve instead. Drop this key in the change
+        # that adds the approval prompt and its resume submission.
+        kwargs: dict = {"disable_tool_approval": True}
         if self._model_override:
             kwargs["model_name"] = self._model_override
 
