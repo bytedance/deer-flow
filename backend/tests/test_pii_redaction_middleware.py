@@ -533,6 +533,12 @@ class TestDurableContextReinjection:
         final = mw._inject(request)
         assert "alice@example.com" in final.messages[1].content
 
+    def test_reinjected_goal_redacted(self):
+        mw = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET))
+        request = _StateRequest({"goal": {"status": "active", "objective": "email the report to alice@example.com"}}, [HumanMessage("hi")])
+        block = mw._inject(request).messages[1].content
+        assert EMAIL_ALICE in block and "alice@example.com" not in block
+
     def test_policy_declares_pii_gate(self):
         enabled = self._make_dc(PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET)).release_policy_parameters()
         disabled = self._make_dc(None).release_policy_parameters()

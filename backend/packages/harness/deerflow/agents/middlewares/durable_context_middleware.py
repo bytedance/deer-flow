@@ -1,10 +1,10 @@
-"""Durable-context middleware: inject summary, delegation ledger, and skills.
+"""Durable-context middleware: inject goal, summary, delegation ledger, and skills.
 
 Capture enumerates task delegations and loaded skill files into checkpointed
 state channels. Injection renders static authority rules as a SystemMessage and
-renders untrusted channel values (`summary_text`, `delegations`,
-`skill_context`) as one hidden <durable_context_data> HumanMessage, never
-written back to state.
+renders untrusted channel values (the active `goal` objective, `summary_text`,
+`delegations`, `skill_context`) as one hidden <durable_context_data>
+HumanMessage, never written back to state.
 """
 
 from __future__ import annotations
@@ -35,6 +35,9 @@ from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_K
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
+# Same cap as ``runtime.goal.MAX_GOAL_OBJECTIVE_CHARS``. The goal routes enforce
+# it, but ``POST /threads/{id}/state`` can write the channel without them.
+_GOAL_RENDER_CHAR_BUDGET = 4000
 _AUTHORITY_CONTRACT = "\n".join(
     [
         "## Durable context authority contract",
@@ -65,8 +68,32 @@ def _bound_text(text: str, cap: int) -> str:
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, task_notes: dict | None = None, task_history: dict | None = None) -> str:
+def _active_goal_objective(goal: object) -> str | None:
+    """Return the objective of the thread's active ``/goal``, if there is one."""
+    if not isinstance(goal, dict) or goal.get("status") != "active":
+        return None
+    objective = goal.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        return None
+    return objective
+
+
+def _render_durable_context_data(
+    summary_text: str | None,
+    ledger: list,
+    skills: list,
+    task_notes: dict | None = None,
+    task_history: dict | None = None,
+    *,
+    goal_objective: str | None = None,
+) -> str:
     data_parts: list[str] = []
+    # Goal first: it changes only when the user sets or clears it, so a new
+    # summary or ledger entry after it leaves the goal inside the cached prefix.
+    if goal_objective:
+        bounded_goal = _bound_text(goal_objective, _GOAL_RENDER_CHAR_BUDGET)
+        data_parts.append(f"## Active goal set by the user for this thread\n{escape(bounded_goal, quote=False)}")
+
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
         data_parts.append(f"## Conversation summary so far\n{escape(bounded_summary, quote=False)}")
@@ -303,6 +330,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             state.get("skill_context") or [],
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
             state.get("task_history") if self._task_continuity_enabled else None,
+            goal_objective=redact_text(_active_goal_objective(state.get("goal")), self._pii_redaction_config),
         )
         if not data_block:
             return request
