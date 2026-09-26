@@ -932,6 +932,14 @@ tools:
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
+  # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
+  # Recent news coverage, not general web search. Replace the active web_search entry.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.webz.tools:web_search_tool
+  #   max_results: 5  # Clamped to 1-100
+  #   # api_key: $WEBZ_API_KEY  # Otherwise read from WEBZ_API_KEY
+
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
   # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
