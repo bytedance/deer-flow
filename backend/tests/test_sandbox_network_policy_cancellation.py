@@ -93,9 +93,7 @@ async def test_async_network_policy_mutation_drains_before_cancellation(
         assert await asyncio.to_thread(provider.entered[kind].wait, 1)
         await _deliver_repeated_cancellation(task)
 
-        assert not task.done(), (
-            "caller cancellation escaped while the policy mutation worker was still running"
-        )
+        assert not task.done(), "caller cancellation escaped while the policy mutation worker was still running"
         assert provider.completed == []
 
         provider.release.set()
@@ -105,4 +103,3 @@ async def test_async_network_policy_mutation_drains_before_cancellation(
     finally:
         provider.release.set()
         await asyncio.gather(task, return_exceptions=True)
-
