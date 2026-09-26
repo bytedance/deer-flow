@@ -292,12 +292,20 @@ def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     assert not any(f["rule_id"] == "resource.missing" and f["path"].startswith("evals/fixtures/") for f in facts["findings"])
 
 
-def test_resource_graph_scan_of_unmatched_brackets_stays_linear(tmp_path):
-    # #5714: a long run of unmatched "[" drove the markdown-link regex into
-    # quadratic backtracking (a 64 KiB run took seconds of review time). The
-    # reference extraction must bail out of the link scan when no "]("
-    # construct is present, keeping the scan linear in that case.
-    _write(tmp_path / "SKILL.md", _valid_skill() + "\n" + "[" * 65536 + "\n")
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("[" * 65536, id="unmatched-brackets"),
+        pytest.param("[a](" + "x]([" * 16000 + "b y)", id="closer-dense"),
+    ],
+)
+def test_resource_graph_link_scan_stays_linear(tmp_path, payload):
+    # #5714: both shapes drove the markdown-link scan quadratic. A long run of
+    # unmatched "[" has no "](" at all, and the "]("-dense run below never
+    # completes a target: each of its candidates re-scanned the whole suffix
+    # (11 s at 16k repetitions measured before the fix). Both must stay far
+    # below the bound.
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\n" + payload + "\n")
 
     started = time.monotonic()
     facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
@@ -305,15 +313,31 @@ def test_resource_graph_scan_of_unmatched_brackets_stays_linear(tmp_path):
 
     assert facts["summary"]["blockers"] == 0
     assert not any(f["rule_id"] == "resource.missing" for f in facts["findings"])
-    # Smoke bound, not a benchmark: ~0.1s after the fix, ~1.2s before it on
-    # the same host. The bound only catches reintroduced quadratic behavior.
-    assert elapsed < 2.0
+    # Smoke bound, not a benchmark: well under 0.1s after the fix, seconds
+    # before it. The bound only catches reintroduced superlinear behavior.
+    assert elapsed < 2.0, f"link scan took {elapsed:.2f}s"
+
+
+def test_resource_graph_link_blanking_starts_at_the_leftmost_opener(tmp_path):
+    # A link construct starts at the first "[" after the previous "]" (the
+    # leftmost match wins), so the whole construct is blanked out of the
+    # residual text. A path token inside it must not reach the bare-path pass
+    # and resurrect a reference: only the real link target is extracted.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\n[references/hidden.md[a](references/kept.md)\n",
+    )
+    _write(tmp_path / "references" / "kept.md", "# Kept\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/kept.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and "hidden" in f["message"] for f in facts["findings"])
 
 
 def test_resource_graph_non_link_reference_passes_survive_link_guard(tmp_path):
-    # The bail-out that keeps unmatched brackets linear must only skip the
-    # markdown-link pass: code-span and bare-path references carry no "]("
-    # construct and must still be extracted.
+    # The link scan must only skip the markdown-link pass: code-span and
+    # bare-path references carry no "](" construct and must still be extracted.
     _write(
         tmp_path / "SKILL.md",
         _valid_skill() + "\nSee `references/from-code-span.md` and references/from-bare-path.md.\n",

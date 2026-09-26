@@ -11,7 +11,6 @@ from typing import Any
 from deerflow.skills.package_paths import is_eval_fixture_path
 from deerflow.skills.review.models import make_finding, normalize_relative_path
 
-_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 _PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+#-]+")
 _RESOURCE_DIRS = {"references", "scripts", "templates", "assets", "evals"}
@@ -96,27 +95,86 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
 _TRAILING_SENTENCE_PUNCTUATION = ".?!"
 
 
+def _quoted_title_end(content: str, terminator: int) -> int:
+    """Return the index just past a ``](target "title")`` closing paren, or -1.
+
+    The optional markdown title is ``\\s+"[^"]*"``: whitespace, a quoted string
+    (possibly empty), then the closing paren.
+    """
+    length = len(content)
+    quote = terminator
+    while quote < length and content[quote].isspace():
+        quote += 1
+    if quote >= length or content[quote] != '"':
+        return -1
+    closing = content.find('"', quote + 1)
+    if closing < 0 or closing + 1 >= length or content[closing + 1] != ")":
+        return -1
+    return closing + 2
+
+
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
-    # "](" is a fixed substring of every markdown link the regex below can
-    # match, so the link scan can be skipped entirely when it is absent.
-    # Pathological inputs made of unmatched "[" characters (#5714: a 64 KiB
-    # run of "[") otherwise drive the link regex into quadratic backtracking.
-    # The code-span and bare-path passes below still run: they match
-    # references that contain no "]( construct.
+    # Markdown link syntax fixes the fragment semantics: the text after '#'
+    # in a link target is ALWAYS a URL fragment, never part of the filename
+    # — a link to a file literally named "faq.md#pricing" would have to
+    # percent-encode it. So links always strip the fragment, and their full
+    # construct is blanked out of the residual text: the code-span and
+    # bare-path passes below are literal-path contexts where '#' may be
+    # part of a real filename, and they must never see link-internal text.
+    # Trailing sentence punctuation is still stripped here (#5739).
+    #
+    # The link scan is closer-driven instead of a regex: `finditer` over
+    # `!?\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)` re-scans the same target run
+    # from every candidate opener, which is quadratic on content dense in "]("
+    # closers whose run never completes (#5714: "[a](" + "x]([" * 16_000 +
+    # "b y)" took 11 s). Every closer inside one failed target run ends at the
+    # same terminator and fails identically, so a failed run is skipped whole
+    # instead of retried inside — each character is then visited a constant
+    # number of times and the scan is linear.
     residual = content
-    if "](" in content:
-        # Markdown link syntax fixes the fragment semantics: the text after '#'
-        # in a link target is ALWAYS a URL fragment, never part of the filename
-        # — a link to a file literally named "faq.md#pricing" would have to
-        # percent-encode it. So links always strip the fragment, and their full
-        # construct is blanked out of the residual text: the code-span and
-        # bare-path passes below are literal-path contexts where '#' may be
-        # part of a real filename, and they must never see link-internal text.
-        # Trailing sentence punctuation is still stripped here (#5739).
-        for match in _MARKDOWN_LINK_RE.finditer(content):
-            refs.add(match.group(1).split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
-            residual = residual.replace(match.group(0), " " * len(match.group(0)))
+    length = len(content)
+    position = 0
+    while True:
+        closer = content.find("](", position)
+        if closer < 0:
+            break
+        # The opener is the FIRST "[" after the last "]" before the closer:
+        # "[^\]]*" cannot cross a "]", and the leftmost match wins, so an
+        # earlier "[" would have been reported instead. The window starts where
+        # the previous closer's window ended, so this stays linear.
+        opener = -1
+        index = closer - 1
+        while index >= 0 and content[index] != "]":
+            index -= 1
+        for candidate in range(index + 1, closer):
+            if content[candidate] == "[":
+                opener = candidate
+                break
+        if opener < 0:
+            position = closer + 2
+            continue
+        start = opener - 1 if opener > 0 and content[opener - 1] == "!" else opener
+        # The target is a maximal run of non-")"/non-whitespace characters.
+        target = closer + 2
+        terminator = target
+        while terminator < length and content[terminator] != ")" and not content[terminator].isspace():
+            terminator += 1
+        if terminator == target:
+            # "[]()" / "[]( x)": the target needs at least one character.
+            position = target
+            continue
+        if terminator < length and content[terminator] == ")":
+            end = terminator + 1
+        else:
+            end = _quoted_title_end(content, terminator)
+            if end < 0:
+                # No closer inside this failed run can match either.
+                position = terminator
+                continue
+        refs.add(content[target:terminator].split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+        residual = residual.replace(content[start:end], " " * (end - start))
+        position = end
     for match in _CODE_SPAN_RE.finditer(residual):
         token = match.group(1).strip()
         if "/" in token:
