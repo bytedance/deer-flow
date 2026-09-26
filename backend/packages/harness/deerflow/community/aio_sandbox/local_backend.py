@@ -259,6 +259,8 @@ def _docker_bridge_gateway_ip() -> str | None:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -289,6 +291,8 @@ def _docker_server_is_desktop() -> bool:
             ["docker", "info", "--format", "{{json .OperatingSystem}}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -723,6 +727,8 @@ class LocalContainerBackend(SandboxBackend):
                 ["docker", "network", "inspect", network_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -793,6 +799,8 @@ class LocalContainerBackend(SandboxBackend):
                 ["docker", "version", "--format", "{{.Server.Version}}"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
                 timeout=10,
             )
@@ -829,6 +837,8 @@ class LocalContainerBackend(SandboxBackend):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -853,6 +863,8 @@ class LocalContainerBackend(SandboxBackend):
                     ["container", "--version"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                     timeout=5,
                 )
@@ -1065,6 +1077,8 @@ class LocalContainerBackend(SandboxBackend):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         if result.returncode != 0:
@@ -1091,6 +1105,8 @@ class LocalContainerBackend(SandboxBackend):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         if result.returncode != 0:
@@ -1154,18 +1170,34 @@ class LocalContainerBackend(SandboxBackend):
         ]
         # First use may pull the sidecar image. Match the sandbox create path's
         # tolerance for an image download instead of killing Docker mid-pull.
-        created = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        created = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
         if created.returncode != 0:
             raise RuntimeError(f"Failed to create sandbox network proxy: {created.stderr.strip()}")
         connected = subprocess.run(
             ["docker", "network", "connect", network_name, proxy_name],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         if connected.returncode != 0:
             raise RuntimeError(f"Failed to connect sandbox network proxy: {connected.stderr.strip()}")
-        started = subprocess.run(["docker", "start", proxy_name], capture_output=True, text=True, timeout=15)
+        started = subprocess.run(
+            ["docker", "start", proxy_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
         if started.returncode != 0:
             raise RuntimeError(f"Failed to start sandbox network proxy: {started.stderr.strip()}")
         source = Path(__file__).with_name("network_proxy.py")
@@ -1373,6 +1405,8 @@ class LocalContainerBackend(SandboxBackend):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -1492,6 +1526,8 @@ class LocalContainerBackend(SandboxBackend):
             ["docker", "rm", "-f", proxy_name],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         if removed.returncode != 0 and "no such container" not in (removed.stderr or "").lower():
@@ -1501,6 +1537,8 @@ class LocalContainerBackend(SandboxBackend):
                 ["docker", "network", "rm", current_network_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
             if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
@@ -1514,6 +1552,8 @@ class LocalContainerBackend(SandboxBackend):
             ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "pending"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         if result.returncode != 0:
@@ -1535,6 +1575,8 @@ class LocalContainerBackend(SandboxBackend):
             ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "deny-pending"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         if result.returncode != 0:
@@ -1562,6 +1604,8 @@ class LocalContainerBackend(SandboxBackend):
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         return result.returncode == 0
@@ -1579,6 +1623,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "inspect", *container_names],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
@@ -1873,7 +1919,14 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
             container_id = result.stdout.strip()
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
             return container_id
@@ -1897,6 +1950,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "stop", container_id],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
                 timeout=self._STOP_TIMEOUT_SECONDS,
             )
@@ -1927,6 +1982,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "inspect", "-f", "{{.State.Running}}", container_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
         except subprocess.TimeoutExpired as exc:
@@ -1952,6 +2009,8 @@ class LocalContainerBackend(SandboxBackend):
                 [self._runtime, "port", container_name, "8080"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
