@@ -46,6 +46,10 @@ _AUTHORITY_CONTRACT = "\n".join(
 _DELEGATION_STABLE_FIELDS = ("description", "subagent_type", "status", "run_id", "result_brief", "result_sha256", "result_ref")
 
 
+def _delegation_identity(entry: dict) -> tuple[str | None, str | None]:
+    return entry.get("run_id") or None, entry.get("id")
+
+
 def _normalize_skills_root(skills_container_path: str | None) -> str:
     return posixpath.normpath(skills_container_path or DEFAULT_SKILLS_CONTAINER_PATH)
 
@@ -93,10 +97,12 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
     if len(existing) < _DELEGATION_LEDGER_MAX_ENTRIES or not existing:
         return delegations
 
-    earliest_retained_id = existing[0].get("id") if isinstance(existing[0], dict) else None
-    if earliest_retained_id is not None:
+    earliest = existing[0] if isinstance(existing[0], dict) else None
+    if earliest is not None:
+        earliest_run_id, earliest_id = _delegation_identity(earliest)
         for index, entry in enumerate(delegations):
-            if entry.get("id") == earliest_retained_id:
+            entry_run_id, entry_id = _delegation_identity(entry)
+            if entry_id == earliest_id and (entry_run_id is None or entry_run_id == earliest_run_id):
                 return delegations[index:]
 
     return delegations[-_DELEGATION_LEDGER_MAX_ENTRIES:]
@@ -104,10 +110,12 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
 
 def _filter_changed_delegations(delegations: list[dict], existing: list[dict]) -> list[dict]:
     comparable_delegations = _retained_delegation_window(delegations, existing)
+    existing_by_identity = {_delegation_identity(entry): entry for entry in existing if isinstance(entry, dict)}
     existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
     changed: list[dict] = []
     for entry in comparable_delegations:
-        previous = existing_by_id.get(entry.get("id"))
+        entry_run_id, entry_id = _delegation_identity(entry)
+        previous = existing_by_identity.get((entry_run_id, entry_id)) if entry_run_id is not None else existing_by_id.get(entry_id)
         if previous is None:
             changed.append(entry)
             continue
@@ -175,7 +183,7 @@ def _run_opening_human_index(messages: list[AnyMessage], run_id: str, pre_existi
     return None
 
 
-def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
+def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str], opening_index: int | None) -> list[AnyMessage]:
     """Return the message tail where this invocation may have emitted tasks.
 
     The worker supplies the message ids that existed before this run, so a
@@ -184,13 +192,12 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
     """
     if run_id is None:
         return messages
-    index = _run_opening_human_index(messages, run_id, pre_existing_message_ids)
-    if index is not None:
-        return messages[index + 1 :]
+    if opening_index is not None:
+        return messages[opening_index + 1 :]
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 
 
-def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str) -> list[dict]:
+def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str, opening_index: int) -> list[dict]:
     """Mark delegations that an earlier run left in_progress without a result as cancelled.
 
     A ``task`` call waits for its subagent, so an entry that is still
@@ -198,33 +205,33 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
     run that was stopped while the subagent ran. Nothing else will ever update
     it, and the ledger would keep telling the model not to delegate again.
 
-    Any recorded reply excludes this inference, including legacy ToolMessages
-    without subagent status metadata. Their outcome is unknown, not evidence
-    of cancellation. Conservatively leave those entries unchanged, even if
-    they remain in_progress: this repairs missing replies, not legacy results.
+    Any reply before the current run's opening HumanMessage excludes this
+    inference, including legacy ToolMessages without subagent status metadata.
+    An unscoped earlier reply remains ambiguous, so leave those entries
+    unchanged. A current run reply with the same provider tool-call id does
+    not answer the old task.
     Current task producers stamp metadata for extract_delegations to capture.
     """
-    answered = {str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage) and message.tool_call_id}
-    return [{**entry, "status": "cancelled"} for entry in existing if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and entry.get("id") not in answered]
+    answered: set[tuple[str | None, str]] = set()
+    message_run_id: str | None = None
+    for message in messages[:opening_index]:
+        if isinstance(message, HumanMessage):
+            marker = message.additional_kwargs.get("run_id")
+            message_run_id = str(marker) if marker else None
+        elif isinstance(message, ToolMessage) and message.tool_call_id:
+            answered.add((message_run_id, str(message.tool_call_id)))
+    return [
+        {**entry, "status": "cancelled"}
+        for entry in existing
+        if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and (entry.get("run_id"), entry.get("id")) not in answered and (None, entry.get("id")) not in answered
+    ]
 
 
-def _with_run_id(delegations: list[dict], run_id: str | None, existing: list[dict]) -> list[dict]:
-    """Tag only new delegation ids with the current run_id."""
+def _with_run_id(delegations: list[dict], run_id: str | None) -> list[dict]:
+    """Tag delegations from the current run's bounded message window."""
     if run_id is None:
         return delegations
-    existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
-    tagged: list[dict] = []
-    for entry in delegations:
-        previous = existing_by_id.get(entry.get("id"))
-        if previous is not None:
-            previous_run_id = previous.get("run_id")
-            if previous_run_id:
-                tagged.append({**entry, "run_id": previous_run_id})
-            else:
-                tagged.append({key: value for key, value in entry.items() if key != "run_id"})
-            continue
-        tagged.append({**entry, "run_id": run_id})
-    return tagged
+    return [{**entry, "run_id": run_id} for entry in delegations]
 
 
 class DurableContextMiddleware(AgentMiddleware[AgentState]):
@@ -272,14 +279,15 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     def _capture_delegations(self, state: AgentState, runtime: Runtime | None) -> dict | None:
         run_id = _runtime_run_id(runtime)
         pre_existing_message_ids = _runtime_pre_existing_message_ids(runtime)
-        messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids)
+        opening_index = _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) if run_id is not None else None
+        messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids, opening_index)
         existing = state.get("delegations") or []
         delegations = _filter_changed_delegations(
-            _with_run_id(extract_delegations(messages), run_id, existing),
+            _with_run_id(extract_delegations(messages), run_id),
             existing,
         )
-        if run_id is not None and _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) is not None:
-            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id)]
+        if run_id is not None and opening_index is not None:
+            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id, opening_index)]
         if delegations:
             return {"delegations": delegations}
         return None

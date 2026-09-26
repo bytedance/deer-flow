@@ -152,6 +152,174 @@ class TestBeforeModelCapture:
         assert out is not None
         assert out["delegations"][0]["run_id"] == "run-42"
 
+    def test_reused_tool_call_id_is_captured_for_new_run_and_counts_toward_limit(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        existing = [
+            {
+                "id": "call_1",
+                "run_id": "run-old",
+                "description": "old task",
+                "subagent_type": "general-purpose",
+                "status": "completed",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+        current_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "task", "args": {"description": "new task", "subagent_type": "general-purpose"}, "id": "call_1", "type": "tool_call"}],
+        )
+
+        update = middleware.after_model(
+            {"messages": [HumanMessage(content="new request", additional_kwargs={"run_id": "run-new"}), current_call], "delegations": existing},
+            runtime,
+        )
+
+        assert update is not None
+        ledger = merge_delegations(existing, update["delegations"])
+        assert [(entry["run_id"], entry["description"]) for entry in ledger] == [("run-old", "old task"), ("run-new", "new task")]
+
+        next_call = AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "extra task"}, "id": "call_2", "type": "tool_call"}])
+        blocked = SubagentLimitMiddleware(max_concurrent=2, max_total=1).after_model({"messages": [next_call], "delegations": ledger}, runtime)
+        assert blocked is not None
+        assert blocked["messages"][0].tool_calls == []
+        assert runtime.context["stop_reason"] == "subagent_limit_capped"
+
+    def test_reused_id_does_not_hide_new_work_at_full_ledger_window(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": f"call_{index}",
+                "run_id": "run-old",
+                "description": f"old task {index}",
+                "subagent_type": "general-purpose",
+                "status": "completed",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+            for index in range(thread_state_module._DELEGATION_LEDGER_MAX_ENTRIES)
+        ]
+        current_call = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "task", "args": {"description": "first new task"}, "id": "new-call", "type": "tool_call"},
+                {"name": "task", "args": {"description": "second new task"}, "id": "call_0", "type": "tool_call"},
+            ],
+        )
+
+        update = middleware.after_model(
+            {"messages": [HumanMessage(content="new request", additional_kwargs={"run_id": "run-new"}), current_call], "delegations": existing},
+            SimpleNamespace(context={"run_id": "run-new"}),
+        )
+
+        assert update is not None
+        assert [(entry["run_id"], entry["id"]) for entry in update["delegations"]] == [("run-new", "new-call"), ("run-new", "call_0")]
+        ledger = merge_delegations(existing, update["delegations"])
+        assert len(ledger) == thread_state_module._DELEGATION_LEDGER_MAX_ENTRIES
+        assert [(entry["run_id"], entry["id"]) for entry in ledger[-2:]] == [("run-new", "new-call"), ("run-new", "call_0")]
+
+    def test_new_run_reply_with_reused_id_does_not_keep_old_orphan_in_progress(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": "call_1",
+                "run_id": "run-old",
+                "description": "old task",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "call_1", "type": "tool_call"}]),
+            HumanMessage(content="new request", additional_kwargs={"run_id": "run-new"}),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "new task"}, "id": "call_1", "type": "tool_call"}]),
+            ToolMessage(content="Task Succeeded. Result: done", tool_call_id="call_1", additional_kwargs=make_subagent_additional_kwargs("completed", result="done")),
+        ]
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, SimpleNamespace(context={"run_id": "run-new"}))
+
+        assert update is not None
+        ledger = merge_delegations(existing, update["delegations"])
+        assert [(entry["run_id"], entry["status"]) for entry in ledger] == [("run-old", "cancelled"), ("run-new", "completed")]
+
+    def test_unmarked_new_run_reply_with_reused_id_does_not_answer_old_orphan(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": "call_1",
+                "run_id": "run-old",
+                "description": "old task",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+        messages = [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(id="old-ai", content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "call_1", "type": "tool_call"}]),
+            HumanMessage(id="new-human", content="new request"),
+            AIMessage(id="new-ai", content="", tool_calls=[{"name": "task", "args": {"description": "new task"}, "id": "call_1", "type": "tool_call"}]),
+            ToolMessage(id="new-result", content="Task Succeeded. Result: done", tool_call_id="call_1", additional_kwargs=make_subagent_additional_kwargs("completed", result="done")),
+        ]
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-human", "old-ai"}})
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert update is not None
+        ledger = merge_delegations(existing, update["delegations"])
+        assert [(entry["run_id"], entry["status"]) for entry in ledger] == [("run-old", "cancelled"), ("run-new", "completed")]
+
+    def test_unmarked_prior_reply_preserves_earlier_delegation(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": "call_1",
+                "run_id": "run-old",
+                "description": "old task",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+        messages = [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(id="old-ai", content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "call_1", "type": "tool_call"}]),
+            ToolMessage(id="old-result", content="legacy result", tool_call_id="call_1"),
+            HumanMessage(id="new-human", content="new request"),
+        ]
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-human", "old-ai", "old-result"}})
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert update is None
+
+    def test_resumed_run_without_new_human_does_not_close_earlier_delegation(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": "call_1",
+                "run_id": "run-old",
+                "description": "old task",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+        messages = [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(id="old-ai", content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "call_1", "type": "tool_call"}]),
+            AIMessage(id="new-ai", content="", tool_calls=[{"name": "task", "args": {"description": "new task"}, "id": "call_1", "type": "tool_call"}]),
+            ToolMessage(id="new-result", content="Task Succeeded. Result: done", tool_call_id="call_1", additional_kwargs=make_subagent_additional_kwargs("completed", result="done")),
+        ]
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-human", "old-ai"}})
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert update is not None
+        ledger = merge_delegations(existing, update["delegations"])
+        assert [(entry["run_id"], entry["status"]) for entry in ledger] == [("run-old", "in_progress"), ("run-new", "completed")]
+
     def test_runtime_run_id_capture_starts_at_current_run_message(self):
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-new"})
