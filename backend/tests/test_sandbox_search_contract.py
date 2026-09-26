@@ -209,6 +209,16 @@ def test_search_root_at_an_ignored_name_still_hides_ignored_descendants(provider
     assert truncated is False
 
 
+def test_glob_with_directories_at_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    matches, truncated = provider.sandbox.glob(str(ignored_name_tree), "**/workspace", include_dirs=True)
+    assert _relative_paths(matches, ignored_name_tree) == {"workspace"}
+    assert truncated is False
+
+
+def test_glob_with_directories_at_an_ignored_name_still_hides_ignored_descendants(provider, ignored_name_tree):
+    assert provider.sandbox.glob(str(ignored_name_tree), "**/*.js", include_dirs=True) == ([], False)
+
+
 def test_grep_preserves_line_numbers_and_ignores_descendants(provider, tree):
     matches, truncated = provider.sandbox.grep(str(tree), "needle", case_sensitive=True)
     assert {(Path(m.path).relative_to(tree).as_posix(), m.line_number, m.line) for m in matches} == {
