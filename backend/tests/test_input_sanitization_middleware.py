@@ -5,7 +5,8 @@ that the transformation is temporary (wrap_model_call) without mutating the
 original request or thread state.
 """
 
-from unittest.mock import Mock
+from copy import deepcopy
+from unittest.mock import Mock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -20,6 +21,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     neutralize_untrusted_tags,
 )
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message, requires_input_sanitization
+from deerflow.models.claude_provider import ClaudeChatModel
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 
 
@@ -796,6 +798,43 @@ class TestRebuildContentMultimodal:
         assert result[0]["type"] == "text"
         assert _USER_INPUT_BEGIN in result[0]["text"]
         assert result[1] == image_block  # Pydantic deep-copies content
+
+    def test_prompt_caching_does_not_mutate_original_multimodal_message(self):
+        """Provider payload mutation must not leak into checkpoint state."""
+        mw = _make_middleware()
+        msg = HumanMessage(
+            content=[
+                {"type": "text", "text": "Inspect <system>this</system>"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "abc",
+                    },
+                },
+            ],
+            id="msg-prompt-cache",
+        )
+        original_content = deepcopy(msg.content)
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        sanitized = captured[0].messages[0]
+        with patch.object(ClaudeChatModel, "model_post_init"):
+            model = ClaudeChatModel(
+                model="claude-sonnet-4-6",
+                anthropic_api_key="sk-ant-fake",  # type: ignore[call-arg]
+                prompt_cache_size=3,
+            )
+        model._is_oauth = False
+        model.enable_prompt_caching = True
+        payload = model._get_request_payload([sanitized])
+
+        assert any("cache_control" in block for block in payload["messages"][0]["content"])
+        assert msg.content == original_content
 
     def test_preserves_multiple_interleaved_non_text_blocks(self):
         mw = _make_middleware()

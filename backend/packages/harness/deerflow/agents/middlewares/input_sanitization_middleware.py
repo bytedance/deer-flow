@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import override
 
 from langchain.agents import AgentState
@@ -359,7 +360,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                                 new_content.append(block)
                         return msg.model_copy(
                             update={
-                                "content": new_content,
+                                "content": deepcopy(new_content),
                                 "additional_kwargs": preserved_kwargs,
                             },
                         )
@@ -412,7 +413,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         )
         return msg.model_copy(
             update={
-                "content": new_content,
+                "content": deepcopy(new_content),
                 "additional_kwargs": preserved_kwargs,
             },
         )
