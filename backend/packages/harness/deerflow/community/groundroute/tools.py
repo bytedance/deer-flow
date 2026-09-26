@@ -53,11 +53,17 @@ def _get_api_key(tool_name: str) -> str | None:
 
 
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
-    try:
-        coerced = int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5;
+        # int() on an out-of-range float (e.g. YAML .inf) raises OverflowError.
         logger.warning("Invalid GroundRoute max_results=%r; using default %s", value, default)
         coerced = default
+    else:
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("Invalid GroundRoute max_results=%r; using default %s", value, default)
+            coerced = default
     return max(1, min(coerced, _MAX_RESULTS_CAP))
 
 

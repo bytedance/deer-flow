@@ -123,6 +123,24 @@ class TestCoerceMaxResults:
         assert _coerce_max_results(0) == 5
         assert _coerce_max_results(-3) == 5
 
+    def test_rejects_boolean_and_fractional_float(self):
+        from deerflow.community.serply.tools import _coerce_max_results
+
+        # int(True) == 1 and int(3.5) == 3 would both silently change the requested count.
+        assert _coerce_max_results(True) == 5
+        assert _coerce_max_results(False) == 5
+        assert _coerce_max_results(3.5) == 5
+
+    def test_rejects_out_of_range_float(self):
+        from deerflow.community.serply.tools import _coerce_max_results
+
+        assert _coerce_max_results(float("inf")) == 5
+
+    def test_accepts_integral_float(self):
+        from deerflow.community.serply.tools import _coerce_max_results
+
+        assert _coerce_max_results(4.0) == 4
+
 
 class TestCoerceVertical:
     def test_accepts_known_verticals(self):
