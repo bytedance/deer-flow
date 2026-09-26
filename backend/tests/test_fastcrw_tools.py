@@ -4,6 +4,8 @@ import ipaddress
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestWebSearchTool:
     @patch.dict("os.environ", {}, clear=True)
@@ -66,6 +68,15 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
+    @pytest.fixture(autouse=True)
+    def public_dns(self):
+        # Keep URL safety checks active without depending on the host's DNS.
+        with patch(
+            "deerflow.community.url_safety.resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ) as resolver:
+            yield resolver
+
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
@@ -151,6 +162,21 @@ class TestWebFetchTool:
             result = web_fetch_tool.invoke({"url": "https://internal.example.com/"})
 
         assert "private, loopback, or metadata" in result
+        mock_fastcrw_cls.assert_not_called()
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    def test_fetch_rejects_unresolvable_host(self, mock_get_app_config, mock_fastcrw_cls, public_dns):
+        mock_get_app_config.return_value.get_tool_config.return_value = None
+        public_dns.return_value = []
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://unresolvable.example.com/"})
+
+        assert result == "Error: URL host could not be resolved"
+        public_dns.assert_called_once_with("unresolvable.example.com")
         mock_fastcrw_cls.assert_not_called()
 
     @patch.dict("os.environ", {}, clear=True)
