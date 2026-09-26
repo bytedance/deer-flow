@@ -93,7 +93,11 @@ contract. Its default implementation walks `list_messages()` backward in
 `before_seq` cursor, and raises when a full page has no safe progressing `seq`.
 Memory and database stores use that bounded path; the JSONL store overrides it
 with one complete thread-log read because each JSONL page would otherwise
-rescan every run file. The default and JSONL paths share the public
+rescan every run file. That JSONL snapshot task is named `jsonl-snapshot:{thread_id}` for
+asyncio task dumps and retains the per-thread lock until its off-thread full-log
+read settles even through caller cancellation. It deliberately has no drain
+timeout: releasing ownership while the worker can still read files would let a
+writer enter the supposedly stable snapshot. The default and JSONL paths share the public
 `normalize_message_ids()` and `match_ai_message_run_id()` helpers from
 `events/store/base.py`. Database owner filtering is inherited on every page.
 
