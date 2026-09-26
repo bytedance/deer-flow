@@ -1,7 +1,8 @@
 """Controlled image-generation entry point for managed provider credentials."""
 
+import base64
+import json
 import posixpath
-import shlex
 import uuid
 
 from langchain.tools import tool
@@ -39,6 +40,20 @@ def _image_path(path: str, *, output: bool = False) -> str:
     if output and (not path.startswith(_OUTPUTS) or not path.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))):
         raise ValueError("Image output must be a PNG, JPEG or WebP file under /mnt/user-data/outputs/")
     return path
+
+
+def _python_script_command(args: list[str], marker: str) -> str:
+    """Pass paths as data through POSIX, PowerShell and cmd.exe shells."""
+    payload = base64.urlsafe_b64encode(json.dumps(args, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    program = ";".join(
+        (
+            "import base64,json,runpy,sys",
+            "marker=sys.argv[1]",
+            f"sys.argv=json.loads(base64.urlsafe_b64decode('{payload}'))+['--success-marker',marker]",
+            "runpy.run_path(sys.argv[0],run_name='__main__')",
+        )
+    )
+    return f'python -c "{program}" {marker}'
 
 
 @tool("check_image_generation", parse_docstring=True)
@@ -133,42 +148,14 @@ def generate_image_tool(
         else:
             script = f"{get_app_config().skills.container_path.rstrip('/')}/{_IMAGE_SCRIPT}"
 
-        # A unique temporary file prevents a failed request from publishing a
-        # partial image as the requested slide. Keep its extension for providers
-        # that derive output_format from the filename.
-        stem, dot, extension = output.rpartition(".")
-        temporary = f"{stem}.{uuid.uuid4().hex}.{extension}" if dot else output + ".tmp"
-        args = ["python", script, "--prompt-file", prompt, "--output-file", temporary, "--aspect-ratio", aspect_ratio]
+        args = [script, "--prompt-file", prompt, "--output-file", output, "--aspect-ratio", aspect_ratio]
         if references:
             args.extend(["--reference-images", *references])
         marker = f"__DEERFLOW_IMAGE_OK_{uuid.uuid4().hex}__"
-        check = "\n".join(
-            (
-                "from PIL import Image",
-                "import sys",
-                "p = sys.argv[1]",
-                "fmt = {'png': 'PNG', 'jpg': 'JPEG', 'jpeg': 'JPEG', 'webp': 'WEBP'}[p.rsplit('.', 1)[-1].lower()]",
-                "with Image.open(p) as image: image.verify()",
-                "with Image.open(p) as image:",
-                "    image.load()",
-                "    source_format = image.format",
-                "    converted = image.copy()",
-                "if source_format != fmt:",
-                "    if fmt == 'JPEG': converted = converted.convert('RGB')",
-                "    converted.save(p, format=fmt, **({'quality': 95} if fmt == 'JPEG' else {}))",
-                "with Image.open(p) as image: image.verify()",
-            )
-        )
-        command = " && ".join(
-            (
-                shlex.join(args),
-                shlex.join(["python", "-c", check, temporary]),
-                shlex.join(["mv", "--", temporary, output]),
-                shlex.join(["printf", "%s\\n", marker]),
-            )
-        )
-        cleanup = shlex.join(["rm", "-f", "--", temporary])
-        command = f"trap {shlex.quote(cleanup)} EXIT; {command}"
+        # Only ASCII base64 and the server-generated marker cross the shell
+        # boundary. PowerShell 5.1, cmd.exe and POSIX shells can all pass this
+        # single Python invocation without interpreting user-controlled paths.
+        command = _python_script_command(args, marker)
         raw = _execute_bash_command(
             sandbox,
             command,

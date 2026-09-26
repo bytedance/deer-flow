@@ -1196,7 +1196,8 @@ requires a Gateway restart and container recreation. See
 Gateway-side generation/edit tests may incur provider charges and do not test
 sandbox egress. PPT slides are generated sequentially because each references
 the previous slide. Generation scripts exit nonzero on failure; composition
-rejects missing or mismatched slide images.
+rejects missing or mismatched slide images. The controlled image tool also works
+with LocalSandbox's PowerShell or cmd.exe fallback on Windows hosts.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
