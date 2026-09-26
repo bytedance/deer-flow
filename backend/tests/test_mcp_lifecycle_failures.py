@@ -429,7 +429,8 @@ def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
     _commit(malformed, raw, previous_config, previous_config)
     assert _lifecycle(malformed)["globalGeneration"] == 1
 
-    # (c) unverifiable previous document, block present and valid -> +1
+    # (c) unverifiable previous document, block present and valid -> the lineage is
+    # preserved (the block is still trustworthy) and only the generations advance.
     unverifiable = tmp_path / "unverifiable.json"
     unverifiable.write_text(
         json.dumps({**_stdlib_servers(), "mcpLifecycle": {"schemaVersion": 2, "lifecycleId": "lineage-old", "configRevision": 5, "globalGeneration": 4, "serverGenerations": {"A": 2}}}),
@@ -438,6 +439,7 @@ def test_unverifiable_baselines_force_a_whole_pool_bump(tmp_path: Path) -> None:
     raw = read_raw_extensions_config(unverifiable)
     new_config = validate_raw_extensions_config(json.loads(json.dumps(raw)))
     _commit(unverifiable, raw, None, new_config)
+    assert _lifecycle(unverifiable)["lifecycleId"] == "lineage-old"
     assert _lifecycle(unverifiable)["globalGeneration"] == 5
     assert _lifecycle(unverifiable)["serverGenerations"] == {"A": 3}
 
