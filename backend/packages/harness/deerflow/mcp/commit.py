@@ -48,8 +48,10 @@ The protocol, in full:
   the same atomic write as the configuration.
 * Migration: the first valid block is a trusted common baseline adopted under lock without retiring anything; the
   guarantee begins only after that initialization completes, so "absent" is never treated as generation zero while
-  another worker advances. Version 1 blocks are unverifiable (they carry no lineage id) and are upgraded to a fresh
-  version-2 baseline, so a version-1 writer must not run concurrently against the same file. A block that is present but malformed, or a previous document that cannot be
+  another worker advances. A reader grants that grace only to a *pure* migration baseline (every generation still
+  zero): a first-seen block with an advanced generation is not provably benign, so it fails closed rather than adopting
+  silently. Version 1 blocks are unverifiable (they carry no lineage id) and are upgraded to a fresh version-2
+  baseline, so a version-1 writer must not run concurrently against the same file. A block that is present but malformed, or a previous document that cannot be
   validated, resets to a fresh baseline and bumps every enabled server plus ``globalGeneration`` so the write
   is fail-closed without blocking a repair.
 * Deployment scope: the cross-process guarantee presupposes every supported writer follows this protocol **and** sees
@@ -190,15 +192,13 @@ class CommittedMcpRevision:
     """One committed, validated extensions config revision.
 
     Built from the validated candidate and the counters written in the same
-    atomic write, so a writer can fence from it without re-reading the file.
-    Treat ``servers`` as immutable: it is the committed stdio fingerprint map and
-    callers must not mutate it in place.
+    atomic write, so a writer can fence from it without re-reading the file. The
+    fence re-derives the per-server and interceptor views from ``config`` (the
+    exact committed candidate), so no second copy of them is stored here.
     """
 
     config: ExtensionsConfig
     lifecycle: McpLifecycle
-    servers: Mapping[str, str]
-    interceptors: object
 
 
 def safe_error_summary(exc: BaseException) -> str:
@@ -262,7 +262,12 @@ def commit_extensions_config(
     * key absent (legacy file) -> migration grace: ``previous = None``
       with the *real* ``old_servers``, so a legacy file adopts a fresh baseline
       without inventing a lifecycle event;
-    * present and valid -> continue the existing history;
+    * present and valid *and* covering every enabled stdio server -> continue the
+      existing history;
+    * present and valid but missing a generation for an enabled stdio server ->
+      the same fresh-baseline treatment: the block does not describe the revision
+      it claims to, so it is not a trusted version (the reader applies the same
+      coverage rule);
     * present but malformed/unsupported -- including an explicit ``null`` --
       -> log a warning, reset ``previous = None`` and
       ``old_servers = {}`` so every enabled server bumps by one, and still write
@@ -342,9 +347,4 @@ def commit_extensions_config(
             f"MCP lifecycle commit to {config_path} raised mid-write: the commit outcome is unknown (the file may be partially or fully written). The caller must conservatively invalidate local MCP state before relying on any binding.",
         ) from exc
 
-    return CommittedMcpRevision(
-        config=new_config,
-        lifecycle=lifecycle,
-        servers=dict(new_servers),
-        interceptors=_interceptor_identity(new_config),
-    )
+    return CommittedMcpRevision(config=new_config, lifecycle=lifecycle)

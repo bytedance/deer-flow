@@ -526,3 +526,51 @@ def test_repaired_version_history_never_collides_with_a_prior_baseline(spawn):
 
     held = w1.send({"cmd": "probe_held", "server": "A", "scope": "t1"})
     assert held["stale"] is True
+
+
+# ---------------------------------------------------------------------------
+# A worker that adopts the first lifecycle baseline late
+# ---------------------------------------------------------------------------
+
+
+def test_worker_initialized_from_a_legacy_file_still_retires_a_rebuilt_server(spawn):
+    """A legacy-baseline worker must not miss a rebuild hidden behind migration.
+
+    W1 initializes from a config with no ``mcpLifecycle`` block, so it has no
+    lifecycle baseline and holds A's session. W2 then creates the first V2
+    baseline, deletes A and identically re-adds it. W1 misses both writes and
+    sees the block for the first time; its effective content equals what it
+    already had, so only the advanced generation can reveal the rebuild.
+    """
+    spawn_workers, config_path = spawn
+    servers = {"A": _stdio("npx"), "B": _stdio("uvx")}
+    config_path.write_text(json.dumps({"mcpServers": servers, "skills": {}}), encoding="utf-8")
+
+    w1 = spawn_workers("w1")
+    w2 = spawn_workers("w2")
+
+    initialized = w1.send({"cmd": "refresh"})
+    assert initialized["applied_lifecycle"] is None
+    assert initialized["bindings"]["A"]["fingerprint"] is not None
+    epoch_a_before = initialized["bindings"]["A"]["epoch"]
+
+    opened = w1.send({"cmd": "open", "server": "A", "scope": "t1"})
+    assert opened["sessions"]["A|t1"] is False
+
+    # W2's delete is also the write that creates the first V2 baseline.
+    w2.send({"cmd": "commit", "mutation": {"op": "delete", "server": "A"}})
+    w2.send(
+        {
+            "cmd": "commit",
+            "mutation": {"op": "add", "server": "A", "server_config": _stdio("npx"), "index": 0},
+        }
+    )
+
+    final = w2.send({"cmd": "read_raw"})["raw"]
+    assert final["mcpLifecycle"]["serverGenerations"]["A"] >= 1
+    assert set(final["mcpServers"]) == {"A", "B"}
+
+    check = w1.send({"cmd": "check"})
+    assert check["retired"] is True
+    assert check["bindings"]["A"]["epoch"] > epoch_a_before
+    assert check["sessions"]["A|t1"] is True

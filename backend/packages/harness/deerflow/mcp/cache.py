@@ -59,7 +59,6 @@ _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at in
 # JSON snapshot of the effective MCP slice (enabled servers in declaration
 # order + mcpInterceptors) that the currently published tools were built from.
 # May contain resolved credentials: never log or persist it.
-_mcp_config_snapshot: str | None = None
 
 # True when the published cache came from an initialization with no resolvable
 # extensions config. Distinguishes "never configured" (a later config must be
@@ -488,10 +487,9 @@ def _adopt_verified_revision(incoming: _McpIncomingRevision) -> None:
 def _revision_matches_applied_baseline(revision: _McpIncomingRevision) -> bool:
     """True when *revision* describes the same effective MCP slice as the baseline.
 
-    The applied baseline survives ``_reset_mcp_tools_cache_state()`` while the
-    published ``_mcp_config_snapshot`` does not, so equivalence must be decided
-    against the baseline: a selective reconcile can leave rediscovery pending
-    when the config path switches.
+    The applied baseline survives ``_reset_mcp_tools_cache_state()``, so
+    equivalence must be decided against it: a selective reconcile can leave
+    rediscovery pending when the config path switches.
     """
     return revision.servers == (_mcp_applied_servers or {}) and revision.order == (_mcp_applied_order or ()) and revision.interceptors == _mcp_applied_interceptors
 
@@ -516,6 +514,11 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
     changed" and "the resource lifecycle changed" are different facts.
 
     ``configRevision`` differences alone are never a signal.
+
+    The first block a process sees is normally adopted without retiring anything
+    (migration grace). That grace only holds for a *pure* migration baseline --
+    one whose generations are all still zero. A first-seen block with an advanced
+    generation is not provably benign, so it fails closed.
     """
     if incoming.lifecycle_invalid or _mcp_applied_lifecycle_invalid:
         # A present-but-unverifiable block on either side of the comparison:
@@ -527,9 +530,15 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
     if incoming_lifecycle is None and applied is None:
         return False, frozenset()  # Legacy file: no lifecycle signal at all.
     if applied is None:
-        # Migration grace: adopt the first valid block without deriving any
-        # retirement from generations this process never observed.
-        return False, frozenset()
+        # First adoption of a lifecycle block by a process that published from a
+        # legacy file. A *pure* migration baseline still has every generation at
+        # zero, so it is adopted without retiring anything. If any generation has
+        # already advanced, this process cannot prove it observed those events --
+        # it may have missed a delete + identical re-add while it was on the
+        # legacy format -- so fail closed instead of adopting the block silently.
+        if incoming_lifecycle.global_generation != 0:
+            return True, frozenset()
+        return False, frozenset(name for name, generation in incoming_lifecycle.server_generations.items() if generation != 0)
     if incoming_lifecycle is None:
         # The block disappeared after this process adopted the protocol: the
         # version can no longer be verified.
@@ -950,7 +959,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         List of LangChain tools from all enabled MCP servers.
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _initializing_generation, _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _initializing_generation, _cache_generation, _initialized_without_config
 
     while True:
         with _init_condition:
@@ -1066,7 +1075,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
                 _config_path, _config_signature = post_path, post_sig
-                _mcp_config_snapshot = post_snapshot
                 _initialized_without_config = post_path is None
                 # Publishing a fresh revision also makes it the pool-applied
                 # baseline: discovery seeded/validated every stdio binding
@@ -1281,13 +1289,12 @@ def reconcile_mcp_servers(changed: Collection[str] | None = None) -> bool:
 def _reset_mcp_tools_cache_state() -> None:
     """Reset cache state under ``_init_condition`` / ``_init_lock``."""
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _cache_generation, _initialized_without_config
 
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_path = None
     _config_signature = None
-    _mcp_config_snapshot = None
     _initialized_without_config = False
     _cache_generation += 1
     _init_condition.notify_all()

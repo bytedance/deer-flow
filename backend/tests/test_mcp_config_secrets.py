@@ -1945,10 +1945,9 @@ def test_delete_mcp_server_route_uses_bodyless_path_parameter(server_name, reque
 
     def fake_delete(name: str):
         deleted_names.append(name)
-        changed = {name}
         pending = mcp_router.prepare_mcp_reconciliation_from_revision(sentinel_revision)
         mcp_router.finish_mcp_reconciliation(pending)
-        return {}, changed
+        return {}
 
     def fake_prepare_mcp_reconciliation(committed):
         reconcile_calls.append(committed)

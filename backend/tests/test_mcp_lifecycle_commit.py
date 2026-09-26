@@ -129,13 +129,12 @@ def test_var_placeholders_and_unknown_top_level_keys_survive_the_write(tmp_path:
     previous_config = validate_raw_extensions_config(copy.deepcopy(raw_data))
     new_config = validate_raw_extensions_config(copy.deepcopy(raw_data))
 
-    committed = _commit(config_path, raw_data, previous_config, new_config)
+    _commit(config_path, raw_data, previous_config, new_config)
 
     on_disk = read_raw_extensions_config(config_path)
     assert on_disk["mcpServers"]["alpha"]["env"]["GITHUB_TOKEN"] == "$DEERFLOW_TEST_MCP_TOKEN"
     assert on_disk["mcpInterceptors"] == ["deerflow_extras:CustomInterceptor"]
     assert on_disk["customTopLevel"] == {"keep": [1, 2, 3]}
-    assert json.loads(committed.interceptors) == ["deerflow_extras:CustomInterceptor"]
 
 
 @pytest.mark.parametrize(
