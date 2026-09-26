@@ -458,6 +458,52 @@ On multi-node clusters, also switch `persistence.home.accessMode` to
 `ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
 sandbox Pod can be scheduled on a node other than the gateway's).
 
+## Sandbox lark-cli runtime (optional)
+
+The Lark/Feishu `lark-cli` integration needs a `lark-cli` binary inside the
+sandbox. For remote/Kubernetes (provisioner) deployments the sandbox-side path
+comes from an optional runtime image instead of an install-time GitHub
+download. The chart exposes the same two knobs the Compose stack reads on the
+provisioner:
+
+```yaml
+provisioner:
+  # Pattern A - an init container copies the binaries into a shared emptyDir.
+  larkCliInitImage: deer-flow/lark-cli-init:v1.0.65
+  # Pattern B - a shim init container + broker sidecar owns the credentials, so
+  # the plaintext config/data dirs are never mounted into the sandbox.
+  # Supersedes larkCliInitImage when both are set.
+  larkCliBrokerImage: deer-flow/lark-cli-broker:v1.0.65
+```
+
+Both default to empty, which leaves the feature off (legacy behavior) and makes
+an in-sandbox `lark-cli` call fail with exit 127 (`command not found`). When
+set, they render `LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` on the
+provisioner Deployment - the names `docker/docker-compose.yaml` uses - and the
+variable is omitted entirely while empty. Point them at a tag that exists in a
+registry your nodes can pull from (mirror the registry prefix if you do not use
+Docker Hub). The images are built from `docker/lark-cli-init` and
+`docker/lark-cli-broker`; see those READMEs and the root README's Lark section
+for the build/publish flow and the credential model. Broker mode is the safer
+choice on a shared cluster: the app secret and OAuth tokens stay in the sidecar
+instead of the sandbox container.
+
+> An image here does not authenticate anyone by itself. The Gateway only asks
+the provisioner to attach the runtime once the Lark integration pack is
+installed for the user, so the sandbox gets the binary but the per-user
+credentials still follow the normal install/authorize flow. The Lark
+integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
+the Settings UI surfaces a missing runtime instead of a later
+`command not found`.
+
+> An image here does not authenticate anyone by itself. The Gateway only asks
+the provisioner to attach the runtime once the Lark integration pack is
+installed for the user, so the sandbox gets the binary but the per-user
+credentials still follow the normal install/authorize flow. The Lark
+integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
+the Settings UI surfaces a missing runtime instead of a later
+`command not found`.
+
 ## Lint / dry-run
 
 ```bash
