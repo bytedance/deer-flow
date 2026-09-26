@@ -840,14 +840,18 @@ def test_url_redaction_filter_collapses_credentials_behind_escaped_bare_cr_separ
     that knows escaped CRLF and escaped LF but not escaped bare CR keeps the
     whole dump in one segment. No field name then sits at a segment start, the
     anchor never fires, and the cookie and the signed ``Location`` are logged
-    verbatim in both the message and the ``exc_text`` that repeats it.
+    verbatim in both the message and the ``exc_text`` that repeats it, and the
+    deployed JSON format renders the same repr, so it must collapse there too.
     """
     url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
     raw = b"bad line\rSet-Cookie: session=BareCRSecret\rLocation: /p?sig=LocationSecret\r\r"
 
     formatted = _emit_real_header_parse_warning(url, raw)
-    for secret in ("BareCRSecret", "LocationSecret", "session=", "UrlSecret"):
-        assert secret not in formatted, secret
+    # ``logging.enhance.format=json`` is the Gateway's setting, and its formatter
+    # renders the exception itself rather than the filter's redacted exc_text.
+    for out in (formatted, _emit_real_header_parse_warning(url, raw, json_format=True)):
+        for secret in ("BareCRSecret", "LocationSecret", "session=", "UrlSecret"):
+            assert secret not in out, secret
     # The names survive for operator legibility, and so does the malformed line.
     assert "Set-Cookie: <redacted>" in formatted
     assert "Location: <redacted>" in formatted
