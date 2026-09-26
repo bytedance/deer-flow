@@ -323,6 +323,14 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **skills:** Deleting a custom skill whose package directory is an
+  operator-managed symlink now succeeds. The storage contract accepts a
+  one-level link under `custom/`, but `delete_custom_skill` removed the
+  package with `shutil.rmtree`, which refuses symlinks: the delete failed with
+  `OSError` after its history record had been written, the user's projected
+  skill view was cleared on the way out, and `DELETE /api/skills/custom/{name}`
+  answered 500. The link itself is now removed; the external tree it points
+  at is never touched.
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
