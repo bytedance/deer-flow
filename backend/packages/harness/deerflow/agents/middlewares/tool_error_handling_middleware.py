@@ -14,10 +14,13 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
     SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_id,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
     normalize_tool_result,
     stamp_exception_meta,
 )
@@ -98,6 +101,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         if getattr(message, "status", "success") == "error":
             return message
+        tool_meta = message.additional_kwargs.get(TOOL_META_KEY)
+        if isinstance(tool_meta, dict) and tool_meta.get("status") == "error":
+            return message
         content = message.content if isinstance(message.content, str) else None
         if content is None:
             return message
@@ -109,15 +115,47 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        args = request.tool_call.get("args") or {}
+        usage = build_skill_usage(
+            path,
+            content,
+            skills_root=self._skills_root,
+            partial=args.get("start_line") is not None or args.get("end_line") is not None,
+        )
+        if usage is not None:
+            existing[SKILL_USAGE_KEY] = usage
         message.additional_kwargs = existing
         return message
 
     def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
-        if not isinstance(result, ToolMessage):
-            return result
         tool_name = str(request.tool_call.get("name") or "")
-        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
+        tool_call_id = _tool_call_id(request.tool_call)
+
+        def stamp(message: ToolMessage) -> None:
+            # Tool-returned kwargs are untrusted. Only this middleware may add
+            # skill evidence after checking the configured producer and path.
+            existing = dict(message.additional_kwargs or {})
+            existing.pop(SKILL_CONTEXT_ENTRY_KEY, None)
+            existing.pop(SKILL_USAGE_KEY, None)
+            message.additional_kwargs = existing
+            if tool_call_id is None or str(message.tool_call_id) == tool_call_id:
+                self._stamp_skill_read_metadata(message, request, tool_name=tool_name)
+
+        if isinstance(result, ToolMessage):
+            stamp(result)
+            return result
+        update = getattr(result, "update", None)
+        if not isinstance(update, dict):
+            return result
+        messages = update.get("messages")
+        if isinstance(messages, ToolMessage):
+            stamp(messages)
+        elif isinstance(messages, (list, tuple)):
+            for message in messages:
+                if isinstance(message, ToolMessage):
+                    stamp(message)
+        return result
 
     @override
     def wrap_tool_call(
@@ -133,9 +171,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
     @override
@@ -152,9 +190,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
 
@@ -172,6 +210,7 @@ def _build_runtime_middlewares(
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -189,9 +228,19 @@ def _build_runtime_middlewares(
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
         InputSanitizationMiddleware(),
+        KnowledgeScopeMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
     ]
+    if app_config.pii_redaction.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        # Listed last so it is the innermost Layer-1 wrapper: tool results are
+        # PII-redacted before ToolResultSanitizationMiddleware neutralizes tags
+        # and ToolOutputBudgetMiddleware externalizes oversized copies to disk
+        # (so those copies hold redacted text), and user messages reach it
+        # after the other request rewrites (issue #3190).
+        outer_wrappers.append(PiiRedactionMiddleware(app_config.pii_redaction))
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
@@ -507,6 +556,7 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            pii_redaction_config=getattr(app_config, "pii_redaction", None),
         )
     )
 

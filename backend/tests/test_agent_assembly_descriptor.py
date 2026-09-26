@@ -239,6 +239,7 @@ class TestLeadAgentAssembly:
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-1"}})
         assert isinstance(assembly, LeadAgentAssembly)
         assert assembly.graph is not None
+        assert assembly.graph["context_schema"] is dict
         assert assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
@@ -603,6 +604,29 @@ class TestModelParametersProjectEffectiveSettings:
         with_noop_override = self._build(model_config, model_overrides={"temperature": None})
         assert profile_only.fingerprint == with_noop_override.fingerprint
 
+    def test_native_reasoning_setting_is_projected_and_moves_the_fingerprint(self):
+        """``reasoning`` is a real provider kwarg for ChatOllama (bool or level string), so
+        flipping it changes requests and must change the fingerprint (PR #5780 review)."""
+        on = self._build(self._model_config(reasoning=True))
+        off = self._build(self._model_config(reasoning=False))
+        high = self._build(self._model_config(reasoning="high"))
+        assert on.fingerprint != off.fingerprint
+        assert on.fingerprint != high.fingerprint
+        assert on.model_parameters["reasoning"] is True
+        assert high.model_parameters["reasoning"] == "high"
+
+    def test_declared_reasoning_contract_is_projected_and_moves_the_fingerprint(self):
+        """A contract's dialect/history change the request payload, so they belong in the fingerprint."""
+
+        def contract(history):
+            return {"thinking": "optional", "dialect": "openai_extra_body", "history": history}
+
+        clear = self._build(self._model_config(reasoning=contract("clear")))
+        preserve = self._build(self._model_config(reasoning=contract("preserve")))
+        assert clear.fingerprint != preserve.fingerprint
+        assert clear.model_parameters["reasoning"]["history"] == "clear"
+        assert clear.model_parameters["reasoning"]["dialect"] == "openai_extra_body"
+
     def test_api_key_is_never_projected_and_never_moves_the_fingerprint(self):
         quiet = self._build(self._model_config(api_key="sk-aaaaaaaaaaaa"))
         loud = self._build(self._model_config(api_key="sk-bbbbbbbbbbbb"))
@@ -653,6 +677,7 @@ class TestCustomAgentModelSettingsReachTheDescriptor:
         TestLeadAgentAssembly._isolate_from_the_ambient_config(monkeypatch)
         with bind_agent_build_extensions(TestLeadAgentAssembly._extensions_with_an_agent_assembly_observer()):
             assembly = assemble_lead_agent({"configurable": {"thread_id": "t-bootstrap", "is_bootstrap": True}})
+        assert assembly.graph["context_schema"] is dict
         assert "temperature" not in assembly.descriptor.model_parameters
 
 
@@ -662,7 +687,7 @@ class TestSkillCatalogHashesContent:
     allowed-tools are untouched."""
 
     @staticmethod
-    def _skill(skill_dir: Path, *, required_secrets=(), secrets_autonomous=True):
+    def _skill(skill_dir: Path, *, allowed_tools=None, required_secrets=(), secrets_autonomous=True):
         from deerflow.skills.types import Skill, SkillCategory
 
         skill_file = skill_dir / "SKILL.md"
@@ -674,6 +699,7 @@ class TestSkillCatalogHashesContent:
             skill_file=skill_file,
             relative_path=Path(skill_dir.name),
             category=SkillCategory.CUSTOM,
+            allowed_tools=allowed_tools,
             required_secrets=required_secrets,
             secrets_autonomous=secrets_autonomous,
         )
@@ -718,6 +744,17 @@ class TestSkillCatalogHashesContent:
         no_secrets = self._skill(Path("/nonexistent/skill-a"))
         with_secret = self._skill(Path("/nonexistent/skill-b"), required_secrets=(SecretRequirement(name="API_KEY"),))
         assert self._build([no_secrets]).fingerprint != self._build([with_secret]).fingerprint
+
+    def test_allowed_tools_declaration_states_have_distinct_fingerprints(self, tmp_path):
+        descriptors = [self._build([self._skill(tmp_path, allowed_tools=allowed_tools)]) for allowed_tools in (None, (), ("bash",))]
+
+        assert len({descriptor.fingerprint for descriptor in descriptors}) == 3
+
+    def test_allowed_tools_order_does_not_change_the_fingerprint(self, tmp_path):
+        before = self._build([self._skill(tmp_path, allowed_tools=("bash", "read_file"))])
+        reordered = self._build([self._skill(tmp_path, allowed_tools=("read_file", "bash"))])
+
+        assert before.fingerprint == reordered.fingerprint
 
     def test_a_missing_skill_file_is_undescribable_not_fatal(self, tmp_path):
         skill = self._skill(tmp_path / "missing-skill")

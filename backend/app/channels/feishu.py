@@ -503,6 +503,7 @@ class FeishuChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="feishu-upload",
+                release_on_last=True,
             )
             if not synced:
                 logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)

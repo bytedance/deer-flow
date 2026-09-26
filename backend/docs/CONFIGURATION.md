@@ -2,6 +2,54 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Prompt overlays
+
+Operators can add instructions around existing system prompts in `config.yaml`.
+Empty or omitted extensions preserve the original prompt exactly. The built-in
+instructions remain present; extensions do not change tool authorization,
+memory admission gates, or runtime limits.
+
+```yaml
+lead_prompt_overlay:
+  prepend: "Use our organization's terminology in reports."
+  append: "Conclude with decisions and unresolved questions."
+subagents:
+  agents:
+    general-purpose:
+      prompt_overlay:
+        append: "Include evidence for research claims."
+    bash:
+      prompt_overlay:
+        prepend: "Prefer reproducible, non-interactive commands."
+memory:
+  backend_config:
+    prompt_prepend: "Prefer concise summaries of lasting preferences."
+    prompt_append: "Preserve explicit corrections without redundant wording."
+```
+
+Merge these into existing sections rather than duplicating YAML keys. Extensions
+are joined with two newlines around the assembled system text. They are literal:
+`{conversation}` and JSON braces are not interpolated. The configuration loader's
+existing `$ENV_VAR` resolution still applies to values beginning with `$`.
+Use YAML block scalars for multiline instructions.
+
+These are trusted operator instructions, never request/body context or per-user
+agent data. Lead extensions apply to the assembled default or custom lead agent;
+its SOUL, skills and runtime guidance remain intact. Subagent extensions also
+support configured custom subagents and never mutate the shared built-in
+registry. Explicit application snapshots remain isolated; subsequent assemblies
+use new settings, while already-built graphs retain their prompt.
+
+DeerMem's current `memory_update` chat prompt handles both summary updates and
+fact extraction; the historical `FACT_EXTRACTION_PROMPT` constant is not a
+separate live extraction call. Its extensions wrap the first system message
+after template rendering, leaving memory and conversation data in their original
+human message. They also work with `prompts_dir` templates, which must include
+a system message when overlays are used. Restart the memory backend/Gateway after
+changing its configuration. Other memory backends do not consume these
+DeerMem-specific fields. Existing external memory templates remain the mechanism
+for complete template replacement; this feature adds no editing endpoint or UI.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
@@ -14,6 +62,10 @@ request_admission:
   max_wait_seconds: 300
   max_queue_size: 256
 ```
+
+Like every other field, these accept `$VAR` environment references; an integer
+field such as `requests_per_minute: $RPM` validates when the variable holds a
+decimal integer.
 
 Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
 at least one second apart, even after idle periods. The first call can proceed
@@ -337,7 +389,26 @@ reachable from the Gateway container or Pod; `localhost` refers to that
 container or Pod, not the host machine.
 
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
-deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+deletion remain in RAGFlow and are not exposed as Agent tools, workspace pages,
+or DeerFlow APIs. The authenticated `/api/knowledge/retrieval-catalog` routes
+exist only to populate the custom-agent chat selector. The provider-neutral
+`knowledge_base` block only gates DeerFlow's knowledge capability and selector;
+configure the RAGFlow connection and retrieval defaults on the
+`tools[].name: knowledge_search` entry shown above:
+
+```yaml
+knowledge_base:
+  enabled: true
+  scope_selection_enabled: true
+```
+
+When enabled, include the `list_knowledge_bases` tool entry shown above if the
+model should be able to discover configured dataset names. The frontend uses
+`GET /api/features -> knowledge_base` only to gate the custom-agent chat
+selector. RAGFlow API keys and dataset UUIDs are never returned to the browser
+or model. Do not put RAGFlow-specific connection, allowlist, or retrieval
+parameters in `knowledge_base`; they are read only from the provider tool
+entry, so different knowledge providers can use their own settings.
 
 ### LightRAG Knowledge Retrieval
 
@@ -485,8 +556,23 @@ tools:
     group: web
     use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
+    include_domains:             # Optional: limit search sources to these domains
+      - docs.python.org
+      - developer.mozilla.org
+    exclude_domains: []         # Optional: domains to exclude from search results
     # api_key: $TAVILY_API_KEY  # Optional
 ```
+
+For Tavily, `include_domains` and `exclude_domains` are deployment-only options
+read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
+For a non-empty `include_domains`, DeerFlow also sends `include_domains_mode: filter`
+so Tavily restricts results to those domains rather than merely boosting them.
+Either list may be configured independently. Omitted options are not added to the SDK
+call; explicit empty lists are forwarded as `[]`, meaning no inclusion restriction
+or no excluded domains, respectively. No `include_domains_mode` is sent for an
+empty or omitted `include_domains`. These filters compose with `max_results`
+and the model's optional `time_range`. The model-visible arguments remain `query`
+and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
@@ -598,6 +684,25 @@ sandbox:
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
+
+For AIO images on the supported semver line (`1.9.3` through the recommended
+`1.11.0` image), `sandbox.bash_command_timeout` is enforced server-side through
+the `hard_timeout` API when the image exposes it. DeerFlow's legacy frozen
+`all-in-one-sandbox:latest` image predates that API, so only the host-side
+request is bounded there. On supported semver AIO images, `list_dir` uses a 60
+second server-side hard timeout with a 65 second no-retry host envelope; the
+frozen legacy image only gets the bounded host wait. Timed-out or otherwise
+ambiguous commands are never replayed, and a partial `list_dir` result is never
+returned as a complete listing.
+
+Explicit AIO shell/bash session creation is a separate control-plane
+operation. DeerFlow bounds those create requests to 5 seconds with SDK
+retries disabled. If a response cannot prove whether creation committed,
+DeerFlow does not replay the create or execute on that session id. The
+affected creation plane is quarantined, bounded best-effort session cleanup
+is attempted, and the container is recycled instead of being returned to the
+warm pool. Session-level cleanup does not clear that quarantine because a
+timed-out create may commit after cleanup has already returned.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml
@@ -802,7 +907,6 @@ If the configured `host_path` is not visible to the gateway process, DeerFlow lo
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   port: 8080
-  auto_start: true
   container_prefix: deer-flow-sandbox
 
   # Optional: Additional mounts

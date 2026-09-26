@@ -455,3 +455,381 @@ test.describe("IM channels", () => {
     await expect(setupDialog.getByLabel("App secret")).toHaveValue("********");
   });
 });
+
+test("WeChat QR setup keeps account binding separate and supports manual entry", async ({
+  page,
+}, testInfo) => {
+  const hydrationErrors: string[] = [];
+  page.on("console", (message) => {
+    if (
+      /hydration|hydrated|server rendered HTML|Minified React error #(418|423|425)/i.test(
+        message.text(),
+      )
+    )
+      hydrationErrors.push(message.text());
+  });
+  mockLangGraphAPI(page);
+  const wechat: MockChannelProvider = {
+    provider: "wechat",
+    display_name: "WeChat",
+    enabled: true,
+    configured: false,
+    connectable: false,
+    auth_mode: "binding_code",
+    connection_status: "not_connected",
+    credential_fields: [
+      {
+        name: "bot_token",
+        label: "Bot token",
+        type: "password",
+        required: true,
+      },
+    ],
+  };
+  mockChannelsAPI(page, [wechat]);
+  let confirm = false;
+  let cancelled = 0;
+  let connected = 0;
+  let bound = false;
+  await page.route("**/api/channels/connections", (route) =>
+    route.fulfill({
+      json: {
+        connections: bound
+          ? [{ id: "wechat-binding", provider: "wechat", status: "connected" }]
+          : [],
+      },
+    }),
+  );
+  let starts = 0;
+  let session = {
+    id: "preview-session",
+    status: "pending",
+    qrcode_content: "https://example.com/wechat-demo",
+    expires_in: 180,
+    provider: null,
+  };
+  await page.route("**/api/channels/wechat/qr-login", (route) => {
+    starts += 1;
+    session = {
+      ...session,
+      id: `preview-session-${starts}`,
+      qrcode_content: `https://example.com/wechat-demo?attempt=${starts}`,
+    };
+    return route.fulfill({ json: session });
+  });
+  await page.route("**/api/channels/wechat/qr-login/*/poll", (route) =>
+    route.fulfill({
+      json: confirm
+        ? {
+            ...session,
+            status: "confirmed",
+            provider: {
+              ...wechat,
+              configured: true,
+              connectable: true,
+              credential_values: { bot_token: "********" },
+            },
+          }
+        : session,
+    }),
+  );
+  await page.route("**/api/channels/wechat/qr-login/*", (route) => {
+    cancelled += 1;
+    return route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/channels/wechat/connect", (route) => {
+    connected += 1;
+    return route.fulfill({
+      json: {
+        provider: "wechat",
+        mode: "binding_code",
+        code: "demo-code",
+        instruction: "Send /connect demo-code to the WeChat bot.",
+        expires_in: 600,
+      },
+    });
+  });
+
+  await page.goto("/workspace/chats/new");
+  const sidebar = page.locator("[data-sidebar='sidebar']");
+  await sidebar.getByRole("button", { name: "Connect", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("img", { name: "WeChat login QR code" }),
+  ).toBeAttached();
+  await expect(
+    dialog.getByText("Scan this code with WeChat, then confirm on your phone."),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("wechat-qr-preview.png"),
+    animations: "disabled",
+  });
+  const cancellationsBeforeSwitch = cancelled;
+  await dialog.getByRole("tab", { name: "Use token" }).click();
+  await expect(dialog.getByLabel("Bot token")).toBeVisible();
+  await dialog.getByLabel("Bot token").fill("example-token");
+  await page.screenshot({
+    path: testInfo.outputPath("wechat-token-preview.png"),
+    animations: "disabled",
+  });
+  await expect.poll(() => cancelled).toBeGreaterThan(cancellationsBeforeSwitch);
+  await dialog.getByRole("tab", { name: "Scan QR code" }).click();
+  await expect(
+    dialog.getByRole("img", { name: "WeChat login QR code" }),
+  ).toBeAttached();
+  await dialog.getByRole("tab", { name: "Use token" }).click();
+  await expect(dialog.getByLabel("Bot token")).toHaveValue("example-token");
+  await dialog.getByRole("tab", { name: "Scan QR code" }).click();
+  confirm = true;
+  await expect(dialog.getByText("Token saved securely")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect.poll(() => connected).toBe(1);
+  await expect(
+    dialog.getByText("/connect demo-code", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Copy command" }),
+  ).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await dialog.getByRole("button", { name: "Copy command" }).click();
+  await expect(
+    dialog.getByRole("button", { name: "Copied", exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    "/connect demo-code",
+  );
+  await page.screenshot({
+    path: testInfo.outputPath("wechat-binding-preview.png"),
+    animations: "disabled",
+  });
+  // Moving the command to the phone can take the user out of the bot screen.
+  // Rescanning must recover in-place and keep that already-copied command.
+  const startsBeforeRetry = starts;
+  confirm = false;
+  await dialog.getByRole("button", { name: "Scan again", exact: true }).click();
+  await expect(
+    dialog.getByRole("img", { name: "WeChat login QR code" }),
+  ).toBeVisible();
+  await expect.poll(() => starts).toBe(startsBeforeRetry + 1);
+  await expect(
+    dialog.getByText("/connect demo-code", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("tab", { name: "Scan QR code" }),
+  ).toHaveAttribute("aria-selected", "true");
+  confirm = true;
+  await expect(
+    dialog.getByText("/connect demo-code", { exact: true }),
+  ).toBeVisible();
+  expect(connected).toBe(1);
+  bound = true;
+  await expect(dialog.getByText("WeChat is connected")).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("wechat-connected-preview.png"),
+    animations: "disabled",
+  });
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(hydrationErrors).toEqual([]);
+});
+
+test("WeChat phone pairing code leads to persistent connection success", async ({
+  page,
+}, testInfo) => {
+  mockLangGraphAPI(page);
+  const wechat: MockChannelProvider = {
+    provider: "wechat",
+    display_name: "WeChat",
+    enabled: true,
+    configured: false,
+    connectable: false,
+    auth_mode: "binding_code",
+    connection_status: "not_connected",
+    credential_fields: [
+      {
+        name: "bot_token",
+        label: "Bot token",
+        type: "password",
+        required: true,
+      },
+    ],
+  };
+  mockChannelsAPI(page, [wechat]);
+  const session = {
+    id: "pairing-session",
+    status: "pending",
+    qrcode_content: "https://example.com/scan",
+    expires_in: 180,
+    provider: null,
+  };
+  let starts = 0;
+  let submitted = "";
+  await page.route("**/api/channels/wechat/qr-login", (route) => {
+    starts += 1;
+    return route.fulfill({ json: session });
+  });
+  await page.route(
+    "**/api/channels/wechat/qr-login/pairing-session/poll",
+    (route) => {
+      const body = route.request().postDataJSON() as {
+        verify_code?: string;
+      } | null;
+      submitted = body?.verify_code ?? "";
+      return route.fulfill({
+        json:
+          submitted === "123456"
+            ? {
+                ...session,
+                status: "confirmed",
+                provider: {
+                  ...wechat,
+                  configured: true,
+                  connection_status: "connected",
+                },
+              }
+            : { ...session, status: "verification_required" },
+      });
+    },
+  );
+  await page.route("**/api/channels/wechat/qr-login/pairing-session", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+  await page.goto("/workspace/chats/new");
+  await page
+    .locator("[data-sidebar='sidebar']")
+    .getByRole("button", { name: "Connect", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Pairing code")).toBeVisible();
+  expect(starts).toBe(1);
+  await dialog.getByLabel("Pairing code").fill("123456");
+  await page.screenshot({
+    path: testInfo.outputPath("wechat-pairing-preview.png"),
+    animations: "disabled",
+  });
+  await dialog.getByRole("button", { name: "Continue connecting" }).click();
+  await expect(dialog.getByText("Token saved securely")).toBeVisible();
+  await expect(dialog.getByText("WeChat is connected")).toBeVisible();
+  expect(submitted).toBe("123456");
+  await expect(dialog.getByRole("tab")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+});
+
+for (const entry of ["sidebar", "settings"] as const) {
+  for (const flow of ["existing token", "manual token"] as const) {
+    test(`WeChat ${flow} from ${entry} keeps binding and QR recovery in a dialog`, async ({
+      page,
+    }) => {
+      mockLangGraphAPI(page);
+      const wechat: MockChannelProvider = {
+        provider: "wechat",
+        display_name: "WeChat",
+        enabled: true,
+        configured: flow === "existing token",
+        connectable: flow === "existing token",
+        auth_mode: "binding_code",
+        connection_status: "not_connected",
+        credential_fields: [
+          {
+            name: "bot_token",
+            label: "Bot token",
+            type: "password",
+            required: true,
+          },
+        ],
+        credential_values:
+          flow === "existing token" ? { bot_token: "********" } : {},
+      };
+      mockChannelsAPI(page, [wechat]);
+      let bindingCalls = 0;
+      let qrStarts = 0;
+      await page.route("**/api/channels/wechat/connect", (route) => {
+        bindingCalls += 1;
+        return route.fulfill({
+          json: {
+            provider: "wechat",
+            mode: "binding_code",
+            code: "recovery-demo",
+            instruction:
+              "Send /connect recovery-demo to the DeerFlow WeChat bot.",
+            expires_in: 600,
+          },
+        });
+      });
+      await page.route("**/api/channels/wechat/runtime-config", (route) => {
+        expect(route.request().method()).toBe("POST");
+        wechat.configured = true;
+        wechat.connectable = true;
+        wechat.credential_values = { bot_token: "********" };
+        return route.fulfill({ json: wechat });
+      });
+      const session = {
+        id: "recovery-session",
+        status: "pending",
+        qrcode_content: "https://example.com/recovery",
+        expires_in: 180,
+        provider: null,
+      };
+      await page.route("**/api/channels/wechat/qr-login", (route) => {
+        qrStarts += 1;
+        return route.fulfill({ json: session });
+      });
+      await page.route(
+        "**/api/channels/wechat/qr-login/recovery-session/poll",
+        (route) => route.fulfill({ json: session }),
+      );
+      await page.route(
+        "**/api/channels/wechat/qr-login/recovery-session",
+        (route) => route.fulfill({ status: 204 }),
+      );
+      await page.goto("/workspace/chats/new");
+      const sidebar = page.locator("[data-sidebar='sidebar']");
+      if (entry === "settings") {
+        await sidebar
+          .getByRole("button", { name: /Settings and more/ })
+          .click();
+        await page.getByRole("menuitem", { name: "Settings" }).click();
+        await page
+          .getByRole("button", { name: "Channels", exact: true })
+          .click();
+        await page
+          .getByRole("dialog", { name: "Settings", exact: true })
+          .getByRole("button", { name: "Connect", exact: true })
+          .click();
+      } else {
+        await sidebar
+          .getByRole("button", { name: "Connect", exact: true })
+          .click();
+      }
+      const dialog = page.getByRole("dialog", {
+        name: "Connect WeChat",
+        exact: true,
+      });
+      if (flow === "manual token") {
+        await dialog.getByRole("tab", { name: "Use token" }).click();
+        await dialog.getByLabel("Bot token").fill("manual-demo-token");
+        await dialog.getByRole("button", { name: "Save and connect" }).click();
+      }
+      await expect(
+        dialog.getByText("/connect recovery-demo", { exact: true }),
+      ).toBeVisible();
+      expect(bindingCalls).toBe(1);
+      await expect(
+        page.locator("[data-sonner-toast]").getByText(/Send \/connect/),
+      ).toHaveCount(0);
+      const startsBeforeRecovery = qrStarts;
+      await dialog
+        .getByRole("button", { name: "Scan again", exact: true })
+        .click();
+      // Saved providers normally default to the token tab; recovery must force QR.
+      await expect(
+        page.getByRole("dialog").filter({
+          has: page.getByRole("img", { name: "WeChat login QR code" }),
+        }),
+      ).toBeVisible();
+      expect(qrStarts).toBe(startsBeforeRecovery + 1);
+    });
+  }
+}

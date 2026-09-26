@@ -45,7 +45,7 @@ fi
 
 cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
 import os
-import sys, shutil, copy, re
+import sys, shutil, copy, re, secrets
 from pathlib import Path
 
 import yaml
@@ -74,6 +74,71 @@ print()
 # Each migration targets a specific version upgrade.
 # 'replacements': list of (old_string, new_string) applied to the raw YAML text.
 #   This handles value changes that a dict merge cannot catch.
+# 'data_transform': callable applied to the parsed config after text migrations.
+
+RAGFLOW_PROVIDER_KEYS = (
+    'base_url',
+    'api_key',
+    'timeout',
+    'page_size',
+    'similarity_threshold',
+    'vector_similarity_weight',
+    'top_k',
+    'max_chars_per_chunk',
+    'max_total_chars',
+)
+
+
+def migrate_knowledge_provider_settings(data):
+    # Move legacy RAGFlow settings to the provider tool and remove them from the generic block.
+    knowledge_base = data.get('knowledge_base')
+    tools = data.get('tools')
+    target = None
+    has_configured_knowledge_tool = False
+    if isinstance(tools, list):
+        has_configured_knowledge_tool = any(
+            isinstance(tool, dict) and tool.get('group') == 'knowledge'
+            for tool in tools
+        )
+        target = next(
+            (
+                tool
+                for tool in tools
+                if isinstance(tool, dict)
+                and tool.get('name') == 'knowledge_search'
+                and tool.get('use') == 'deerflow.community.ragflow.tools:knowledge_search_tool'
+            ),
+            None,
+        )
+
+    changes = []
+    # Before the capability gate shipped, a tools-only knowledge configuration
+    # was valid and enabled by the presence of the provider tool itself. Preserve
+    # that provider-neutral behavior when the merge adds the example's
+    # ``enabled: false`` gate. Explicit operator values still win.
+    if not isinstance(knowledge_base, dict):
+        if not has_configured_knowledge_tool:
+            return changes
+        knowledge_base = data['knowledge_base'] = {'enabled': True}
+        changes.append('knowledge_base.enabled set to true (preserved configured knowledge tools)')
+
+    if 'enabled' not in knowledge_base and has_configured_knowledge_tool:
+        knowledge_base['enabled'] = True
+        changes.append('knowledge_base.enabled set to true (preserved configured knowledge tools)')
+
+    for key in RAGFLOW_PROVIDER_KEYS:
+        if key not in knowledge_base:
+            continue
+        if target is None:
+            changes.append(f'knowledge_base.{key} removed (no RAGFlow knowledge_search tool configured)')
+        elif key in target:
+            changes.append(f'knowledge_base.{key} removed (tools.knowledge_search.{key} preserved)')
+        else:
+            target[key] = knowledge_base[key]
+            changes.append(f'knowledge_base.{key} -> tools.knowledge_search.{key}')
+        del knowledge_base[key]
+    return changes
+
 
 MIGRATIONS = {
     1: {
@@ -85,11 +150,34 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
-    # Future migrations go here:
-    # 2: {
-    #     'description': '...',
-    #     'replacements': [('old', 'new')],
-    # },
+    46: {
+        'description': 'Preserve configured knowledge providers and move RAGFlow settings to the knowledge_search tool',
+        'data_transform': migrate_knowledge_provider_settings,
+    },
+}
+
+
+def migrate_pii_token_secret(data):
+    # token_secret became mandatory whenever pii_redaction is enabled (v47).
+    # A v46 deployment that enabled redaction without a secret would fail
+    # startup after the upgrade, so generate a random deployment-scoped
+    # secret and persist it here; the .bak backup taken below covers the
+    # original file.
+    pii = data.get('pii_redaction')
+    changes = []
+    if not isinstance(pii, dict) or not pii.get('enabled'):
+        return changes
+    secret = pii.get('token_secret')
+    if isinstance(secret, str) and secret.strip():
+        return changes
+    pii['token_secret'] = secrets.token_urlsafe(32)
+    changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
+    return changes
+
+
+MIGRATIONS[47] = {
+    'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
+    'data_transform': migrate_pii_token_secret,
 }
 
 # Apply migrations in order for versions (user_version, example_version]
@@ -106,6 +194,13 @@ for version in range(user_version + 1, example_version + 1):
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+
+# Apply structured migrations to the parsed config.
+for version in range(user_version + 1, example_version + 1):
+    migration = MIGRATIONS.get(version)
+    transform = migration.get('data_transform') if migration else None
+    if transform:
+        migrated.extend(transform(user))
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')

@@ -1,0 +1,139 @@
+---
+title: Results and Acceptance
+description: Terminal statuses and cap reasons, the report contract and receipt citations, the three acceptance checklist outcomes and their semantics, and why the Lead Agent keeps "execution finished" apart from "task accepted".
+---
+
+import { Callout } from "nextra/components";
+
+# Results and Acceptance
+
+A subagent's report is its **self-report**. DeerFlow layers three kinds of checkable evidence on top of it: the runtime status and cap reason, the cross-check of cited tool receipts, and the deterministic check of acceptance criteria. This chapter explains each layer and how the Lead Agent should read them.
+
+## Terminal statuses
+
+| `subagent_status`     | Meaning                                                                                        | Card     | Result text starts with                   |
+| --------------------- | ---------------------------------------------------------------------------------------------- | -------- | ----------------------------------------- |
+| `completed`           | The subgraph ended normally                                                                    | Completed | `Task Succeeded. Result:`                 |
+| `failed`              | The model call failed after retries, capacity was rejected, or a runtime error occurred        | Failed   | `Task failed.` or `Task failed (capped: <label>).` |
+| `cancelled`           | The user stopped the run, or the parent run was cancelled                                      | Failed   | `Task cancelled by user.`                 |
+| `timed_out`           | `timeout_seconds` elapsed                                                                      | Failed   | `Task timed out.`                         |
+| `polling_timed_out`   | The parent's polling budget ran out; the background task may be stuck. The runtime requested cancellation and scheduled deferred cleanup | Failed | `Task polling timed out after N minutes.` |
+
+`failed`, `cancelled`, and `timed_out` append `Error: <detail>` when a detail exists; `polling_timed_out` shows its detail as-is. The text body is display content only; the frontend and the Lead Agent rely on the structured fields in the message metadata, not on parsing text.
+
+<Callout type="info">
+  A failed subagent does not fail the parent run. A failed delegation is an
+  ordinary tool result: the Lead Agent sees the error text and decides how to
+  continue, and the conversation itself ends with a success status.
+</Callout>
+
+### Cap reasons: stop_reason
+
+Three guards can end a run early. The run usually still counts as `completed`; when no usable output exists it is `failed` and keeps the same `stop_reason`:
+
+| `subagent_stop_reason` | Trigger                          | Result text                                                          |
+| ---------------------- | -------------------------------- | -------------------------------------------------------------------- |
+| `turn_capped`          | `max_turns` exhausted            | `Task Succeeded (capped: turn budget). Result: ...`                  |
+| `token_capped`         | `token_budget` hard stop reached | `Task Succeeded (capped: token budget). Result: ...`                 |
+| `loop_capped`          | Loop-detection hard stop         | `Task Succeeded (capped: repeated tool-call loop). Result: ...`      |
+
+A capped report is a **partial result**: the tool calls of the final turn were stripped and the model was forced to answer. When the turn budget runs out with no usable text at all, the status is `failed` and the text reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. The legacy `max_turns_reached` status maps to `turn_capped` on read.
+
+### How failure is decided
+
+`LLMErrorHandlingMiddleware` converts provider exceptions into an assistant message marked `deerflow_error_fallback`, so the subgraph can end cleanly. The executor checks only the **last** assistant message for that marker: with the marker the run is `failed`, and the error text comes from the message body or `error_detail`; without it, even error-looking prose remains a `completed` result. Checking only the last message is deliberate, because the subagent shares the parent's `thread_id` and older parent markers may linger in history.
+
+## Report contract and receipt citations
+
+Every subagent, built-in or custom, carries a `report_contract` section in its system prompt that requires it to:
+
+- Cite a receipt id such as `[r3 write_file]` for every claim about an action it took: a file written, a command run, a page fetched, a request sent.
+- Attach a verifiable handle to every deliverable: an absolute path, URL, record id, or HTTP status.
+- State explicitly what failed, was skipped, or remains uncertain, and never claim an action it did not execute.
+- Use `[rN]` only for its own tool calls, and keep the `[citation:Title]` followed by `(URL)` format for external web sources.
+
+Receipts come from `ToolReceiptMiddleware`. It writes one record per tool call (id, tool name, status, hash prefixes of arguments and output, byte count) under a runtime-owned key on the tool message, so a tool cannot forge evidence. Before every model call the subagent sees a ledger:
+
+```
+## Tool receipts (execution record)
+Cite receipt ids (e.g. [r1 write_file]) in your final report for every claim about an action you took.
+Execution evidence only — receipts record that a call happened and its status; they do not validate claim correctness or task acceptance.
+- [r1] write_file status=success args_sha256=… output_sha256=… bytes=123
+```
+
+The ledger has a 2,000 character render budget; older receipts beyond it are omitted. The exact ledger shown is stamped on the assistant message, so renumbering after compaction cannot shift the ids.
+
+When the subagent finishes, the parent checks every `[rN]` in the report against the execution record and produces a `receipt_verdict`:
+
+| Outcome               | Meaning                                                                                                     |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| resolved              | The receipt exists, its status is success, and the tool name matches the citation anchor                    |
+| failed                | The receipt exists but its status is not success, or the cited tool name does not match the actual tool     |
+| unknown               | No receipt with that id exists in the ledger                                                                |
+| `no_citation_claims`  | The report cites nothing but contains action verbs or paths, or, when the receipt ledger is not empty, is at least 240 characters long             |
+
+This verdict is not written into the result text. It is stored in the message metadata and summarized on one line in the delegation ledger, such as `citations: 2 resolved, 1 failed, 1 unknown — execution evidence only, does not validate claim correctness`, or `citations: UNVERIFIED — action claims without receipt citations`.
+
+<Callout type="warning">
+  A receipt proves only that a call happened with the recorded status. It does
+  not prove the adjacent claim is correct. A file being written is not the
+  same as its content being right.
+</Callout>
+
+Receipts and citation verification are controlled by `verification.receipts_enabled`, on by default. When off, the report contract asks for verifiable handles instead of receipt citations.
+
+## The acceptance checklist
+
+When `acceptance_criteria` were attached, a `completed` result ends with a checklist:
+
+```
+Acceptance checklist (deterministic checks; execution evidence only, does not validate claim correctness):
+- [holds] file:outputs/report.md non-empty — 1204 bytes
+- [does not hold] file_written:outputs/summary.md — file does not exist
+- [UNVERIFIED] The report must cover three competitors — not deterministically checkable
+```
+
+The three outcomes:
+
+- **holds**: a check ran and the condition is true.
+- **does not hold**: a check ran and the condition is false.
+- **UNVERIFIED**: no deterministic check ran. This is missing evidence, not a failed condition.
+
+Semantics per condition:
+
+| Situation                                              | `exists`                    | `non-empty`                       | `file_written`                       |
+| ------------------------------------------------------ | --------------------------- | --------------------------------- | ------------------------------------ |
+| File missing                                           | does not hold               | does not hold                     | does not hold                        |
+| File exists but is empty                               | holds (`exists, 0 bytes`)   | does not hold (`file is empty`)   | holds (`read-back ok, 0 bytes`)      |
+| Binary file                                            | holds                       | holds                             | holds (`binary file`)                |
+| Path outside the thread workspace / outputs            | UNVERIFIED                  | UNVERIFIED                        | UNVERIFIED                           |
+| Local-sandbox symlink pointing outside                 | UNVERIFIED                  | UNVERIFIED                        | UNVERIFIED                           |
+| Remote-sandbox symlink, FIFO, or other non-regular file | UNVERIFIED                 | UNVERIFIED                        | UNVERIFIED                           |
+| Larger than 50,000 bytes                               | Decided by a size probe, content not read | Same                | Plus one bounded one-byte read probe |
+
+`tests_passed:<command>` holds only when all of the following are true: the record contains a successful bash execution of the command; the command text is complete, not truncated; it did not run in a persistent shell session (earlier state cannot be proven clean); and the output shows a passing test summary with no failing or zero-test shape. The evidence window is the last 20 bash executions, with 500 characters of command text and the last 1,000 characters of output.
+
+The full verdict is stored in the `subagent_acceptance_verdict` metadata: each `leaf` has `criterion`, `family`, `checked`, `holds`, and `detail`; the verdict has an `unchecked` list and an `all_hold` boolean.
+
+## Execution finished is not task accepted
+
+The Lead Agent prompt, the `task` description, and the delegation ledger all say the same thing: `completed` means execution ended. Each ledger entry carries an acceptance summary such as `acceptance: 2 hold, 1 does not hold, 1 UNVERIFIED`. For a completed delegation with unmet or unverified criteria, the ledger guidance is to retain useful work, repair only the remaining gaps, verify load-bearing `UNVERIFIED` criteria or preserve the uncertainty in the answer, and respect the remaining budget.
+
+After compaction the ledger keeps one concrete example of each unresolved kind (criterion cut to 160 characters, detail to 120) and counts the rest as `N more unresolved criteria (not shown)`. The complete verdict stays in thread state.
+
+## The delegation ledger
+
+The ledger is the system-maintained record of delegations, stored in the `delegations` channel of thread state. Summarization compacts messages only and leaves it alone. Before every model call, `DurableContextMiddleware` renders it into a hidden `durable_context_data` message:
+
+```
+## Work already delegated
+Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. ...
+- [completed] research competitors (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> Pricing of the top 5 competitors… · citations: 3 resolved · acceptance: 1 hold, 1 does not hold — execution evidence only, does not validate claim correctness
+- [in_progress] organize data (via bash; already delegated; do NOT delegate again; wait for or build on the result)
+```
+
+- Each entry holds an id, run id, description, subagent type, status, result brief (up to 2,000 characters, 120 when rendered), result hash, stop reason, receipt verdict, and acceptance verdict.
+- A terminal status is never downgraded. The ledger keeps at most 50 entries with a 6,000 character render budget; older entries beyond it are counted, not shown.
+- When the user stops a conversation, an in-progress delegation has no tool result. At the start of the next run the runtime flips such unpaired `in_progress` entries to `cancelled`, so the Lead Agent does not wait forever for a result that will never arrive.
+
+A "durable context authority contract" system message precedes the ledger, declaring that those values are data, not instructions.

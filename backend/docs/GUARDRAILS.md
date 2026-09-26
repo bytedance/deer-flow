@@ -57,12 +57,12 @@ Without guardrails:                      With guardrails:
            │    (configured in YAML)  │      with evaluate/aevaluate
            └────────────┬─────────────┘
                         │
-              ┌─────────┼──────────────┐
-              │         │              │
-              ▼         ▼              ▼
-         Built-in   OAP Passport    Custom
-         Allowlist  Provider        Provider
-         (zero dep) (open standard) (your code)
+              ┌─────────┼──────────────┼───────────────────┐
+              │         │              │                   │
+              ▼         ▼              ▼                   ▼
+         Built-in   OAP Passport    Custom             TypeSafe (Jev)
+         Allowlist  Provider        Provider           risk gate
+         (zero dep) (open standard) (your code)        (HTTP, opt-in)
                         │
                   Any implementation
                   (e.g. APort, or
@@ -78,7 +78,7 @@ The `GuardrailMiddleware` implements `wrap_tool_call` / `awrap_tool_call` (the s
 5. If **provider error** and `fail_closed=true` (default): blocks the call
 6. `GraphBubbleUp` exceptions (LangGraph control signals) are always propagated, never caught
 
-## Three Provider Options
+## Four Provider Options
 
 ### Option 1: Built-in AllowlistProvider (Zero Dependencies)
 
@@ -432,6 +432,94 @@ defaults:
   action: allow
 ```
 
+### Option 4: TypeSafe (Jev) Risk Gate (Network Provider)
+
+Ships with DeerFlow. Sends **one `noul` question** to [TypeSafe](https://docs.typesafe.ai/api) System One (`POST {base_url}/v1/systemone`) — "does executing this tool call risk an irreversible or out-of-scope side effect?" — and denies the call when the returned probability reaches `threshold`. It is the only provider here that sends tool arguments to a third party.
+
+**config.yaml:**
+```yaml
+guardrails:
+  enabled: true
+  fail_closed: true
+  provider:
+    use: deerflow.guardrails.typesafe:TypeSafeGuardrailProvider
+    config:
+      # api_key: <explicit key>; when omitted, read from api_key_env
+      api_key_env: TYPESAFE_API_KEY
+      model: jev-latest        # pin an exact version (e.g. jev-1.13.0) when
+                               # decisions must stay traceable across releases
+      threshold: 0.5           # example value; calibrate with the online evaluation
+      tools: ["bash"]          # SMOKE-TEST scope only -- see "Coverage" below
+      # allowed_tools: ["bash", "read_file", "write_file"]   # permission list; see "Allowed tools" below
+```
+
+| Setting | Default | Notes |
+|---|---|---|
+| `api_key` / `api_key_env` | `TYPESAFE_API_KEY` | One of the two must resolve, or agent construction fails. |
+| `base_url` | `https://api.typesafe.ai` | |
+| `model` | `jev-latest` | A rolling server-side alias; pin a version for reproducibility. |
+| `threshold` | `0.5` | Deny when `probability >= threshold`. |
+| `tools` | omitted = **every** tool | Probing every tool matches the "every call passes the gate" contract; narrowing it shrinks protection (see Coverage). |
+| `allowed_tools` | omitted = **not enforced** | Hard permission list. Tools outside it are refused locally (`typesafe.tool_not_allowed`) before the probe scope and before any state is built; `[]` refuses every tool; tools in the list still face the risk gate (see "Allowed tools"). |
+| `instructions` / `criteria` | risk rubric (below) | The default rubric judges the call text alone. |
+| `timeout` | `5.0` | Per-attempt sub-limit (connect/read/write/pool) -- **not** a total budget. |
+| `deadline_seconds` | `10.0` | Whole-evaluation budget, including retries and backoff. |
+| `max_attempts` / `retry_backoff` | `2` / `0.5` | Retries only 429/529/transport errors; backoff `retry_backoff x 2^(n-1)`. |
+| `max_state_chars` | `4000` | Argument text above this is denied locally. |
+| `cache_size` / `cache_ttl_seconds` | `256` / `300` | FIFO cache keyed by `(tool, arguments)`; `0` disables it. |
+
+**Allowed tools (`allowed_tools`).** A hard permission list, not an exemption from evaluation. Omitted, no list is enforced (the probe scope decides what is evaluated). Set to `[]`, no tool may run. Set to a list, only those tools may run — a call to any other tool is refused locally (`typesafe.tool_not_allowed`) with no state built, no request and no cache entry, and the refusal is a guardrail decision, so `fail_closed: false` cannot reopen it. A listed tool is **still** probed and still denied when its risk probability reaches `threshold`; the list answers "may this tool run at all", the risk gate answers "is this particular call safe". It is checked before `tools`, so a tool outside the list is refused even when `tools` would have skipped probing it — an unlisted tool must not inherit an allow from being out of probe scope. The provider has no denylist: express deny rules and per-role limits in `authorization.*`.
+
+**What is sent.** The tool name plus the call's full argument JSON, under `state.tool_call`. The provider does **not** redact: arguments can carry user content, file paths, shell commands or secrets, and `pii_redaction_middleware` does not apply on this path. Narrow `tools` to the tools that can cause side effects, and clear the egress with your data-protection owner before enabling.
+
+**Limits are enforced locally.** Arguments that cannot be serialised as strict JSON (bytes, non-string keys, `NaN`/`Infinity`, lone surrogates that UTF-8 cannot encode) and argument text above `max_state_chars` are **denied without a request** (`typesafe.state_unusable`). A local refusal is a guardrail decision, so `fail_closed: false` does not turn it into an unevaluated tool run. Nothing is truncated and sent -- a prefix could hide the dangerous half of a `write_file` payload. The trade-off is real: long heredocs, inline scripts and large `write_file` bodies can trip the limit, and those refusals count toward the deployment's false-positive rate. Raising `max_state_chars` increases the data leaving the process.
+
+**Deadlines.** The async path cancels an in-flight request through `asyncio.timeout`, which bounds the request duration but not the wall-clock cost of cleanup. The synchronous path cannot preempt a blocking call: it checks the deadline after the response headers arrive, around the body read, and before the decision is accepted, and drops results that arrived late. **No total return-time bound is promised on the sync path.**
+
+**Audit boundary.** Denials reach the run journal (`middleware:guardrail`) with the probability, threshold, served model version and state digest in the reason message, so the threshold comparison can be replayed from the record. The served model version is response content, so it is recorded verbatim only when it fits a conservative token shape; anything else (an echoed argument, injected text, an oversized string) is recorded as `unrecorded:sha256:<digest>` rather than echoed into the message, which reaches the denied `ToolMessage`, the journal and middleware logs. Local denials (`typesafe.state_unusable`) record the failure category, the limit and the observed length -- never a probability or a model version, because the model was never asked. Allowed calls are not persisted anywhere, and native subagents do not inherit a run journal. This provider adds no audit fields.
+
+**Coverage -- read before narrowing `tools`.** A denial does not stop the operation: the agent can retry the same effect through an unprobed tool, an MCP tool, a subagent or a shell wrapper. `tools: ["bash"]` above is a smoke-test scope, not a production recommendation. Inventory the equivalent capabilities reachable from the main agent and its subagents, probe those paths, or forbid them through `authorization.*` / the sandbox. Moving a tool out of `tools` removes it from the gate -- that is a reduction in protection, not a fix for false positives. The provider never propagates one denial to semantically equivalent later calls.
+
+**Replacing the built-in AllowlistProvider.** `guardrails.provider` is a single slot: pointing it at TypeSafe **replaces** the allowlist provider and its rules stop applying. The allow half moves into the provider's `allowed_tools`; deny rules have no in-provider equivalent and still belong to `authorization.*`.
+
+| Old `AllowlistProvider.config` | TypeSafe equivalent |
+|---|---|
+| `allowed_tools: [a, b]` | `allowed_tools: [a, b]` — listed tools still face the risk gate, every other tool is refused locally |
+| `allowed_tools: []` | `allowed_tools: []` (refuse everything) |
+| `allowed_tools` omitted or null | omit `allowed_tools` (not enforced) — do not write `allowed_tools: []` unless "no tool may run" is intended |
+| `denied_tools: [a]` | no in-provider equivalent: `authorization.*` `deny: [a]`, which wins over allow |
+| `denied_tools` omitted or null | nothing to migrate |
+
+Verify them while the old guardrail is still enabled, then switch the slot. Deny rules and per-role limits go to the RBAC provider as before:
+
+```yaml
+authorization:
+  enabled: true
+  fail_closed: true
+  default_role: user
+  provider:
+    use: deerflow.authz.rbac:RbacAuthorizationProvider
+    config:
+      roles:
+        user:
+          tools:
+            deny: ["write_file"]   # the allow half lives in the provider's allowed_tools
+```
+
+Only the deny half needs RBAC now: the provider's `allowed_tools` carries the allow half for every caller, subagents included. Apply the migrated limits to **every role the old global guardrail covered**, admin/internal roles included; `default_role` only fills missing roles and never overrides an authenticated principal's role, and unknown roles fail closed. The mapping covers tool permissions only -- RBAC sets no limit on resources a known role has no policy for, and an OAP provider may carry semantics this mapping does not express. Verify allow, deny, omitted list, empty list, allow/deny overlap, the default role and real roles, including from a subagent, before switching. Rollback means restoring the old provider; keep the migrated RBAC limits until that restore is verified. RBAC also filters tool visibility at assembly time, so identical tool permissions do not guarantee identical model behavior.
+
+**Failure surface.** When TypeSafe is unreachable, only probed calls that miss the cache are affected (blocked while `fail_closed: true`). Unprobed tools and cache hits keep working. Every failure raises: it is never silently downgraded to an allow. Provider errors report the status code or the offending field's type — never the response body, the HTTP reason phrase, or the tool arguments, all of which a malformed or hostile response can control or echo back.
+
+**Smoke test.** Use a throwaway sandbox, a disposable file, and a test key:
+
+```bash
+cd backend
+uv run python -m pytest tests/test_typesafe_guardrail_provider.py tests/blocking_io/test_typesafe_guardrail_provider.py -v
+make dev   # then ask the agent to delete the disposable file with bash
+```
+
+Check the denial message the agent receives and the `middleware:guardrail` journal event. Do not run this against real project data or a production key.
+
 ## Implementing a Provider
 
 ### Required Interface
@@ -542,14 +630,29 @@ guardrails:
 ```bash
 cd backend
 uv run python -m pytest tests/test_guardrail_middleware.py -v
+uv run python -m pytest tests/test_typesafe_guardrail_provider.py -v
+uv run python -m pytest tests/blocking_io/test_typesafe_guardrail_provider.py -v
 ```
 
-25 tests covering:
+`tests/test_guardrail_middleware.py` -- 25 tests covering:
 - AllowlistProvider: allow, deny, both allowlist+denylist, async
 - GuardrailMiddleware: allow passthrough, deny with OAP codes, fail-closed, fail-open, passport forwarding, empty reasons fallback, empty tool name, protocol isinstance check
 - Async paths: awrap_tool_call for allow, deny, fail-closed, fail-open
 - GraphBubbleUp: LangGraph control signals propagate through (not caught)
 - Config: defaults, from_dict, singleton load/reset
+
+`tests/test_typesafe_guardrail_provider.py` -- the TypeSafe provider over `httpx.MockTransport`:
+- Threshold boundary, request shape and state digest
+- Local denials with zero requests: over-limit arguments, unserialisable arguments, unprobed tools, allowed_tools refusals (`[]` refuses everything; a refusal outranks the probe scope and state validation)
+- Allowed tools still reaching the risk gate, and allowed_tools refusals surviving `fail_closed: false`
+- Response validation (`noul` type/range/finiteness, `answers`, `model`) and non-retryable vs retryable failures
+- Cache hits, TTL expiry, FIFO eviction, failures and local denials never cached
+- Deadline behaviour on both paths, including late results that must not be adopted
+- Transport factory call counts, transport closure, and per-path client isolation
+- Middleware integration: denial `ToolMessage`, replayable journal reason, fail-closed/fail-open
+
+`tests/blocking_io/test_typesafe_guardrail_provider.py` -- anchor that drives `aevaluate` against a real loopback HTTP
+server, with a meta-check proving the sync path on the loop trips the Blockbuster gate.
 
 ## Files
 
@@ -559,6 +662,7 @@ packages/harness/deerflow/guardrails/
     provider.py              # GuardrailProvider protocol, GuardrailRequest, GuardrailDecision
     middleware.py             # GuardrailMiddleware (AgentMiddleware subclass)
     builtin.py               # AllowlistProvider (zero deps)
+    typesafe.py              # TypeSafeGuardrailProvider (System One HTTP risk gate)
 
 packages/harness/deerflow/config/
     guardrails_config.py     # GuardrailsConfig Pydantic model + singleton
@@ -566,7 +670,9 @@ packages/harness/deerflow/config/
 packages/harness/deerflow/agents/middlewares/
     tool_error_handling_middleware.py  # Registers GuardrailMiddleware in chain
 
-config.example.yaml          # Three provider options documented
+config.example.yaml          # Four provider options documented
 tests/test_guardrail_middleware.py  # 25 tests
+tests/test_typesafe_guardrail_provider.py  # TypeSafe provider + middleware integration
+tests/blocking_io/test_typesafe_guardrail_provider.py  # Async path must stay off the loop
 docs/GUARDRAILS.md           # This file
 ```

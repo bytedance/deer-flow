@@ -89,14 +89,26 @@ def test_parse_slash_skill_reference_rejects_invalid_names():
 
 
 def test_resolve_slash_skill_ignores_reserved_control_commands(tmp_path):
-    for command in ["agent", "bootstrap", "goal", "help", "memory", "models", "new", "status"]:
+    for command in sorted(RESERVED_SLASH_SKILL_NAMES):
+        if command == "context":
+            continue
         skill = _make_skill(tmp_path, command)
 
         assert resolve_slash_skill(f"/{command} create an agent", [skill]) is None
 
 
-def test_reserved_slash_skill_names_match_channel_commands():
-    assert RESERVED_SLASH_SKILL_NAMES == {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS}
+def test_channel_commands_are_reserved_slash_skill_names():
+    assert {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS} <= RESERVED_SLASH_SKILL_NAMES
+
+
+def test_context_compact_alias_is_reserved_without_becoming_channel_command(tmp_path):
+    assert "context" in RESERVED_SLASH_SKILL_NAMES
+    assert "/context" not in KNOWN_CHANNEL_COMMANDS
+
+    context_skill = _make_skill(tmp_path, "context")
+    assert parse_slash_skill_reference("/context compact") is None
+    assert parse_slash_skill_reference("/context use the skill") is not None
+    assert resolve_slash_skill("/context use the skill", [context_skill]) is not None
 
 
 def test_resolve_slash_skill_respects_available_skill_whitelist(tmp_path):
@@ -840,3 +852,38 @@ def test_skill_activation_middleware_reports_invalid_utf8_skill_file_safely(monk
 
     assert isinstance(result, AIMessage)
     assert "could not be loaded safely" in result.content
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_slash_usage_snapshot_is_persisted_on_first_model_response_only(monkeypatch, tmp_path, asynchronous):
+    from langchain.agents.middleware.types import ModelResponse
+
+    content = "---\nname: data-analysis\ndescription: Analyze data.\n---\n# Original instructions"
+    skill = _make_skill(tmp_path, "data-analysis", content=content)
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    recorded = []
+    runtime = SimpleNamespace(context={"__run_journal": SimpleNamespace(record_skill_usage=recorded.append)})
+    request = _make_model_request([HumanMessage(content="/data-analysis analyze", id="user-1")], runtime=runtime)
+
+    def call():
+        response = ModelResponse(result=[AIMessage(content="Analyzing")])
+        if asynchronous:
+
+            async def handler(_request):
+                return response
+
+            return asyncio.run(middleware.awrap_model_call(request, handler))
+        return middleware.wrap_model_call(request, lambda _: response)
+
+    first = call()
+    snapshot = first.result[0].additional_kwargs["skill_usage"]
+    assert recorded == [snapshot]
+    assert snapshot["activation"] == "slash"
+    assert snapshot["name"] == "data-analysis"
+    assert snapshot["category"] == "custom"
+    assert snapshot["content"] == content
+    assert snapshot["path"] == "/mnt/skills/custom/data-analysis/SKILL.md"
+    skill.skill_file.write_text("Changed later", encoding="utf-8")
+    assert snapshot["content"] == content
+    assert "skill_usage" not in call().result[0].additional_kwargs

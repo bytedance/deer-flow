@@ -2,7 +2,7 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
@@ -178,6 +178,30 @@ def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     assert response.status_code == 409
     assert response.json()["detail"] == "Thread has a run in flight. Update state after the run finishes."
     accessor.aupdate.assert_not_awaited()
+
+
+def test_update_state_rejects_external_system_without_writing(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    accessor = SimpleNamespace(graph=None, aupdate=AsyncMock(), aget=AsyncMock())
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "system-role-test"}})))
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "system-role-test"}).status_code == 200
+        before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}}))
+        response = client.post(
+            "/api/threads/system-role-test/state",
+            json={
+                "values": {
+                    "messages": [{"role": "system", "content": "synthetic marker"}],
+                    "title": "must not be written",
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert "synthetic marker" not in response.text
+    accessor.aupdate.assert_not_awaited()
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}})) == before
 
 
 class _RawStateAccessor:
@@ -432,6 +456,131 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    return app
+
+
+def test_delete_thread_route_cleans_persisted_records(tmp_path):
+    """run_events, historical runs and feedback are cleaned under the reservation."""
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+    user_id = get_effective_user_id()
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=2)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    run_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    event_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    feedback_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+
+
+def test_delete_thread_route_isolates_failing_persistence_cleanup(tmp_path):
+    """One failing store must not stop the remaining cleanup attempts."""
+    paths = Paths(tmp_path)
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(side_effect=RuntimeError("simulated cleanup failure"))
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
+    feedback_repo.delete_by_thread.assert_awaited_once()
+
+
+def test_delete_thread_route_tolerates_store_without_bulk_cleanup(tmp_path):
+    """Third-party RunStore implementations without the capability stay usable."""
+    paths = Paths(tmp_path)
+    run_store = SimpleNamespace()  # no delete_by_thread attribute
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=0)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
+
+
+class _LegacyRunEventStore:
+    """Event store still on the pre-owner-scope delete contract.
+
+    ``RunEventStore`` is an ABC, but Python never validates override signatures,
+    so this store satisfies it while rejecting the new ``user_id`` keyword.
+    """
+
+    def __init__(self) -> None:
+        self.deleted_threads: list[str] = []
+
+    async def delete_by_thread(self, thread_id: str) -> int:
+        self.deleted_threads.append(thread_id)
+        return 1
+
+
+def test_delete_thread_route_supports_legacy_event_store_delete_signature(tmp_path):
+    """A legacy event store still deletes; the owner kwarg is only passed when accepted."""
+    paths = Paths(tmp_path)
+    event_store = _LegacyRunEventStore()
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=SimpleNamespace(),
+        event_store=event_store,
+        feedback_repo=None,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    assert event_store.deleted_threads == ["thread-cleanup"]
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
@@ -797,7 +946,14 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     thread_store = _RacingOwnerStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1055,7 +1211,14 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1087,7 +1250,14 @@ def test_goal_thread_creation_uses_internal_owner_header() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -3903,7 +4073,7 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
     assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
-    assert updates["messages"].value[0]["id"] == "h1"
+    assert updates["messages"].value[0].id == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"

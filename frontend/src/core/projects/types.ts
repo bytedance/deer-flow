@@ -100,7 +100,11 @@ export type ProjectThreadFile = {
 /** One member-thread group of the conversation-files view (spec §7.4). */
 export type ProjectThreadFileGroup = {
   thread_id: string;
-  display_name: string;
+  /**
+   * The member thread's title. Nullable on the wire like ``ProjectThread``:
+   * the thread meta row starts as ``null`` and is filled by title generation.
+   */
+  display_name?: string | null;
   updated_at: string;
   files: ProjectThreadFile[];
   /** True when the thread's files were cut at the request's file_limit. */

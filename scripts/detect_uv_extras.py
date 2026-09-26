@@ -345,7 +345,7 @@ def models_use_providers(lines: list[str]) -> set[str]:
 
 def detect_from_config(path: Path) -> list[str]:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     lines = text.splitlines()

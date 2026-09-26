@@ -19,6 +19,7 @@ from uuid import UUID
 import pytest
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.testclient import TestClient
+from langgraph.store.memory import InMemoryStore
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.gateway.auth.models import User
@@ -26,6 +27,7 @@ from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
+from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -62,10 +64,17 @@ class _ScopeAuthMiddleware(BaseHTTPMiddleware):
 
 
 class _PermissiveThreadStore:
-    """Stands in for the thread store behind ``owner_check=True``."""
+    """Stands in for the thread store behind ``owner_check=True``.
+
+    The existing scope tests exercise the established-ownership path, so
+    ``get`` reports an existing, owner-established meta row.
+    """
 
     async def check_access(self, _thread_id: str, _user_id: str, *, require_existing: bool = False) -> bool:
         return True
+
+    async def get(self, _thread_id: str, *, user_id: str | None | object = None) -> dict | None:
+        return {"thread_id": THREAD_ID, "user_id": "established-owner"}
 
 
 class _RecordingRunStore(MemoryRunStore):
@@ -141,10 +150,12 @@ def _make_app(
     run_store: MemoryRunStore,
     event_store: MemoryRunEventStore | None = None,
     feedback_repo: _RecordingFeedbackRepo | None = None,
+    thread_store=None,
 ) -> TestClient:
     app = FastAPI()
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=auth_source)
-    app.state.thread_store = _PermissiveThreadStore()
+    app.state.thread_store = thread_store if thread_store is not None else _PermissiveThreadStore()
+    app.state.run_store = run_store
     app.state.run_manager = RunManager(store=run_store)
     if event_store is not None:
         app.state.run_event_store = event_store
@@ -319,16 +330,294 @@ def test_browser_session_messages_keep_per_user_filter(mixed_owner_store: Memory
 
 
 # ---------------------------------------------------------------------------
+# owner isolation on threads without established metadata (#5448 review P1)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_thread_meta_keeps_owner_isolation_for_internal_callers() -> None:
+    """owner_check also authorizes missing-meta (legacy shared) threads.
+
+    There, unfiltered reads would expose other users' persisted runs to the
+    acting owner's internal caller, so the raw trusted owner stays the filter
+    — the exact value ``start_run`` stamps on run rows (#5448 review P1).
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no metadata row at all
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        listed = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        page = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        single = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-other-user",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json() == []
+    assert page.status_code == 200
+    assert page.json()["data"] == []
+    assert single.status_code == 404
+    # The acting owner's own raw-stamped runs remain visible: seed one and
+    # confirm it comes back through the same endpoints.
+    owned_store = _RecordingRunStore()
+    _seed_run(owned_store, "run-own-owner-stamp", user_id=OWNER_RAW, status="success")
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=owned_store,
+        thread_store=thread_store,
+    )
+    with client:
+        own = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-own-owner-stamp",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+    assert own.status_code == 200
+    assert own.json()["run_id"] == "run-own-owner-stamp"
+
+
+def test_null_owner_thread_meta_keeps_owner_isolation_for_internal_callers() -> None:
+    """NULL-owner meta rows (shared/pre-auth data) isolate by raw owner too."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(
+        thread_store.create(
+            THREAD_ID,
+            assistant_id=None,
+            user_id=None,  # shared / pre-auth: meta row exists with NULL owner
+        )
+    )
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        listed = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        single = client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-other-user",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json() == []
+    assert single.status_code == 404
+
+
+def test_established_ownership_still_reads_thread_runs_unfiltered(mixed_owner_store: MemoryRunStore) -> None:
+    """Established meta ownership keeps the #5437 unfiltered-read behavior."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=OWNER_RAW))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, RUN_OWNER, user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-legacy-default", user_id="default", status="success")
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/runs",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    assert {row["run_id"] for row in response.json()} == {RUN_OWNER, "run-legacy-default"}
+
+
+def test_ownerless_internal_caller_default_filter_on_missing_meta() -> None:
+    """Without an owner header the synthetic "default" identity is the filter.
+
+    Pins the owner-less fallback branch of ``_run_scope_user_id``: a run
+    stamped with another owner's raw id stays hidden on missing-meta threads.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+
+    client = _make_app(
+        user=_internal_user(None),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(f"/api/threads/{THREAD_ID}/runs")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_subresource_reads_stay_owner_isolated_without_meta() -> None:
+    """Run-scoped sub-resources must respect the acting owner's stamp.
+
+    These reads query by ``(thread_id, run_id)`` with no per-user filter of
+    their own; on missing-meta threads an internal caller acting for owner A
+    could otherwise read owner B's run content by id (#5448 review P1
+    follow-up).
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+    _seed_message(event_store, "run-owner-777", "msg-owner-run")
+
+    stranger_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: "feishu:owner-999"}
+    owner_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW}
+    base = f"/api/threads/{THREAD_ID}/runs/run-owner-777"
+
+    stranger = _make_app(
+        user=_internal_user("feishu:owner-999"),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+    owner_client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with stranger:
+        assert stranger.get(base + "/messages", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/events", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/workspace-changes", headers=stranger_headers).status_code == 404
+        assert stranger.get(base + "/join", headers=stranger_headers).status_code == 404
+
+    with owner_client:
+        messages = owner_client.get(base + "/messages", headers=owner_headers)
+        events = owner_client.get(base + "/events", headers=owner_headers)
+
+    assert messages.status_code == 200
+    assert [row["content"]["id"] for row in messages.json()["data"]] == ["msg-owner-run"]
+    assert events.status_code == 200
+    assert any(event.get("run_id") == "run-owner-777" for event in events.json())
+
+
+def test_null_owner_thread_gates_cancel_and_archive_for_internal_callers() -> None:
+    """NULL-owner meta rows gate POST /cancel and the archive pair too.
+
+    The round-2 findings: cancel resolved runs unscoped (an interrupt-vs-join
+    inconsistency) and the archive manifest leaked the other owner's
+    delivered-file count plus a 200-vs-409 delivery oracle on shared threads.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+
+    stranger_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: "feishu:owner-999"}
+    stranger = _make_app(
+        user=_internal_user("feishu:owner-999"),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with stranger:
+        cancel = stranger.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/cancel?action=interrupt",
+            headers=stranger_headers,
+        )
+        manifest = stranger.get(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers=stranger_headers,
+        )
+        archive = stranger.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers=stranger_headers,
+        )
+
+    assert cancel.status_code == 404
+    assert manifest.status_code == 404
+    assert archive.status_code == 404
+
+
+def test_null_owner_thread_matching_owner_cancels_and_reads_manifest() -> None:
+    """The acting owner keeps cancel and archive access on shared threads."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    event_store = MemoryRunEventStore()
+    asyncio.run(
+        event_store.put(
+            thread_id=THREAD_ID,
+            run_id="run-owner-777",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 2, "by_tool": {"present_files": ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.txt"]}},
+        )
+    )
+
+    owner_client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=event_store,
+        thread_store=thread_store,
+    )
+
+    with owner_client:
+        manifest = owner_client.get(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/artifacts/archive",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+        cancel = owner_client.post(
+            f"/api/threads/{THREAD_ID}/runs/run-owner-777/cancel?action=interrupt",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert manifest.status_code == 200
+    assert manifest.json() == {"file_count": 2}
+    # A terminal run cannot be cancelled again: the acting owner reaches the
+    # real conflict path instead of a 404 anti-enumeration answer.
+    assert cancel.status_code == 409
+
+
 # edit/regenerate helper fallback paths (#5482)
 # ---------------------------------------------------------------------------
 
 
-def _helper_request(*, user, auth_source: str, run_store, event_store):
-    """Minimal Request stand-in: the helpers only touch state and app.state."""
+def _helper_request(*, user, auth_source: str, run_store, event_store, owner_header: str | None = None):
+    """Minimal Request stand-in: the helpers touch state, app.state and headers."""
     app_state = SimpleNamespace(run_manager=RunManager(store=run_store), run_event_store=event_store)
+    headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_header} if owner_header else {}
     return SimpleNamespace(
         state=SimpleNamespace(user=user, auth_source=auth_source),
         app=SimpleNamespace(state=app_state),
+        headers=headers,
     )
 
 
@@ -342,12 +631,13 @@ def test_helper_fallback_paths_resolve_internal_caller_runs() -> None:
         auth_source=AUTH_SOURCE_INTERNAL,
         run_store=store,
         event_store=MemoryRunEventStore(),
+        owner_header=OWNER_RAW,
     )
 
     # The owner-stamped interrupted run resolves through the raw owner stamp.
     interrupted = asyncio.run(thread_runs._find_interrupted_target_run_id(THREAD_ID, {"additional_kwargs": {"run_id": RUN_OWNER}}, request))
     assert interrupted == RUN_OWNER
-    assert store.get_user_ids[-1] is None
+    assert store.get_user_ids[-1] == OWNER_RAW
 
     # An interrupted run is not an editable source run, but the lookup itself
     # must have reached it (409 for status, not for a missing record).
@@ -355,10 +645,11 @@ def test_helper_fallback_paths_resolve_internal_caller_runs() -> None:
         asyncio.run(thread_runs._require_successful_source_run(THREAD_ID, RUN_OWNER, request))
     assert exc.value.status_code == 409
     assert "successful" in exc.value.detail
-    assert store.get_user_ids[-1] is None
+    assert store.get_user_ids[-1] == OWNER_RAW
 
     # Fallback scan without any event-store or kwargs anchors still scans the
-    # authorized thread unfiltered (and 409s on the miss).
+    # authorized thread through the acting owner's raw-stamp scope (and 409s
+    # on the miss).
     with pytest.raises(HTTPException) as exc2:
         asyncio.run(
             thread_runs._find_target_run_id(
@@ -370,7 +661,7 @@ def test_helper_fallback_paths_resolve_internal_caller_runs() -> None:
             )
         )
     assert exc2.value.status_code == 409
-    assert store.list_by_thread_user_ids and store.list_by_thread_user_ids[-1] is None
+    assert store.list_by_thread_user_ids and store.list_by_thread_user_ids[-1] == OWNER_RAW
 
 
 def test_helper_fallback_paths_keep_per_user_filter_for_browser_sessions() -> None:
@@ -396,3 +687,94 @@ def test_helper_fallback_paths_keep_per_user_filter_for_browser_sessions() -> No
         asyncio.run(thread_runs._require_successful_source_run(THREAD_ID, RUN_OWNER, request))
     assert exc.value.status_code == 409
     assert store.get_user_ids[-1] == str(BROWSER_USER_ID)
+
+
+def test_token_usage_isolated_without_meta_for_internal_callers() -> None:
+    """Token-usage aggregate honors the acting owner's raw stamp (#5484 r4)."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-other-user", user_id=str(BROWSER_USER_ID), status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-other-user"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 999}}
+    run_store._runs["run-other-user"]["total_tokens"] = 999
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/token-usage",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_tokens"] == 111
+    assert body["total_runs"] == 1
+
+
+def test_token_usage_narrowed_for_browser_sessions_without_meta() -> None:
+    """Browser sessions on shared threads see only their own spend too."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())  # no meta row
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-browser", user_id=str(BROWSER_USER_ID), status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-browser"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 222}}
+    run_store._runs["run-browser"]["total_tokens"] = 222
+
+    client = _make_app(
+        user=_browser_user(),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(f"/api/threads/{THREAD_ID}/token-usage")
+
+    assert response.status_code == 200
+    assert response.json()["total_tokens"] == 222
+
+
+def test_token_usage_unfiltered_on_established_ownership_for_internal_callers() -> None:
+    """Established meta ownership keeps the unfiltered aggregate.
+
+    Pins the other half of the scoping contract: on an established thread the
+    internal caller's aggregate folds runs stamped by different identities
+    (the store must receive ``user_id=None``), mirroring
+    ``test_established_ownership_still_reads_thread_runs_unfiltered``.
+    """
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=OWNER_RAW))
+    run_store = _RecordingRunStore()
+    _seed_run(run_store, "run-owner-777", user_id=OWNER_RAW, status="success")
+    _seed_run(run_store, "run-legacy-default", user_id="default", status="success")
+    run_store._runs["run-owner-777"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 111}}
+    run_store._runs["run-owner-777"]["total_tokens"] = 111
+    run_store._runs["run-legacy-default"]["token_usage_by_model"] = {"gpt-x": {"total_tokens": 55}}
+    run_store._runs["run-legacy-default"]["total_tokens"] = 55
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        thread_store=thread_store,
+    )
+
+    with client:
+        response = client.get(
+            f"/api/threads/{THREAD_ID}/token-usage",
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_tokens"] == 166  # both stamps fold when ownership is established

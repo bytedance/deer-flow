@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.config.paths import Paths
 from deerflow.projects.documents import _content_intact, check_document_content, converted_markdown_path, original_file_path
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
@@ -330,6 +330,6 @@ async def run_trash_retention_sweep(
     if include_reconciliation:
         rows = await repo.list_all_for_sweep(user_id=user_id)
         guard_cutoff = now - _ORPHAN_GUARD
-        await run_file_io(_reconcile_storage, paths, user_id=user_id, rows=rows, guard_cutoff=guard_cutoff, report=report)
-        await run_file_io(_reconcile_rows, paths, rows=rows, guard_cutoff=guard_cutoff, report=report)
+        await await_drained(run_file_io(_reconcile_storage, paths, user_id=user_id, rows=rows, guard_cutoff=guard_cutoff, report=report))
+        await await_drained(run_file_io(_reconcile_rows, paths, rows=rows, guard_cutoff=guard_cutoff, report=report))
     return report

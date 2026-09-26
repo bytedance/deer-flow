@@ -1,0 +1,22 @@
+[project]
+name = "deerflow-extension-jev-classify"
+version = "0.1.0"
+description = "Opt-in text-list classification for DeerFlow through Jev or an OpenAI-compatible chat endpoint"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "deerflow-extension-api>=0.2.2,<0.3",
+    "httpx>=0.28,<1",
+    "pydantic>=2.12,<3",
+]
+
+[project.entry-points."deerflow.extensions"]
+jev-classify = "deerflow_extension_jev_classify:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_jev_classify"]

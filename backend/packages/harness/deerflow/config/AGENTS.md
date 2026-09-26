@@ -1,5 +1,11 @@
 ### Configuration System
 
+Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
+`subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
+The per-assembly snapshot owns these settings; no run-context override exists.
+DeerMem owns its separate `memory.backend_config.prompt_prepend`/`prompt_append`
+fields so the memory package remains host-agnostic.
+
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
 label of at most 100 Unicode code points. C0/C1 controls and bidirectional
 formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
@@ -24,9 +30,16 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
+The v46 upgrade treats an existing `tools[]` entry in the `knowledge` group as
+pre-gate enablement and sets `knowledge_base.enabled: true` only when that flag
+was absent. Explicit `true` or `false` values remain authoritative. Moving
+legacy provider settings out of `knowledge_base` remains specific to the
+RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
+their tool-local settings unchanged.
+
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
-**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
+**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
@@ -49,7 +62,10 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
-configure process-local model pacing. Models sharing an explicit group must use
+configure process-local model pacing. `requests_per_minute` and `max_queue_size` are strict
+integers (bools and floats are rejected) behind a `BeforeValidator` that converts a
+decimal literal delivered as a string, because `$VAR` substitution always yields
+`str`; any other string still fails validation. Models sharing an explicit group must use
 identical policies. Restart after changing, disabling or regrouping an active
 policy; conflicting policies fail construction rather than silently resetting
 an active budget. This nested model option is enforced by its limiter registry,
@@ -75,12 +91,21 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 ### Config Schema
 
 **`config.yaml`** key sections:
-- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
+- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields. An optional `reasoning:` block (issue #5073) declares thinking availability (`unsupported|optional|required`), the accepted effort `values` with `aliases`/`default`/`path`, the payload `dialect`, and the reasoning `history` requirement; when present, `supports_thinking` / `supports_reasoning_effort` are derived from it and contradictory combinations fail validation in `ModelConfig`
+  A declared custom `reasoning.effort.path` is the only effort serialization path: `ModelConfig` rejects leftover `reasoning_effort` keys in the profile or thinking templates, even if their values are otherwise accepted.
+  A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for gpt-oss style models) remains the legacy native ChatOllama setting and is passed to the provider; only a mapping opts into the contract.
 - `logging.enhance` - Log output only (`enabled`, `format`): whether log records carry a `trace_id` field, and in which format. Trace ids are issued unconditionally — the Gateway `X-Trace-Id` header and Langfuse `deerflow_trace_id` metadata are always present whatever this says (see the Request Trace Context section in `packages/harness/deerflow/AGENTS.md`); restart-required
 - vLLM reasoning models should use `deerflow.models.vllm_provider:VllmChatModel`; for Qwen-style parsers prefer `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking`, and DeerFlow will also normalize the older `thinking` alias
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
+- `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
+  and TTL multiplier must each be finite, and their derived lease TTL must also
+  remain finite. Redis-backed lease TTLs must be at least one millisecond and
+  use at most half of Redis's signed 64-bit millisecond range, leaving
+  deterministic headroom for conversion from a relative TTL to an absolute Unix
+  timestamp during validation. The Redis store rounds fractional milliseconds
+  up so its integer TTL never shortens the validated lease.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)
@@ -89,6 +114,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `subagent_runtime` - Startup-only shared process admission (`max_running`, bounded async wait queue, queue/reject policy, and queue timeout) for ordinary and durable-batch native subagents
 - `subagent_batches` - Startup-only explicit durable batch scheduler limits (disabled by default), including separate total, live, and running dimensions plus leases/retries/result bounds
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
+- `knowledge_base` - Hot-reloadable, provider-agnostic knowledge capability and custom-agent scope-selector flags. It gates the read-only Agent tools and selector; provider connection, allowlist, and retrieval defaults belong to the matching entry in `tools[]` (for example, the RAGFlow `knowledge_search` tool).
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
@@ -99,3 +125,26 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
 Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.
+
+`AgentConfig.knowledge_scope` uses the versioned `KnowledgeScope` contract as a
+Gateway new-turn default. The API preserves omitted updates and clears explicit
+null; file and SQL stores persist it in the existing config document. Keep it
+outside `MANAGED_AGENT_CONFIG_FIELDS` so harness self-updates preserve it;
+`setup_agent` also preserves the binding when re-bootstrapping. Admission uses
+explicit message scope before this default and snapshots it onto the current
+human message. Resolve the executing agent with runtime context over configurable,
+including legacy callers using `context.agent_name`; bootstrap skips defaults.
+Recovery (including a legacy null scope) never reapplies defaults.
+The operator allowlist is still checked by retrieval; this is not authorization.
+
+Unscoped new runs persist pre-default request digests even for unbound agents.
+Digest-free legacy retries compare pre-default canonical input; explicit scopes
+and recovery are excluded. Retries preserve the original run across binding edits.
+
+The file-backed singleton entrypoints additionally merge administrator-managed shared
+models from the encrypted runtime-home catalog. YAML entries win name conflicts;
+managed changes create new effective snapshots and do not alter an active runtime
+or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and reload
+boundaries. `managed_model_providers.py` derives provider defaults from validated
+endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
+`AppConfig.from_file()` remains YAML-only.

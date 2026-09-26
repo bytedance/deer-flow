@@ -40,9 +40,12 @@ class MemoryRunStore(RunStore):
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
 
-    def _mark_changed(self, run: dict[str, Any]) -> None:
+    def _next_change_seq(self) -> int:
         self._change_seq += 1
-        run["change_seq"] = self._change_seq
+        return self._change_seq
+
+    def _mark_changed(self, run: dict[str, Any]) -> None:
+        run["change_seq"] = self._next_change_seq()
 
     async def put(
         self,
@@ -215,6 +218,25 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
+    async def delete_by_thread(self, thread_id: str, *, user_id=None) -> int:
+        """Delete a thread's historical runs, keeping internal operation rows.
+
+        Mirrors ``RunRepository.delete_by_thread``: only ``operation_kind ==
+        "run"`` rows are removed, so durable thread-operation reservations keep
+        protecting the thread until their own release path drops them.
+        """
+        removed = 0
+        for run_id in list(self._runs_by_thread.get(thread_id, {})):
+            run = self._runs.get(run_id)
+            if run is None or run.get("operation_kind", "run") != "run":
+                continue
+            if user_id is not None and run.get("user_id") != user_id:
+                continue
+            self._runs.pop(run_id, None)
+            self._unindex_run(run_id, run["thread_id"])
+            removed += 1
+        return removed
+
     async def update_run_completion(self, run_id, *, status, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
@@ -252,12 +274,12 @@ class MemoryRunStore(RunStore):
         results.sort(key=lambda r: r["created_at"])
         return results
 
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, user_id: str | None = None) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run in the process (mirrors ``list_by_thread``).
         run_ids = self._runs_by_thread.get(thread_id) or ()
-        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses]
+        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and run.get("status") in statuses and (user_id is None or run.get("user_id") == user_id)]
         by_model: dict[str, dict] = {}
         for r in completed:
             usage_by_model = r.get("token_usage_by_model") or {}
@@ -483,6 +505,7 @@ class MemoryRunStore(RunStore):
         # interrupted state on raise, diverging from SQL where a raise rolls
         # the whole transaction back.
         claimed = []
+        change_seq: int | None = None
         if multitask_strategy in ("interrupt", "rollback"):
             candidates: list[dict[str, Any]] = []
             for r in self._runs.values():
@@ -514,12 +537,20 @@ class MemoryRunStore(RunStore):
                 if r.get("operation_kind", "run") != "run" and not lease_expired:
                     raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                 candidates.append(r)
+            # One position covers this atomic set of changes, with ``run_id``
+            # ordering ties. The SQL store allocates the same single value for
+            # the set from its singleton clock (``runtime/AGENTS.md``); marking
+            # each row separately split one interrupt-and-replace into two
+            # positions in the ``(change_seq, run_id)`` cursor consumers page
+            # with. Allocate after the raise-only scan above so a rejected
+            # operation does not consume a position.
+            change_seq = self._next_change_seq()
             for r in candidates:
                 r["status"] = "interrupted"
                 r["error"] = "Cancelled by newer run"
                 r["owner_worker_id"] = owner_worker_id
                 r["updated_at"] = now
-                self._mark_changed(r)
+                r["change_seq"] = change_seq
                 claimed.append(r)
 
         new_row = {
@@ -542,7 +573,9 @@ class MemoryRunStore(RunStore):
             "created_at": created_at or now,
             "updated_at": now,
         }
+        if change_seq is None:
+            change_seq = self._next_change_seq()
+        new_row["change_seq"] = change_seq
         self._runs[run_id] = new_row
-        self._mark_changed(new_row)
         self._index_run(run_id, thread_id)
         return new_row, claimed

@@ -355,3 +355,15 @@ def test_allowed_subcommand_still_runs_with_denylist(tmp_path: Path) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout.decode())
     assert payload["argv"] == ["auth", "status"]
+
+
+@pytest.mark.parametrize("name", ["DEERFLOW_LARK_BROKER_PORT", "DEERFLOW_LARK_BROKER_TIMEOUT"])
+def test_config_from_env_treats_blank_numbers_as_unset(monkeypatch, name) -> None:
+    monkeypatch.delenv("DEERFLOW_LARK_BROKER_PORT", raising=False)
+    monkeypatch.delenv("DEERFLOW_LARK_BROKER_TIMEOUT", raising=False)
+    monkeypatch.setenv(name, "")
+
+    config = lark_broker._config_from_env()
+
+    assert config.port == lark_broker.LARK_BROKER_DEFAULT_PORT
+    assert config.timeout_seconds == lark_broker.LARK_BROKER_DEFAULT_TIMEOUT_SECONDS
