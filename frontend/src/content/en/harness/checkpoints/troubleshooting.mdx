@@ -1,0 +1,221 @@
+---
+title: Troubleshooting
+description: Checkpoint problems indexed by symptom. Mode mismatches and restart-required errors, configuration that seems ignored, storage that did not shrink, regenerate and history replay defects, Postgres and redis failures, integration rejections, and cache counters that never hit, each with cause, fix, and the pinned upstream issue.
+---
+
+import { Callout } from "nextra/components";
+
+# Troubleshooting
+
+This chapter is organized by **what you see**. Each entry gives the cause, the fix, and — where the behavior is an upstream defect — the pinned issue and dependency version, so you can match it to your build.
+
+## Symptom index
+
+| Symptom | Most likely cause | Section |
+| --- | --- | --- |
+| `409` from a state/history/thread read | a full-mode process reading a delta thread | [HTTP 409 on a delta thread](#http-409-on-a-delta-thread) |
+| A run request returns `500` before admission | the thread's run-event feed is empty, so the seeding read runs under the mode gate | [HTTP 409 on a delta thread](#http-409-on-a-delta-thread) |
+| A run fails with a restart-required message | a config edit the frozen process rejects when it builds the graph | [A run fails after a config edit](#a-run-fails-after-a-config-edit) |
+| A config edit seems ignored | mode and cadence are frozen at agent-build time | [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect) |
+| A history-cache edit seems ignored | the cache is built with the checkpointer at startup | [A history-cache change appears to have no effect](#a-history-cache-change-appears-to-have-no-effect) |
+| Regenerate endpoints return `500` | the run-runs router does not map the mode errors | [Regenerate endpoints return 500 instead of 409](#regenerate-endpoints-return-500-instead-of-409) |
+| Delta did not shrink storage | still in full mode, or the writes table was not counted | [Delta did not shrink storage](#delta-did-not-shrink-storage) |
+| Materialization got slower | snapshot cadence raised too far | [Materialization got slower after raising the cadence](#materialization-got-slower-after-raising-the-cadence) |
+| The replaced answer comes back after regenerate | delta fork replay (#4458) | [The old answer reappears after regenerate](#the-old-answer-reappears-after-regenerate) |
+| History order differs from the live run | upstream replay ordering (#8382) | [History order differs from the live run](#history-order-differs-from-the-live-run) |
+| Postgres hydrates old checkpoints empty | upstream paged walk (#8448) | [Postgres hydrates old checkpoints empty](#postgres-hydrates-old-checkpoints-empty) |
+| `redis` cache rejected on the TUI | sync path supports `memory` only | [`redis` cache is rejected on the TUI or embedded path](#redis-cache-is-rejected-on-the-tui-or-embedded-path) |
+| Cache counters never hit | cache disabled, wrong mode, or every read is new | [The cache counters never hit](#the-cache-counters-never-hit) |
+| `create_deerflow_agent` rejects delta | delta plus a checkpointer is refused | [`create_deerflow_agent` rejects delta with a checkpointer](#create_deerflow_agent-rejects-delta-with-a-checkpointer) |
+
+## Mode gates and configuration
+
+### HTTP 409 on a delta thread
+
+**Symptom**: a state, history, or thread read returns `409` with
+
+```
+{"detail": "Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode."}
+```
+
+**Cause**: a process running `full` read a thread whose checkpoints were written in `delta`. The read gate raises `CheckpointModeMismatchError` before materializing, so a full-mode process never silently returns empty state. The routes that return `409` are `GET /api/threads/{thread_id}`, `GET` and `POST /api/threads/{thread_id}/state`, and `POST /api/threads/{thread_id}/history` (all covered by tests); `POST /api/threads/{thread_id}/branches` and `POST .../compact` gate the same way by code path. `compact` also uses `409` for a different reason, with detail `Context compaction is disabled.`
+
+The threads router does not pre-gate run creation, so a mismatch there fails asynchronously: `POST .../runs` returns a `200` run record that later turns `status: error`, `POST .../runs/stream` returns `200 text/event-stream` and then an `event: error` frame, and `POST .../runs/wait` returns `200` JSON with `{"status": "error", "error": "<the mismatch text>"}`. One run path reads a checkpoint before admission, though: when a thread's run-event feed is empty but a checkpoint head exists, `ensure_checkpoint_history_seeded` materializes that head inside `start_run`, where only `ConflictError` and `UnsupportedStrategyError` are mapped, so the mismatch escapes as an unhandled `500` on `POST /api/threads/{thread_id}/runs`, `/runs/stream`, and `/runs/wait`. With the default `run_events.backend: memory` a Gateway restart empties every existing thread's feed, so that branch is reachable after a restart.
+
+In the embedded TUI the client raises in-process before the graph streams: the Textual runner turns it into an `AssistantError` plus `RunEnded` pair, while the headless `--print` and `--json` runners have no handler and print an uncaught traceback instead of a status code.
+
+**Fix**: pick one of two exits.
+
+1. Run the process in `delta`: set `database.checkpoint_channel_mode: delta` and restart every process sharing the database. A delta process reads legacy full checkpoints transparently, so full to delta is the supported direction.
+2. Keep the process in `full`, which requires the thread's checkpoints to be materialized and converted first. The error text names this step, but the repository ships no conversion command, and a raw full-mode read of delta checkpoints would only see sentinels — do not work around it by deleting rows.
+
+See [Channel Modes](/docs/harness/checkpoints/modes) for the marker semantics and [Quick Start](/docs/harness/checkpoints/quick-start) for the switch procedure.
+
+### A run fails after a config edit
+
+**Symptom**: after editing `config.yaml` without restarting, the next run fails with one of
+
+```
+checkpoint_channel_mode is restart-required and cannot change in a running process
+checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process
+```
+
+in its run record, its SSE `error` frame, or the worker log line `Run %s failed: %s`.
+
+**Cause**: `CheckpointModeReconfigurationError`. The process froze its mode and cadence at startup, and something built a graph with a different value — a config hot-reload that diverged from the frozen startup snapshot. Only Gateway startup, `make_lead_agent`, and `DeerFlowClient.__init__` call the freeze helpers, and no state, history, or thread route builds an agent — those routes read the startup-frozen `app.state` values — so this is a run-side failure: none of them answers `503` for a config edit. The router-level `503` mapping exists for that error class but nothing in the threads routes raises it.
+
+Each knob behaves differently:
+
+- `database.checkpoint_channel_mode`: no failure. The run worker injects the frozen mode into the run config and the agent factory prefers that injected value over the request-time config, so the edited value is ignored until a restart — that is [A config change appears to have no effect](#a-config-change-appears-to-have-no-effect).
+- `database.checkpoint_delta.snapshot_frequency`: the next run fails, because the cadence has no injected override and the agent factory freezes it from the reloaded config.
+
+**Fix**: restart the process so the new value is frozen, then re-run. The snapshot cadence is part of the failure because it is compiled into each graph's channel table and is likewise restart-required.
+
+### A config change appears to have no effect
+
+**Symptom**: you edited `database.checkpoint_channel_mode` or `database.checkpoint_delta.snapshot_frequency`, but threads keep behaving as before.
+
+**Cause**: the mode is frozen process-globally the first time an agent is built, from the startup snapshot; the cadence is frozen alongside it. On the first freeze a client-supplied `configurable.__deerflow_checkpoint_channel_mode` is ignored, and once frozen any differing value fails closed. The embedded `DeerFlowClient` freezes mode and cadence the same way. Also note `checkpoint_delta.*` is ignored in full mode.
+
+**Fix**: restart every process that shares the checkpoint database; all of them must use the same value. Confirm the switch by reading a thread's marker (see [Observability](/docs/harness/checkpoints/observability)). Only one related key is re-read at runtime: `database.checkpoint_graph_cache.accessor_graph_max` (on each eviction check). `database.checkpoint_cache.*` is *not frozen* — it cannot corrupt a thread and may differ across workers — but it is also not hot-reloadable; see [the next entry](#a-history-cache-change-appears-to-have-no-effect).
+
+### A history-cache change appears to have no effect
+
+**Symptom**: you changed `database.checkpoint_cache.max_entries`, switched `type` to `redis`, or edited `redis_url`, `ttl_seconds`, or `key_prefix`, and the running Gateway keeps its old behaviour — the old capacity, no redis traffic, the previous keys.
+
+**Cause**: the history cache is not hot-reloadable. `langgraph_runtime()` builds the checkpointer once from the startup `AppConfig` snapshot, and the delta saver is wrapped around whatever `make_checkpoint_cache()` returned at that moment (`backend/app/gateway/deps.py`, `backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py`), so backend, capacity, connection, TTL, and prefix are captured for the process's lifetime. The whole `database` section is registered startup-only for exactly this reason (`backend/packages/harness/deerflow/config/reload_boundary.py`).
+
+This is not the frozen-for-correctness case: nothing about the cache can corrupt a thread, results are identical with it disabled, and workers sharing one checkpoint database may safely run different cache settings. It is simply captured once.
+
+**Fix**: restart the Gateway after editing the section — and on the embedded or TUI path, restart that process, whose checkpointer singleton is also created once and reused. Only `database.checkpoint_graph_cache.accessor_graph_max` applies without a restart, because it is re-read on every eviction check.
+
+### Regenerate endpoints return 500 instead of 409
+
+**Symptom**: regenerate preparation returns `500` with `detail: "Failed to read latest checkpoint"` or `detail: "Failed to inspect checkpoint history"`, even though the same thread yields `409` elsewhere.
+
+**Cause**: `POST /api/threads/{thread_id}/runs/regenerate/prepare` (and `/runs/edit-regenerate/prepare`) build the state accessor outside any `try`, and this module does not map the checkpoint-mode errors, so a mismatch surfaces as an unhandled `500`. The log lines are
+
+```
+Failed to read latest checkpoint for regenerate thread %s
+Failed to list checkpoints for regenerate thread %s
+```
+
+Two other endpoints fail more quietly for the same reason: `GET /api/threads/{thread_id}/token-usage` returns `200` with `context_usage: null` (only `Failed to load checkpoint for context usage on thread %s` is logged), and `/runs/wait` returns `200` with an error body rather than `409`.
+
+**Fix**: read the `500` as a mode mismatch. Check the thread's marker, then restart the process in the thread's mode. There is no local fix that turns these into `409`.
+
+## Storage and materialization
+
+### Delta did not shrink storage
+
+**Symptom**: you switched to delta (or believe you did), but the database is the same size or larger.
+
+**Cause**: usually one of these.
+
+- The process is still in `full` — the default — because the key was never set, or was set without a restart. `checkpoint_delta.*` does nothing in full mode, and the history cache wraps the saver only in delta mode.
+- You compared the wrong table. Delta moves per-step payloads into the writes table, so a fair comparison counts checkpoint payload bytes **plus** write rows. The storage guard asserts delta keeps at most one snapshot blob where full keeps at least four.
+
+A related caution: retention that drops intermediate checkpoints must not drop the ancestor checkpoints or writes between the kept checkpoint and the nearest `_DeltaSnapshot`, or delta channels silently reconstruct empty with no error raised. DeerFlow ships no production trigger for `prune`/`aprune`, so this is a constraint on any wiring, not a live failure.
+
+**Fix**: confirm the mode from a thread's marker, restart if needed, and compare checkpoint payload plus writes rows. See [History Cache](/docs/harness/checkpoints/history-cache) and [Operating Checkpoints](/docs/harness/checkpoints/operations).
+
+### Materialization got slower after raising the cadence
+
+**Symptom**: after raising `snapshot_frequency`, reads and state materialization are slower.
+
+**Cause**: `snapshot_frequency` (default `10`) is the number of per-step writes between full snapshots. Higher means fewer, smaller snapshots but a longer replay walk to materialize any given checkpoint. The materialized state is identical either way; only size and read cost trade off.
+
+**Fix**: lower `snapshot_frequency` to trade checkpoint size back for read speed. It is restart-required, like the mode. Repeated materialization of the same checkpoints is what the history cache absorbs, so check its counters too (below).
+
+## History and replay
+
+### The old answer reappears after regenerate
+
+**Symptom**: regenerating in a branched thread leaves the replaced assistant message beside the new one after a reload, and branch history can break when seeded rows share one run id ([#4458](https://github.com/bytedance/deer-flow/issues/4458)).
+
+**Cause**: delta cannot fork correctly — the fork itself is accepted, the read is what breaks. Resuming from an older checkpoint forks the lineage, and the delta history walk collects **every** `pending_writes` entry on each on-path ancestor — but a shared parent also carries the writes of the sibling that was abandoned, so those writes are replayed into the fork and the run starts from a message list that still contains the answer it was supposed to replace. Reproduced on Postgres, SQLite, and the in-memory saver; full mode is unaffected because its checkpoints carry complete channel values.
+
+**Fix**: DeerFlow linearizes instead of forking. It materializes the requested checkpoint's state and writes it with replace semantics on the current head (which has no other children), resets channels that exist only on the newer head to their schema default or `None`, consumes the selector, then runs linearly. Linearization is a no-op when the mode is full, there is no checkpointer, the selector already names the head, or the namespace is non-root; it **fails closed** rather than falling back to the fork:
+
+```
+Run {run_id} could not materialize resume checkpoint {checkpoint_id}
+```
+
+The upstream fix is PR [#8548](https://github.com/langchain-ai/langgraph/pull/8548) (fixing upstream [#8443](https://github.com/langchain-ai/langgraph/issues/8443); mirror #8551), still open, which is why the local linearization is retained. See [Resume and Rollback](/docs/harness/checkpoints/resume-and-rollback).
+
+### History order differs from the live run
+
+**Symptom**: on a parallel fan-out that writes one delta channel in a single super-step, the live run returns writes in path order but `get_state` / resume replays them in a different order.
+
+**Cause**: pinned upstream defect ([langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382)), open, fix PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) unmerged, no released version. Delta replay orders writes by hashed `(task_id, idx)` instead of the path order `apply_writes` used live, so same-superstep writes are permuted. Present in `langgraph-checkpoint 4.2.0`; reproduced on memory, SQLite, and Postgres.
+
+**Fix**: none locally. DeerFlow's test asserts the correct contract and trigger-skips while the defect is present, naming the issue:
+
+```
+upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes
+```
+
+If ordering within one super-step matters to your consumer, avoid fanning parallel writes into a single delta channel.
+
+### Postgres hydrates old checkpoints empty
+
+**Symptom**: on Postgres, an older delta checkpoint materializes empty while a recent one is fine.
+
+**Cause**: pinned upstream defect ([langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448)), open, fix PR #8556 unmerged. `PostgresSaver.get_delta_channel_history` permanently poisons its walk cursor when the target checkpoint is not in the first pagination page: the unpatched cursor is derived from a not-yet-loaded parent and parks at `None` for good, so old checkpoints hydrate empty. Only Postgres pages its stage-1 scan. Present in `langgraph-checkpoint-postgres 3.1.2`.
+
+**Fix**: none locally; the Postgres case trigger-skips, naming the issue:
+
+```
+upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty
+```
+
+Cadence bounds replay depth, so a smaller `snapshot_frequency` keeps the walk shorter; that is the only lever this repository exposes, not a fix for the cursor bug.
+
+## Cache
+
+### `redis` cache is rejected on the TUI or embedded path
+
+**Symptom**: the TUI or a headless `--print` / `--json` run fails at checkpointer construction with
+
+```
+database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.
+```
+
+**Cause**: the TUI and headless modes build `DeerFlowClient(checkpointer=get_checkpointer())` — the **sync** singleton checkpointer — and only the `memory` backend is supported on the sync path (it is process-local anyway). A config that is valid for the Gateway can therefore break the TUI.
+
+**Fix**: set `database.checkpoint_cache.type: memory`. Gateway-only deployments can keep `redis`, which is the async path's shared cache.
+
+### The cache counters never hit
+
+**Symptom**: `hits` stays at `0` while `misses` climbs, or `compose_hits` and `full_walks` look wrong.
+
+**Cause**: several legitimate reasons.
+
+- The cache is installed only in delta mode, on the async/Gateway path. In full mode there is no `CachedHistorySaver` at all.
+- `max_entries: 0` disables the cache uniformly, and a disabled cache passes straight through without composing.
+- The wrapper never caches the "latest checkpoint" resolution: it resolves the target to an immutable checkpoint id first, so a client that only ever reads brand-new checkpoints misses by design.
+- Composition depth is bounded (`_COMPOSE_MAX_DEPTH = 8`) and a cold chain falls back to one inner walk; single-level composition was measured to yield `0` cache hits on a 500-step SQLite run before recursive composition was added.
+- A `max_entries: 1` LRU thrashes on every read — correct, but no hits.
+- The redis backend reports only `hits` and `misses`; its `evictions` and `entries` stay `0`.
+
+**Fix**: confirm delta mode and `max_entries > 0` — and restart before drawing conclusions from a settings change, because the cache is read only when it is built at startup. Then read `compose_hits` and `full_walks` to see whether composition (not the top-level cache) is doing the work. Interpret `hits`/`misses` together with those two counters rather than alone. See [Cache counters](/docs/harness/checkpoints/observability).
+
+## Integration
+
+### `create_deerflow_agent` rejects delta with a checkpointer
+
+**Symptom**: calling `create_deerflow_agent(..., checkpoint_channel_mode="delta", checkpointer=...)` raises a `ValueError`:
+
+```
+create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: persisted graphs built here bypass checkpoint mode marker injection and the fail-closed compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would silently corrupt thread state.  Use the guarded application paths (make_lead_agent or DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed.
+```
+
+**Cause**: a graph built directly this way bypasses marker injection and the fail-closed compatibility gate, so a mixed-mode store could silently corrupt thread state. Delta **without** a checkpointer is ephemeral and allowed.
+
+**Fix**: for delta persistence, go through the guarded paths — `make_lead_agent` or `DeerFlowClient`. If you only need an ephemeral delta graph, drop the checkpointer.
+
+<Callout type="tip">
+  Before chasing a symptom, get two facts: the process's frozen mode (from
+  `config.yaml` plus whether it was restarted) and the thread's marker (from
+  its `metadata`). Almost every entry above resolves once those agree.
+</Callout>

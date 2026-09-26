@@ -261,7 +261,8 @@ def _link_staged_no_overwrite(
     place, for a caller that still holds a descriptor on the staged inode and
     therefore must remove it itself. Windows refuses to remove a file that
     has an open handle, so the removal cannot happen here in that case; the
-    caller retains ownership of the staged path on both success and failure.
+    caller owns the staged path from the moment this returns — including on
+    the failure arms below, which leave it for that caller's own cleanup.
     """
     file_path = _pure_destination(uploads_dir, display_filename)
     try:
@@ -294,9 +295,10 @@ def _commit_upload_temp_no_overwrite(
     Same no-overwrite contract as :func:`_link_staged_no_overwrite`:
     :class:`FileExistsError` leaves the staged part in place for a
     next-suffix retry (the handle's second ``close`` is idempotent); any
-    other failure removes it best-effort. With ``unlink_staged=False``, the
-    caller retains the staged name on success and failure until it releases
-    its descriptor on the inode.
+    other failure removes the staged name only when this call owns it.
+    ``unlink_staged=False`` leaves the name for the caller on every exit,
+    including the failure arms: that caller still holds a descriptor on the
+    inode and removes it itself (``_abort_upload_temp`` on its error path).
     """
     upload_temp.handle.close()
     return _link_staged_no_overwrite(upload_temp.temp_path, uploads_dir, display_filename, unlink_staged=unlink_staged)

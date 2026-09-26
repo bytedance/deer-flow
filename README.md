@@ -112,6 +112,10 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
+literal prepend/append configuration without editing source templates. See
+[prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
+
 Optional per-model [`request_admission`](backend/docs/CONFIGURATION.md#model-request-admission)
 paces requests to help stay within provider request-per-minute limits.
 It is disabled by default; see the linked guide to enable it.
@@ -630,6 +634,7 @@ already received by the browser, without an additional secret-redaction layer.
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
+For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact.
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
@@ -1338,6 +1343,11 @@ not wrapped by middleware model-call hooks (goal, memory, title, and summarizati
 Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
 framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
 libraries they import.
+The [fetched-content screening example](examples/deerflow-extension-jev-screening/README.md)
+contributes one such middleware at the visible tool position. After operator opt-in it
+classifies the sanitized text a remote tool result shows the model, PII-redacted when
+`pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
+update; it imports only the extension contract.
 
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
@@ -1395,6 +1405,15 @@ returns `None` when the host does not support the capability; the required helpe
 `NotImplementedError` instead. Denied access raises `PermissionError`. Routes should map
 these exceptions to HTTP 503 and 403 respectively; resolver failures never fall back to
 the global service reader.
+
+Extension services can optionally receive a [host model invoker](backend/docs/extension-model-invocation.md)
+(extension API 0.2.4+). Operators explicitly map allowed logical roles under
+`plugins[].host_access.model_invocation`; the host handles credentials, concurrency,
+  timeouts, and schema-validated output. Admission is bounded; timed-out provider work
+keeps its concurrency slot until completion, and schema validation runs in terminable
+child processes. A provider's own cancellation becomes `ModelInvocationFailed`,
+while cancellation of the calling extension task still propagates normally.
+Without a grant the capability is `None`.
 
 Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
 `required: true` makes load failure abort startup; otherwise failures are reported and

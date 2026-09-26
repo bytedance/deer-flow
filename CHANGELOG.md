@@ -7,9 +7,1472 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This section accumulates work toward the **2.2.0** milestone
+([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
+This release closes that milestone with **181 merged pull requests**.
+
+### Added
+
+#### Scheduler
+
+- **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
+  task previously meant scanning every title or opening details to read its
+  prompt. A search field above the existing filters matches a literal, trimmed,
+  case-insensitive substring of either field (including Chinese), composes with
+  the status/type filters and thread scope, and clearing it retains the other
+  filters; when nothing matches, task actions hide with localized feedback. Runs
+  entirely on the existing authorized list response — no API change. ([#5355])
+
+#### Agents & runtime
+
+- **uploads:** Add stable cursor pagination to the `list_uploaded_files`
+  discovery tool. With more than 100 historical uploads matching the same
+  filters the tool could only return the first page, giving an agent no
+  continuation path. An optional `cursor` input and `next_cursor` output now
+  paginate past the default page of 20 (maximum 100), sorted by nanosecond
+  modification time descending with a deterministic raw-filename tie-breaker.
+  The token binds to the runtime-resolved user/thread, normalized filters,
+  current-run exclusions, and ordinary-file metadata; malformed or invalidated
+  continuation returns controlled restart instructions telling the client to
+  discard previously collected pages. `total_count` still covers all filtered
+  matches and no new dependency, storage layer, or HTTP endpoint is involved.
+  ([#5570])
+- **agents:** Custom agents can persist a default knowledge scope in agent
+  settings, so a specialized agent starts each conversation with its own
+  corpus instead of all operator-approved knowledge bases. When a new turn
+  omits an explicit selection — including callers without the composer
+  selector — gateway admission applies the saved default; an explicit
+  per-message selection still wins, selecting all knowledge bases clears the
+  binding, and regenerate/resume retain the source turn's accepted scope.
+  This is a default, not an access-control policy: operator allowlists and
+  dataset availability are still enforced. ([#5579])
+- **config:** Operators can now overlay core system prompts without source
+  patches. `lead_prompt_overlay.prepend/append` wraps the assembled lead
+  prompt, `subagents.agents.<name>.prompt_overlay` extends built-in and
+  configured subagent prompts without mutating the shared registry, and
+  DeerMem's `memory.backend_config.prompt_prepend/prompt_append` extends the
+  rendered memory-update system message. Empty overlays preserve prompt bytes
+  and overlay text is literal, so stock behavior is unchanged until an
+  operator opts in. ([#5794])
+
+#### Memory
+
+- **memory:** Cross-session memory gains `user.cognitiveStyle` for stable
+  collaboration preferences (response structure, depth, correction style),
+  stored and injected separately from `personalContext` and task skills so a
+  protocol like "conclusions first" no longer competes with project facts under
+  `max_injection_tokens`. Legacy `memory.json` files are normalized on load, the
+  `<memory>` injection gains a `Thinking Style:` line (plus optional
+  `category: cognitive` facts), and the field is editable in Settings → Memory
+  and exposed through the Gateway memory API. ([#3182])
+- **memory:** The sample-memory loader can now bulk-load registered users.
+  It previously wrote the legacy shared memory path while authenticated users
+  read per-user storage, so a successful load still left Settings showing no
+  memory. `scripts/load_memory_sample.py` requires exactly one of
+  `--target PATH` or `--all-users`; `--all-users` enumerates registered users
+  from the configured persistent database and backs up each user's existing
+  memory before replacing it. Non-persistent database modes are rejected.
+  ([#4066])
+- **memory:** Memory search and injection can rank candidates by lexical relevance
+  instead of confidence alone. Confidence-only injection could prefer unrelated
+  facts over ones useful to the current task; opt-in `retrieval_relevance_enabled`
+  (default `false`) blends IDF-weighted query coverage with confidence, applies
+  category filtering before `top_k`, and can diversify selections — no embeddings,
+  vector storage, or persisted-format changes; the tokenizer handles CJK bigrams
+  without new dependencies. Legacy `get_context` implementations keep working.
+  ([#5251])
+- **memory:** Add an opt-in tolerant `MarkdownMemoryStorage`
+  (`memory.storage_class: markdown`) for the user-memory summary store. Corrupt
+  or partially written files no longer raise `MemoryStorageCorruption` and crash
+  the agent: a Markdown summary is understood via a lossless fenced
+  `memory-json` block with a best-effort structured fallback, and plain JSON
+  still loads. The on-disk JSON format and the JSON UI are unchanged, and writes
+  remain journaled JSON — this ships read-path tolerance only; a full Markdown
+  write path is a follow-up. ([#5545])
+- **memory:** Add a deterministic DeerMem scope-isolation benchmark under
+  `backend/scripts/benchmark/deermem_scope_isolation`. The opt-in
+  validate/run/report workflow exercises lifecycle durability, concurrent
+  corrections, and isolation across agent and user memory scopes, and changes
+  no runtime memory behavior. ([#5564])
+
+#### Knowledge & retrieval
+
+- **knowledge:** Custom-agent chats can scope RAGFlow retrieval per message. An
+  opt-in Knowledge selector picks all operator-approved datasets, specific
+  datasets/files, or no retrieval for one turn; the choice is stored as a
+  validated, immutable `knowledge_scope` snapshot on the HumanMessage and
+  enforced at Gateway admission, middleware, RAGFlow retrieval, and native and
+  batch subagents — out-of-allowlist selections fail closed, and scope ids never
+  reach model inputs or tracing. Off by default via
+  `knowledge_base.scope_selection_enabled` (config version 41). ([#5238])
+- **ragflow:** RAGFlow retrieval results now carry verifiable source citations.
+  Clicking an inline knowledge citation, a document-title link in Sources, or
+  the answer's knowledge sources list opens the retrieved excerpt, dataset and
+  document names, and page numbers when RAGFlow supplies them, and sources
+  remain available after conversation reload. `knowledge_search` pairs the
+  opaque citation links with bounded native tool-message artifacts holding the
+  exact excerpt given to the model (truncation marked, configured API key
+  redacted); ordinary `task` results forward only captured sources cited in the
+  child's result; and output budgeting retains complete evidence entries under
+  the active limit, omitting non-fitting entries with a notice. Missing records
+  display as unavailable. These are retrieval-time evidence snapshots, not a
+  live full-document viewer; existing direct `knowledge_search()` callers keep
+  the string return type. ([#5551])
+- **community:** The image search tool exposes the `color` and `license_image`
+  filters. Both were wired into the request path but unreachable from the tool
+  signature, so agents could not narrow results to a palette or to
+  license-cleared images when sourcing references for image generation. Valid
+  values follow `ddgs` (`color`: `Monochrome` through `White`; `license_image`:
+  `any`, `Public`, `Share`, `ShareCommercially`, `Modify`, `ModifyCommercially`);
+  unset filters produce exactly the same request as before. ([#5723])
+
+#### Skills
+
+- **skills:** Show which skills an answer loaded, with inspectable snapshots.
+  Successful configured `SKILL.md` reads and explicit slash activations now record
+  a bounded, read-only snapshot, and the answer toolbar gains a Skills menu listing
+  only the skills that answer's own run loaded; selecting one opens the captured
+  file (original Markdown including frontmatter, package-relative links kept as
+  non-navigating references) in a resizable desktop panel or a mobile sheet, with
+  copy returning the original Markdown. The run journal persists a first-load-order
+  aggregate on the terminal answer so paginated history keeps the evidence, and the
+  entry is hidden when no load evidence exists. ([#5758])
+
+#### Models & integrations
+
+- **models:** Administrators can manage shared models from Settings → Models
+  without editing server configuration. New administrator-only
+  `GET/PUT /api/managed-models` and `POST /api/managed-models/test` endpoints
+  maintain an encrypted catalog under `$DEER_FLOW_HOME/managed-models/` —
+  credentials are never returned, omitted keys retain the saved value, and
+  stale edits are rejected by revision. Enabled managed profiles are appended
+  to new effective configuration snapshots; YAML profiles remain read-only and
+  win name conflicts. The first version supports OpenAI-compatible Chat
+  Completions endpoints; existing model authorization still applies. ([#5596])
+- **models:** Add a declarative reasoning capability contract for model profiles. A
+  model can declare an optional `reasoning:` block (`thinking:
+  unsupported|optional|required`, `on_disable_request`, `dialect`, `history`, and
+  `effort: {values, default, aliases, path}`) beside the legacy booleans, and
+  contradictory profiles fail at config load. `create_chat_model` enforces one
+  normalized policy everywhere — lead agent, subagents, summarization, and title
+  generation — so a required-thinking model never enters the disable branch and
+  effort values map through aliases or fall back to the declared default instead
+  of being sent verbatim. `GET /api/models` and `DeerFlowClient` gain a `reasoning`
+  object (`source: legacy|contract`), the frontend derives the effort menu from the
+  model's declared values (e.g. `Low/High/Max` for GLM-5.3-Flash) and hides "off"
+  for required-thinking models, and `PATCH /api/v1/auth/preferences` accepts
+  provider-specific effort tokens. Profiles without the block keep the unchanged
+  legacy path. ([#5780])
+
+#### Channels
+
+- **channels:** WeChat can be connected by scanning a QR code from the web UI.
+  The connection dialog in the sidebar and Settings gains QR login with
+  progress, pairing-code input, expiry and retry states, and a "Scan again"
+  option that preserves an unexpired binding command; credentials are saved on
+  the backend and only the WeChat channel restarts. New WeChat connections
+  default to QR login, with manual token entry still available. ([#5582])
+
+#### Auth & guardrails
+
+- **authz:** Make the `skills` policy key govern visibility on the user-facing skill
+  listing surfaces. A role whose policy denied skills still saw every skill in the
+  slash-command autocomplete, `GET /api/skills`, `GET /api/skills/custom`, and
+  `GET /api/skills/{name}`, discovering the denial only at activation time. Listing
+  visibility now goes through `filter_resources(principal, "skill", ...)`, mirroring
+  `list_models`: denied names disappear from the listings, the detail endpoint returns a
+  404 byte-identical to a genuine miss (no existence oracle), anonymous callers stay
+  unfiltered, and provider resolution errors follow `authorization.fail_closed`.
+  Admin management endpoints stay `require_admin_user`-gated; runtime activation
+  authorization remains #4541's layer. ([#5489])
+- **middleware:** Add deterministic, opt-in PII redaction for model-bound context
+  (`pii_redaction.enabled`, default off). `PiiRedactionMiddleware` rewrites PII in
+  genuine user messages and remote-content tool results (same allowlist as the
+  tool-result sanitizer) to irreversible placeholders like `[EMAIL_1]`, using regex-only
+  detectors — email; OpenAI/AWS/GitHub/Slack/Google API keys; Luhn-validated credit
+  cards; international/CN/US phones; CN ID, CPF, CUIT/RFC national IDs. No mapping is
+  stored. Placeholder numbering is stable across turns (the conversation is re-redacted
+  per model call with value-deduplicated counters), externalized tool-output copies hold
+  redacted text too, and subagents inherit the middleware automatically. Raw text stays
+  in thread state; default behavior is unchanged. ([#5527])
+- **frontend:** Gate composer send on the `runs:create` permission. Both chat routes
+  resolve `canCreateRuns` and the shared composer checks it at the top of
+  `submitThreadMessage`, the single choke point for the submit button, Enter-to-send,
+  goal-set-triggered runs, and programmatic submits. A denied role gets a disabled send
+  button that explains itself via `aria-label`/`title`, an info toast on submit, and its
+  draft text kept for retry; while streaming the button remains the `runs:cancel` stop
+  affordance as before. Absent or null permission lists stay permissive for mixed
+  deployments. Mirrors the stop gating from #5294. ([#5528])
+- **guardrails:** New opt-in TypeSafe (Jev) risk gate for tool calls,
+  `deerflow.guardrails.typesafe:TypeSafeGuardrailProvider`, selected through
+  `guardrails.provider.use`. Each probed call sends one yes/no question with the
+  tool name and full argument JSON to TypeSafe System One and denies at
+  `threshold` (default 0.5) with an error `ToolMessage` the model can adapt to.
+  `allowed_tools` stays a hard permission list enforced locally before any
+  request; oversized or unserializable arguments are refused locally with zero
+  network requests; provider errors follow `guardrails.fail_closed`. This is the
+  only guardrail provider that sends tool arguments to a third party — assess
+  egress before enabling. `config_version` moves 46 → 47. ([#5712])
+- **authz:** Gate plugin actions and management operations through the
+  configured authorization provider. `POST /api/plugins/{ns}/actions/{name}`
+  now requires a `plugin_action`/`invoke` decision on `<ns>/<action>`, checked
+  after resolution and before the request body is read, denying with `403`;
+  new `require_plugin_management`/`arequire_plugin_management` in
+  `deerflow-extension-api` give contributed management routes a fail-closed
+  check with independent `read`/`write` scopes; built-in RBAC gains
+  `plugin_actions` and `plugin_management` keys, an omitted key leaving the
+  resource unrestricted; plugin tool descriptors now report
+  `source: "plugin:<namespace>"`. Enforcement stays off until
+  `authorization.enabled: true`; extension-api contract 0.2.4 and
+  `config_version` 49. ([#5842])
+
+#### Extensions & plugins
+
+- **plugins:** Full-stack plugin APIs and a bookmark example package. A
+  deployment-installed Python extension can now ship its own browser page,
+  conversation actions and model tools: `registry.plugin(PluginContribution(...))`
+  (extension-api 0.2.2) registers contributions in one plugin namespace,
+  authenticated descriptors, ES modules and declared actions are served under
+  `/api/plugins`, and the frontend loads plugin pages, workspace pages and
+  conversation actions at runtime. The `deerflow-extension-bookmarks` example
+  exercises the path end to end; no plugin ships enabled by default. ([#5647])
+- **plugins:** Support manifests and static asset directories for full-stack
+  plugins. `BrowserAssets(module, root, manifest="ui_manifest.json")`
+  (extension-api 0.2.3) joins `BrowserModule`: a versioned manifest names the
+  entry module and lists the files served from namespace/content-revision
+  URLs, with authentication, correct MIME types, `nosniff`, a document sandbox
+  policy, and immutable caching. Packaged entries load as native credentialed
+  module graphs, so a plugin can split its JavaScript and resolve CSS/images
+  with relative imports; existing inline modules keep working. ([#5685])
+- **extensions:** Extension routes can request a run-evidence reader bound to
+  the authenticated request user. New `resolve_run_evidence_reader(request)` /
+  `require_run_evidence_reader(request)` APIs return an immutable user-scoped
+  `RunEvidenceReader` gated by `runs:read`, with invisible-run behavior and
+  scope-bound cursor validation preserved. The existing global reader stays
+  available to trusted Gateway-lifetime services.
+  `deerflow-extension-api` is bumped to 0.2.2. ([#5727])
+- **plugins:** New standalone `deerflow-extension-jev-context` example plugin
+  (`community.jev-context`) prunes stale tool results from long conversations.
+  Through the lead agent's `before_model`/`abefore_model` hooks it asks Jev
+  about old read-only tool results and shortens low keep-probability ones,
+  protecting recent messages, tool-call records, host-stamped errors, skill
+  reads, and multimodal content. Requires deployment opt-in and an
+  environment-only Jev key; failed requests preserve the original history.
+  Pruning is lossy and persists in graph state — disabling the plugin does not
+  restore omitted text. ([#5731])
+- **plugins:** New standalone `deerflow-extension-jev-classify` example plugin
+  (`community.jev-classify`) contributes a `classify_texts` model tool that
+  labels `{id, text}` items against 2-32 caller-supplied categories and returns
+  one label and status per item in input order. Two deployment-selected
+  backends: Jev (one choice question per item) or an OpenAI-compatible chat
+  endpoint asked for a validated JSON label list. Calls are batched (default 10
+  per request) with bounded concurrency and a 25s deadline; failures are
+  explicit per item, and nothing is retried. ([#5735])
+- **extensions:** Packaged extensions can now invoke the host model under
+  operator-granted limits. `plugins[].host_access.model_invocation` maps
+  logical roles to models with shared per-installation concurrency, bounded
+  admission, timeout, and input/output limits; extension API 0.2.4 adds the
+  request/result contracts and `ExtensionRuntimeDeps.model_invoker`. Calls use
+  the host model factory and tracing with inline Draft 2020-12 schema
+  validation in child processes; ungranted extensions still get `None`, and
+  grants follow the restart-required plugin lifecycle. ([#5796])
+- **examples:** Add `deerflow-extension-jev-screening`, an opt-in packaged
+  extension that flags injected instructions in fetched content as advisories.
+  A `TOOL_VISIBLE` middleware classifies each text message in visible
+  `web_fetch`/`web_search`/`image_search`/`web_capture` and MCP tool results
+  with its own model request over the sanitized excerpt (at most eight messages
+  per call), and `before_model` replaces the flagged messages of the latest
+  tool step with a fixed advisory prefix, never mutating the originals. Loaded
+  from `plugins:`; inert until its `config.enabled` is set, provider failures
+  and timeouts pass the result through, and runs without a task store screen
+  nothing. ([#5833])
+
+#### Persistence
+
+- **persistence:** Add a checkpoint retention service implementing the deletion
+  side of #4189 item 3 on the #5255 contract. Trailing duration-only leaves are
+  pruned by default (each materializes its parent's payload, so removal reclaims
+  parent-sized rows without touching the surviving line); superseded leaf sibling
+  branches stay opt-in via `prune_leaf_sibling_branches` because clients may hold
+  them as resume targets. The resume head, its ancestor chain, and checkpoints
+  with live pending-writes rows are protected. No production trigger yet — the
+  invocation wiring lands separately. ([#5308])
+- **storage:** Add a content-addressed blob store contract (`deerflow/storage/`),
+  the storage-abstraction half of #4189 item 2. `BlobRef` (sha256, size, kind,
+  content type) plus a tiered `BlobStore` interface ship with a `local_fs` default
+  backend: sharded layout, atomic publish, digest verified on read, and
+  concurrent puts converge. Purely additive and opt-in — `blob_storage.enabled`
+  defaults to `false` and no producer is migrated yet (viewed images and
+  externalized tool results are the named follow-ups), so unset deployments
+  behave exactly as today. ([#5361])
+
+#### Frontend
+
+- **frontend:** Unify the Capability Center into a searchable catalog with plugin
+  configuration and custom-agent selection. Catalog entries over the existing MCP, Lark
+  CLI, and skill services carry localized metadata, categories, icons, and editable
+  configuration forms; MCP installs validate required transport fields before saving,
+  ordinary users see safe installation projections, and administrator mutations keep
+  their role checks. Custom agents gain stable MCP installation IDs with explicit
+  plugin/skill selection — an omitted/null selection inherits all enabled connections,
+  an empty list selects none — with colliding installation IDs rejected on write and
+  ambiguous IDs excluded at runtime; selection carries through ordinary and durable
+  batch delegation without changing the shared MCP cache or granting authorization.
+  Bundles DingTalk/WeCom group notification and HubSpot CRM tools; existing MCP and Lark
+  workflows are preserved and nothing is enabled automatically. ([#5497])
+
+### Fixed
+
+- **frontend:** Stop mutating subtask render state during `MessageList` render.
+  Subtask synchronization moved from render into an effect, so cards immediately
+  receive pure message-derived snapshots even before the task context publishes
+  an update — fixing the regression where final streamed arguments and
+  `task_started` arrive together but the card keeps its partial title or empty
+  prompt. Message arguments supply title, prompt and subagent type; live state
+  preserves lifecycle, model, usage and step history, with terminal snapshots
+  keeping status/result precedence. ([#3157])
+- **skills:** Surface failed skill enable/disable requests in Settings instead of
+  treating them as success. The frontend skills helpers parsed the response JSON
+  without checking `response.ok`, so a 4xx/5xx from the skills list or toggle
+  endpoints resolved as success and the UI flipped the switch even though the
+  backend rejected the change. Non-OK responses now stay on the error path and
+  show the backend error message. ([#3823])
+- **agent:** Align unattended-run prompting with the tool policy. Non-interactive
+  runs removed `ask_clarification` from the toolset while the system prompt still
+  demanded it for ambiguity, leaving GitHub, webhook, and scheduled runs unable
+  to ask or proceed. A shared `RunInteractionPolicy` now drives both toolset and
+  prompt — `webhook` infers from issue and event context, exiting with structured
+  blocking information when context is insufficient; `scheduled`/`autonomous`
+  make minimal reversible assumptions and report high-risk ambiguity as blocked.
+  ([#4919])
+- **mcp:** Make the durable MCP task claim lifecycle cancellation-safe. Caller
+  cancellation after a claim was acquired could leave rows leased until expiry,
+  abandon a started release, or let cleanup failure replace the original
+  `CancelledError`; routine shutdown was also recorded as a task failure.
+  Compensation now covers every await after the claim, ambiguous operations stay
+  service-owned past the foreground deadline, and per-claim lease tokens reject
+  stale-generation writes atomically (closing a SQLite race). Migration `0026`
+  adds nullable lease-token columns; no public MCP API changes. ([#4966])
+- **frontend:** Keep streamed answer text out of the Thinking panel. A streaming
+  AI message that already carried reasoning plus answer text was grouped into the
+  processing disclosure until the turn settled, so the answer could sit in the
+  Thinking panel for a long run; such messages now render as an assistant bubble
+  immediately while plain pre-tool narration stays grouped. The bash tool's
+  model-visible contract also describes cross-platform local environment
+  discovery — start with `uname -s`, use `sw_vers` on Darwin, recover from
+  blocked absolute paths with command-only probes. ([#5001])
+- **runtime:** Harden model response recovery at provider boundaries. An empty
+  completed response could end a run with no usable answer, and length-capped
+  responses could carry truncated tool calls into the loop. A true empty stop is
+  now retried once at the model boundary (one shared retry per run); exhaustion
+  yields a visible same-step fallback instead of a hidden graph-level recovery
+  turn; a detected length cap drops all tool calls in that response, even with
+  parsed arguments. DeepSeek thinking-mode history keeps `reasoning_content` on
+  assistant tool turns. ([#5080])
+- **sandbox:** Reject overflowing sandbox ownership lease TTLs at config
+  validation. `renewal_interval_seconds` and `ttl_multiplier` were each checked
+  finite, but their product could overflow to `inf`, failing only at the first
+  lease write or silently changing the promised timing. Non-finite derived TTLs
+  and sub-millisecond Redis TTLs are now rejected, Redis TTLs are capped at half
+  the signed 64-bit millisecond range, and fractional milliseconds round up so
+  the stored lease is never shorter than validated. ([#5104])
+- **subagents:** Close the subagent graph stream before releasing runtime
+  resources. Cooperative cancellation could return a terminal result without
+  explicitly closing the active `agent.astream()` iterator, so the executor
+  released the sandbox lease and sent the task-stop notification while
+  graph-stream teardown was still in flight. The stream is now retained and
+  closed before terminalization and release, the original stream error or host
+  cancellation wins if close also fails, and teardown still running after 10s
+  logs a warning. ([#5221])
+- **composer:** Reserve `context` as a slash command alias. `/context compact` is
+  a built-in composer command, but `context` was not reserved in the shared
+  slash-skill contract, so a skill could claim the alias and shadow it. The
+  shared contract now reserves `context`, frontend and backend slash parsing stay
+  aligned through it, and IM channel command classification is unchanged.
+  ([#5279])
+- **scheduler:** Preserve a one-time task's execution instant across title and
+  prompt edits. The schedule control converted the stored timestamp to
+  minute-precision local time and back on mount, so in New York
+  `2026-11-01T06:30:00Z` was saved as `05:30:00Z` and ordinary timestamps lost
+  seconds and milliseconds — a metadata-only edit silently moved the run. The
+  edit form now snapshots the original timestamp, local input, and timezone and
+  re-emits the original `run_at` until the time or timezone changes. ([#5330])
+- **scheduler:** Reject wall times skipped by daylight saving in the one-time
+  schedule form. New York `2027-03-14T02:30` converted to UTC and back as
+  `01:30`, so create and edit could save an instant different from the preview.
+  The form now validates local-to-UTC-to-local equality, shows localized inline
+  feedback with the input marked invalid, emits an empty schedule spec until
+  corrected, and keeps Create (and edit-save) disabled. ([#5348])
+- **sandbox:** Drain the previous sandbox release during async rebind. Async rebind
+  paths released the previous sandbox client through a bare
+  `await asyncio.to_thread(provider.release, ...)`; cancelling the caller cancelled only
+  the awaiter and let the per-thread lifecycle serializer release while the old release
+  was still running, so a later same-thread lifecycle transition could overlap it. The
+  three async previous-release paths now route through the cancellation-safe
+  `run_sync_lifecycle_operation()` helper, which holds the serializer until the old
+  release completes and then propagates the original `CancelledError`. ([#5498])
+- **subagents:** Close delegation-ledger entries a stopped run left in progress. On
+  Stop, the `task` tool cancels the subagent and re-raises cancellation, so no
+  `ToolMessage` is written and the ledger keeps the delegation `in_progress` — every
+  later model call was told the work was "already delegated; do NOT delegate again" and
+  waited for a result that never arrived. When a run starts with a new user message,
+  `DurableContextMiddleware` now marks such entries `cancelled` ("cancelled attempt; may
+  retry with a changed plan"). Resumed runs, goal continuations sharing the run id, and
+  entries with a result are unchanged. ([#5507])
+- **frontend:** Keep clarification text outside the execution-steps panel. Answer text
+  accompanying an `ask_clarification` call rendered inside the bordered execution panel,
+  and submitting a hidden reply moved previously completed answer bubbles back into it
+  while the continuation streamed. Clarification results now act as completed-run
+  boundaries so earlier answers stay in the conversation across continuation and
+  reconnect, and the accompanying text renders once outside the panel with the original
+  messages, tool-result associations, and usage accounting preserved. ([#5508])
+- **projects:** Drain trash reconciliation file workers across Gateway shutdown
+  cancellation. Cancelling the startup trash-retention sweep cancelled only the asyncio
+  awaiter while its executor worker kept walking/statting/unlinking files, so
+  `_shutdown_startup_trash_sweep()` could finish Gateway teardown while the detached
+  worker was still mutating the projects tree. Both reconciliation `run_file_io()`
+  operations now drain through the cancellation-safe `await_drained()` helper: an
+  already-started worker reaches terminal state first, then cancellation propagates and
+  later stages never start. The hook timeout stays the graceful-completion budget, not a
+  hard cap after cancellation. ([#5511])
+- **mcp:** Insert bare-filename rewrites literally instead of as a regex replacement
+  template. `_rewrite_unique_bare_filenames` passed the correlated `/mnt/user-data/...`
+  path to `Pattern.subn` as a template, so a literal backslash in a filename (a model
+  passing a Windows-style path to a stdio MCP server on POSIX creates a file literally
+  named `screenshots\q3.png`) either raised `re.error: bad escape` out of the tool-call
+  conversion and failed the whole call after the server had already written the file, or
+  — for escapes `re` accepts — silently substituted the escape byte (`\r` became a CR)
+  into the returned path, riding it into the transcript and checkpoint. The replacement
+  now goes through a callable, so the path is inserted verbatim. ([#5522])
+- **nginx:** Allow model-bound `/api/` and `/api/skills` requests to outlive 60
+  seconds. The catch-all `location /api/` (e.g. `POST /api/runs/wait`, which also
+  cancelled the run when nginx dropped the upstream connection, and
+  `POST /api/input-polish`) and `location /api/skills` (`.skill` installs scan every
+  archive file with sequential LLM calls) still used nginx's 60-second
+  `proxy_read_timeout` default and failed with `504`. Both locations now set
+  `proxy_read_timeout 600s`, matching the model-bound locations; applied to the Docker,
+  `make dev`, and Helm nginx configs. More specific locations are untouched. ([#5524])
+- **subagents:** Drain the owned batch-service stop across caller cancellation.
+  `SubagentRuntime.stop()` cleared its batch-submitter flag before awaiting
+  `SubagentBatchService.stop()`; an interrupted await left the runtime reporting no
+  submitter — later `stop()` calls returned immediately — while the owned service was
+  still part-way through stopping, so runtime-owned batch work could outlive the
+  runtime's lifecycle ownership. The stop now runs in a strongly-owned task that is
+  shielded and drained across repeated cancellation; the first caller `CancelledError`
+  propagates only after the owned stop reaches a terminal state. ([#5525])
+- **memory:** Drain Gateway memory shutdown workers across lifespan cancellation. The
+  flush and backend close ran as separate `asyncio.to_thread()` awaits, so cancelling
+  the lifespan task cancelled only the awaiter: `manager.close()` could start while the
+  flush worker was still running — closing the backend connection under an in-flight
+  flush — and repeated cancellation could detach the close worker entirely. Manager
+  resolution, `shutdown_flush()`, and `close()` now form one owned shutdown operation
+  drained through the cancellation-safe `await_drained()` helper; the first caller
+  cancellation propagates only after the started work reaches a terminal state. ([#5531])
+- **sandbox:** Report an exactly-full sandbox search result as complete. `glob` and
+  `grep` in the AIO, E2B, OpenSandbox, Tenki, and BoxLite providers treated "collected
+  `max_results` matches" as `truncated=True`, so a tree holding exactly that many
+  eligible matches told the agent its search was partial and it re-ran or narrowed the
+  search for nothing. The filtered-match cap now looks one match past the cap before
+  deciding — a genuinely dropped match still reports truncated — leaving the matches
+  themselves and the remote raw-output cap unchanged. ([#5534])
+- **threads:** Clean persisted records safely on thread deletion.
+  `DELETE /api/threads/{id}` removed the thread directory, checkpoints, browser session,
+  and meta row but left `run_events`, historical `runs` rows, and `feedback` behind —
+  the messages feed stayed readable after the delete (the owner check passes on a
+  missing meta row), and re-creating the same thread id inherited the deleted thread's
+  messages. Deletion now also removes runs, run events, and feedback, owner-scoped and
+  best-effort inside the existing delete reservation; run cleanup deletes only
+  `operation_kind == "run"` rows so the in-flight delete reservation survives. Durable
+  event stores take an explicit per-thread mutation fence, so a concurrently admitted
+  writer can no longer commit a row for a deleted thread after deletion returns. ([#5535])
+- **frontend:** Rejoin active runs after reopening a chat. The SSE reconnect path only
+  knew the run id stored in the current tab's `sessionStorage`, so reopening the browser
+  or opening a new tab lost the pointer while the server-side run kept going. Opening a
+  thread without a reconnect pointer now discovers the newest pending or running run,
+  persists the pointer before joining so stop/cancel still targets the right run, and
+  rejoins its resumable stream, retrying a failed recovery twice with bounded 1s/2s
+  delays; a matching pointer suppresses duplicate joins. ([#5536])
+- **channels:** Roll back a partially started channel service across startup
+  cancellation. `start_channel_service()` published the global singleton before awaiting
+  `ChannelService.start()`, so cancellation after partial resource acquisition exited
+  without stopping the service and left a singleton whose startup never completed.
+  Startup failure/cancellation now rolls back the partial service and drains the
+  rollback across repeated cancellation with `await_drained()`; the singleton clears
+  only after cleanup succeeds, and a failed cleanup retains it so later shutdown can
+  retry. ([#5537])
+- **docker:** Add a `make prod-logs` entry point for the production stack and stop
+  `make docker-logs` from exiting silently after a production start. `make up`
+  runs compose project `deer-flow` while `make docker-logs` tailed the dev
+  project `deer-flow-dev`, which has no containers then, so the command printed
+  nothing. `scripts/docker.sh logs --prod` now tails the production stack with
+  the same compose file, `--env-file ../.env`, and the interpolation defaults
+  `deploy.sh` exports (without them compose cannot parse the production volume
+  specs on checkouts without a `.env`); dev-only logs with no containers print a
+  hint pointing at `make prod-logs`. ([#5538])
+- **frontend:** Preserve literal `<think>` tags in fenced, indented, and inline
+  code during reasoning extraction, including unfinished code while streaming.
+  The parser only protected an opener immediately following a backtick, so a
+  code example explaining `<think>` tags was moved into the reasoning
+  disclosure — corrupting the rendered answer and the copied text — and a
+  literal unclosed opener swallowed the following explanation. Real closed or
+  streaming reasoning after literal code is still extracted, and Markdown
+  delimiters inside actual reasoning no longer prevent finding its closing tag,
+  so an unfinished fence there cannot hide the answer. ([#5540])
+- **uploads:** Handle a UTF-8 BOM in uploaded Markdown when building document
+  summaries. A leading BOM stopped the outline extractor from recognizing the
+  first heading or opening code fence — in the fence case a code comment became
+  a document heading and the closing fence was mistaken for an opening one,
+  hiding the real sections — and a BOM-only first line consumed a
+  fallback-preview slot. Outlines and previews are now read with `utf-8-sig`,
+  which consumes the optional BOM while preserving ordinary UTF-8, embedded
+  U+FEFF characters, physical line numbers, and the original uploaded bytes.
+  ([#5541])
+- **gateway:** Preserve confirmed clarification-card answers when preparing a
+  thread regeneration. The regenerate endpoint only selected visible human
+  messages, but clarification-card answers are stored as hidden `HumanMessage`
+  objects with `human_input_response` metadata, so it could skip the confirmed
+  answer and replay an older visible prompt instead. A regenerate-specific
+  predicate now accepts hidden messages carrying a structurally valid
+  `human_input_response` and preserves their hidden and request-correlation
+  metadata; summaries, goal-control messages, malformed hidden responses, and
+  unrelated internal messages remain rejected. ([#5544])
+- **sandbox:** Wrap the `remote_list_dir_command` and `remote_search_command`
+  probe scripts in a subshell so their trailing `exit` cannot kill the AIO
+  sandbox's implicit persistent shell. A bare `exit` terminated the session
+  shell and the server's response for that `exec_command` request never
+  completed, hanging the client indefinitely — making every
+  `list_dir`/`grep`/`glob` call a deterministic wedge and deadlocking entire
+  runs that issued parallel `[ls, bash]` tool calls. Output markers and exit
+  codes still propagate from the subshell; only the probe scripts change.
+  ([#5546])
+- **uploads:** Delete the requested upload entry instead of a symlink's resolved
+  target. `delete_file_safe` resolved the requested path first and unlinked the
+  result, so a symlink planted at an upload name (the sandbox maps the uploads
+  directory writable) made `DELETE /api/threads/{id}/uploads/{filename}` remove
+  the target file and its companion `.md`, leave the dangling link in place, and
+  answer `200` for the wrong file. The requested entry itself is now checked and
+  unlinked: a symlink, like any non-regular entry, returns `404`; links pointing
+  outside the uploads directory still return `400`; and the companion `.md` name
+  comes from the requested file. Regular-file deletes are unchanged. ([#5547])
+- **extensions:** Drain extension-service shutdown across host cancellation. The
+  Gateway registered extension-service cleanup with `AsyncExitStack` but awaited
+  `stop_services()` directly, so a cancellation landing while an extension
+  `stop()` was blocked aborted the cleanup callback and let stack unwinding
+  continue while extension-owned resources were still alive, breaking the
+  ownership ordering the stack exists to provide. Shutdown now runs through the
+  cancellation-safe `await_drained()` helper, so later runtime teardown waits
+  until extension services reach a terminal state within the per-service
+  timeout budget. ([#5549])
+- **memory:** Report malformed `memory.backend_config` values by key name instead
+  of unnamed tracebacks. The Honcho backend read `failure_policy`,
+  `workspace_overrides`, and `user_peer_overrides` through a falsy-only
+  `or {}` fallback, so the most natural YAML spelling — `failure_policy:
+  fail_closed` as an unquoted string — survived as a truthy non-mapping and
+  crashed with `AttributeError: 'str' object has no attribute 'get'`, naming
+  neither the key nor `backend_config`. Non-mapping values are now rejected as
+  config errors naming the key, while falsy values still mean unset. The mem0
+  and OpenViking backends get the same key-naming guard for numeric knobs
+  (`top_k`, `timeout_seconds`, ...) instead of bare `int()`/`float()` casts that
+  escaped unnamed `TypeError`s. ([#5555])
+- **mcp:** Scope MCP sessions and durable-task access by thread incarnation.
+  Deleting and recreating the same thread ID reused the previous lifecycle's
+  persistent MCP session scope, and the replacement thread could list, read, and
+  request cancellation of durable tasks created by the old lifecycle because
+  those operations scoped only by user and thread ID. The server-owned thread
+  incarnation now reaches the agent runtime: non-legacy MCP sessions get a
+  versioned `(user, thread, incarnation)` scope, durable task list, detail, and
+  cancellation bind to the caller-captured and current incarnation, and
+  submissions are atomically rejected when the thread is deleted or recreated
+  between remote submission and local persistence. Explicit legacy `NULL`
+  incarnations keep the pre-activation scope, worker polling and cancellation
+  keep working through the creating session, and incarnation fields stay out of
+  public task responses. ([#5556])
+- **subagents:** Recognize empty regular files in remote subagent acceptance
+  probes. GNU `stat -c %F` reports a zero-byte file as `regular empty file`, but
+  the remote size and readability probes accepted only `regular file`, so an
+  empty artifact was rejected as `NONREGULAR` and `exists`, `non-empty`, and
+  `file_written` all stayed UNVERIFIED even when the file was present and
+  readable. Both labels are now accepted: empty readable files can satisfy
+  `exists` and `file_written`, and `non-empty` yields a deterministic negative
+  result. Symlink, FIFO, and containment checks are unchanged. ([#5559])
+- **frontend:** Derive the `web_fetch` tool-step title from the first non-blank
+  line of the fetched markdown. `extractTitleFromMarkdown()` only accepted a
+  document whose very first characters were `# `, so a blank line or up-to-three
+  spaces of indentation before the first heading — which CommonMark allows, and
+  which the crawl4ai backend hands through unchanged — cost the chat transcript
+  its step title and silently fell back to the raw URL. An indented code block
+  still does not count as a title, and an empty heading yields no title instead
+  of a literal `#`. ([#5560])
+- **sandbox:** Stop E2B reconciliation from reviving warm-pool sandboxes. Every
+  reconciliation pass issued `Sandbox.connect()` against sandboxes parked in the
+  warm pool — which the SDK normalizes to a 300-second timeout update, pushing
+  the remote expiry forward forever — and the first pass adopted the warm
+  sandbox back into the active set so it was never released again; idle billed
+  VMs stayed alive indefinitely and held capacity slots. Reconciliation now
+  treats locally tracked sandboxes (active or warm) as canonical and never
+  probes them with `connect()`, refreshes active-sandbox TTLs through the
+  cached client, and sweeps warm entries parked past `sandbox.idle_timeout`,
+  releasing their ownership leases, mount results, and capacity tracking. Warm
+  sandboxes now actually expire at the configured `sandbox.idle_timeout`.
+  ([#5562])
+- **utils:** Return empty text for content-less messages instead of the literal
+  string `"None"`. `message_content_to_text(None)` stringified its argument, so
+  a content-less sub-agent final message bypassed the `No response generated`
+  sentinel, a content-less structured LLM-error fallback hid its
+  `error_detail`, and the task-continuity archive failed to skip the empty text.
+  Only `None` content is treated as empty — the literal string `"None"`, `0`,
+  `False`, and list-block conversions behave exactly as before. ([#5563])
+- **doctor:** Validate the contents of CLI-backed model credentials in `make
+  doctor`. The check reported Codex and Claude auth as healthy whenever the
+  credential path merely existed, so an empty, logged-out, malformed, or expired
+  file produced a green checkmark while the model loader could not obtain a
+  usable token. Codex `auth.json` is now validated across all three supported
+  token layouts and Claude `.credentials.json` through `claudeAiOauth.accessToken`
+  including the runtime's one-minute expiry buffer; missing files, directories,
+  non-object JSON, empty tokens, and invalid expiry values report
+  provider-specific failures with the existing remediation hints. The check
+  stays standard-library-only, offline, and redacted; environment and
+  file-descriptor sources remain non-consuming presence checks. ([#5567])
+- **middleware:** End length-capped turns cleanly instead of letting
+  `TodoMiddleware` re-engage the model. When a model hit its per-response output
+  cap (`finish_reason=length`) while emitting a `write_file` call, the
+  suppressed call still triggered the todo completion-reminder jump
+  (`jump_to=model`), re-emitting the same oversized call into the same cap — up
+  to three futile responses with junk fragments instead of a clean truncation
+  notice. `TodoMiddleware` now skips the reminder jump when the
+  `model_length_termination` marker is present, the length notice is appended
+  even when partial text survived (fixing a latent `append_visible_text` bug
+  that silently dropped string content), and `write_file`'s model-visible
+  description is annotated with the configured `max_tokens` output budget so the
+  model does not assume the 80 KB streaming ceiling is the practical
+  single-write limit. ([#5569])
+- **ragflow:** Validate RAGFlow document selections in batches of at most 100 IDs.
+  Selecting more than 100 documents from one dataset is valid under the
+  1000-document scope limit, but validation sent every ID in a single request,
+  which the provider rejects, so `knowledge_search` failed before retrieval.
+  Selections now validate in provider-sized batches that preserve input order
+  and the fail-closed behavior for missing or unsearchable documents, sharing
+  one concurrency budget across datasets. ([#5572])
+- **persistence:** Drain the PostgreSQL bootstrap advisory unlock across
+  cancellation. The unlock in `_postgres_lock()`'s `finally` was awaited
+  directly, so startup/lifespan cancellation arriving while
+  `pg_advisory_unlock` was still in flight could abort the release and return
+  the connection to the pool while it still held the bootstrap mutex. The
+  release now completes through the cancellation-safe `await_drained()` helper
+  on the same connection that acquired the lock. ([#5573])
+- **persistence:** Drain engine disposal across cancellation during gateway
+  teardown. `close_engine()` awaited `AsyncEngine.dispose()` directly, so
+  cancellation while disposal was blocked let teardown return while the
+  process-global engine and session factory still pointed at a partially
+  disposed resource. Disposal now completes through the cancellation-safe
+  `await_drained()` helper, the globals stay published until it finishes, and
+  stale cleanup can no longer erase a replacement engine. ([#5576])
+- **channels:** Photos and files sent to the Telegram bot now download and
+  reach the agent. Two bugs compounded: the download opened a fresh connection
+  on the manager event loop and failed with a generic `NetworkError`, and the
+  ingested file was written `0600 root:root`, so the non-root sandbox user got
+  `Permission denied` reading it. Downloads now route through a loop-bound
+  download bot, inbound files get sandbox-readable permissions, and failures
+  log the underlying cause with the token-bearing Bot API URL masked. ([#5581])
+- **models:** Treat a Codex auth file whose top level is not a JSON object as
+  "no credential from this source". An array, string, or number in
+  `~/.codex/auth.json` (or `$CODEX_AUTH_PATH`) previously raised
+  `AttributeError` out of `CodexChatModel` construction, preempting the
+  documented "Codex CLI credential not found" error; the loader now logs and
+  falls through. ([#5584])
+- **memory:** Keep an explicit `confidence: 0.0` from scoring as the 0.5
+  default. Two read sites rescued the field with `or 0.5`, which cannot tell
+  "explicitly zero" from "unset", so a zero-confidence fact was inflated by
+  the default weight and ranked differently depending on which write path
+  indexed it. Zero now ranks strictly below 0.5 through both the FTS5 index
+  and the substring fallback; an absent or null confidence still defaults to
+  0.5. ([#5586])
+- **skills:** Load a `SKILL.md` saved as UTF-8 with a BOM. The front-matter
+  anchor rejected the leading `U+FEFF` written by Notepad and PowerShell's
+  `Set-Content -Encoding UTF8`, so Windows-authored skills silently vanished
+  from the catalog with no warning. The mark is now consumed by the shared
+  compiled anchor and reaches neither skill metadata, rendered instructions,
+  nor the skill-context description, and the loader, validator and middleware
+  copies of the pattern can no longer drift. ([#5588])
+- **models:** Skip Claude Code credentials sources with a non-numeric
+  `expiresAt`. A string, null, list, or object value raised `TypeError` out of
+  the loader and stopped the lookup loop, so one malformed file at
+  `$CLAUDE_CODE_CREDENTIALS_PATH` prevented every `ClaudeChatModel` from ever
+  reaching `~/.claude/.credentials.json`; the source is now skipped with a
+  debug log like its sibling guards. ([#5591])
+- **skills:** Render an explicit empty `allowed-tools` as no tools. The skill
+  metadata renderer truthiness-tested the field, so a skill declaring
+  `allowed-tools: []` advertised `Allowed tools: (all)` while the tool policy
+  stripped every business tool — the model planned against tools that would be
+  rejected. The empty declaration now renders `(none)`; an omitted or
+  non-empty declaration renders as before. ([#5593])
+- **gateway:** Classify the Windows `image/svg` MIME alias as active content.
+  On Windows the MIME database maps `.svg` to `image/svg` rather than the
+  standard `image/svg+xml`, and the shared active-content classifier only
+  recognized the standard type, so SVG artifacts, `.skill` archive members,
+  and project documents could be served inline instead of forced to download.
+  The alias is now treated as active content on every host. ([#5594])
+- **models:** Tolerate a null Codex `account_id` before it reaches the request
+  header. `or`-chaining let a JSON `null` survive the loader as `None`, so
+  `CodexChatModel` construction crashed on `self._account_id[:8]`; a numeric
+  `account_id` died later with `httpx` rejecting a non-string
+  `ChatGPT-Account-ID` header. Null now falls back to the unknown-account
+  value `""` and any other non-string is stringified. ([#5601])
+- **llm:** Fence circuit-breaker probe settlement by generation and ownership.
+  `LLMErrorHandlingMiddleware` settled successes and failures unconditionally,
+  so a request admitted under an older closed generation could finish after a
+  newer recovery probe was acquired and then close the circuit during the
+  outage, reopen it and discard a healthy probe, or release another call's
+  probe. Every admission now captures the circuit generation, and success,
+  failure, or release only mutates the breaker when both the generation and —
+  in half-open state — the exact probe token match. ([#5602])
+- **memory:** Reject a Honcho `base_url` that can never resolve. The field was
+  read with no validation, so the natural scheme-less spelling for an internal
+  host (`base_url: honcho:8000`) was accepted at startup — httpx parses the host
+  as the scheme — and memory then failed on every operation with an
+  unsupported-protocol error, or silently returned empty results while the
+  Gateway ran green; the api_key-over-plain-HTTP guard was skipped too, since it
+  matched only a literal `http://` prefix. Malformed values now fail fast at
+  Gateway startup, matching the documented behavior, and every URL that resolves
+  today keeps working. ([#5607])
+- **subagents:** Report an explicit zero batch limit by name instead of
+  defaulting it. `SubagentBatchService.submit()` resolved `max_live_items` /
+  `max_running_items` with `or`, so a caller-supplied `0` read as "not supplied"
+  and was silently replaced with the configured default — a `batch_task` asking
+  for zero concurrent items ran three at a time — and paired with a small
+  `max_live_items`, the request was refused for a limit it did not violate. Both
+  resolutions now compare against `None`, so an explicit `0` reaches the range
+  guard and is rejected by name; an absent key still means "use the configured
+  default". ([#5609])
+- **sandbox:** Drop ignored directories from remote `list_dir` output. A local
+  sandbox skips `node_modules`, `.git` and the other ignore patterns, but the
+  same call in a remote sandbox listed every path under them up to the
+  500-line cap, even though the remote `grep` and `glob` already treat those
+  paths as invisible. The shared remote parser now drops entries containing an
+  ignored directory name, matched relative to the listing root like the local
+  walk: explicitly listing an ignored directory still works, and a fully
+  ignored directory returns empty instead of `FileNotFoundError`. ([#5612])
+- **middleware:** Discard stale todo reminders during context compaction. After
+  a todo reminder had been injected, compaction could summarize its old task
+  statuses or keep the stale reminder in the retained message tail, which also
+  stopped TodoMiddleware from rebuilding task context from the current `todos`
+  state. Automatic and manual compaction now exclude `todo_reminder` snapshots
+  before selecting the summary and retained partitions, and the current todo
+  state survives: the middleware regenerates a reminder before the next model
+  call when no `write_todos` call remains visible. ([#5614])
+- **sandbox:** Honor `start_line`/`end_line` in Tenki's `read_file`. The Tenki
+  provider accepted only `path`, so a ranged read — the normal way an agent
+  continues a truncated read — raised `TypeError: ... unexpected keyword
+  argument 'start_line'`, rendered as a generic read error. It now slices like
+  the sibling providers, with negative bounds clamping the way the local
+  sandbox does. ([#5616])
+- **persistence:** Drain the PostgreSQL schema bootstrap connection close
+  across cancellation. `ensure_postgres_schema_async()` closed its dedicated
+  psycopg connection with a bare `await`, so cancellation arriving during
+  lifespan teardown could abort the close and return while the connection was
+  still live. The close now goes through the cancellation-safe
+  `await_drained()` helper, which defers the caller's cancellation until the
+  owned connection finishes closing. ([#5617])
+- **runtime:** Drain runtime provider teardown across cancellation. The
+  checkpoint-cache and stream-bridge provider context managers own their
+  backends and awaited `aclose()`/`close()` directly on context exit, so host
+  cancellation arriving mid-teardown could abort the close and return while a
+  memory or Redis backend was still live. Both closes now go through the
+  cancellation-safe `await_drained()` helper for the memory and Redis backends;
+  cancellation propagates only after the owned close finishes. ([#5622])
+- **helm:** Align the provisioner's state root with the Gateway's when the
+  shared home PVC is enabled. The chart set the Gateway's
+  `DEER_FLOW_HOST_BASE_DIR` but left the provisioner on its runtime default
+  `/.deer-flow`, so valid Gateway skill-projection paths fell outside the
+  provisioner's allowed base and could be rejected before sandbox creation in
+  `USERDATA_PVC_NAME` mode. The provisioner now receives the same logical root
+  so projections map to `deer-flow/<suffix>` on the PVC; it stays unset when
+  `persistence.home.enabled=false`. ([#5625])
+- **client:** Honor an agent's MCP plugin selections in the embedded client. An
+  agent saved with `mcp_plugins: [installation-A]` still received tools from
+  every enabled MCP server through `DeerFlowClient`, an empty selection was
+  ignored as well, and delegated tasks did not inherit the agent's selection.
+  The client now applies the saved selection when loading tools and passes it
+  to delegated tasks on every run, including cached-graph runs; the selection
+  joins the graph cache key as an unordered set, and saved configuration
+  changes still take effect after `reset_agent()`. ([#5630])
+- **persistence:** Drain Alembic migration workers across cancellation.
+  `bootstrap_schema()` held the SQLite in-process mutex or the PostgreSQL
+  advisory lock while `stamp`/`upgrade` ran in `asyncio.to_thread()`, but those
+  awaits were cancellation-vulnerable: cancelling the host task could return
+  from the bootstrap critical section while the worker was still mutating
+  schema state, letting a second bootstrap overlap a live migration. Every
+  Alembic worker await now goes through the cancellation-safe `await_drained()`
+  helper; cancellation propagates only after the worker finishes. ([#5631])
+- **sandbox:** Enforce command timeouts in the AIO sandbox. `AioSandbox` ignored
+  the caller-provided timeout, so `sandbox.bash_command_timeout` never applied —
+  a long-running command ran to completion, and a stalled persistent-shell
+  request kept the sandbox-wide serialization lock occupied, blocking later
+  operations on the same client. Commands now carry a server-side
+  `hard_timeout` on supported AIO images (the frozen legacy `:latest` gets a
+  bounded host wait only), ambiguous outcomes are never replayed, and
+  `sandbox.bash_command_timeout` is now the provider default. ([#5634])
+- **channels:** Log Slack Socket Mode connect failures instead of dropping them.
+  `SlackChannel.start()` ran `SocketModeClient.connect()` through
+  `run_in_executor()` and discarded the returned future, so a rejected
+  `app_token` (or unreachable Slack) left the bot silently dead — the log said
+  `Slack channel started` and the exception surfaced only as asyncio's "Future
+  exception was never retrieved" at garbage-collection time. Connect failures
+  are now logged with their traceback, matching what the Telegram and Discord
+  channels already did. ([#5640])
+- **mcp:** Honor a stdio MCP server's configured `cwd`. `McpServerConfig`
+  accepted the setting as an extra field, but `build_server_params()` dropped it
+  before either launch path saw it, so a server configured with a working
+  directory could fail discovery when its script path was relative, or discover
+  with an absolute path and then fail relative file reads during pooled tool
+  calls. The directory is now forwarded to stdio connections when non-empty
+  (including environment-variable references) and omitted for HTTP/SSE;
+  omitted, `null`, or empty values keep the default behavior. ([#5643])
+- **skills:** Read Python secret assignments from the AST in SkillScan. The
+  `secret-env-assignment` rule swept every text file with a `name[:=]value` regex,
+  which misreads Python: a typed-optional parameter default
+  (`token: Optional[str] = None`) and `api_key = os.getenv("...")` — the rule's
+  own documented remediation — were both reported as hardcoded credentials,
+  failing the review gate on unchanged bundled skills. Python sources are now
+  analyzed from their AST, reporting only real literal values; non-Python
+  coverage is unchanged, and a test pins the bundled skills stay clean. ([#5648])
+- **persistence:** Drain the database auto-create maintenance dispose across
+  cancellation. `_auto_create_postgres_db()` released its throwaway engine with
+  a bare `await maint_engine.dispose()`, so cancellation during a slow first
+  boot could abort the dispose and leave one live server session against
+  `postgres` for the lifetime of the process — a leak that is not self-healing,
+  since the next boot takes the non-missing-database path and never retries the
+  disposal. The dispose now goes through the cancellation-safe `await_drained()`
+  helper; a successful first boot behaves as before. ([#5649])
+- **skills:** Keep per-user skill-install directory setup off the event loop.
+  `UserScopedSkillStorage.ainstall_skill_from_archive` created the per-user
+  custom directory with a blocking `os.mkdir` on the loop before any real work
+  was dispatched, so `POST /api/skills/install` stalled the Gateway event loop;
+  the existing blocking-IO anchor missed it because it covered only the
+  host-scoped base class. The `mkdir` now runs on the worker thread like the
+  extraction and validation around it, and the anchor covers the user-scoped
+  path. Install semantics and on-disk layout are unchanged. ([#5650])
+- **sandbox:** Clamp negative `read_file` range bounds in the e2b, OpenSandbox,
+  and BoxLite providers the way `LocalSandbox` already does. Negative values
+  previously fell through to Python negative-index slicing, so `start_line=-1`
+  silently returned the last lines of a file and `end_line=-1` a truncated
+  range instead of reading from the first line and yielding an empty range. The
+  tool layer already rejected negative bounds; direct `Sandbox` consumers hit
+  the gap. ([#5655])
+- **skills:** Align the bundled Vercel deploy skill's package directory with its
+  declared name and point its deployment commands at the real mounted path
+  `/mnt/skills/public/vercel-deploy/scripts/deploy.sh`. The skill lived in
+  `vercel-deploy-claimable` while activating as `/vercel-deploy`, and its
+  instructions referenced a script path DeerFlow never mounts, so a deployment
+  request could select the correct skill and still receive a command pointing at
+  a file that does not exist. ([#5656])
+- **frontend:** Show explicit empty skill export requirements instead of a blank
+  value. The export dialog formatted `allowed-tools` and `required-secrets` with
+  `join(", ")`, so an explicitly empty declaration rendered as an empty string
+  and was indistinguishable from an omitted one, even though the two have
+  different policy semantics; absent declarations now render as "Not declared"
+  and explicitly empty ones as a localized "None". ([#5659])
+- **sandbox:** Bound AIO `list_dir` with a dedicated directory deadline. The
+  listing ran under the sandbox-wide lock with only a 600-second no-change
+  timeout and inherited the SDK transport budget, so a stalled relay or wedged
+  `find` could block later operations on the same sandbox for minutes. On
+  supported images the remote `find` now carries a 60-second server-side
+  `hard_timeout` inside a 65-second no-retry host envelope: `hard_timeout`
+  raises `TimeoutError` and keeps the shell generation reusable, ambiguous
+  outcomes raise `OSError` and fence it. No new configuration. ([#5662])
+- **runtime:** Share one change position across an atomic thread operation in
+  the memory run store. `create_thread_operation_atomic` advanced the change
+  clock per row, so an interrupt-and-replace landed its interrupted row and
+  replacement on two `change_seq` values and a `list_changed` reader paging by
+  `(change_seq, run_id)` could observe half of the atomic set; every claimed
+  row and the new row now carry one position, matching the SQL store. The
+  default (no durable database) deployment selects this store. ([#5663])
+- **runtime:** Drain synchronous checkpoint mutations across cancellation. Goal
+  writes and rollback offload sync checkpointers with `asyncio.to_thread()`, and
+  cancelling the caller previously stopped waiting while the `put`, `put_writes`,
+  or `delete_thread` worker kept running — the caller could observe cancellation
+  and the mutation could still commit afterwards. These fallbacks now drain
+  through the cancellation-safe `await_drained()` helper; the read fallback
+  `get_tuple` stays directly cancellable. ([#5664])
+- **agent:** Distinguish undeclared and explicitly empty skill `allowed-tools`
+  in the agent assembly fingerprint. Both declaration states hashed to an empty
+  list, so switching a skill from the legacy allow-all to a no-business-tools
+  policy changed runtime tool availability without changing the fingerprint;
+  undeclared `allowed_tools` now hashes as `None` while explicit allowlists stay
+  sorted lists. Frontmatter parsing and runtime tool policy are unchanged. ([#5669])
+- **uploads:** Stop deleting a converted Markdown companion when its document is
+  deleted. `delete_file_safe` recomputed `stem.md`, so two documents sharing a
+  stem (`a.docx`, `a.pdf`) made deleting one document remove the other's
+  converted text — or destroy a user's own `report.md` next to an unrelated
+  `report.pdf`. `DELETE /api/threads/{id}/uploads/{filename}` now removes only
+  the requested file; orphaned companions stay in the listing and can be deleted
+  individually. No API shape or config change. ([#5673])
+- **sandbox:** Prune ignored entries before applying the remote `ls` listing
+  limit. The 500-entry cap was applied before ignored paths were dropped, so a
+  dependency tree could fill the entire window and hide a normal file beside it,
+  sometimes leaving only the root in the returned listing; ignored descendants
+  are now pruned inside the shared `find` command before `head`, preserving
+  depth and output limits. ([#5676])
+- **persistence:** Apply `database.postgres_schema` to the synchronous
+  SQLAlchemy store used by DB-backed custom agents and managed subagents. The
+  async ORM and LangGraph stores already honored the configured schema, but
+  synchronous agent-store queries fell back to `public` and failed to find the
+  application tables; the connection URL now preserves existing libpq options
+  while adding `search_path`. ([#5678])
+- **logging:** Collapse every non-absolute Redirecting slot to `/<redacted>`.
+  The #5225 URL-redaction pass kept a slot verbatim unless it started with `/`,
+  so slash-less relative `Location` references (`download?sign=…`), query-only,
+  fragment-only, network-path, and `data:` targets rendered their signed queries
+  verbatim in DEBUG redirect logs; only a target with a scheme at position 0 is
+  now handed to the generic absolute-URL pass, and non-URL `-> /path` sandbox
+  mount arrows still pass through. ([#5680])
+- **channels:** Log DingTalk inbound-file skips instead of dropping the
+  attachment silently. A download that returned no content vanished with zero
+  log lines, indistinguishable from a message that never had one; the skip now
+  emits a neutral guard line naming the file, matching the WeChat channel's
+  shape, with the accurate reason already logged inside the download helper.
+  No behavior change. ([#5683])
+- **gateway:** Drain readiness-probe connection close across cancellation.
+  `/health/ready` closed its SQLite and PostgreSQL probe connections with a bare
+  `await connection.close()`, so a second cancellation during teardown could
+  interrupt it and let the probe return while its connection was still live,
+  detaching database cleanup from the request lifecycle; close now drains
+  through the cancellation-safe `await_drained()` helper. Response shape is
+  unchanged. ([#5684])
+- **logging:** Collapse space-carrying Redirecting slots to `/<redacted>`. Round
+  15 kept scheme-bearing slots verbatim for the generic absolute-URL pass, but
+  that pass's pattern stops at whitespace, so a slot like
+  `https://mirror.example/other page?sig=…` rewrote only the text before the
+  space and leaked the rest into DEBUG logs; a slot is now kept only when a
+  whitespace-free absolute URL fills it, and ordinary absolute redirect pairs
+  still keep their host. ([#5687])
+- **skills:** SkillScan's `secret-env-assignment` rule again reports secrets
+  bound outside plain statement assignments. The AST walk from #5648 only saw
+  bare-constant assignments, so keyword arguments (`connect(api_key="...")`),
+  parameter defaults, walrus bindings, literal concatenation, and all-constant
+  f-strings hid a hardcoded credential from the HIGH-severity gate. The constant
+  fold is iterative: a recursive one could raise `RecursionError`, which the
+  scanner records as a per-file error that drops every finding for the file.
+  The #5648 precision (annotations, `os.getenv` calls) is preserved. ([#5691])
+- **community:** Browserless `web_fetch` now reads its documented wait settings
+  the way `web_capture` does. `wait_for_timeout_ms` goes through the tolerant
+  `_as_int` helper, so a value like `2s` falls back to the default instead of
+  failing the call with `invalid literal for int()`, and
+  `wait_for_selector_timeout_ms` is read from tool config instead of a hardcoded
+  `5000` (default unchanged, so existing configs behave the same). Both keys are
+  now documented on the `web_fetch` entry in `config.example.yaml`. ([#5702])
+- **community:** SearXNG `max_results` above one page is now honored. The
+  SearXNG API has no `limit` parameter, so the client sent an ignored `limit`,
+  requested only page 1, and sliced an already-truncated list — `max_results:
+  20` silently returned one page (10 by default). `search` now walks `pageno`
+  and accumulates results until the cap is reached, a page comes back empty, or
+  a page adds nothing new (deduped by URL), capped at 5 pages; the dead `limit`
+  parameter is no longer sent. Default `max_results` still costs one request.
+  ([#5705])
+- **sandbox:** Ambiguous AIO session creation can no longer be replayed or
+  executed. Shell and bash creation planes track each attempted id through a
+  pending/owned/absent/tombstoned state machine: timeouts, transport errors, 5xx
+  responses, and malformed HTTP-200 responses tombstone the id — no execution on
+  it, no replayed create, bounded best-effort cleanup that never clears the
+  tombstone — and new creates on that plane are blocked. A dirty sandbox is
+  released through the existing teardown path instead of returning to the warm
+  pool; shell ambiguity does not affect bash creation. ([#5711])
+- **models:** Official DeepSeek models added through Settings now use the native
+  `PatchedChatDeepSeek` adapter. Managed profiles and their connection probes
+  always built `ChatOpenAI`, so adding `deepseek-flash` failed the connection
+  test with HTTP 400 `Thinking mode does not support this tool_choice`, and
+  streamed tool calls dropped `reasoning_content` and sent
+  `max_completion_tokens` instead of DeepSeek's native `max_tokens`. Thinking is
+  disabled only for the bounded forced-tool probe — normal chat settings are
+  untouched — and matching is limited to `api.deepseek.com`, so third-party
+  compatible endpoints keep their behavior. Existing saved profiles gain the
+  adapter without a catalog migration. ([#5718])
+- **community:** Browserless `web_fetch` now reads `reject_resource_types` and
+  `reject_request_pattern` from its tool config. Both parameters were declared
+  and passed to the client but only ever assigned `None`, so a configured value
+  was silently ignored and resource-type/request-pattern rejection — the main
+  lever for render latency and bandwidth against a self-hosted Browserless —
+  could not be turned on. Values accept a YAML list or a comma-separated string;
+  unusable values omit the parameter instead of sending it. Defaults are
+  unchanged, and both keys are documented in `config.example.yaml`. ([#5719])
+- **skills:** The custom-skill rollback route no longer reads the skill's edit
+  history on the event loop. `POST /api/skills/custom/{skill_name}/rollback`
+  constructed the storage, probed existence, and parsed
+  `custom/.history/<name>.jsonl` inline, and each history entry carries the
+  full previous and new skill contents, so a rollback stalled every other run
+  and stream on the worker for the parse. The work now runs on a worker thread,
+  matching the adjacent history handler; status codes and response shapes are
+  unchanged, and blocking-IO anchors guard the route. ([#5729])
+- **mcp:** Durable MCP task calls now bound connection setup and MCP
+  initialization under the same `session_init_timeout` deadline as session
+  entry. The timeout previously started only after entering the session
+  context, so an SSE server that accepted HTTP but never sent the MCP endpoint
+  event kept the call waiting indefinitely. After initialization succeeds the
+  deadline is disabled and the existing independent tool-call timeout applies;
+  `None` still disables the initialization bound. ([#5733])
+- **skills:** `required-secrets[].optional` must now be a YAML boolean. A quoted
+  value like `optional: "false"` passed frontmatter validation and was later
+  parsed with Python truthiness, so `bool("false")` recorded a required secret
+  as optional and produced wrong missing-secret diagnostics and exported
+  requirement metadata. Validation rejects non-boolean values, and the runtime
+  parser fails closed to `optional=False` with a warning (value type and secret
+  name only) for mounted or historical skills. The skill-review analyzer flags
+  the shape as `structure.invalid-required-secrets-optional`. ([#5738])
+- **skills:** Skill review no longer keeps sentence punctuation on extracted
+  resource references. A bare path at the end of a sentence ("See
+  references/setup.md.") was extracted with its trailing period, producing a
+  false `resource.missing` finding and a spurious orphan for the real file.
+  Extracted references now strip trailing `.`, `?`, and `!`, while real dotted
+  filenames such as `references/config.yaml` and link targets like
+  `references/v1.0.md` stay intact. ([#5739])
+- **uploads:** Remove a staged upload's `.part` only after its document-conversion
+  descriptor is released. With `uploads.auto_convert_documents` enabled, commit
+  unlinked the staged file while conversion still held an open descriptor, so on
+  Windows every convertible upload (PDF/DOCX/PPTX/XLSX) failed with `WinError 32`
+  (500) where POSIX silently allowed it. The staged name is now removed in the same
+  cleanup that releases the descriptor, and abort-path cleanup is best-effort so a
+  secondary removal failure can no longer mask the original error. ([#5740])
+- **composer:** Keep IME-composition Enter out of the slash-skill catalog. The main
+  prompt textarea's suggestion handler lacked the `isIMEComposing` guard its sibling
+  call sites had, so with an IME active and the `/` catalog open, the Enter that
+  committed a CJK composition instead applied the highlighted skill and discarded
+  the in-progress text. IME-consumed keydowns now fall through to the normal submit
+  path; plain Enter still selects the highlighted skill. ([#5741])
+- **sandbox:** Cancel BoxLite loop work whose synchronous bridge wait timed out.
+  `run_coroutine_threadsafe(...).result(timeout)` raised to the caller but left the
+  submitted coroutine running on the private loop, so the sandbox could keep
+  mutating or retain acquire ownership after the operation was reported as timed
+  out; the pending future is now cancelled before the timeout re-raises, while
+  already-completed futures are left alone. ([#5748])
+- **mcp:** Invalidate the MCP tool cache only when the effective MCP configuration
+  changes. Invalidation previously keyed on the whole `extensions_config.json`
+  signature, so toggling an unrelated skill rebuilt cached tools and retired every
+  pooled stdio session. The cache now compares a snapshot of the enabled servers'
+  parsed settings (declaration order) and global `mcpInterceptors` before retiring
+  anything; when no servers are enabled, a non-initializing refresh retires stale
+  state without adding discovery overhead, and malformed-config error logging no
+  longer emits resolved credentials. ([#5750])
+- **gateway:** Drain artifact updates to completion across request cancellation.
+  Cancelling `PUT /api/threads/{thread_id}/artifacts/{path}` unwound the
+  thread-operation reservation and sandbox lease while the non-mounted remote sync
+  was still mutating the sandbox, leaving the remote and host copies at different
+  bytes and letting later work overlap the abandoned mutation. The full
+  remote-sync/local-replace transaction is now drained before ownership is
+  released, with rollback semantics preserved and the primary commit failure logged
+  before rollback. ([#5755])
+- **uploads:** Preserve the original link error when staged-upload cleanup fails.
+  On a failed link commit whose conversion descriptor was still open, Windows
+  rejected the error handler's unlink with a sharing violation and that secondary
+  error replaced the real endpoint error; the generic link-failure path now
+  respects `unlink_staged=False` and all staged cleanup is best-effort. A cleanup
+  failure after a successful link also no longer returns 500 for an
+  already-published destination. ([#5756])
+- **runtime:** Drain database provider context exits across caller cancellation.
+  The async SQLite/PostgreSQL checkpointer and Store providers used raw
+  `async with`, so a cancellation delivered while the backend's `__aexit__()` was
+  blocked cancelled the teardown itself and let the provider finish with incomplete
+  database/pool cleanup — deterministically across all six provider paths. A
+  `drained_async_context()` helper now preserves exception and suppression
+  semantics while draining the exit to completion. ([#5757])
+- **channels:** Resolve the Buzz seen-event store path off the event loop.
+  `ChannelService._start_channel` built the default `seen_event_store_path` inline,
+  dereferencing `Paths.base_dir` (a `realpath`) on the loop in a path reachable
+  from `POST /api/channels/{name}/restart`; the resolution now runs in a worker
+  thread, with a blocking-IO anchor pinning it to the strict gate. ([#5759])
+- **sandbox:** Resolve the AIO sandbox acquire lock path off the event loop.
+  `_discover_or_create_with_lock_async` offloaded every acquire step except the
+  inline lock-file path construction, which dereferences `Paths.base_dir` (a
+  `realpath`) on the loop on the hot path of every sandboxed tool call; the
+  resolution now joins the surrounding steps in a worker thread, and the sibling
+  ownership-publish anchor exercises the production path layer again. ([#5760])
+- **threads:** Do not leave orphan threads behind when a LangGraph run is rejected.
+  Standalone run admission pre-creates a missing thread before LangGraph re-checks
+  assistant ownership, so a run against another user's non-system assistant
+  returned the expected 404 but had already persisted an idle thread owned by the
+  caller. Admission now verifies the assistant's server-owned provenance before
+  `Threads.put` (with the ambient auth context temporarily cleared), while
+  ordinary users can still implicitly create threads for registered system
+  assistants. ([#5762])
+- **setup:** Run the pre-commit hook through `uv` so `make install` no longer fails
+  when uv's tool bin directory is not on PATH, and make the Node.js prerequisite
+  check actionable: nvm users get an install command and everyone else a link to
+  the official download page. ([#5767])
+- **scheduler:** Read the dispatch lease owner under SQLite's writer lock.
+  `release_dispatch_lease` was the only mutating path that skipped `_lock_task`,
+  and because `FOR UPDATE` is ignored on SQLite its guard evaluated a stale
+  snapshot: a pause landing inside the dispatch window could be overwritten,
+  leaving the task `enabled` and firing again even though the API had confirmed
+  the pause. The read now takes the writer lock first; PostgreSQL behavior is
+  unchanged. ([#5777])
+- **utils:** Initialize `Article.url` so `to_message()` no longer raises
+  `AttributeError` for pages containing images. `ReadabilityExtractor` never passed
+  the page URL into `Article`, so resolving a relative image URL via
+  `urljoin(self.url, …)` crashed; the attribute now defaults to `""` and the
+  extractor passes the real URL. ([#5785])
+- **tools:** Coerce DDG web-search result limits from environment variables.
+  `max_results: $DDG_MAX_RESULTS` kept the substituted string, and DDGS
+  9.14.1 raised a `TypeError` sizing its workers that the search wrapper
+  reported as `No results found` for every query. Configured limits now
+  accept numeric strings; invalid or non-positive values log a warning and
+  fall back to the default of 5, while integer configs, the default, and
+  config-over-call precedence are unchanged. ([#5792])
+- **gateway:** Treat a blank `GATEWAY_HOST` or `GATEWAY_PORT` as unset. A
+  compose file with `GATEWAY_PORT=` (or `GATEWAY_PORT=${PORT}` with `PORT`
+  unset) handed an empty string to `int()`, killing the Gateway at import
+  time before uvicorn could bind. Blank values now fall back to the declared
+  defaults (`0.0.0.0` / `8001`); `GATEWAY_PORT=0` still asks the OS for a
+  free port, and every non-empty value parses exactly as before. ([#5801])
+- **channels:** Persist channel runtime configuration as UTF-8. The store
+  read its JSON as UTF-8 but wrote its temporary file with the host's default
+  encoding and `ensure_ascii=False`, so on non-UTF-8 hosts (CP1252, GBK)
+  non-ASCII values — such as a configured Buzz relay URL — could fail to save
+  or be written in bytes the store could not read back. The temporary write
+  now specifies UTF-8; atomic replace, locking, and chmod behavior are
+  unchanged, and legacy-encoded files are not migrated. ([#5803])
+- **setup:** Accept successful Apple Container image pulls in
+  `make setup-sandbox`. On macOS with Apple Container installed and Docker
+  absent, the script fell through to the Docker availability check and exited
+  1 with "Neither Docker nor Apple Container is available" after the image
+  had already been pulled. An Apple-only pull now counts as success and
+  continues to the default-image note; Docker behavior, including fallback
+  after an Apple Container failure, is unchanged. ([#5804])
+- **runtime:** Keep agent stream teardown alive across repeated
+  cancellation. `close_agent_stream()` awaited `stream.aclose()` in the
+  caller task, so a second `Task.cancel()` during teardown cancelled the
+  close itself and let callers abandon releasing graph, provider, sandbox,
+  and tool resources; a close-originated `CancelledError` also made a broken
+  close look interrupted instead of failed. The close now runs in a dedicated
+  shielded task, the first caller cancellation is deferred until it
+  completes, and stream-originated close cancellation is reported as a close
+  failure so the run terminalizes as failed. ([#5806])
+- **tools:** Apply the #5792 numeric-string coercion to DDG image search.
+  `image_search_tool` passed the environment-substituted `max_results`
+  string straight to DDGS, which raised a `TypeError` sizing its workers, so
+  `max_results: $IMAGE_MAX_RESULTS` made every query return `No images
+  found`; `0` removed the limit and negative values truncated results.
+  Numeric strings now work, and invalid, zero, or negative values warn and
+  fall back to 5, with integer configs and the default unchanged. ([#5807])
+- **client:** Stop resumed embedded-client streams from replaying prior
+  turns. On a resumed thread, `DeerFlowClient.stream()` re-emitted earlier
+  turns' message deltas — including tool results — in `messages-tuple`
+  events and counted their tokens in `end.usage`, overstating per-turn
+  usage. Historical messages stay in `values` full-state snapshots but are
+  suppressed from the current turn's deltas and usage, with the per-run
+  `run_id` on the current user message as the boundary; Gateway SSE is
+  unchanged. ([#5811])
+- **persistence:** Drain the postgres schema-setup connection exit across
+  cancellation. `_ensure_postgres_schema_with_pool` still acquired its
+  connection with a raw `async with`, so caller cancellation landing while
+  the connection's `__aexit__` was blocked interrupted the exit and the
+  connection was never returned to the pool, whose drained teardown then
+  closed with a checked-out connection. The connection now goes through
+  `drained_async_context()` like the rest of the checkpointer provider; no
+  happy-path behavior change. ([#5812])
+- **mcp:** Stop the bare-filename correlation pass from mangling backslash
+  paths. After a stdio MCP call created `page.yml`, a result mentioning
+  `C:\outside\page.yml` had its basename rewritten to point at the new
+  workspace file, because the pass treated a backslash as a bare-filename
+  boundary. Backslashes now act as path separators on both sides of a
+  correlated name, so genuine bare filenames still resolve while names
+  inside unresolved Windows, UNC, or relative paths stay unchanged. ([#5815])
+- **mcp:** Resolve generated file paths containing spaces in MCP text
+  results. A file named `artifact with space.txt` kept its absolute host
+  path in the free-text tool result, and a follow-up `read_file` failed with
+  `Permission denied` because whitespace hid the complete filename from the
+  token matcher. Whitespace-containing absolute and workspace-relative paths
+  now correlate with files the call created, validated inside the current
+  thread's user-data tree; outside paths and ambiguous suffixes are
+  untouched. ([#5819])
+- **middleware:** Preserve human message metadata in `ThreadDataMiddleware`.
+  Adding run metadata reconstructed the last `HumanMessage` from parts,
+  silently dropping fields it did not copy such as `response_metadata`; the
+  middleware now copies the existing message and updates only its default
+  name and `additional_kwargs`. ([#5823])
+- **uploads:** Keep document-conversion `stat()` and markdown write-back off
+  the event loop. `convert_file_to_markdown` offloaded the conversion itself
+  but still ran the size-check `stat()` and the multi-megabyte `write_text`
+  of the converted markdown on the loop, blocking upload ingestion for large
+  documents. Both now go through the shared `run_file_io` pool; the
+  small-file inline conversion threshold is unchanged. ([#5830])
+- **mcp:** Run lazy MCP tool discovery once when initialization itself raises.
+  The no-event-loop `except RuntimeError` fallback in `get_cached_mcp_tools()`
+  also caught discovery's own errors: with no running loop a failing call
+  spawned every stdio server and re-fetched OAuth tokens twice — repeated on
+  every later call, since a failed init never marks the cache initialized —
+  and inside a running loop the log buried the real cause under "asyncio.run()
+  cannot be called from a running event loop". Initialization is now driven
+  exactly once with the real failure logged; errors still return `[]` and
+  leave the cache uninitialized for the next retry. ([#5836])
+- **config:** Honor `$VAR` substitution for `request_admission` integer fields.
+  `requests_per_minute` and `max_queue_size` are declared `strict=True` so
+  `true` and `60.0` stay rejected, but an environment substitution like
+  `requests_per_minute: $RPM` arrived as the string `"60"` and failed the whole
+  `config.yaml` load with `int_type` — quotas kept in the environment could not
+  pace a model at all. A `BeforeValidator` now converts a plain decimal string
+  to `int` before the strict check; bools, floats, `"60.0"`, empty and
+  non-numeric values are still rejected and `gt=0` is unchanged. ([#5838])
+- **tools:** Coerce Exa's configured result limits before calling the SDK.
+  `$VAR` substitution resolves to strings, so `max_results: $EXA_MAX_RESULTS`
+  made every `web_search` call fail — exa-py rejects a string `num_results` —
+  and `contents_max_characters` went out as `"maxCharacters": "1000"`. Both are
+  now parsed as integers (a non-boolean integer or integer-form string only); a
+  blank, non-numeric, fractional, boolean, zero or negative value logs a
+  warning and falls back to the defaults (5 and 1000) instead of failing the
+  search, matching the DDG and SearXNG providers. ([#5839])
+- **gateway:** Treat a blank `GATEWAY_WORKERS` and blank Lark broker port or
+  timeout as unset, extending #5801's blank-env rule. `int("")` in the WeChat
+  QR-login guard turned a blank `GATEWAY_WORKERS` (e.g. `-e GATEWAY_WORKERS=`)
+  into a 503 "requires a single Gateway worker" on every QR route even though
+  the Gateway runs one worker, and a blank `DEERFLOW_LARK_BROKER_PORT`/`_TIMEOUT`
+  aborted the Lark broker at startup. The guard now reads `GATEWAY_WORKERS or
+  WEB_CONCURRENCY or "1"` and still fails closed on multi-worker or non-numeric
+  values; the broker falls back to its defaults. ([#5840])
+- **skills:** Strip section anchors from code-span resource references in the
+  skill review resource graph. Markdown-link targets already dropped
+  `#fragment` before resolving, but a code-span reference like
+  `references/faq.md#pricing` kept the anchor, resolved as a literal path, and
+  raised a false `resource.missing` warning even though the file exists and is
+  referenced. Code-span tokens now split the fragment the same way and strip
+  trailing sentence punctuation; dotted filenames such as
+  `references/v1.0.md#notes` keep their extension dots. ([#5841])
+- **config:** Sign the bytes the config cache parsed, not a second read. The
+  app-config loader opened `config.yaml` twice — parse once, then hash a fresh
+  read to record the `(mtime, size, sha256)` signature — so a write landing
+  between the two reads cached the older content under the newer signature and
+  `get_app_config()` never reloaded it, silently serving a stale config until
+  some later edit. The loader now reads once through a shared
+  `file_signature.read_config_with_signature()` helper that signs exactly the
+  returned bytes; a racing edit can only cost one extra reload. ([#5848])
+
+### Security
+
+- **authz:** Enforce permission checks on routes that only had authentication, and
+  scope `USER.md` per user. `POST /api/threads`, `/api/threads/search`,
+  `/api/runs/stream`, `/api/runs/wait`, every `/api/memory` route, and the
+  custom-agent routes carried no `@require_permission`, so a provider configured
+  to deny `threads:write`/`runs:create`/... could not enforce those decisions.
+  `GET/PUT /api/user-profile` also read and wrote one global `USER.md`, letting
+  any authenticated user overwrite or read everyone's prompt context — the file
+  now lives at `{base_dir}/users/{user_id}/USER.md`. ([#4989])
+- **gateway:** Preserve owner isolation on threads whose metadata row is missing or
+  NULL-owner. #5448's internal-caller run scoping returned an empty filter for every
+  trusted internal caller, and `ThreadMetaStore.check_access(..., require_existing=False)`
+  deliberately admits a missing metadata row (legacy compatibility) and NULL-owner rows,
+  so an internal caller acting for owner A could list or fetch owner B's persisted runs
+  on such a thread via `/runs`, `/runs/page`, or `/runs/{run_id}` (the single-run request
+  returned 200 instead of 404). `_run_scope_user_id` now consults the thread meta store:
+  established-owner threads keep the unfiltered read, while missing/NULL-owner threads
+  fall back to the acting owner's raw stamp, keeping cross-user runs hidden. Browser and
+  API sessions are untouched. ([#5484])
+- **frontend:** Gate tool-step links through the shared `isSafeHref` scheme allowlist.
+  The `web_fetch`, `web_search`, and `image_search` tool steps put URLs straight into
+  `<a href target="_blank">`, so a `ms-msdt:`, `search-ms:`, or `vscode:` link drawn
+  from model-written tool arguments (or provider results) rendered clickable — backend
+  URL validation never sees a still-streaming or failed fetch — and one click plus the
+  browser's external-application prompt handed an attacker-chosen URI to a local
+  application. Unsafe URLs now render as the same inert "Unsafe link omitted" span
+  markdown links use; `web_fetch` also stops throwing on a non-string `url` arg, and
+  missing tool-call `args` normalize to `{}` across every tool branch. ([#5526])
+- **uploads:** Stop the embedded client's uploads from writing through
+  symlinks. The uploads directory is writable from inside the sandbox, so a
+  process there (for example one steered by prompt injection) could plant
+  `notes.txt -> /host/path` and have the next `DeerFlowClient.upload_files` —
+  or a converted Markdown companion — overwrite an arbitrary host file with
+  the client's privileges. Uploads now publish through a no-symlink copy
+  helper; unsafe destinations are skipped and reported via `skipped_files`
+  with `success: false`, matching the Gateway's contract. ([#5578])
+- **uploads:** Convert a private copy of the staged bytes instead of the name
+  they landed under. The uploads directory is writable from inside the sandbox,
+  so a process there could swap an upload's committed name for a symlink to any
+  host file in the window before document conversion; the converter opens by
+  path and follows it, and the host file's content came back into the thread as
+  the converted `.md` companion. The Gateway now converts a descriptor-backed
+  copy in a private temporary directory, and the client converts the caller's
+  own source path — a swapped name no longer redirects the read. ([#5611])
+- **authz:** Enforce `threads:write` for Live Browser WebSocket connections.
+  The WebSocket bypassed the HTTP authentication middleware, and
+  `browser_stream()` checked authentication, Origin, thread ownership and
+  browser availability without resolving route permissions — so a thread owner
+  whose policy denies `threads:write` could still connect to the thread's Live
+  Browser, receive frames, and dispatch input events. Denied connections are
+  now rejected with close code `4403` before session acquisition; behavior is
+  unchanged when fine-grained authorization is disabled. ([#5621])
+- **gateway:** Reject external `system` and `developer` messages with HTTP 400
+  before checkpoint writes, run admission, or agent execution. Such messages
+  were previously accepted and could be persisted, merging into the agent's
+  system context on later turns. Message representations are canonicalized once
+  and validated; ordinary user, assistant, tool, and attachment messages and
+  trusted internal system messages are unaffected, and existing checkpoints are
+  not rewritten. ([#5651])
+- **skills:** A user-scoped `.skill` install now resolves the static content
+  scan from the same app config as the inherited archive preflight. The
+  user-scoped storage override passed no `app_config`, so the content scan fell
+  back to the hot-reloaded process global: when a storage's snapshot had
+  `skill_scan.enabled: true` and a later `config.yaml` edit set it to `false`,
+  the preflight ran but the content scan silently skipped and a CRITICAL archive
+  (such as embedded private-key material) installed anyway. The per-file LLM
+  scan now forwards the same config instead of reading the global for model
+  selection. ([#5703])
+- **sandbox:** Restored sandbox references are now scoped to the authenticated
+  user and thread. An authenticated caller could submit
+  `input.sandbox.sandbox_id` on a thread they owned, and the AIO restore path
+  resolved the body-supplied id from a process-wide active-sandbox cache
+  without checking the cached sandbox's `(user_id, thread_id)`, so a known
+  still-active foreign sandbox id could have sandbox-backed tool calls
+  dispatched to it. `sandbox` is now server-owned state: external run input and
+  thread-state updates reject it with HTTP 400, checkpoint reuse requires a
+  scoped match and otherwise falls back to a canonical
+  `acquire(user_id, thread_id)` persisted with `Overwrite`, and only the
+  server-created fork path may borrow a parent's sandbox. ([#5736])
+- **logging:** Redact space-carrying request targets in urllib3 retry log lines.
+  Three redaction patterns (`Retry: …`, `Retrying (…) …`, and the quoted request
+  line) stopped matching at the first space, so an origin-form path containing an
+  interior space — allowed by RFC 9110 — reached the log in cleartext with its
+  signature query intact; the `Retrying` shape logs at WARNING, so it landed in
+  production logs without DEBUG. The patterns now match the target up to its
+  terminating quote or end of line, consistent with the already-hardened
+  `Redirecting` and increment-retry slots. ([#5745])
+- **auth:** Claim the first admin atomically in `POST /api/v1/auth/initialize`. The
+  handler counted admins in one session and created the user in another with no
+  lock or constraint between them, so two concurrent first-boot requests with
+  different emails both succeeded and both became admins — silently, since
+  `setup-status` then reports an initialized system. Count and insert now share one
+  serialized transaction (`BEGIN IMMEDIATE` on SQLite, a transaction-scoped
+  advisory lock on PostgreSQL, unknown dialects fail at boot), and a losing request
+  gets the documented `409 system_already_initialized`; sequential behavior and
+  response shapes are unchanged. ([#5776])
+- **sandbox:** Require `sandbox:execute` before `view_image` reads. A role
+  allowed to call `view_image` while denied `sandbox:execute` could still
+  read an image from the current thread's allowed directories, and the image
+  middleware could place those bytes into a model request — an authorization
+  gap, not a cross-user read. Synchronous and asynchronous reads now check
+  execution authorization, and the middleware rechecks before reading an
+  image recorded in thread state, including after a role change. ([#5799])
+- **authz:** Enforce `model:use` on the suggestions endpoint. With model
+  authorization enabled, a user denied a model could still invoke it through
+  `POST /api/threads/{thread_id}/suggestions` — by naming it, or by omitting
+  the name when the denied model was the configured default — even though
+  `GET /api/models/{model_name}` returned 403 for the same user. The shared
+  model-details check now runs before model creation, returns 403 on denial,
+  and sits outside the best-effort handler so a permission failure cannot
+  become `200` with empty results. ([#5816])
+- **sandbox:** Scope viewed-image host reads to the current thread. External
+  run input or thread-state updates could supply `viewed_images` metadata
+  with a chosen `actual_path`, and after matching `view_image` history the
+  middleware read that host path into the next model request, so one user's
+  request could carry another user's image. External writes to the
+  server-owned `viewed_images` and `thread_data` channels are now rejected
+  with `400` before run admission, and a saved host copy is read only when
+  the recorded virtual path, resolved for the current user and thread,
+  matches `actual_path`; cross-thread references stay unavailable until
+  `view_image` runs again. ([#5824])
+
+### Documentation
+
+- **docs:** Fix the Apple Container verification instructions. The guide
+  pointed to a `test_container_runtime.py` script that does not exist and to
+  the old runtime implementation; it now references `LocalContainerBackend` in
+  `local_backend.py`, documents the existing Docker selection for restricted
+  networking, and uses the two existing runtime-selection pytest cases (which
+  mock runtime commands) as verification. ([#5605])
+- **config:** Move the `# Sandbox Configuration` banner in `config.example.yaml`
+  to sit directly above the `sandbox:` key it introduces instead of the
+  `uploads:` block it had drifted twenty lines away from, and give `uploads:` a
+  banner of its own. Comment-only change; `config.yaml` files generated from the
+  example are unaffected. ([#5652])
+- **docs:** Clarify the upgrade workflow for existing local and Docker
+  deployments in the README and the operations-and-troubleshooting guide:
+  `make config` and `make docker-init` are first-time setup steps, not routine
+  source-upgrade steps, and `make config-upgrade` is only needed when a release
+  adds configuration fields. ([#5654])
+- **docs:** Document how to connect DeerFlow to a local llama.cpp
+  `llama-server` (closes #2931). `config.example.yaml` and the English/Chinese
+  configuration pages gain an OpenAI-compatible Qwen example (`use:
+  langchain_openai:ChatOpenAI` against `http://localhost:8080/v1`), and cover
+  the `--alias` model name, a Docker-reachable `base_url`, the API key when
+  `llama-server --api-key` is enabled, and the chat-template/tool-calling
+  requirement. ([#5688])
+- **extensions:** Cover full-stack plugins and request-scoped run evidence in the
+  extensions manual (deerflow-extension-api 0.2.3, en and zh). A new Full-Stack
+  Plugins chapter documents `registry.plugin()`, `BrowserModule`/`BrowserAssets`,
+  backend actions, model tools, and settings; the run-evidence chapter covers
+  `resolve_run_evidence_reader`/`require_run_evidence_reader` with a per-user route
+  example; and plugin sections are added to Reference, Troubleshooting, and
+  Operating Extensions. ([#5775])
+- **docs:** Correct the documented skill and MCP enable/disable endpoints. The docs
+  site and `backend/docs/API.md` pointed at `POST /api/extensions/skills/{name}/enable`
+  and similar routes that do not exist in the gateway (404/405); the skill toggle
+  is `PUT /api/skills/{name}` with `{"enabled": bool}` and the MCP toggle is
+  `PATCH /api/mcp/config` with `{"server_name", "enabled"}` (both admin only), now
+  documented in the en/zh skills and MCP pages and in API.md with working cURL
+  examples. ([#5778])
+- **docs:** Fix backend doc examples that referenced APIs that do not exist.
+  The `PATH_EXAMPLES.md` upload example imported a `THREAD_DATA_BASE_DIR`
+  symbol no module exports, and pointed at the legacy upload bucket; it now
+  resolves the directory via `get_uploads_dir(thread_id)` from
+  `deerflow.uploads.manager`, which reads the bucket the Gateway actually
+  writes to. `CONFIGURATION.md` also drops a `sandbox.auto_start` key that
+  `SandboxConfig` never declared and no code reads. ([#5798])
+- **docs:** Make the custom-memory-storage guide followable. The harness
+  `memory.mdx` / `customization.mdx` snippets imported a module that does not
+  exist, showed a storage class the factory cannot construct and the memory
+  updater's calls reject, documented a `module:Class` value form that
+  `storage_class` never resolves, and promised a graceful fallback where the
+  code deliberately raises. The guide (English and Chinese) now names the real
+  module, matches the real call shapes, and states the actual error behavior. ([#5844])
+- **docs:** Add a ten-chapter checkpoint storage manual (`harness/checkpoints`)
+  in English and Chinese — quick start, channel modes, snapshot cadence, history
+  cache, resume and rollback, operations, observability, troubleshooting and
+  reference. The docs site's first coverage of dual-mode checkpoint storage: why
+  the mode and snapshot cadence are frozen per process (only
+  `checkpoint_graph_cache.accessor_graph_max` re-reads at runtime), why a
+  mode-mismatched request 409s, why delta runs cannot fork, and how retained
+  storage really grows — periodic snapshots keep the full message list, so
+  delta divides the quadratic term by the cadence rather than removing it. ([#5845])
+
+### Internal
+
+- **persistence:** Add historical regression coverage for the run-change clock repair
+  and its rollback. Databases created from the published migration graph at
+  `0023_user_preferences` or `0024_project_documents` skip the later-inserted
+  `0023_run_change_seq` ancestor; new tests reconstruct both affected graphs and
+  exercise the real startup bootstrap, legacy rows, and thread-delete reservation/state
+  writes, and verify healthy positions survive repeated bootstrap, downgrade, and
+  re-upgrade. Documentation only — the repair itself landed in #5517; no runtime
+  behavior change. ([#5518])
+- **capabilities:** Internal cleanup of the capability gallery and MCP
+  connection validation: named status/action helpers with early returns, a
+  separate `validate_mcp_connection()` with unchanged 422 responses, a shared
+  `installationQuery()`, and removal of an unused display-name argument from
+  `catalogForServer()`. Rendered UI and behavior are unchanged. ([#5580])
+- **deps:** Bump `anyio` from 4.13.0 to 4.14.2 in `/backend`. ([#5583])
+- **sandbox:** Share offline search contracts across sandbox providers. A new
+  112-case parameterized suite exercises the same `ls` / `glob` / `grep`
+  scenarios through all six adapters against a shared fixture filesystem,
+  covering ignored descendants, special paths, grep scope, overflow, transport
+  failures, and unavailable binaries. Production code is unchanged. ([#5677])
+- **persistence:** `langgraph-checkpoint` is bumped to `>=4.2.0,<5.0` and the
+  postgres extra's `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, letting
+  `checkpoint_patches.py` drop its `InMemorySaver` patch in favor of the
+  upstream fixes for the dropped first write after a full → delta migration and
+  for plain-value delta seed detection. The floors are load-bearing: without
+  them a resolver can quietly install the versions whose bug is no longer
+  patched. Behavior is unchanged — the local patch had been masking the bug.
+  ([#5734])
+- **tests:** Cover the delta-history cache's full-to-delta migration and pin
+  two open upstream `DeltaChannel` defects. The migration contract now runs
+  with the history cache disabled, cold, and warm, asserting materialized
+  history is digest-identical to an uncached saver; new regressions pin
+  langgraph#8382 (same-superstep parallel writes replay out of live order)
+  and langgraph#8448 (the Postgres paged delta walk poisons its cursor, so
+  older checkpoints hydrate empty), skipping until upstream fixes land. No
+  runtime behavior change. ([#5797])
+
+## [2.1.0] — 2026-09-24
+
 This section accumulates work toward the **2.1.0** milestone
-([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
-This release closes that milestone with **765 merged pull requests**.
+([2.1.0](https://github.com/bytedance/deer-flow/milestone/2)).
+This release closes that milestone with **772 merged pull requests**.
 
 ### ⚠ Breaking changes
 
@@ -493,22 +1956,6 @@ This release closes that milestone with **765 merged pull requests**.
 
 #### Models & integrations
 
-- **models:** Optional per-model `reasoning:` capability contract beside the
-  legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
-  `unsupported | optional | required`, the accepted effort `values` with
-  `aliases`, `default`, and serialization `path`, the payload `dialect`, and the
-  reasoning `history` requirement. Every model-creation path enforces one
-  normalized policy, so required-thinking models never receive a synthesized
-  disable payload and unsupported effort values never reach the provider;
-  `/api/models` projects the contract as `reasoning`, the composer derives its
-  effort choices from it, and the Z.AI GLM-5.3-Flash wizard profile regains its
-  `low/high/max` effort control. Custom effort paths reject leftover generic
-  effort keys, and the chat UI drops remembered contract-only levels when
-  switching to legacy models. Existing Ollama `reasoning: true` / `false` and
-  `low|medium|high` settings remain native provider options and stay in the
-  assembly fingerprint. Profiles without a mapping contract keep their existing
-  provider behavior.
-  ([#5073])
 - **community:** New web search/fetch engines - GroundRoute, Crawl4AI
   (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
   screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
@@ -957,6 +2404,45 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Fixed
 
+- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
+  worktree whose path contains spaces. `serve.sh` built its worktree-root list
+  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
+  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
+  frontend started from that worktree was never recognised as deer-flow's and
+  the start aborted with "port already in use". The whole path is kept now. ([#5856])
+- **uploads:** A malformed `files[*].size` in a run's message metadata no
+  longer fails the whole run. `UploadsMiddleware` validated every other field
+  of a client-supplied file entry fail-soft but passed `size` straight to
+  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
+  before the model was called — and again on every edit or regenerate of that
+  message, since the entry is carried over verbatim. The size only feeds the
+  human-readable line in `<current_uploads>`; unusable values now fall back to
+  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
+- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
+  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
+  and the Helm chart, but the lockfile records the root package's own version too
+  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
+  documented release step therefore produced a commit whose lock CI rejects:
+  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
+  tree, and with pre-commit installed it broke a step earlier on the
+  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
+  before editing anything when `uv` is missing, instead of leaving a half-bumped
+  working tree behind. Only the root package's version line moves. ([#5859])
+- **config:** A `config.yaml` edit that lands while the previous edit is still
+  being loaded is no longer lost until the next edit. `get_app_config()`'s
+  loader parsed the file and then hashed it again to record the cache
+  signature, so a write between those two reads left the cache holding the
+  older content under the newer content's signature — a state the signature
+  comparison can never detect. The loader now reads the file once and signs
+  the bytes it parsed; a write that races the load just triggers one more
+  reload on the next call. ([#5848])
+- **config:** `request_admission.requests_per_minute` and `max_queue_size` now
+  accept `$VAR` environment references like every other field. Both are strict
+  integers so a bool or float is still rejected, but `$VAR` substitution always
+  produces a string, so `requests_per_minute: $RPM` failed the whole config load
+  with "Input should be a valid integer" even when `RPM=60`. A decimal literal
+  delivered as a string is now converted before the strict check; any other
+  string is still rejected. ([#5838])
 - **scheduler:** Pausing a scheduled task no longer loses the pause when a
   dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
   owner — which pausing clears — but read the row without taking SQLite's
@@ -965,6 +2451,13 @@ This release closes that milestone with **765 merged pull requests**.
   the API had reported as paused. The read now takes the writer first, as every
   other mutating path in that repository does. PostgreSQL was unaffected.
   ([#5777])
+- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
+  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
+  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
+  `get_event_loop()` failing, but it also caught discovery errors and
+  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
+  up; inside a running loop it also logged a misleading "asyncio.run() cannot
+  be called from a running event loop" traceback instead of the real cause.
 - **uploads:** Deleting an uploaded document no longer deletes the converted
   Markdown beside it. Conversion names a companion after the document's stem
   and falls back to a `_N` suffix when that name is taken, so the `.md` next to
@@ -976,6 +2469,16 @@ This release closes that milestone with **765 merged pull requests**.
   acceptance checks. Readable empty files now satisfy `exists` and
   `file_written` and deterministically fail `non-empty`, instead of remaining
   UNVERIFIED. ([#5559])
+- **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
+  sidebar. In the sidebar's grouped Projects mode the indented nested menus
+  kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
+  100% of the width plus 16px and their absolutely positioned `right-1`
+  action landed past the sidebar edge — clipped on active-project rows and
+  pushed out entirely on the doubly indented rows under the Archived group,
+  while the flat chat list (the only unindented menu) was unaffected, which
+  is why it slipped through. Both nested menus now use `w-auto`, so the
+  block-level flex container fills the remaining width minus its margin. No
+  behavior, data, or API change beyond the layout fix. ([#5682])
 - **persistence:** Heal databases that silently skipped the run-change clock
   schema. `0023_run_change_seq` was inserted ahead of the already-shipped
   `0023_user_preferences` revision, so databases stamped at that revision (or
@@ -987,22 +2490,74 @@ This release closes that milestone with **765 merged pull requests**.
   upgrade and no-ops on healthy shapes. `RunChangeClockRow` and
   `UserPreferenceRow` are also registered in the ORM model registry so
   `create_all` and autogenerate see every table through explicit imports
-  instead of module side effects. Rolling back the repair to
-  `0024_project_documents` intentionally leaves the ancestor-owned schema and
-  existing change positions intact; the repair downgrade is a no-op.
-- **nginx:** Extend the 600-second read timeout to the two remaining locations
-  whose routes wait on the Gateway, both left on nginx's 60-second default by
-  the thread-route fix. Behind the `/api/` catch-all, the stateless
-  `POST /api/runs/wait` blocks on the same run-completion wait and cancels its
-  run when the client disconnects, so an API consumer waiting on a run longer
-  than 60 seconds got a 504 *and* a cancelled run, and the composer's
-  `POST /api/input-polish` waits for a one-shot model call. Behind
-  `/api/skills`, installing a `.skill` archive runs one LLM security scan per
-  file in it, and a custom-skill edit or rollback runs one more; none of them
-  sets its own timeout, and only the sibling `/api/skills/install/upload`
-  endpoint had been given the longer timeout, so the same install through
-  `POST /api/skills/install` failed at 60 seconds. Applied to the Docker,
-  local, and Helm configs. ([#5524])
+  instead of module side effects. ([#5517])
+- **backend:** Validate pagination on the LangGraph-compatible
+  `POST /api/assistants/search`. `limit` and `offset` were applied directly
+  through Python slicing, so invalid values such as `offset: -1`, `limit: 0`,
+  or an excessive limit returned `200` with misleading results instead of
+  being rejected at the API boundary. `limit` is now required within the
+  compatible range of 1–1000 and `offset` must be non-negative; invalid
+  requests get `422`. ([#5506])
+- **models:** Guard the Claude Code credential loader against a malformed
+  `claudeAiOauth` container. `~/.claude/.credentials.json` can hold a
+  syntactically valid JSON payload whose `claudeAiOauth` value is not an
+  object — a `null` left by a partial export, a raw string, an array, a
+  number — and the extractor called `.get` on it, raising `AttributeError`
+  out of `ClaudeChatModel.model_post_init` and aborting model construction,
+  the opposite of the loader's documented degrade-gracefully behavior (the
+  sibling Codex loader already guarded the identical shape). A non-object
+  top-level payload or `claudeAiOauth` value now logs at debug level and
+  counts as "no credential from this source", so loading falls through to
+  the next source and ultimately returns `None` when every source is
+  unusable. ([#5494])
+- **events:** Preserve the DB write-lock generation across thread deletion.
+  `DbRunEventStore` serializes per-thread sequence assignment with an
+  `asyncio.Lock`, and `delete_by_thread()` evicted that lock whenever
+  `lock.locked()` was false — but `asyncio.Lock.release()` clears the locked
+  state before a queued waiter resumes, so a deletion landing in that
+  handoff window removed the registry entry while an admitted waiter still
+  referenced the old lock. A later writer then created a new lock generation
+  for the same thread, and two writers could proceed under different locks,
+  violating the single-process serialization around `max(seq) + INSERT`.
+  The per-thread registry is now weak, so an admitted holder/waiter keeps
+  its lock generation discoverable until it drains, while a separate strong
+  pin preserves the existing stable one-lock-per-thread behavior; deletion
+  retires only the pin. ([#5462])
+- **setup:** Honor a custom sandbox image in BOM-prefixed configs.
+  `setup-sandbox.sh` matched `^sandbox:` against a first line still carrying
+  its UTF-8 BOM, never matched, and silently chose and pulled the default
+  image instead of the configured one, although the runtime YAML loader
+  accepts the same configuration. The script now strips a UTF-8 BOM at the
+  beginning of the first line before the image-selection pipeline, with no
+  new runtime dependency. ([#5515])
+- **gateway:** Keep the shutdown run drain alive across repeated
+  cancellation. `_drain_inflight_runs()` shielded the `RunManager.shutdown()`
+  task and then awaited it again, but a second `Task.cancel()` while that
+  second shield was pending interrupted the helper itself, letting the
+  lifespan continue unwinding while run tasks were still draining —
+  reopening the exact resource-ordering hazard the drain exists to prevent:
+  run tasks could still be writing checkpoints after checkpointer teardown
+  began. The helper now keeps the already-started shutdown task strongly
+  owned and repeatedly shields it until it reaches a terminal state,
+  remembering the first caller cancellation and propagating it only after
+  the bounded drain completes. Logging and error behavior on a failing
+  drain are unchanged. ([#5487])
+- **models:** Pair Codex invalid tool calls with their tool results. A Codex
+  model that emits a `function_call` whose `arguments` are not valid JSON
+  does not fail the turn: the call is parked on `invalid_tool_calls` and
+  answered with a placeholder `ToolMessage` by `DanglingToolCallMiddleware`,
+  so the model sees a recoverable tool error. But the Codex Responses
+  serializer emitted input items for valid `tool_calls` only, so the
+  placeholder reached the provider as a `function_call_output` whose
+  `call_id` had no matching `function_call` in the same request, and the
+  Responses API requires the pair — the exact case the middleware exists to
+  recover from ended in a provider error instead of a retry. Chat
+  Completions providers already replay invalid calls through LangChain's
+  converter, and the OpenAI-compatible path had the same failure class
+  repaired in the middleware; Codex requests now also replay
+  `invalid_tool_calls` as `function_call` input items next to the valid
+  ones. The valid-call path, the parse side, and the middleware are
+  unchanged. ([#5509])
 - **nginx:** Stop thread routes that wait on a model call from failing at 60
   seconds. The browser calls `/api/threads/*` directly, and that location had
   no `proxy_read_timeout`, so nginx's 60-second default applied while
@@ -1053,15 +2608,6 @@ This release closes that milestone with **765 merged pull requests**.
   filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
   is a separate limit with its own one-line-past accounting, and the other
   providers' filtered-match cap is unchanged. ([#5449])
-- **sandbox:** Stop AIO's `grep` and the remote providers' `glob`/`grep` from
-  reporting an exactly-full result as truncated. They hold the whole listing —
-  the raw stream is capped above `max_results` and reports its own cut-off — but
-  they returned as soon as they had collected `max_results` filtered matches, so
-  a tree holding exactly that many — and no more — came back flagged as cut off
-  and the tool told the model the result was incomplete. They now look one match
-  past the cap before deciding, the rule AIO's `glob` branches already apply.
-  This concerns the filtered-match cap only; the raw-output cap
-  `parse_remote_search_output` owns is unchanged. ([#5534])
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2816,42 +4362,6 @@ This release closes that milestone with **765 merged pull requests**.
 
 ### Security
 
-- **auth:** `POST /api/v1/auth/initialize` no longer lets two concurrent
-  first-boot requests both create an admin. The handler counted admins in one
-  session and created the account in another, so two requests with different
-  emails both saw an empty system; the loser now gets the documented
-  `409 system_already_initialized`. The count and the insert share one
-  transaction with writers serialized first (SQLite `BEGIN IMMEDIATE`,
-  PostgreSQL advisory lock). ([#5776])
-- **uploads:** Document conversion no longer re-opens the upload by name. The
-  Gateway converted the committed file and the embedded client converted the
-  copy it had just placed in the thread's uploads directory, so a sandbox that
-  replaced that name with a symlink in between had a host file converted into
-  the thread as the `.md` companion. The Gateway now converts a private copy of
-  the staged bytes, read through the descriptor it wrote, and the client
-  converts the caller's own source file. ([#5611])
-- **client:** `DeerFlowClient.upload_files` no longer writes through a
-  symlink. A symlink planted in the sandbox-writable uploads directory, at an
-  upload's name or its Markdown companion's name, made the embedded client
-  overwrite the host file it pointed to while reporting success. The file is
-  now skipped and listed in `skipped_files` with `success: false`, matching
-  the Gateway; an unsafe companion is left out and the upload kept. Copies
-  keep the source's permission bits and timestamps. ([#5578])
-- **uploads:** Deleting an upload no longer follows a symlink to delete a
-  different file. A symlink planted in the sandbox-writable uploads directory
-  made `DELETE /api/threads/{id}/uploads/{filename}` (and
-  `DeerFlowClient.delete_upload`) remove the upload it pointed to, plus that
-  file's companion `.md`, while reporting the requested name as deleted.
-  Symlinks now return 404, matching the upload listing; links that leave the
-  uploads directory are still rejected with 400. ([#5547])
-- **frontend:** Tool steps no longer turn non-web URLs into links. The
-  `web_fetch` URL and `web_search` / `image_search` result links in the
-  chain-of-thought panel skipped the scheme allowlist that markdown links use,
-  so a prompt-injected tool call could put a `file:` or OS protocol-handler
-  link (`ms-msdt:`, `vscode:`, …) into the chat. They now pass `isSafeHref`
-  and show an unsafe URL with the same "Unsafe link omitted" marker as
-  markdown links. A tool call whose args are missing, or whose `web_fetch` URL
-  is not a string, no longer crashes the message list. ([#5526])
 - **skills:** Close gaps that let files skip SkillScan in the public skill
   review gate. The review analyzer passed SkillScan only files it had decoded
   as text, so executable binaries and nested archives were never checked; it
@@ -3010,7 +4520,7 @@ This release closes that milestone with **765 merged pull requests**.
   integration, and a reference appendix with the June to September 2026
   change log. The former single page becomes the section index, so existing
   page links keep working; deep links to sections of the old page now land
-  on the index.
+  on the index. ([#5761])
 - **docs:** Add an extension developer manual under `harness/extensions/` in
   both languages, covering the `deerflow-extension-api` 0.2.1 contract: when
   to write an extension, a quick start, the runtime model, middleware
@@ -3018,25 +4528,10 @@ This release closes that milestone with **765 merged pull requests**.
   evidence reader, operating extensions, troubleshooting by error message,
   and a reference of every public name with the contract's version history.
   Also correct stale descriptions of the contribution kinds and of run
-  evidence metadata redaction in `AGENTS.md`.
-- **docs:** Bring the extension developer manual up to the
-  `deerflow-extension-api` 0.2.3 contract: a Full-Stack Plugins chapter
-  covering `registry.plugin()`, browser modules and packaged assets, backend
-  actions, model tools and settings; the request-scoped run evidence reader
-  with a per-user route example; and plugin troubleshooting and operations
-  notes. Also correct the plugin `mount` return value in
-  `docs/full-stack-plugins.md`.
+  evidence metadata redaction in `AGENTS.md`. ([#5769])
 
 ### Internal
 
-- **deps:** Raise `langgraph-checkpoint` to `>=4.2.0,<5.0` and
-  `langgraph-checkpoint-postgres` to `>=3.1.2,<3.2`, and drop the
-  `InMemorySaver` delta-history compatibility patch. Upstream 4.2.0 fixes the
-  first write dropped after a full → delta migration
-  (langchain-ai/langgraph#8526) and the postgres release locates plain-value
-  delta seeds (langchain-ai/langgraph#8535), so the dependency floor replaces
-  the patch; the full → delta migration contract test remains the gate.
-  `langgraph` and `langgraph-checkpoint-sqlite` are unchanged. ([#5734])
 - **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
   a DOM environment. ([#3703], [#4453])
 - **tests:** Require explicit opt-in for live client tests. ([#4482])
@@ -3100,6 +4595,15 @@ This release closes that milestone with **765 merged pull requests**.
 - **tests:** Skip the POSIX mode-bit skill-permission assertions on Windows,
   where the `chmod` contract is unobservable, so Windows contributors can
   reach a green backend-suite baseline. ([#5244])
+- **tests:** Pin the composer's skill suggestions against an empty skill
+  catalog (RFC #4063 Phase 4): a caller whose `skills` policy allows nothing
+  — or a fresh install with no skills — receives `[]` from `GET /api/skills`,
+  and the composer must degrade to a builtin-only dropdown, never a broken
+  or fully vanishing one. New tests drive the matcher and mount the real
+  `InputBox` with an empty catalog: typing `/` offers exactly the builtin
+  commands, and an unmatched query renders no listbox. No production code
+  changed; all four `useSkills()` consumers were audited and already
+  degrade gracefully. ([#5490])
 
 ## [2.0.0] — 2026-06-15
 
@@ -3428,6 +4932,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
+[Unreleased]: https://github.com/bytedance/deer-flow/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
 [#2329]: https://github.com/bytedance/deer-flow/pull/2329
@@ -3508,8 +5014,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3133]: https://github.com/bytedance/deer-flow/pull/3133
 [#3144]: https://github.com/bytedance/deer-flow/pull/3144
 [#3153]: https://github.com/bytedance/deer-flow/pull/3153
+[#3157]: https://github.com/bytedance/deer-flow/pull/3157
 [#3174]: https://github.com/bytedance/deer-flow/pull/3174
 [#3176]: https://github.com/bytedance/deer-flow/pull/3176
+[#3182]: https://github.com/bytedance/deer-flow/pull/3182
 [#3183]: https://github.com/bytedance/deer-flow/pull/3183
 [#3191]: https://github.com/bytedance/deer-flow/pull/3191
 [#3200]: https://github.com/bytedance/deer-flow/pull/3200
@@ -3683,6 +5191,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3810]: https://github.com/bytedance/deer-flow/pull/3810
 [#3812]: https://github.com/bytedance/deer-flow/pull/3812
 [#3821]: https://github.com/bytedance/deer-flow/pull/3821
+[#3823]: https://github.com/bytedance/deer-flow/pull/3823
 [#3824]: https://github.com/bytedance/deer-flow/pull/3824
 [#3826]: https://github.com/bytedance/deer-flow/pull/3826
 [#3828]: https://github.com/bytedance/deer-flow/pull/3828
@@ -3787,6 +5296,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4060]: https://github.com/bytedance/deer-flow/pull/4060
 [#4064]: https://github.com/bytedance/deer-flow/pull/4064
 [#4065]: https://github.com/bytedance/deer-flow/pull/4065
+[#4066]: https://github.com/bytedance/deer-flow/pull/4066
 [#4067]: https://github.com/bytedance/deer-flow/pull/4067
 [#4069]: https://github.com/bytedance/deer-flow/pull/4069
 [#4072]: https://github.com/bytedance/deer-flow/pull/4072
@@ -4139,6 +5649,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4903]: https://github.com/bytedance/deer-flow/pull/4903
 [#4911]: https://github.com/bytedance/deer-flow/pull/4911
 [#4918]: https://github.com/bytedance/deer-flow/pull/4918
+[#4919]: https://github.com/bytedance/deer-flow/pull/4919
 [#4921]: https://github.com/bytedance/deer-flow/pull/4921
 [#4928]: https://github.com/bytedance/deer-flow/pull/4928
 [#4933]: https://github.com/bytedance/deer-flow/pull/4933
@@ -4156,6 +5667,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4962]: https://github.com/bytedance/deer-flow/pull/4962
 [#4963]: https://github.com/bytedance/deer-flow/pull/4963
 [#4965]: https://github.com/bytedance/deer-flow/pull/4965
+[#4966]: https://github.com/bytedance/deer-flow/pull/4966
 [#4970]: https://github.com/bytedance/deer-flow/pull/4970
 [#4972]: https://github.com/bytedance/deer-flow/pull/4972
 [#4977]: https://github.com/bytedance/deer-flow/pull/4977
@@ -4164,8 +5676,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4984]: https://github.com/bytedance/deer-flow/pull/4984
 [#4986]: https://github.com/bytedance/deer-flow/pull/4986
 [#4987]: https://github.com/bytedance/deer-flow/pull/4987
+[#4989]: https://github.com/bytedance/deer-flow/pull/4989
 [#4995]: https://github.com/bytedance/deer-flow/pull/4995
 [#4998]: https://github.com/bytedance/deer-flow/pull/4998
+[#5001]: https://github.com/bytedance/deer-flow/pull/5001
 [#5003]: https://github.com/bytedance/deer-flow/pull/5003
 [#5006]: https://github.com/bytedance/deer-flow/pull/5006
 [#5008]: https://github.com/bytedance/deer-flow/pull/5008
@@ -4198,10 +5712,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5066]: https://github.com/bytedance/deer-flow/pull/5066
 [#5069]: https://github.com/bytedance/deer-flow/pull/5069
 [#5071]: https://github.com/bytedance/deer-flow/pull/5071
-[#5073]: https://github.com/bytedance/deer-flow/issues/5073
 [#5074]: https://github.com/bytedance/deer-flow/pull/5074
 [#5076]: https://github.com/bytedance/deer-flow/pull/5076
 [#5077]: https://github.com/bytedance/deer-flow/pull/5077
+[#5080]: https://github.com/bytedance/deer-flow/pull/5080
 [#5083]: https://github.com/bytedance/deer-flow/pull/5083
 [#5086]: https://github.com/bytedance/deer-flow/pull/5086
 [#5087]: https://github.com/bytedance/deer-flow/pull/5087
@@ -4211,6 +5725,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5095]: https://github.com/bytedance/deer-flow/pull/5095
 [#5099]: https://github.com/bytedance/deer-flow/pull/5099
 [#5103]: https://github.com/bytedance/deer-flow/pull/5103
+[#5104]: https://github.com/bytedance/deer-flow/pull/5104
 [#5105]: https://github.com/bytedance/deer-flow/pull/5105
 [#5109]: https://github.com/bytedance/deer-flow/pull/5109
 [#5110]: https://github.com/bytedance/deer-flow/pull/5110
@@ -4253,6 +5768,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5216]: https://github.com/bytedance/deer-flow/pull/5216
 [#5217]: https://github.com/bytedance/deer-flow/pull/5217
 [#5219]: https://github.com/bytedance/deer-flow/pull/5219
+[#5221]: https://github.com/bytedance/deer-flow/pull/5221
 [#5224]: https://github.com/bytedance/deer-flow/pull/5224
 [#5225]: https://github.com/bytedance/deer-flow/pull/5225
 [#5227]: https://github.com/bytedance/deer-flow/pull/5227
@@ -4260,11 +5776,13 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5232]: https://github.com/bytedance/deer-flow/pull/5232
 [#5234]: https://github.com/bytedance/deer-flow/pull/5234
 [#5236]: https://github.com/bytedance/deer-flow/pull/5236
+[#5238]: https://github.com/bytedance/deer-flow/pull/5238
 [#5239]: https://github.com/bytedance/deer-flow/pull/5239
 [#5244]: https://github.com/bytedance/deer-flow/pull/5244
 [#5245]: https://github.com/bytedance/deer-flow/pull/5245
 [#5247]: https://github.com/bytedance/deer-flow/pull/5247
 [#5249]: https://github.com/bytedance/deer-flow/pull/5249
+[#5251]: https://github.com/bytedance/deer-flow/pull/5251
 [#5254]: https://github.com/bytedance/deer-flow/pull/5254
 [#5255]: https://github.com/bytedance/deer-flow/pull/5255
 [#5261]: https://github.com/bytedance/deer-flow/pull/5261
@@ -4272,6 +5790,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5265]: https://github.com/bytedance/deer-flow/pull/5265
 [#5275]: https://github.com/bytedance/deer-flow/pull/5275
 [#5278]: https://github.com/bytedance/deer-flow/pull/5278
+[#5279]: https://github.com/bytedance/deer-flow/pull/5279
 [#5280]: https://github.com/bytedance/deer-flow/pull/5280
 [#5281]: https://github.com/bytedance/deer-flow/pull/5281
 [#5282]: https://github.com/bytedance/deer-flow/pull/5282
@@ -4289,6 +5808,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5304]: https://github.com/bytedance/deer-flow/pull/5304
 [#5305]: https://github.com/bytedance/deer-flow/pull/5305
 [#5306]: https://github.com/bytedance/deer-flow/pull/5306
+[#5308]: https://github.com/bytedance/deer-flow/pull/5308
 [#5309]: https://github.com/bytedance/deer-flow/pull/5309
 [#5310]: https://github.com/bytedance/deer-flow/pull/5310
 [#5312]: https://github.com/bytedance/deer-flow/pull/5312
@@ -4300,15 +5820,19 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5324]: https://github.com/bytedance/deer-flow/pull/5324
 [#5326]: https://github.com/bytedance/deer-flow/pull/5326
 [#5329]: https://github.com/bytedance/deer-flow/pull/5329
+[#5330]: https://github.com/bytedance/deer-flow/pull/5330
 [#5332]: https://github.com/bytedance/deer-flow/pull/5332
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5341]: https://github.com/bytedance/deer-flow/pull/5341
 [#5344]: https://github.com/bytedance/deer-flow/pull/5344
 [#5347]: https://github.com/bytedance/deer-flow/pull/5347
+[#5348]: https://github.com/bytedance/deer-flow/pull/5348
 [#5350]: https://github.com/bytedance/deer-flow/pull/5350
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5355]: https://github.com/bytedance/deer-flow/pull/5355
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5359]: https://github.com/bytedance/deer-flow/pull/5359
+[#5361]: https://github.com/bytedance/deer-flow/pull/5361
 [#5363]: https://github.com/bytedance/deer-flow/pull/5363
 [#5367]: https://github.com/bytedance/deer-flow/pull/5367
 [#5369]: https://github.com/bytedance/deer-flow/pull/5369
@@ -4374,6 +5898,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5458]: https://github.com/bytedance/deer-flow/pull/5458
 [#5459]: https://github.com/bytedance/deer-flow/pull/5459
 [#5461]: https://github.com/bytedance/deer-flow/pull/5461
+[#5462]: https://github.com/bytedance/deer-flow/pull/5462
 [#5463]: https://github.com/bytedance/deer-flow/pull/5463
 [#5465]: https://github.com/bytedance/deer-flow/pull/5465
 [#5467]: https://github.com/bytedance/deer-flow/pull/5467
@@ -4386,23 +5911,187 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5479]: https://github.com/bytedance/deer-flow/pull/5479
 [#5480]: https://github.com/bytedance/deer-flow/pull/5480
 [#5483]: https://github.com/bytedance/deer-flow/pull/5483
+[#5484]: https://github.com/bytedance/deer-flow/pull/5484
 [#5485]: https://github.com/bytedance/deer-flow/pull/5485
 [#5486]: https://github.com/bytedance/deer-flow/pull/5486
+[#5487]: https://github.com/bytedance/deer-flow/pull/5487
 [#5488]: https://github.com/bytedance/deer-flow/pull/5488
+[#5489]: https://github.com/bytedance/deer-flow/pull/5489
+[#5490]: https://github.com/bytedance/deer-flow/pull/5490
 [#5492]: https://github.com/bytedance/deer-flow/pull/5492
+[#5494]: https://github.com/bytedance/deer-flow/pull/5494
 [#5496]: https://github.com/bytedance/deer-flow/pull/5496
+[#5497]: https://github.com/bytedance/deer-flow/pull/5497
+[#5498]: https://github.com/bytedance/deer-flow/pull/5498
 [#5501]: https://github.com/bytedance/deer-flow/pull/5501
 [#5504]: https://github.com/bytedance/deer-flow/pull/5504
 [#5505]: https://github.com/bytedance/deer-flow/pull/5505
+[#5506]: https://github.com/bytedance/deer-flow/pull/5506
+[#5507]: https://github.com/bytedance/deer-flow/pull/5507
+[#5508]: https://github.com/bytedance/deer-flow/pull/5508
+[#5509]: https://github.com/bytedance/deer-flow/pull/5509
+[#5511]: https://github.com/bytedance/deer-flow/pull/5511
+[#5515]: https://github.com/bytedance/deer-flow/pull/5515
+[#5517]: https://github.com/bytedance/deer-flow/pull/5517
+[#5518]: https://github.com/bytedance/deer-flow/pull/5518
+[#5522]: https://github.com/bytedance/deer-flow/pull/5522
 [#5524]: https://github.com/bytedance/deer-flow/pull/5524
-[#5559]: https://github.com/bytedance/deer-flow/pull/5559
+[#5525]: https://github.com/bytedance/deer-flow/pull/5525
 [#5526]: https://github.com/bytedance/deer-flow/pull/5526
+[#5527]: https://github.com/bytedance/deer-flow/pull/5527
+[#5528]: https://github.com/bytedance/deer-flow/pull/5528
+[#5531]: https://github.com/bytedance/deer-flow/pull/5531
 [#5534]: https://github.com/bytedance/deer-flow/pull/5534
+[#5535]: https://github.com/bytedance/deer-flow/pull/5535
+[#5536]: https://github.com/bytedance/deer-flow/pull/5536
+[#5537]: https://github.com/bytedance/deer-flow/pull/5537
+[#5538]: https://github.com/bytedance/deer-flow/pull/5538
+[#5540]: https://github.com/bytedance/deer-flow/pull/5540
+[#5541]: https://github.com/bytedance/deer-flow/pull/5541
+[#5544]: https://github.com/bytedance/deer-flow/pull/5544
+[#5545]: https://github.com/bytedance/deer-flow/pull/5545
+[#5546]: https://github.com/bytedance/deer-flow/pull/5546
 [#5547]: https://github.com/bytedance/deer-flow/pull/5547
+[#5549]: https://github.com/bytedance/deer-flow/pull/5549
+[#5551]: https://github.com/bytedance/deer-flow/pull/5551
+[#5555]: https://github.com/bytedance/deer-flow/pull/5555
+[#5556]: https://github.com/bytedance/deer-flow/pull/5556
+[#5559]: https://github.com/bytedance/deer-flow/pull/5559
+[#5560]: https://github.com/bytedance/deer-flow/pull/5560
+[#5562]: https://github.com/bytedance/deer-flow/pull/5562
+[#5563]: https://github.com/bytedance/deer-flow/pull/5563
+[#5564]: https://github.com/bytedance/deer-flow/pull/5564
+[#5567]: https://github.com/bytedance/deer-flow/pull/5567
+[#5569]: https://github.com/bytedance/deer-flow/pull/5569
+[#5570]: https://github.com/bytedance/deer-flow/pull/5570
+[#5572]: https://github.com/bytedance/deer-flow/pull/5572
+[#5573]: https://github.com/bytedance/deer-flow/pull/5573
+[#5576]: https://github.com/bytedance/deer-flow/pull/5576
 [#5578]: https://github.com/bytedance/deer-flow/pull/5578
+[#5579]: https://github.com/bytedance/deer-flow/pull/5579
+[#5580]: https://github.com/bytedance/deer-flow/pull/5580
+[#5581]: https://github.com/bytedance/deer-flow/pull/5581
+[#5582]: https://github.com/bytedance/deer-flow/pull/5582
+[#5583]: https://github.com/bytedance/deer-flow/pull/5583
+[#5584]: https://github.com/bytedance/deer-flow/pull/5584
+[#5586]: https://github.com/bytedance/deer-flow/pull/5586
+[#5588]: https://github.com/bytedance/deer-flow/pull/5588
+[#5591]: https://github.com/bytedance/deer-flow/pull/5591
+[#5593]: https://github.com/bytedance/deer-flow/pull/5593
+[#5594]: https://github.com/bytedance/deer-flow/pull/5594
+[#5596]: https://github.com/bytedance/deer-flow/pull/5596
+[#5601]: https://github.com/bytedance/deer-flow/pull/5601
+[#5602]: https://github.com/bytedance/deer-flow/pull/5602
+[#5605]: https://github.com/bytedance/deer-flow/pull/5605
+[#5607]: https://github.com/bytedance/deer-flow/pull/5607
+[#5609]: https://github.com/bytedance/deer-flow/pull/5609
 [#5611]: https://github.com/bytedance/deer-flow/pull/5611
+[#5612]: https://github.com/bytedance/deer-flow/pull/5612
+[#5614]: https://github.com/bytedance/deer-flow/pull/5614
+[#5616]: https://github.com/bytedance/deer-flow/pull/5616
+[#5617]: https://github.com/bytedance/deer-flow/pull/5617
+[#5621]: https://github.com/bytedance/deer-flow/pull/5621
+[#5622]: https://github.com/bytedance/deer-flow/pull/5622
+[#5625]: https://github.com/bytedance/deer-flow/pull/5625
+[#5630]: https://github.com/bytedance/deer-flow/pull/5630
+[#5631]: https://github.com/bytedance/deer-flow/pull/5631
+[#5634]: https://github.com/bytedance/deer-flow/pull/5634
+[#5640]: https://github.com/bytedance/deer-flow/pull/5640
+[#5643]: https://github.com/bytedance/deer-flow/pull/5643
+[#5647]: https://github.com/bytedance/deer-flow/pull/5647
+[#5648]: https://github.com/bytedance/deer-flow/pull/5648
+[#5649]: https://github.com/bytedance/deer-flow/pull/5649
+[#5650]: https://github.com/bytedance/deer-flow/pull/5650
+[#5651]: https://github.com/bytedance/deer-flow/pull/5651
+[#5652]: https://github.com/bytedance/deer-flow/pull/5652
+[#5654]: https://github.com/bytedance/deer-flow/pull/5654
+[#5655]: https://github.com/bytedance/deer-flow/pull/5655
+[#5656]: https://github.com/bytedance/deer-flow/pull/5656
+[#5659]: https://github.com/bytedance/deer-flow/pull/5659
+[#5662]: https://github.com/bytedance/deer-flow/pull/5662
+[#5663]: https://github.com/bytedance/deer-flow/pull/5663
+[#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
+[#5676]: https://github.com/bytedance/deer-flow/pull/5676
+[#5677]: https://github.com/bytedance/deer-flow/pull/5677
+[#5678]: https://github.com/bytedance/deer-flow/pull/5678
+[#5680]: https://github.com/bytedance/deer-flow/pull/5680
+[#5682]: https://github.com/bytedance/deer-flow/pull/5682
+[#5683]: https://github.com/bytedance/deer-flow/pull/5683
+[#5684]: https://github.com/bytedance/deer-flow/pull/5684
+[#5685]: https://github.com/bytedance/deer-flow/pull/5685
+[#5687]: https://github.com/bytedance/deer-flow/pull/5687
+[#5688]: https://github.com/bytedance/deer-flow/pull/5688
+[#5691]: https://github.com/bytedance/deer-flow/pull/5691
+[#5702]: https://github.com/bytedance/deer-flow/pull/5702
+[#5703]: https://github.com/bytedance/deer-flow/pull/5703
+[#5705]: https://github.com/bytedance/deer-flow/pull/5705
+[#5711]: https://github.com/bytedance/deer-flow/pull/5711
+[#5712]: https://github.com/bytedance/deer-flow/pull/5712
+[#5718]: https://github.com/bytedance/deer-flow/pull/5718
+[#5719]: https://github.com/bytedance/deer-flow/pull/5719
+[#5723]: https://github.com/bytedance/deer-flow/pull/5723
+[#5727]: https://github.com/bytedance/deer-flow/pull/5727
+[#5729]: https://github.com/bytedance/deer-flow/pull/5729
+[#5731]: https://github.com/bytedance/deer-flow/pull/5731
+[#5733]: https://github.com/bytedance/deer-flow/pull/5733
 [#5734]: https://github.com/bytedance/deer-flow/pull/5734
+[#5735]: https://github.com/bytedance/deer-flow/pull/5735
+[#5736]: https://github.com/bytedance/deer-flow/pull/5736
+[#5738]: https://github.com/bytedance/deer-flow/pull/5738
+[#5739]: https://github.com/bytedance/deer-flow/pull/5739
+[#5740]: https://github.com/bytedance/deer-flow/pull/5740
+[#5741]: https://github.com/bytedance/deer-flow/pull/5741
+[#5745]: https://github.com/bytedance/deer-flow/pull/5745
+[#5748]: https://github.com/bytedance/deer-flow/pull/5748
+[#5750]: https://github.com/bytedance/deer-flow/pull/5750
+[#5755]: https://github.com/bytedance/deer-flow/pull/5755
+[#5756]: https://github.com/bytedance/deer-flow/pull/5756
+[#5757]: https://github.com/bytedance/deer-flow/pull/5757
+[#5758]: https://github.com/bytedance/deer-flow/pull/5758
+[#5759]: https://github.com/bytedance/deer-flow/pull/5759
+[#5760]: https://github.com/bytedance/deer-flow/pull/5760
+[#5761]: https://github.com/bytedance/deer-flow/pull/5761
+[#5762]: https://github.com/bytedance/deer-flow/pull/5762
+[#5767]: https://github.com/bytedance/deer-flow/pull/5767
+[#5769]: https://github.com/bytedance/deer-flow/pull/5769
+[#5775]: https://github.com/bytedance/deer-flow/pull/5775
 [#5776]: https://github.com/bytedance/deer-flow/pull/5776
 [#5777]: https://github.com/bytedance/deer-flow/pull/5777
+[#5778]: https://github.com/bytedance/deer-flow/pull/5778
+[#5780]: https://github.com/bytedance/deer-flow/pull/5780
+[#5785]: https://github.com/bytedance/deer-flow/pull/5785
+[#5792]: https://github.com/bytedance/deer-flow/pull/5792
+[#5794]: https://github.com/bytedance/deer-flow/pull/5794
+[#5796]: https://github.com/bytedance/deer-flow/pull/5796
+[#5797]: https://github.com/bytedance/deer-flow/pull/5797
+[#5798]: https://github.com/bytedance/deer-flow/pull/5798
+[#5799]: https://github.com/bytedance/deer-flow/pull/5799
+[#5801]: https://github.com/bytedance/deer-flow/pull/5801
+[#5803]: https://github.com/bytedance/deer-flow/pull/5803
+[#5804]: https://github.com/bytedance/deer-flow/pull/5804
+[#5806]: https://github.com/bytedance/deer-flow/pull/5806
+[#5807]: https://github.com/bytedance/deer-flow/pull/5807
+[#5811]: https://github.com/bytedance/deer-flow/pull/5811
+[#5812]: https://github.com/bytedance/deer-flow/pull/5812
+[#5815]: https://github.com/bytedance/deer-flow/pull/5815
+[#5816]: https://github.com/bytedance/deer-flow/pull/5816
+[#5819]: https://github.com/bytedance/deer-flow/pull/5819
+[#5823]: https://github.com/bytedance/deer-flow/pull/5823
+[#5824]: https://github.com/bytedance/deer-flow/pull/5824
+[#5830]: https://github.com/bytedance/deer-flow/pull/5830
+[#5833]: https://github.com/bytedance/deer-flow/pull/5833
+[#5836]: https://github.com/bytedance/deer-flow/pull/5836
+[#5838]: https://github.com/bytedance/deer-flow/pull/5838
+[#5839]: https://github.com/bytedance/deer-flow/pull/5839
+[#5840]: https://github.com/bytedance/deer-flow/pull/5840
+[#5841]: https://github.com/bytedance/deer-flow/pull/5841
+[#5842]: https://github.com/bytedance/deer-flow/pull/5842
+[#5844]: https://github.com/bytedance/deer-flow/pull/5844
+[#5845]: https://github.com/bytedance/deer-flow/pull/5845
+[#5848]: https://github.com/bytedance/deer-flow/pull/5848
+[#5855]: https://github.com/bytedance/deer-flow/pull/5855
+[#5856]: https://github.com/bytedance/deer-flow/pull/5856
+[#5859]: https://github.com/bytedance/deer-flow/pull/5859
 

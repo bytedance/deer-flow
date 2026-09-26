@@ -1,5 +1,11 @@
 ### Configuration System
 
+Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
+`subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
+The per-assembly snapshot owns these settings; no run-context override exists.
+DeerMem owns its separate `memory.backend_config.prompt_prepend`/`prompt_append`
+fields so the memory package remains host-agnostic.
+
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
 label of at most 100 Unicode code points. C0/C1 controls and bidirectional
 formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
@@ -33,7 +39,7 @@ their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
-**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
+**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
@@ -56,7 +62,10 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
-configure process-local model pacing. Models sharing an explicit group must use
+configure process-local model pacing. `requests_per_minute` and `max_queue_size` are strict
+integers (bools and floats are rejected) behind a `BeforeValidator` that converts a
+decimal literal delivered as a string, because `$VAR` substitution always yields
+`str`; any other string still fails validation. Models sharing an explicit group must use
 identical policies. Restart after changing, disabling or regrouping an active
 policy; conflicting policies fail construction rather than silently resetting
 an active budget. This nested model option is enforced by its limiter registry,

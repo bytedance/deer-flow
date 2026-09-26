@@ -1,5 +1,9 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Apply each subagent's prompt overlay after assembling its full SystemMessage.
+Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
+Durable batch specs store overlays as JSON and restore them before execution.
+
 **Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
 `regular file` and `regular empty file` as regular files. Empty files satisfy
 `exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and
@@ -9,19 +13,17 @@ FIFOs remain rejected.
 
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
-**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until the owned service stop task terminates, then propagates the first caller cancellation with any service failure/cancellation as its cause. The drain is intentionally unbounded: repository awaits and child cleanup must terminate; a timeout must not detach still-owned work. Keep terminal-outcome and repeated-cancellation coverage in `tests/test_subagent_runtime.py`.
+**Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until service shutdown finishes. Drain without a timeout so owned work cannot detach; propagate the first caller cancellation, chaining any service failure. Cover terminal outcomes and repeated cancellation in `tests/test_subagent_runtime.py`.
 
-**Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
-before persistence (empty becomes null; 20 items × 500 neutralized characters),
-sharing `normalize_acceptance_criteria` with the executor and checker.
-Completed items reuse `acceptance_checks` through `batch_acceptance.py`, with
-owner-scoped thread paths, sandbox authorization and a client lease. Admission
-and checks share `parse_file_criterion` on the effective normalized list. Blocking
-reads drain before release on cancellation, and the batch item lease is renewed
-while checking. The nullable validated verdict survives repository queries and
-JSONL exports independently of execution status. No criteria, checker errors,
-and legacy rows have no verdict; they are not accepted by implication. Failed
-executions are not checked, and acceptance never changes automatic retry policy.
+**Durable batch acceptance**: Normalize optional `batch_task` criteria before
+persistence (empty → null; 20 items × 500 neutralized characters) with shared
+`normalize_acceptance_criteria`. Completed items use `acceptance_checks` through
+`batch_acceptance.py`, with owner-scoped paths, sandbox authorization, and a
+renewed client lease. Admission and checks share `parse_file_criterion`; drain
+blocking reads before releasing the lease on cancellation. Persist nullable
+verdicts through queries and JSONL exports: absent criteria, checker errors,
+legacy rows, and failed executions are never implicitly accepted. Acceptance
+does not change retry policy.
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Registry and managed definitions**: Runtime resolution is built-in → `config.yaml custom_agents` → enabled administrator-managed definitions, followed by explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, persist through the same `agent_storage.backend` selection as Custom Agent definitions, and remain stored but are excluded from runtime when a built-in or later-added config definition owns the same name. The default Lead Agent sees the whole enabled catalog. A Custom Agent's `allowed_subagents` is snapshotted into run metadata (`None` = all, `[]` = hard deny, list = allowlist) and must filter both prompt discovery and `task` execution; never reload caller policy from mutable agent config inside the tool.

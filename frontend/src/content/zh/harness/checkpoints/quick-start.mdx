@@ -1,0 +1,72 @@
+---
+title: 快速上手
+description: 把 DeerFlow 的检查点存储切换到增量模式：两个配置键及其默认值、为什么需要重启、新装默认拿到什么、如何确认切换已生效，以及受支持的迁移方向。
+---
+
+import { Callout } from "nextra/components";
+
+# 快速上手
+
+`database:` 下的两个键决定检查点的表示方式，以及增量模式下多久落一份完整消息快照。两者都需要重启。
+
+```yaml
+database:
+  checkpoint_channel_mode: full     # full | delta
+  checkpoint_delta:
+    snapshot_frequency: 10          # >= 1
+```
+
+| 键 | 类型 | 默认值 | 范围 | 是否重启 |
+| --- | --- | --- | --- | --- |
+| `database.checkpoint_channel_mode` | `"full"` \| `"delta"` | `"full"` | `full`、`delta` | 是 |
+| `database.checkpoint_delta.snapshot_frequency` | int | `10` | `>= 1`，无文档化的上限 | 是 |
+
+没有任何环境变量能选择模式或节奏，两者只来自 `config.yaml`。未知的模式取值会在加载配置时被 pydantic 校验拒绝，`snapshot_frequency` 小于 1 同样如此。`snapshot_frequency` 只在 `delta` 模式下起作用；`config.example.yaml` 里两个键都以默认值出现。
+
+## 为什么需要重启
+
+两个值都在首次使用时冻结：进程把它们存进两个模块级全局变量，之后再出现不同的取值就会抛出 `CheckpointModeReconfigurationError`：
+
+- `checkpoint_channel_mode is restart-required and cannot change in a running process`
+- `checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process`
+
+节奏和模式一起被冻结，因为它并不存在检查点里：它在图被编译时就已经编进每张图的 channel table。用不同节奏启动的进程会把那个节奏施加到同一批线程上，而节奏又刻意不写入检查点元数据，读取时没有任何东西可以用来发现这种不一致。同样的推理让模式成为一个跨进程不变量：共享同一个检查点数据库的所有进程都必须使用同一个值。
+
+冻结发生在编译图之前，覆盖每一条会构建图的路径：Gateway 的 lifespan、Lead Agent 装配，以及 `DeerFlowClient.__init__`。两个值都没有热重载。
+
+## 新装默认拿到什么
+
+| 配置项 | 全新安装的取值 |
+| --- | --- |
+| `database.backend` | 缺少 `database:` 段或该键时为 `sqlite`，`sqlite_dir: .deer-flow/data` |
+| `database.checkpoint_channel_mode` | `full` |
+| `database.checkpoint_delta.snapshot_frequency` | `10` |
+| `database.checkpoint_graph_cache.accessor_graph_max` | `64` |
+| `database.checkpoint_cache` | 进程内 memory LRU：`max_entries: 128`、`redis_url: null`、`ttl_seconds: 86400`、`key_prefix: ""`。示例文件把整段注释掉了 |
+
+缺少 `database:` 段时解析结果是 `sqlite` 加 `full`，不会是内存后端：`memory` 只是直接构造 `DatabaseConfig()` 时的默认值。如果你的 `config.yaml` 早于这个键，`make config-upgrade` 会以安全默认值 `full` 合并进来。
+
+## 确认切换已生效
+
+1. **进程内。** `frozen_checkpoint_channel_mode()` 返回已冻结的模式；进程尚未冻结时返回 `None`。`frozen_checkpoint_snapshot_frequency()` 是它的节奏版本。两者都在 `deerflow.runtime.checkpoint_mode` 里。
+2. **线程上。** 增量模式进程写出的检查点带有元数据标记 `deerflow_checkpoint_channel_mode: "delta"`。`full` 模式会移除该键，因此缺失即 `full`，已有检查点不需要迁移。
+3. **不一致时。** 如果进程仍处于 `full` 模式，打开一个增量线程会返回 HTTP 409，`detail` 为 `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.`。这是失败关闭的闸门在正常工作，不是需要消除的错误；见[通道模式](/docs/harness/checkpoints/modes)。
+
+没有任何健康检查、就绪或能力接口会报告模式，所以能用的就是上面这三条。
+
+## 迁移方向
+
+增量模式进程可以透明地读取旧的整份检查点，因此 **full → delta 是受支持的方向**：已有线程无需重写数据即可继续工作。反方向并不对称。运行时模块文档字符串写道：
+
+> a full-mode process opening a delta thread raises CheckpointModeMismatchError instead of silently materializing empty state. Delta-mode processes read legacy full checkpoints transparently, so full -> delta is the supported migration path.
+
+因此把存储切回 `full` 之前，必须先物化并转换这些线程的检查点，错误文本本身就是在告诉运维人员这件事。在完成之前，请让所有接触该存储的进程保持 `delta`。
+
+<Callout type="warning">
+  只改 `config.yaml` 里的 `checkpoint_channel_mode` 而不重启不会生效：run worker 会注入冻结的模式，
+  因此这次改动在重启前一直被忽略。改 `checkpoint_delta.snapshot_frequency` 而不重启则更响——
+  下一次 run 会失败，run 记录与 SSE `error` 帧里带着 `CheckpointModeReconfigurationError`。
+  这两种改动都不会让任何请求返回 `503`；见
+  [故障排查](/docs/harness/checkpoints/troubleshooting#改完配置后-run-失败)。请通过重启所有共享
+  该检查点数据库的进程来发布改动。
+</Callout>

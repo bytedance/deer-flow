@@ -17,6 +17,7 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
@@ -646,6 +647,27 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_prompt_overlay_surrounds_complete_system_message(self, classes):
+        from langchain_core.messages import SystemMessage
+
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        overrides = SubagentsAppConfig(agents={"general-purpose": {"prompt_overlay": {"prepend": "Operator first", "append": "Operator last"}}})
+        config = get_subagent_config("general-purpose", app_config=overrides)
+        executor = classes["SubagentExecutor"](config=config, tools=[], thread_id="test-thread")
+
+        state, _tools, _setup = await executor._build_initial_state("Do the task")
+
+        system = state["messages"][0]
+        assert isinstance(system, SystemMessage)
+        assert system.content.startswith("Operator first\n\n")
+        assert system.content.endswith("\n\nOperator last")
+        assert config.system_prompt in system.content
+        assert "report" in system.content[len(config.system_prompt) : -len("Operator last")].lower()
+        assert executor._assembled_system_prompt == system.content
 
     @pytest.mark.anyio
     async def test_build_initial_state_inherits_background_without_execution_evidence(self, classes, base_config):
@@ -2003,6 +2025,7 @@ class TestAsyncExecutionPath:
         classes,
         base_config,
         mock_agent,
+        caplog,
     ):
         SubagentExecutor = classes["SubagentExecutor"]
         started = asyncio.Event()
@@ -2028,15 +2051,18 @@ class TestAsyncExecutionPath:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            execution = asyncio.create_task(executor._aexecute("Task"))
-            await started.wait()
-            execution.cancel("host cancellation")
-            with pytest.raises(asyncio.CancelledError) as raised:
-                await execution
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                execution = asyncio.create_task(executor._aexecute("Task"))
+                await started.wait()
+                execution.cancel("host cancellation")
+                with pytest.raises(asyncio.CancelledError) as raised:
+                    await execution
 
         assert raised.value.args == ("host cancellation",)
         assert close_attempted is True
+        assert "Could not close interrupted subagent stream" in caplog.text
+        assert "close failed" in caplog.text
 
     @pytest.mark.anyio
     async def test_aexecute_finally_releases_only_the_failing_subagent_lease(

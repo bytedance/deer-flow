@@ -4,6 +4,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,8 @@ def default_subagent_token_budget(*, summarization_enabled: bool = False) -> Tok
 
 class SubagentOverrideConfig(BaseModel):
     """Per-agent configuration overrides."""
+
+    prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal extensions around this subagent's system prompt")
 
     timeout_seconds: int | None = Field(
         default=None,

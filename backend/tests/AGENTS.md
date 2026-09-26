@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+## Lark CLI blocking-I/O fixtures
+
+`blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
+script on Windows and an executable shell script on POSIX. Resolve it through
+the production PATH lookup, including a directory containing spaces. Seed fake
+app credentials so auth completion reaches the CLI instead of returning early,
+and keep fixture filesystem work behind `asyncio.to_thread`.
+
 ## Shared sandbox search contracts
 
 `test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
@@ -75,3 +83,23 @@ Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
 inputs that fit the host's separate input limit. Use offline transports.
 Check the host's JSON output bound with the maximum item count and keys that
 expand when escaped; preserving raw UTF-8 limits alone does not cover it.
+
+## Advisory fetched-content screening example
+
+Load the example through `load_extensions()` and the host isolation wrapper, as a
+`plugins:` entry is loaded; never instantiate the middleware directly.
+`test_jev_result_screening_extension.py` checks install/config diagnostics, bounded
+requests, the task-store handover between the tool wrapper and `before_model`, copy
+semantics, fail-open provider errors and isolation diagnostics for local bugs. It
+also pins per-message classification: a benign first message in a `Command` must
+not take the flag of an injected later one, and a malformed, compressed or slow
+answer for one message must not cancel or hide another's flag. The loopback test
+uses a real local server behind an unreachable proxy variable.
+`test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
+with a task store bound under the runtime-context key the Gateway worker uses; cover
+the redacted excerpt, error metadata/receipts, budget, one-time warnings including
+valid empty-string message IDs, and runs without a task store. Only `None` awaits ID
+assignment. Use offline transports. Detection is not behavioral defense; do not infer
+the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
+the host descriptor builder to pin policy identity; hash endpoint/prompt text and
+never project credential values.

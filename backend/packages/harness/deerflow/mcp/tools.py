@@ -275,9 +275,9 @@ def _rewrite_unique_bare_filenames(
 
     rewritten = text
     for name in sorted(unique, key=len, reverse=True):
-        # Do not rewrite inside longer paths/words. A final sentence period is
-        # allowed, but ".bak" or another path segment is not.
-        pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
+        # Do not rewrite inside longer paths/words, with either path separator.
+        # A final sentence period is allowed, but ".bak" or another segment is not.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(name)}(?!(?:[\w/\\-]|\.[\w]))")
         # A callable replacement, not a template: the virtual path is built from
         # the real file's relative path, where a backslash is an ordinary
         # character, so it must never be read as a regex escape.

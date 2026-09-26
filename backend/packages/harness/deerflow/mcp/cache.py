@@ -381,9 +381,18 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             retired_pool.close_all_sync()
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
+        # Only ``get_event_loop()`` may fall back to ``asyncio.run``: a
+        # ``RuntimeError`` raised *by* ``initialize_mcp_tools()`` (for example
+        # ``McpTaskConfigurationError``) must not trigger a second discovery
+        # pass that respawns every stdio server and re-fetches OAuth tokens.
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        try:
+            if loop is None or loop.is_closed():
+                asyncio.run(initialize_mcp_tools())
+            elif loop.is_running():
                 import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -391,12 +400,6 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                     future.result()
             else:
                 loop.run_until_complete(initialize_mcp_tools())
-        except RuntimeError:
-            try:
-                asyncio.run(initialize_mcp_tools())
-            except Exception:
-                logger.exception("Failed to lazy-initialize MCP tools")
-                return []
         except Exception:
             logger.exception("Failed to lazy-initialize MCP tools")
             return []

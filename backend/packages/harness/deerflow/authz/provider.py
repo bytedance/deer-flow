@@ -119,5 +119,13 @@ class AuthorizationProvider(Protocol):
         role→resource map should delegate to :meth:`authorize` per item and
         return only the allowed subset. Providers with a static map can
         override this for O(1) filtering and fail-closed visibility.
+
+        The answer can only narrow *candidates*: every caller intersects it with
+        the list it asked about, so naming a target that was never a candidate
+        grants nothing.
+
+        Implementations must be thread-safe: an async caller offloads this
+        synchronous method to a worker thread, so it may run while the event
+        loop keeps serving other work.
         """
         ...
