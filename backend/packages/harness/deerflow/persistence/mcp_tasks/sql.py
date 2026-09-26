@@ -31,7 +31,7 @@ _TIMESTAMP_FIELDS = (
     "updated_at",
 )
 
-_INFLIGHT_NOTIFICATION_STATUSES = frozenset({"claimed", "dispatched", "retry"})
+_INFLIGHT_NOTIFICATION_STATUSES = frozenset({"claimed", "launching", "dispatched", "retry"})
 
 
 def _new_claim_token() -> str:
@@ -639,7 +639,7 @@ class McpTaskRepository:
         limit: int,
         tracking_degraded_after_errors: int,
     ) -> list[dict[str, Any]]:
-        statuses = ("pending", "claimed", "retry", "dispatched")
+        statuses = ("pending", "claimed", "launching", "retry", "dispatched")
         stmt = (
             select(McpTaskRow)
             .where(
@@ -693,7 +693,7 @@ class McpTaskRepository:
                 McpTaskRow.notification_lease_token == notification_lease_token,
                 McpTaskRow.notification_lease_expires_at >= now,
                 McpTaskRow.dispatch_version == dispatch_version,
-                McpTaskRow.notification_status.in_(("claimed", "retry")),
+                McpTaskRow.notification_status.in_(("claimed", "launching", "retry")),
             )
             .values(
                 notification_status="dispatched",
@@ -863,7 +863,7 @@ class McpTaskRepository:
             McpTaskRow.notification_lease_token == notification_lease_token,
             McpTaskRow.notification_lease_expires_at >= now,
             McpTaskRow.dispatch_version == dispatch_version,
-            McpTaskRow.notification_status.in_(("claimed", "retry", "dispatched")),
+            McpTaskRow.notification_status.in_(("claimed", "launching", "retry", "dispatched")),
         )
         dead_letter_values: dict[str, Any] = {
             "notification_status": "dead_letter",
