@@ -2555,6 +2555,84 @@ class TestAsyncExecutionPath:
         assert executor._recursion_limit is None
         assert captured_configs[0]["recursion_limit"] == base_config.max_turns
 
+    @pytest.mark.anyio
+    async def test_aexecute_accumulates_tool_output_chunks_from_custom_stream(
+        self,
+        classes,
+        base_config,
+        msg,
+    ):
+        """When stream_mode includes "custom", the async loop must accumulate
+        custom event chunks (emitted by ToolStreamingMiddleware via
+        get_stream_writer) into result.tool_output_chunks so the task_tool
+        polling loop can forward them to the parent SSE stream (#4150).
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        custom_chunk = {"type": "tool_output_chunk", "tool_call_id": "tc-1", "status": "start"}
+        final_state = {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        # Simulate LangGraph yielding (mode, chunk) tuples when stream_mode is a
+        # list: one custom chunk, then one values chunk.
+        async def mixed_astream(state, *, config, context, stream_mode):
+            yield ("custom", custom_chunk)
+            yield final_state
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mixed_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.tool_output_chunks == [custom_chunk]
+
+    @pytest.mark.anyio
+    async def test_aexecute_ignores_invalid_tuple_items(
+        self,
+        classes,
+        base_config,
+        msg,
+    ):
+        """Tuples with unexpected mode strings or wrong length must not crash the
+        loop — they fall through to the else branch and are treated as state
+        chunks. The mode string must be exactly "custom" for accumulation.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        final_state = {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        # "values" mode in a tuple should NOT be treated as a custom chunk
+        async def mixed_astream(state, *, config, context, stream_mode):
+            yield ("values", final_state)
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mixed_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        # "values" tuple should not be accumulated as a custom chunk — the chunk
+        # falls through to the else branch and is handled as state.
+        assert result.tool_output_chunks == []
+
 
 class TestSkillAllowedTools:
     @pytest.mark.anyio
@@ -3994,6 +4072,25 @@ class TestCooperativeCancellation:
         assert isolated_manager.inheritable_handlers == [stream_handler]
         assert manager.handlers == [loop_bound, stream_handler]
         assert manager.inheritable_handlers == [loop_bound, stream_handler]
+
+    def test_tool_output_chunks_drain_with_terminal_status(self, classes):
+        """The final custom chunk and terminal state are observed together."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        result = SubagentResult(
+            task_id="stream-task",
+            trace_id="trace",
+            status=SubagentStatus.RUNNING,
+        )
+        final_chunk = {"type": "tool_output_chunk", "is_final": True}
+
+        result.append_tool_output_chunk(final_chunk)
+        assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+
+        chunks, status = result.drain_tool_output_chunks()
+        assert chunks == [final_chunk]
+        assert status is SubagentStatus.COMPLETED
+        assert result.drain_tool_output_chunks() == ([], SubagentStatus.COMPLETED)
 
     def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
         """Test that the real timeout handler does not overwrite CANCELLED status.
