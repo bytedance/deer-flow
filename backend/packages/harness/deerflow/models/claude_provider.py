@@ -146,6 +146,11 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
+        else:
+            # Checkpoints written before breakpoints were placed on copies can
+            # carry markers on old blocks; a thread with more than four of them
+            # must not stay broken just because caching was switched off.
+            self._strip_cache_control(payload)
 
         if self.auto_thinking_budget:
             self._apply_thinking_budget(payload)
@@ -197,28 +202,38 @@ class ClaudeChatModel(ChatAnthropic):
         placed on the *last* eligible blocks because later breakpoints cover a
         larger prefix and yield better cache hit rates.
 
+        The budget covers the whole request, so markers already present are
+        dropped first.  Checkpoints written before breakpoints were placed on
+        copies can still carry markers on old blocks, and those would otherwise
+        push every later request of the thread past the limit.  A marked block
+        is always a copy; ``_strip_cache_control`` explains why.
+
         The system prompt is expected to be fully static (no per-user memory or
         current date).  Dynamic context is injected per-turn via
         DynamicContextMiddleware as a <system-reminder> in the first HumanMessage.
         """
         MAX_CACHE_BREAKPOINTS = 4
 
-        # Collect candidate blocks in document order:
+        # Must run first: stripping leaves every list and message dict below
+        # owned by this payload, which is what makes replacing a candidate
+        # slot (and writing msg["content"]) safe for any payload.
+        self._strip_cache_control(payload)
+
+        # Collect candidate slots (list, index) in document order:
         #   1. system text blocks
         #   2. content blocks of the last prompt_cache_size messages
         #   3. the last tool definition
-        candidates: list[dict] = []
+        candidates: list[tuple[list, int]] = []
 
         # 1. System blocks
         system = payload.get("system")
         if system and isinstance(system, list):
-            for block in system:
+            for index, block in enumerate(system):
                 if isinstance(block, dict) and block.get("type") == "text":
-                    candidates.append(block)
+                    candidates.append((system, index))
         elif system and isinstance(system, str):
-            new_block: dict = {"type": "text", "text": system}
-            payload["system"] = [new_block]
-            candidates.append(new_block)
+            payload["system"] = [{"type": "text", "text": system}]
+            candidates.append((payload["system"], 0))
 
         # 2. Recent message blocks
         messages = payload.get("messages", [])
@@ -229,23 +244,22 @@ class ClaudeChatModel(ChatAnthropic):
                 continue
             content = msg.get("content")
             if isinstance(content, list):
-                for block in content:
+                for index, block in enumerate(content):
                     if isinstance(block, dict):
-                        candidates.append(block)
+                        candidates.append((content, index))
             elif isinstance(content, str) and content:
-                new_block = {"type": "text", "text": content}
-                msg["content"] = [new_block]
-                candidates.append(new_block)
+                msg["content"] = [{"type": "text", "text": content}]
+                candidates.append((msg["content"], 0))
 
         # 3. Last tool definition
         tools = payload.get("tools", [])
         if tools and isinstance(tools[-1], dict):
-            candidates.append(tools[-1])
+            candidates.append((tools, len(tools) - 1))
 
         # Apply cache_control only to the last MAX_CACHE_BREAKPOINTS candidates
         # to stay within the API limit.
-        for block in candidates[-MAX_CACHE_BREAKPOINTS:]:
-            block["cache_control"] = {"type": "ephemeral"}
+        for container, index in candidates[-MAX_CACHE_BREAKPOINTS:]:
+            container[index] = {**container[index], "cache_control": {"type": "ephemeral"}}
 
     def _apply_thinking_budget(self, payload: dict) -> None:
         """Auto-allocate thinking budget (80% of max_tokens)."""
@@ -262,26 +276,46 @@ class ClaudeChatModel(ChatAnthropic):
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:
-        """Remove cache_control markers before OAuth requests reach Anthropic."""
-        for section in ("system", "messages"):
-            items = payload.get(section)
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item.pop("cache_control", None)
-                content = item.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict):
-                            block.pop("cache_control", None)
+        """Remove cache_control markers without writing into the payload's objects.
+
+        Every request is stripped: prompt caching strips before placing its own
+        breakpoints, a request without caching is stripped in
+        ``_get_request_payload``, and OAuth requests again before they reach
+        Anthropic.
+
+        The payload shares objects with the caller.  langchain-anthropic passes
+        Claude-native blocks (an image or document with a ``source``, a search
+        result) and list-form system blocks through by reference, and a reused
+        tool binding passes its own tool dicts.  Changing them in place changes
+        the thread's messages, and a marker written there is checkpointed with
+        them.  So a block that carries a marker is copied without it, and the
+        system, message, content and tool lists and every message dict are
+        replaced with copies.  langchain-anthropic already builds fresh message
+        dicts and content lists, so those copies are defensive; they are what
+        lets ``_apply_prompt_caching`` write into them for any payload.
+        """
+
+        def without_markers(items: list) -> list:
+            return [{key: value for key, value in item.items() if key != "cache_control"} if isinstance(item, dict) and "cache_control" in item else item for item in items]
+
+        system = payload.get("system")
+        if isinstance(system, list):
+            payload["system"] = without_markers(system)
+
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            copied: list = []
+            for message in messages:
+                if isinstance(message, dict):
+                    message = {key: value for key, value in message.items() if key != "cache_control"}
+                    if isinstance(message.get("content"), list):
+                        message["content"] = without_markers(message["content"])
+                copied.append(message)
+            payload["messages"] = copied
 
         tools = payload.get("tools")
         if isinstance(tools, list):
-            for tool in tools:
-                if isinstance(tool, dict):
-                    tool.pop("cache_control", None)
+            payload["tools"] = without_markers(tools)
 
     def _create(self, payload: dict) -> Any:
         if self._is_oauth:
