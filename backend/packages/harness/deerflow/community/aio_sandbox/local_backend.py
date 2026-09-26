@@ -947,6 +947,7 @@ class LocalContainerBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        extra_environment: dict[str, str] | None = None,
     ) -> SandboxInfo:
         """Start a new container and return its connection info.
 
@@ -992,6 +993,7 @@ class LocalContainerBackend(SandboxBackend):
                         port,
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
+                        extra_environment=extra_environment,
                         labels=self._sandbox_labels(sandbox_id),
                     )
                 else:
@@ -1003,6 +1005,7 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         relay_token=relay_token,
+                        extra_environment=extra_environment,
                     )
                 break
             except _ExistingRestrictedSandbox as exc:
@@ -1049,6 +1052,7 @@ class LocalContainerBackend(SandboxBackend):
         *,
         config_mount_exclusion_root: str | None,
         relay_token: str,
+        extra_environment: dict[str, str] | None = None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -1078,6 +1082,7 @@ class LocalContainerBackend(SandboxBackend):
                 network_override=network_name,
                 publish_port=False,
                 extra_environment={
+                    **(extra_environment or {}),
                     "HTTP_PROXY": proxy_url,
                     "HTTPS_PROXY": proxy_url,
                     "ALL_PROXY": proxy_url,

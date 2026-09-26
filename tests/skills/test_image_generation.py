@@ -14,6 +14,7 @@ img = load("image-generation")
 def clean_env(monkeypatch):
     for k in [
         "GEMINI_API_KEY",
+        "GEMINI_IMAGE_MODEL",
         "MINIMAX_API_KEY",
         "IMAGE_GENERATION_PROVIDER",
         "MINIMAX_API_HOST",
@@ -68,6 +69,59 @@ def test_resolve_override_wins(monkeypatch):
 def test_resolve_errors_when_none(monkeypatch):
     with pytest.raises(ValueError, match="IMAGE_GENERATION_API_KEY"):
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
+
+
+def test_gemini_rejects_missing_reference_before_provider_call(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("provider should not be called"),
+    )
+    with pytest.raises(ValueError, match="Reference image is missing or invalid"):
+        img._generate_image_gemini(
+            "slide",
+            [str(tmp_path / "missing.png")],
+            str(tmp_path / "slide.png"),
+            "16:9",
+        )
+
+
+def test_gemini_sends_actual_reference_mime_and_has_timeout(monkeypatch, tmp_path):
+    from PIL import Image
+
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    reference = tmp_path / "slide.jpg"
+    Image.new("RGB", (2, 2), "blue").save(reference, format="PNG")
+    captured = {}
+
+    def post(_url, **kwargs):
+        captured.update(kwargs)
+        return FakeResp(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "data": base64.b64encode(b"image").decode()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(img.requests, "post", post)
+    img._generate_image_gemini(
+        "slide", [str(reference)], str(tmp_path / "generated.png"), "16:9"
+    )
+    parts = captured["json"]["contents"][0]["parts"]
+    assert parts[0]["inlineData"]["mimeType"] == "image/png"
+    assert captured["timeout"] == 180
 
 
 def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
@@ -206,10 +260,8 @@ def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_pa
     prompt_file = tmp_path / "p.json"
     prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
     out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
-
-    assert "1500" in msg
-    assert "character" in msg.lower()
+    with pytest.raises(ValueError, match="1600 characters.*1500"):
+        img.generate_image(str(prompt_file), [], str(out), "16:9")
     assert not out.exists()
 
 

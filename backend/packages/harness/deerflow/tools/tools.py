@@ -17,6 +17,8 @@ from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
     cancel_background_task,
+    check_image_generation_tool,
+    generate_image_tool,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -33,6 +35,8 @@ BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
     review_skill_package,
+    check_image_generation_tool,
+    generate_image_tool,
 ]
 
 SUBAGENT_TOOLS = [
