@@ -174,6 +174,7 @@ class SandboxConfig(BaseModel):
     AioSandboxProvider specific options:
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
+        auto_restart: Check cached containers during acquire and replace crashed ones (default: true).
         mounts: List of volume mounts to share directories with the container
         thread_data_mounts: Override whether thread data is already visible to
             the sandbox through shared mounts. Omit to auto-detect from the backend.
@@ -248,6 +249,10 @@ class SandboxConfig(BaseModel):
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
+    )
+    auto_restart: bool = Field(
+        default=True,
+        description="AioSandboxProvider: check cached containers during acquire and replace crashed ones. Set false to skip cached-container health checks.",
     )
     thread_data_mounts: bool | None = Field(
         default=None,

@@ -1640,6 +1640,10 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Replace crashed cached containers on the next acquire (default: true).
+#   # Set false to skip cached-container health checks.
+#   # auto_restart: true
+#
 #   # Optional: outbound network policy for locally managed Docker sandboxes.
 #   # open keeps the current behavior. isolated denies all outbound traffic.
 #   # allowlist permits the listed HTTP/HTTPS domains; denied public domains can

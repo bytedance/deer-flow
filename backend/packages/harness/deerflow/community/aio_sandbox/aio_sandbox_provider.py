@@ -229,6 +229,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
         self._renewal_thread: threading.Thread | None = None
+        self._health_check_thread: threading.Thread | None = None
         # Per-instance id used for cross-instance sandbox ownership leases (#4206).
         self._owner_id = generate_owner_id()
 
@@ -356,6 +357,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "auto_restart": getattr(sandbox_config, "auto_restart", True),
             "command_timeout": command_timeout,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
@@ -1322,6 +1324,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         thread = self._renewal_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
+        health_thread = getattr(self, "_health_check_thread", None)
+        if health_thread is not None and health_thread.is_alive() and health_thread is not threading.current_thread():
+            health_thread.join(timeout=5)
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1330,6 +1335,58 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._renew_owned_leases()
             except Exception:
                 logger.exception("Error in sandbox ownership renewal loop")
+            try:
+                self._schedule_health_check()
+            except Exception:
+                logger.exception("Error scheduling sandbox health check")
+
+    def _schedule_health_check(self) -> None:
+        """Start at most one health scan without delaying lease renewal."""
+        if not self._config.get("auto_restart", True) or self._renewal_stop.is_set():
+            return
+        thread = getattr(self, "_health_check_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        self._health_check_thread = threading.Thread(
+            target=self._run_health_check,
+            name="sandbox-health-check",
+            daemon=True,
+        )
+        self._health_check_thread.start()
+
+    def _run_health_check(self) -> None:
+        try:
+            self._health_check_owned_sandboxes()
+        except Exception:
+            logger.exception("Error in sandbox health check loop")
+
+    def _health_check_owned_sandboxes(self) -> None:
+        """Evict cached sandboxes whose containers died since last use.
+
+        ``get()``/``get_scoped()`` are intentionally pure in-memory lookups
+        (async tool paths call them directly on the event loop), so a
+        mid-run container crash is otherwise only caught the next time
+        ``acquire``/``reclaim`` runs. A worker scheduled by the renewal loop
+        detects a crash between tool calls without delaying the next lease
+        refresh, then uses the usual ownership-fenced teardown.
+        """
+        if not self._config.get("auto_restart", True):
+            return
+
+        with self._lock:
+            tracked = list(self._sandbox_infos.items()) + [(sandbox_id, info) for sandbox_id, (info, _) in self._warm_pool.items()]
+
+        for sandbox_id, info in tracked:
+            if getattr(self, "_shutdown_called", False):
+                return
+            if self._check_tracked_sandbox_alive(sandbox_id, info) is False:
+                if getattr(self, "_shutdown_called", False):
+                    return
+                self._drop_unhealthy_sandbox(
+                    sandbox_id,
+                    "periodic health check",
+                    expected_info=info,
+                )
 
     def _renew_owned_leases(self) -> None:
         """Renew every container this instance believes it owns.
@@ -1885,6 +1942,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _check_tracked_sandbox_alive(self, sandbox_id: str, info: SandboxInfo) -> bool | None:
         """Return whether a tracked sandbox appears alive, or None if unknown."""
+        if not self._config.get("auto_restart", True):
+            return True
         try:
             return self._backend.is_alive(info)
         except Exception as e:

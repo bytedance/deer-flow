@@ -614,6 +614,8 @@ For Docker development, service startup follows `config.yaml` sandbox mode. In L
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
+Docker/AIO checks cached containers when a sandbox is acquired and replaces a crashed container. Set `sandbox.auto_restart: false` to skip these checks.
+
 Remote directory listings report traversal failures (for example, unreadable
 directories) as incomplete results, even when no entries were returned. A
 missing start path is reported separately as “Directory not found.”

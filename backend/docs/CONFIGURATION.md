@@ -730,6 +730,8 @@ reclaim its warm VM on the next acquire; different threads cannot share a VM.
 evicted; active VMs continue and the provider may temporarily exceed the cap if
 all boxes are active.
 
+For AIO sandboxes, `sandbox.auto_restart` defaults to `true`. On each acquire, DeerFlow checks cached active and warm containers and replaces a container confirmed dead. Set it to `false` to skip those cached-container health checks. A running tool call does not restart in place; the replacement happens on a later acquire.
+
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
 
 This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.
