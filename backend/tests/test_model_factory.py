@@ -285,6 +285,71 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("max_tokens") == 16000
 
 
+def _legacy_model_with_base_extra_body(when_thinking_enabled: dict, extra_body: dict) -> ModelConfig:
+    """A profile without ``reasoning:`` whose base ``extra_body`` carries keys the template must not clobber."""
+    return ModelConfig(
+        name="legacy-glm",
+        display_name="legacy-glm",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="legacy-glm",
+        supports_thinking=True,
+        extra_body=extra_body,
+        when_thinking_enabled=when_thinking_enabled,
+    )
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
+    """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``
+    replaced the profile's whole ``extra_body`` and dropped sibling keys such as GLM's
+    ``tool_stream`` — but only when thinking was ON; the disable path already deep-merged.
+    Both directions must keep the operator's keys."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+def test_legacy_when_thinking_enabled_merges_nested_mappings_recursively(monkeypatch):
+    """A vLLM template that only sets ``chat_template_kwargs.enable_thinking`` must keep the
+    profile's other chat-template kwargs, not replace the nested mapping."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        extra_body={"tool_stream": True, "chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {
+        "tool_stream": True,
+        "chat_template_kwargs": {"preserve_thinking": True, "enable_thinking": True},
+    }
+
+
+def test_legacy_when_thinking_enabled_template_still_wins_on_conflicts(monkeypatch):
+    """Deep-merging must not weaken precedence: a key set in both places takes the template's value."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}},
+        extra_body={"thinking": {"type": "disabled", "budget_tokens": 1}, "tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled", "budget_tokens": 4096}}
+
+
 # ---------------------------------------------------------------------------
 # thinking_enabled=False — disable logic
 # ---------------------------------------------------------------------------

@@ -143,14 +143,18 @@ def _apply_legacy_thinking_settings(
 ) -> None:
     """Historical thinking/effort payload path for profiles without a ``reasoning:`` contract.
 
-    Kept byte-for-byte so existing configurations retain their behavior (issue
-    #5073 acceptance criterion), including the synthesized ``reasoning_effort=minimal``
-    on the OpenAI-compatible disable path that the contract path drops.
+    Kept as-is so existing configurations retain their behavior (issue #5073
+    acceptance criterion), including the synthesized ``reasoning_effort=minimal``
+    on the OpenAI-compatible disable path that the contract path drops. The one
+    deliberate change is that the enable template is deep-merged like the
+    disable path and the contract path: ``when_thinking_enabled.extra_body``
+    used to replace the profile's whole ``extra_body`` and silently drop sibling
+    keys such as GLM's ``tool_stream`` — only while thinking was on.
     """
     if requested_reasoning_effort is not None and not is_codex_model:
         settings["reasoning_effort"] = requested_reasoning_effort
     if thinking_enabled and has_thinking_settings and effective_wte:
-        settings.update(effective_wte)
+        _merge_settings(settings, effective_wte)
     if not thinking_enabled:
         if model_config.when_thinking_disabled is not None:
             # User-provided disable settings take full precedence
