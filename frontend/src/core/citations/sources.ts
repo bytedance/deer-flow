@@ -115,7 +115,16 @@ function maskFencedCodeBlocks(markdown: string): string {
 function maskInlineCode(markdown: string): string {
   // Only mask closed spans: an unclosed backtick run renders as literal text,
   // so a citation after it is a real, rendered link and must not be masked.
-  return markdown.replace(/(`+)[\s\S]*?\1/g, maskKeepingNewlines);
+  // Pairing stays inside one paragraph, because an inline span cannot cross a
+  // blank line either; without that limit a stray backtick in an earlier
+  // paragraph steals the opener of a later span and mis-pairs both directions.
+  // The blank-line shape matches the inline scanner in core/messages/utils.ts.
+  // The captured separator keeps every character, so occurrence indices stay
+  // aligned with the original markdown.
+  return markdown
+    .split(/(\r?\n[ \t]*\r?\n)/)
+    .map((part) => part.replace(/(`+)[\s\S]*?\1/g, maskKeepingNewlines))
+    .join("");
 }
 
 function maskKeepingNewlines(block: string): string {
