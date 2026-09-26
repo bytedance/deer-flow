@@ -320,6 +320,67 @@ class TestBeforeModelCapture:
         ledger = merge_delegations(existing, update["delegations"])
         assert [(entry["run_id"], entry["status"]) for entry in ledger] == [("run-old", "in_progress"), ("run-new", "completed")]
 
+    @pytest.mark.parametrize("resumed_call_id", ["resumed-call", "shared-call"])
+    def test_next_turn_keeps_reply_checkpointed_by_resumed_run(self, resumed_call_id):
+        """A resumed run has no HumanMessage; Stop can leave its reply saved before ledger capture."""
+        middleware = DurableContextMiddleware()
+        existing = [
+            {"id": "shared-call", "run_id": "run-a", "description": "old task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:00Z"},
+            {"id": resumed_call_id, "run_id": "run-b", "description": "resumed task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:01Z"},
+        ]
+        messages = [
+            HumanMessage(content="original request", additional_kwargs={"run_id": "run-a"}),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "shared-call", "type": "tool_call"}]),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "resumed task"}, "id": resumed_call_id, "type": "tool_call"}]),
+            ToolMessage(content="Task Succeeded. Result: done", tool_call_id=resumed_call_id, additional_kwargs=make_subagent_additional_kwargs("completed", result="done")),
+            HumanMessage(content="continue", additional_kwargs={"run_id": "run-c"}),
+        ]
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, SimpleNamespace(context={"run_id": "run-c"}))
+
+        ledger = merge_delegations(existing, update["delegations"] if update else [])
+        assert next(entry for entry in ledger if entry["run_id"] == "run-b")["status"] == "in_progress"
+        if resumed_call_id != "shared-call":
+            assert next(entry for entry in ledger if entry["run_id"] == "run-a")["status"] == "cancelled"
+        else:
+            assert next(entry for entry in ledger if entry["run_id"] == "run-a")["status"] == "in_progress"
+
+    def test_earlier_reply_conservatively_preserves_unmarked_reuse(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {"id": "shared-call", "run_id": "run-a", "description": "old task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:00Z"},
+            {"id": "shared-call", "run_id": "run-b", "description": "resumed task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:01Z"},
+        ]
+        messages = [
+            HumanMessage(content="original request", additional_kwargs={"run_id": "run-a"}),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "old task"}, "id": "shared-call", "type": "tool_call"}]),
+            ToolMessage(content="Task Succeeded. Result: old", tool_call_id="shared-call", additional_kwargs=make_subagent_additional_kwargs("completed", result="old")),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "resumed task"}, "id": "shared-call", "type": "tool_call"}]),
+            HumanMessage(content="continue", additional_kwargs={"run_id": "run-c"}),
+        ]
+
+        update = middleware.before_model({"messages": messages, "delegations": existing}, SimpleNamespace(context={"run_id": "run-c"}))
+
+        assert update is None
+
+    def test_later_unanswered_reuse_does_not_cancel_earlier_resumed_reply(self):
+        middleware = DurableContextMiddleware()
+        existing = [
+            {"id": "shared-call", "run_id": "run-b", "description": "answered task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:00Z"},
+            {"id": "shared-call", "run_id": "run-d", "description": "unanswered task", "subagent_type": "general-purpose", "status": "in_progress", "created_at": "2026-07-11T00:00:01Z"},
+        ]
+        messages = [
+            HumanMessage(content="original request", additional_kwargs={"run_id": "run-a"}),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "answered task"}, "id": "shared-call", "type": "tool_call"}]),
+            ToolMessage(content="Task Succeeded. Result: done", tool_call_id="shared-call", additional_kwargs=make_subagent_additional_kwargs("completed", result="done")),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {"description": "unanswered task"}, "id": "shared-call", "type": "tool_call"}]),
+            HumanMessage(content="continue", additional_kwargs={"run_id": "run-e"}),
+        ]
+
+        # With no HumanMessage from either resumed run, the saved reply cannot
+        # be assigned safely to B or D. Both entries must remain conservative.
+        assert middleware.before_model({"messages": messages, "delegations": existing}, SimpleNamespace(context={"run_id": "run-e"})) is None
+
     def test_runtime_run_id_capture_starts_at_current_run_message(self):
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-new"})

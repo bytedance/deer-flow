@@ -207,24 +207,40 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
 
     Any reply before the current run's opening HumanMessage excludes this
     inference, including legacy ToolMessages without subagent status metadata.
-    An unscoped earlier reply remains ambiguous, so leave those entries
-    unchanged. A current run reply with the same provider tool-call id does
-    not answer the old task.
+    A resumed run has no opening HumanMessage, so a saved reply cannot safely
+    be assigned to the preceding user's run. Preserve unmarked runs with a
+    matching reply even across repeated IDs; the reply's owner is ambiguous.
     Current task producers stamp metadata for extract_delegations to capture.
     """
     answered: set[tuple[str | None, str]] = set()
+    marked_run_ids: set[str] = set()
+    replied_ids: set[str] = set()
     message_run_id: str | None = None
     for message in messages[:opening_index]:
         if isinstance(message, HumanMessage):
             marker = message.additional_kwargs.get("run_id")
             message_run_id = str(marker) if marker else None
+            if message_run_id is not None:
+                marked_run_ids.add(message_run_id)
         elif isinstance(message, ToolMessage) and message.tool_call_id:
-            answered.add((message_run_id, str(message.tool_call_id)))
-    return [
-        {**entry, "status": "cancelled"}
-        for entry in existing
-        if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and (entry.get("run_id"), entry.get("id")) not in answered and (None, entry.get("id")) not in answered
-    ]
+            tool_call_id = str(message.tool_call_id)
+            answered.add((message_run_id, tool_call_id))
+            replied_ids.add(tool_call_id)
+
+    cancelled = []
+    for entry in existing:
+        if not isinstance(entry, dict) or entry.get("status") != "in_progress":
+            continue
+        entry_run_id = entry.get("run_id")
+        entry_id = entry.get("id")
+        if entry_run_id in (None, run_id) or (entry_run_id, entry_id) in answered or (None, entry_id) in answered:
+            continue
+        # Command(resume=...) can checkpoint a reply before ledger capture,
+        # without a HumanMessage carrying that run's id. Its owner is unknown.
+        if entry_run_id not in marked_run_ids and entry_id in replied_ids:
+            continue
+        cancelled.append({**entry, "status": "cancelled"})
+    return cancelled
 
 
 def _with_run_id(delegations: list[dict], run_id: str | None) -> list[dict]:
