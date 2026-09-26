@@ -28,6 +28,20 @@ def _get_searxng_client() -> SearxngClient:
     return SearxngClient(base_url=base_url)
 
 
+def _coerce_max_results(value: object, default: int) -> int:
+    """Normalize a configured max_results before handing it to the SearXNG client."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5;
+        # int() on an out-of-range float (e.g. YAML .inf) raises OverflowError.
+        logger.warning("Invalid SearXNG max_results=%r; using default %s", value, default)
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("Invalid SearXNG max_results=%r; using default %s", value, default)
+        return default
+
+
 @tool("web_search", parse_docstring=True)
 async def web_search_tool(query: str, time_range: SearchTimeRange | None = None) -> str:
     """Search the web using SearXNG.
@@ -39,19 +53,8 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
     try:
         cfg = _get_tool_config("web_search")
         max_results = 5
-        if cfg is not None:
-            raw = cfg.get("max_results", max_results)
-            if isinstance(raw, int):
-                max_results = raw
-            else:
-                try:
-                    max_results = int(raw)
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "Invalid SearXNG max_results=%r; using default %s",
-                        raw,
-                        max_results,
-                    )
+        if cfg is not None and "max_results" in cfg:
+            max_results = _coerce_max_results(cfg.get("max_results"), max_results)
 
         client = _get_searxng_client()
         search_kwargs: dict[str, object] = {"max_results": max_results}
