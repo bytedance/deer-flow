@@ -2,12 +2,14 @@
 
 Validates that the function never places more than 4 cache_control breakpoints
 (the hard limit enforced by the Anthropic API and AWS Bedrock) regardless of
-how many system blocks, message content blocks, or tool definitions are present.
+how many system blocks, message content blocks, or tool definitions are present,
+and that it never writes into blocks the caller still owns.
 """
 
 from unittest import mock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.models.claude_provider import ClaudeChatModel
 
@@ -247,3 +249,82 @@ def test_old_messages_outside_cache_window_not_cached(model):
     # Only the last message should be within the cache window
     assert "cache_control" not in payload["messages"][0]["content"][0]
     assert payload["messages"][1]["content"][0].get("cache_control") == {"type": "ephemeral"}
+
+
+# ---------------------------------------------------------------------------
+# Caller-owned blocks
+# ---------------------------------------------------------------------------
+
+
+def _native_image() -> dict:
+    """A Claude-native image block, which langchain-anthropic forwards by reference."""
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+
+
+def test_breakpoints_are_placed_on_copies_of_caller_blocks(model):
+    system_block = {"type": "text", "text": "sys"}
+    image = _native_image()
+    tool = {"name": "bash"}
+    payload: dict = {
+        "system": [system_block],
+        "messages": [{"role": "user", "content": [image]}],
+        "tools": [tool],
+    }
+
+    model._apply_prompt_caching(payload)
+
+    assert _count_cache_control(payload) == 3
+    assert payload["messages"][0]["content"][0] == {**_native_image(), "cache_control": {"type": "ephemeral"}}
+    assert "cache_control" not in system_block
+    assert "cache_control" not in image
+    assert "cache_control" not in tool
+
+
+def test_repeated_requests_leave_thread_messages_unmarked(model):
+    """Regression: a marker written into a message's own block was checkpointed.
+
+    Every later request then carried the stale markers of earlier turns on top
+    of its own four, and the API rejected the thread from the third turn on.
+    """
+    history: list = [SystemMessage(content="You are helpful.")]
+    for turn in range(1, 6):
+        history.append(HumanMessage(content=[_native_image()], id=f"human-{turn}"))
+        payload = model._get_request_payload(history)
+        assert _count_cache_control(payload) <= 4, f"turn {turn}"
+        history.append(AIMessage(content=f"answer {turn}", id=f"ai-{turn}"))
+
+    assert all(message.content == [_native_image()] for message in history if isinstance(message, HumanMessage))
+
+
+def test_markers_already_in_the_request_are_replaced(model):
+    """Checkpoints written by older versions can carry markers on old blocks."""
+    stale = [{**_native_image(), "cache_control": {"type": "ephemeral"}} for _ in range(5)]
+    payload: dict = {
+        "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+        "messages": [{"role": "user", "content": [block]} for block in stale],
+        "tools": [{"name": "bash", "cache_control": {"type": "ephemeral"}}],
+    }
+
+    model._apply_prompt_caching(payload)
+
+    # Candidates: the system block, the last three messages, the tool — the
+    # system block falls outside the last four.
+    assert _count_cache_control(payload) == 4
+    assert [index for index, message in enumerate(payload["messages"]) if "cache_control" in message["content"][0]] == [2, 3, 4]
+    assert "cache_control" not in payload["system"][0]
+    assert payload["tools"][0]["cache_control"] == {"type": "ephemeral"}
+    assert all("cache_control" in block for block in stale)
+
+
+def test_strip_cache_control_copies_instead_of_popping():
+    system_block = {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+    image = {**_native_image(), "cache_control": {"type": "ephemeral"}}
+    tool = {"name": "bash", "cache_control": {"type": "ephemeral"}}
+    message = {"role": "user", "content": [image], "cache_control": {"type": "ephemeral"}}
+    payload: dict = {"system": [system_block], "messages": [message], "tools": [tool]}
+
+    ClaudeChatModel._strip_cache_control(payload)
+
+    assert _count_cache_control(payload) == 0
+    assert payload["messages"][0] == {"role": "user", "content": [_native_image()]}
+    assert all("cache_control" in item for item in (system_block, image, tool, message))
