@@ -30,26 +30,24 @@ client = DeerFlowClient()
 
 客户端是线程安全的，设计为实例化一次并在请求之间复用。
 
-## 异步流式传输
+## 流式传输
 
-推荐的集成模式是异步流式传输。这让你可以在 Agent 生成响应时实时访问每个 token 和事件：
+推荐的集成模式是流式传输。`stream()` 是同步生成器，无需 asyncio，即可在 Agent 生成响应时实时访问每个 token 和事件：
 
 ```python
-import asyncio
+import json
 
-async def run_agent(thread_id: str, user_message: str):
-    async for event in client.astream(
-        thread_id=thread_id,
+def run_agent(thread_id: str, user_message: str):
+    for event in client.stream(
         message=user_message,
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-                "subagent_enabled": True,
-            }
-        },
+        thread_id=thread_id,
+        model_name="gpt-4o",
+        subagent_enabled=True,
     ):
-        # 处理每个流式事件
-        yield event
+        # `stream()` 产出的是 `StreamEvent` 数据类实例，而不是字符串。发送前必须
+        # 先序列化：Starlette 会对非 `str` / `bytes` 的分块调用 `.encode()`，
+        # 直接产出数据类会在第一个事件上抛出 `AttributeError`。
+        yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
 
 # 在 FastAPI 处理器中：
 # from fastapi.responses import StreamingResponse
@@ -61,10 +59,10 @@ async def run_agent(thread_id: str, user_message: str):
 对于批处理或只需要最终结果的场景：
 
 ```python
-async def run_agent_sync(thread_id: str, user_message: str) -> dict:
-    result = await client.ainvoke(
-        thread_id=thread_id,
+def run_agent_sync(thread_id: str, user_message: str) -> str:
+    result = client.chat(
         message=user_message,
+        thread_id=thread_id,
     )
     return result
 ```
@@ -81,25 +79,22 @@ thread_id = str(uuid.uuid4())
 
 # 继续已有对话（相同 thread_id）
 # 如果配置了检查点，Agent 将看到完整历史
-await client.ainvoke(thread_id=existing_thread_id, message="后续问题")
+client.chat(message="后续问题", thread_id=existing_thread_id)
 ```
 
 ## 自定义 Agent 配置
 
-通过创建命名 Agent 配置并在运行时传入 `agent_name` 来构建领域特定 Agent：
+通过创建命名 Agent 配置并在构造客户端时传入 `agent_name` 来构建领域特定 Agent：
 
 ```python
 # agents/research-assistant/config.yaml 必须存在并包含技能和工具配置
 
-result = await client.ainvoke(
-    thread_id=thread_id,
+research_client = DeerFlowClient(agent_name="research-assistant")
+
+result = research_client.chat(
     message=user_message,
-    config={
-        "configurable": {
-            "agent_name": "research-assistant",
-            "model_name": "gpt-4o",
-        }
-    },
+    thread_id=thread_id,
+    model_name="gpt-4o",
 )
 ```
 
@@ -123,6 +118,8 @@ app.mount("/deerflow", gateway_app)
 或者在你自己的 FastAPI 路由中直接使用 `DeerFlowClient` 进行流式传输：
 
 ```python
+import json
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from deerflow.client import DeerFlowClient
@@ -132,9 +129,11 @@ client = DeerFlowClient()
 
 @app.post("/chat/{thread_id}")
 async def chat(thread_id: str, body: dict):
-    async def generate():
-        async for event in client.astream(thread_id=thread_id, message=body["message"]):
-            yield f"data: {event}\n\n"
+    def generate():
+        for event in client.stream(message=body["message"], thread_id=thread_id):
+            # Serialise the `StreamEvent` dataclass; a raw f-string of the object
+            # would ship its `repr()`, which no SSE client can parse.
+            yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 

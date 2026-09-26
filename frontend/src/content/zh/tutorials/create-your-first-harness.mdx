@@ -47,7 +47,6 @@ tools:
 创建 `my_agent.py`：
 
 ```python
-import asyncio
 import os
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
@@ -60,19 +59,12 @@ load_config()
 
 client = DeerFlowClient()
 
-async def main():
-    async for event in client.astream(
-        thread_id="my-first-thread",
-        message="用 Python 写一个斐波那契数列函数，包含文档字符串",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-            }
-        },
-    ):
-        print(event)
-
-asyncio.run(main())
+for event in client.stream(
+    message="用 Python 写一个斐波那契数列函数，包含文档字符串",
+    thread_id="my-first-thread",
+    model_name="gpt-4o",
+):
+    print(event)
 ```
 
 ## 运行
@@ -80,6 +72,26 @@ asyncio.run(main())
 ```bash
 cd backend
 uv run python my_agent.py
+```
+
+## 事件长什么样
+
+`stream()` 产出的是 `StreamEvent` 数据类实例，而不是字典，需通过
+`event.type` 和 `event.data` 读取。事件类型只有四种：
+`"values"`、`"messages-tuple"`、`"custom"` 和 `"end"`：
+
+```python
+StreamEvent(type="messages-tuple", data={"type": "ai", "content": "def fibonacci...", "id": "m1"})
+StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...]})
+StreamEvent(type="end",            data={"usage": {"total_tokens": 412}})
+```
+
+```python
+for event in client.stream(message="...", thread_id="my-first-thread"):
+    if event.type == "messages-tuple":
+        print(event.data.get("content", ""), end="")
+    elif event.type == "end":
+        print("\ndone:", event.data.get("usage"))
 ```
 
 ## 下一步

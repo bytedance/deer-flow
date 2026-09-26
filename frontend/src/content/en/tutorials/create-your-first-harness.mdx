@@ -53,7 +53,6 @@ tools:
 Create `my_agent.py` in the `backend/` directory:
 
 ```python
-import asyncio
 import os
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
@@ -65,19 +64,12 @@ load_config()
 
 client = DeerFlowClient()
 
-async def main():
-    async for event in client.astream(
-        thread_id="my-first-thread",
-        message="Write a Python fibonacci function with a docstring",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
-            }
-        },
-    ):
-        print(event)
-
-asyncio.run(main())
+for event in client.stream(
+    message="Write a Python fibonacci function with a docstring",
+    thread_id="my-first-thread",
+    model_name="gpt-4o",
+):
+    print(event)
 ```
 
 ### Run it
@@ -91,11 +83,22 @@ uv run python my_agent.py
 
 ## What the events look like
 
-The stream yields events like:
+`stream()` yields `StreamEvent` dataclasses, not dicts. Read them through
+`event.type` and `event.data`. There are exactly four types —
+`"values"`, `"messages-tuple"`, `"custom"` and `"end"`:
 
 ```python
-{"type": "messages", "data": {"content": "def fibonacci..."}}
-{"type": "thread_state", "data": {"title": "Python Fibonacci Function"}}
+StreamEvent(type="messages-tuple", data={"type": "ai", "content": "def fibonacci...", "id": "m1"})
+StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...]})
+StreamEvent(type="end",            data={"usage": {"total_tokens": 412}})
+```
+
+```python
+for event in client.stream(message="...", thread_id="my-first-thread"):
+    if event.type == "messages-tuple":
+        print(event.data.get("content", ""), end="")
+    elif event.type == "end":
+        print("\ndone:", event.data.get("usage"))
 ```
 
 ## Next steps
