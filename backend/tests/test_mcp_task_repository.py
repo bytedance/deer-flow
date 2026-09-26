@@ -990,6 +990,83 @@ async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_
 
 
 @pytest.mark.asyncio
+async def test_reclaimed_launching_notification_preserves_reserved_snapshot(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-launching-compat", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launching-compat",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier-a",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    first_version = first[0]["dispatch_version"]
+    first_event = first[0]["dispatch_event"]
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "task-launching-compat")
+        assert row is not None
+        row.notification_status = "launching"
+        row.notification_lease_owner = None
+        row.notification_lease_expires_at = None
+        row.notification_lease_token = None
+        await session.commit()
+
+    second_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-launching-compat",
+        lease_owner="poller",
+        lease_token=second_poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+
+    reclaimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier-b",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+
+    assert len(reclaimed) == 1
+    assert reclaimed[0]["notification_status"] == "launching"
+    assert reclaimed[0]["dispatch_version"] == first_version
+    assert reclaimed[0]["dispatch_event"] == first_event
+    assert reclaimed[0]["event_version"] > first_version
+    assert await repo.mark_notification_dispatched(
+        "task-launching-compat",
+        lease_owner="notifier-b",
+        notification_lease_token=reclaimed[0]["notification_lease_token"],
+        dispatch_version=first_version,
+        run_id="notify-run-1",
+        now=now,
+    )
+
+
+@pytest.mark.asyncio
 async def test_release_poll_claim_after_cancellation_preserves_poll_failure_state(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
@@ -1363,7 +1440,8 @@ async def test_notification_launch_failure_counts_and_reclaims_latest_snapshot(t
 
 
 @pytest.mark.asyncio
-async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
+@pytest.mark.parametrize("notification_status", ["claimed", "launching"])
+async def test_permanent_notification_failure_is_not_reclaimed(tmp_path, notification_status):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-dead-letter", now=now)
@@ -1389,6 +1467,12 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
         limit=1,
         tracking_degraded_after_errors=3,
     )
+    if notification_status == "launching":
+        async with repo._sf() as session:
+            row = await session.get(McpTaskRow, "task-dead-letter")
+            assert row is not None
+            row.notification_status = "launching"
+            await session.commit()
 
     assert await repo.dead_letter_notification(
         "task-dead-letter",
