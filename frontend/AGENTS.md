@@ -263,12 +263,29 @@ keeps the saved key, explicit removal sends an empty key. Saving invalidates bot
 admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
 callbacks. Static demos and non-admin users must not query the management API.
 
+### Model reasoning capabilities
+
+`/api/models` projects a per-model `reasoning` contract (issue #5073) beside the
+deprecated `supports_thinking` / `supports_reasoning_effort` booleans.
+`core/models/reasoning.ts` is the only place that interprets it: it falls back to
+the booleans for older Gateways, clamps the chat mode (`getResolvedMode` never
+yields `flash` for a required-thinking model), lists the effort options the
+composer and the sidecar render, and maps mode presets and remembered values
+through the contract's aliases/default (`resolveReasoningEffort`). Effort values
+are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
+`max` flow through local settings and account preferences unchanged; the custom
+agent dialog offers only the intersection with the per-agent `low/medium/high`
+schema and hides "off" for required-thinking models. Do not read the booleans in
+components directly. On a legacy model, `resolveReasoningEffort` keeps only its
+advertised generic values; this drops a remembered provider-specific token after
+a model switch without changing the backend's direct legacy-request behavior.
+
 ## Full-stack plugin UI
 
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
-Module downloads use the configured backend base and authenticated fetch, then import
-and release a Blob URL; packages must be self-contained (no relative module/assets).
-This inline transport is experimental; packaged-asset compatibility is documented in
+Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
+native credentialed module scripts, preserving relative imports and resource URLs.
+Both honor the backend base and prefixes; transport and cache semantics are documented in
 `docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.

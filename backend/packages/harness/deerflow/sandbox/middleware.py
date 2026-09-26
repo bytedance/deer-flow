@@ -178,7 +178,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            get_sandbox_lease_manager(provider).retain(
+            sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -203,7 +203,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            await get_sandbox_lease_manager(provider).retain_async(
+            sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -306,8 +306,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             user_id=user_id,
             owner_id=owner_id,
         )
-        if retained_id is not None and runtime.context is not None:
-            runtime.context["sandbox_id"] = retained_id
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return super().before_agent(state, runtime)
 
     def _apply_network_policy_response(self, state: SandboxMiddlewareState, runtime: Runtime) -> None:
@@ -416,8 +419,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             user_id=user_id,
             owner_id=owner_id,
         )
-        if retained_id is not None and runtime.context is not None:
-            runtime.context["sandbox_id"] = retained_id
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return await super().abefore_agent(state, runtime)
 
     @override
@@ -508,7 +514,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return sandbox_id if isinstance(sandbox_id, str) else None
 
     @staticmethod
-    def _attach_sandbox_update(result: ToolMessage | Command, sandbox_id: str) -> ToolMessage | Command:
+    def _attach_sandbox_update(
+        result: ToolMessage | Command,
+        sandbox_id: str,
+        *,
+        overwrite: bool = False,
+    ) -> ToolMessage | Command:
         """Wrap or merge ``result`` so that ``sandbox.sandbox_id`` is persisted.
 
         - ``ToolMessage`` -> ``Command(update={"sandbox": ..., "messages": [msg]})``
@@ -517,7 +528,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         - ``Command`` with non-dict / None update -> leave it untouched to
           avoid silent data loss on unknown update shapes.
         """
-        sandbox_update = {"sandbox": {"sandbox_id": sandbox_id}}
+        sandbox_value: object = {"sandbox_id": sandbox_id}
+        if overwrite:
+            sandbox_value = Overwrite(sandbox_value)
+        sandbox_update = {"sandbox": sandbox_value}
 
         if isinstance(result, ToolMessage):
             return Command(update={**sandbox_update, "messages": [result]})
@@ -545,8 +559,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if prev_sandbox_id is None and curr_sandbox_id is not None:
-            result = self._attach_sandbox_update(result, curr_sandbox_id)
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
         return self._maybe_request_network_approval(request, result, curr_sandbox_id or prev_sandbox_id)
 
     @override
@@ -558,8 +576,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = await handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if prev_sandbox_id is None and curr_sandbox_id is not None:
-            result = self._attach_sandbox_update(result, curr_sandbox_id)
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
         sandbox_id = curr_sandbox_id or prev_sandbox_id
         if sandbox_id is None:
             return result
@@ -644,5 +666,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         update: dict = {"messages": [message], "sandbox": {"sandbox_id": sandbox_id}}
         if isinstance(result, Command) and isinstance(result.update, dict):
-            update = {**result.update, **update}
+            update = {**result.update, "messages": [message]}
+            update.setdefault("sandbox", {"sandbox_id": sandbox_id})
         return Command(update=update, goto=END)

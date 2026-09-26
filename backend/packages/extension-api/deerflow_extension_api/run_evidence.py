@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+RUN_EVIDENCE_READER_RESOLVER_KEY = "deerflow_extension_run_evidence_reader_resolver"
+
 
 class InvalidRunEvidenceCursor(ValueError):
     """The cursor is malformed, unsupported, or belongs to another scope."""
@@ -91,3 +93,34 @@ class RunEvidenceReader(Protocol):
     async def get_run_status(self, *, thread_id: str, run_id: str) -> RunStatusView | None:
         """Return authoritative status, or ``None`` when not visible."""
         raise NotImplementedError("the host does not provide run-status reading")
+
+
+def resolve_run_evidence_reader(request: object) -> RunEvidenceReader | None:
+    """Resolve a reader bound to the authenticated request, if supported.
+
+    The resolver receives the request rather than a caller-supplied user ID or
+    principal, so the host remains responsible for authentication and scope
+    binding. Extensions should use this for user-facing routes; the global
+    reader injected into ``ExtensionRuntimeDeps`` is for trusted services.
+    Unsupported hosts return ``None``; denied authentication/authorization
+    raises ``PermissionError``. Unexpected resolver errors propagate.
+    """
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    resolver = getattr(state, RUN_EVIDENCE_READER_RESOLVER_KEY, None)
+    if not callable(resolver):
+        return None
+    return resolver(request)
+
+
+def require_run_evidence_reader(request: object) -> RunEvidenceReader:
+    """Return a reader; unsupported hosts raise ``NotImplementedError``.
+
+    Authentication/authorization denial raises ``PermissionError``. Extensions
+    may translate these to HTTP 503 and 403 respectively. Resolver failures
+    propagate, never falling back to the global reader.
+    """
+    reader = resolve_run_evidence_reader(request)
+    if reader is None:
+        raise NotImplementedError("request-scoped run evidence is unavailable")
+    return reader

@@ -73,6 +73,14 @@ import { getFileIcon } from "@/core/utils/files";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+/** A thread's wire title, or the localized "Untitled" while it has none. */
+function threadTitle(
+  displayName: string | null | undefined,
+  untitled: string,
+): string {
+  return displayName?.trim() ? displayName : untitled;
+}
+
 function errorToastMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -143,7 +151,7 @@ function ProjectDocumentShelf({
   const threadNameById = new Map(
     threads.map((thread) => [
       thread.thread_id,
-      thread.display_name?.trim() ? thread.display_name : t.projects.untitled,
+      threadTitle(thread.display_name, t.projects.untitled),
     ]),
   );
 
@@ -854,7 +862,9 @@ function ConversationFileGroup({
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-sm font-medium">{group.display_name}</div>
+      <div className="text-sm font-medium">
+        {threadTitle(group.display_name, t.projects.untitled)}
+      </div>
       <ul className="flex w-full flex-col gap-1">
         {group.files.map((file) => {
           const previewUrl = resolveArtifactOpenURL({

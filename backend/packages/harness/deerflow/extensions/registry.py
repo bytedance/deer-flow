@@ -11,7 +11,7 @@ import inspect
 import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from deerflow_extension_api import (
@@ -24,7 +24,9 @@ from deerflow_extension_api import (
     TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
-from deerflow_extension_api.plugins import PluginContribution
+from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
+
+from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
 
 _Entry = tuple[str, Any]
 
@@ -83,16 +85,20 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._routers: list[_Entry] = []
         self._plugins: list[_Entry] = []
         self._current_source: str | None = None
+        self._model_access: ModelInvocationScope | None = None
 
     @contextmanager
-    def attributed_to(self, source: str) -> Iterator[None]:
+    def attributed_to(self, source: str, *, model_access: ModelInvocationScope | None = None) -> Iterator[None]:
         """Attribute everything registered inside the block to ``source``."""
         previous = self._current_source
+        previous_access = self._model_access
         self._current_source = source
+        self._model_access = model_access
         try:
             yield
         finally:
             self._current_source = previous
+            self._model_access = previous_access
 
     def _source(self) -> str:
         if self._current_source is None:
@@ -117,8 +123,15 @@ class ExtensionRegistry(ExtensionRegistryContract):
             if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
                 raise ValueError("Backend actions require unique names and async handlers")
             names.add(action.name)
-        if contribution.frontend and (not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024):
-            raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        if isinstance(contribution.frontend, BrowserAssets):
+            from deerflow.extensions.browser_assets import load_browser_assets
+
+            contribution = replace(contribution, frontend=load_browser_assets(contribution.frontend))
+        elif isinstance(contribution.frontend, BrowserModule):
+            if not contribution.frontend.code or len(contribution.frontend.code.encode()) > 512 * 1024:
+                raise ValueError("Browser code must be nonempty and at most 512 KiB")
+        elif contribution.frontend is not None:
+            raise ValueError("Unsupported browser transport")
         # Validate everything before writing the plugin bucket; loader rollback also
         # covers a later failure elsewhere in this package's install function.
         from deerflow.config.plugin_settings import validate_contribution
@@ -147,6 +160,8 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._context_compaction_observers.append((self._source(), observer))
 
     def service(self, service: ExtensionService) -> None:
+        if self._model_access is not None:
+            service = ModelInvocationService(service, self._model_access)
         self._services.append((self._source(), service))
 
     def routers(self, routers: Sequence[Any]) -> None:

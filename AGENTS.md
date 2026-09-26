@@ -66,7 +66,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
+├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks}
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -75,14 +75,14 @@ deer-flow/
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
 kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
-routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
-five. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
+middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
+full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
 `make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
 hooks and extension code execute with Gateway privileges, so only trusted operator sources
 belong in this path. The manager transaction, accepted source forms, lock discipline, and
 contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
+is `frontend/src/content/{en,zh}/harness/extensions/`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -231,9 +231,11 @@ These apply repo-wide; module guides own the module-specific detail.
   relying on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
-  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
-  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
-  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
+  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
+  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
+  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
+  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
   `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

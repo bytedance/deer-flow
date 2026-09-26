@@ -37,6 +37,7 @@ from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
@@ -775,6 +776,9 @@ def _filter_tools(
     return filtered
 
 
+_THREAD_INCARNATION_UNSET = object()
+
+
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -806,6 +810,7 @@ class SubagentExecutor:
         tool_promotion_recorder: Any | None = None,
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
+        thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     ):
         """Initialize the executor.
 
@@ -822,6 +827,8 @@ class SubagentExecutor:
                 run. Seeded into the child graph state so ``list_uploaded_files``
                 can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
+            thread_incarnation: Server-captured parent lifecycle. Explicit None
+                preserves legacy scope; omission stays absent so MCP fails closed.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
                 When None, the tracing layer falls back to DEFAULT_USER_ID.
@@ -879,6 +886,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.thread_id = thread_id
+        self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
@@ -1108,14 +1116,20 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            # Subagents request thinking off; the model's reasoning contract
+            # decides what that means (a required-thinking model stays on), and
+            # the descriptor reports the effective policy the factory applied.
+            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                thinking_enabled=effective_reasoning.thinking_enabled,
+                reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,
@@ -1327,7 +1341,7 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            self._assembled_system_prompt = "\n\n".join(system_parts)
+            self._assembled_system_prompt = self.config.prompt_overlay.apply("\n\n".join(system_parts))
             messages.append(SystemMessage(content=self._assembled_system_prompt))
 
         if self.context_snapshot is not None:
@@ -1548,6 +1562,8 @@ class SubagentExecutor:
             context: dict[str, Any] = {}
             if self.thread_id:
                 context["thread_id"] = self.thread_id
+            if self.thread_incarnation is not _THREAD_INCARNATION_UNSET:
+                context[THREAD_INCARNATION_CONTEXT_KEY] = self.thread_incarnation
             if self.app_config is not None:
                 context["app_config"] = self.app_config
             # Propagate guardrail attribution so delegated tool calls are
@@ -1648,6 +1664,16 @@ class SubagentExecutor:
                 )
                 try:
                     await close_agent_stream(stream)
+                except asyncio.CancelledError as exc:
+                    close_failure = exc.__cause__
+                    if isinstance(close_failure, Exception):
+                        logger.warning(
+                            "[trace=%s] Could not close interrupted subagent stream %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+                        )
+                    raise
                 except Exception:
                     cancel_requested = cancel_requested or result.cancel_event.is_set()
                     if active_error is None and not cancel_requested:

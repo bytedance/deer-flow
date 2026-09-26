@@ -53,3 +53,27 @@ def get_config_signature(config_path: Path) -> ConfigSignature | None:
         return (stat_result.st_mtime, stat_result.st_size, None)
 
     return (stat_result.st_mtime, stat_result.st_size, digest.hexdigest())
+
+
+def read_config_with_signature(config_path: Path) -> tuple[bytes, ConfigSignature]:
+    """Read *config_path* once and return its bytes with the signature of those bytes.
+
+    ``get_config_signature`` is a probe: it re-reads the file, so a caller that
+    parses the file and *then* probes it can record one revision's signature
+    against another revision's content when a write lands in between. That
+    leaves the cache serving stale content that the signature comparison can
+    never detect, because the on-disk signature already matches. A cache that
+    parses the bytes returned here and records the signature returned here
+    cannot get into that state: the size and digest describe exactly the bytes
+    that were parsed, and a write that lands at any point around the read only
+    ever produces a signature mismatch on the next comparison, i.e. one more
+    reload.
+
+    The stat is taken before the read, matching ``get_config_signature``, so a
+    stable file yields an identical signature from both helpers. Unlike the
+    probe, a missing or unreadable file raises (``OSError``): the caller wants
+    the content, so there is no "no file" value to return.
+    """
+    stat_result = config_path.stat()
+    data = config_path.read_bytes()
+    return data, (stat_result.st_mtime, len(data), hashlib.sha256(data).hexdigest())

@@ -122,6 +122,14 @@ def _view_image(
     Args:
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
     """
+    from deerflow.sandbox.tools import sandbox_authorization_scope
+
+    with sandbox_authorization_scope(runtime):
+        return _view_image_authorized(runtime, image_path, tool_call_id)
+
+
+def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str) -> Command:
+    """Read image bytes only after the sandbox execution gate has passed."""
     from deerflow.sandbox.exceptions import SandboxRuntimeError
     from deerflow.sandbox.overwrite import unwrap_sandbox
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -288,13 +296,15 @@ async def _aview_image(
 ) -> Command:
     """Run the blocking image read without letting cancellation outlive it."""
     from deerflow.sandbox.lease import run_sync_lifecycle_operation
+    from deerflow.sandbox.tools import sandbox_authorization_scope_async
 
-    return await run_sync_lifecycle_operation(
-        _view_image,
-        runtime,
-        image_path,
-        tool_call_id,
-    )
+    async with sandbox_authorization_scope_async(runtime):
+        return await run_sync_lifecycle_operation(
+            _view_image_authorized,
+            runtime,
+            image_path,
+            tool_call_id,
+        )
 
 
 view_image_tool = StructuredTool.from_function(

@@ -25,6 +25,10 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- memory:read   - View memory data/config
+- memory:write  - Modify memory data (create/update/delete facts, import, clear)
+- agents:read   - View custom agents and the user profile
+- agents:write  - Create/update/delete custom agents and the user profile
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
-from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
@@ -72,6 +76,14 @@ class Permissions:
     PROJECTS_READ = "projects:read"
     PROJECTS_WRITE = "projects:write"
     PROJECTS_DELETE = "projects:delete"
+
+    # Memory (per-user memory data surfaced by /api/memory*)
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+
+    # Custom agents and the per-user USER.md profile (/api/agents*, /api/user-profile)
+    AGENTS_READ = "agents:read"
+    AGENTS_WRITE = "agents:write"
 
 
 class AuthContext:
@@ -153,6 +165,10 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
@@ -359,6 +375,37 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     return _resolve_route_scoped_authorization(user, is_internal=is_internal)
 
 
+def authorize_model_use(user: User, model_name: str | None, *, is_internal: bool, app_config: AppConfig) -> None:
+    """Enforce model:use for an explicit model or the factory's default model.
+
+    Shared by model details and caller-selected one-shot requests. Explicit
+    denies always reject; provider failures honor the configured failure policy.
+    """
+    if model_name is None:
+        if not app_config.models:
+            return  # The caller's existing no-model handling remains authoritative.
+        model_name = app_config.models[0].name
+    detail = f"Model '{model_name}' is not available for your role"
+    try:
+        provider, principal = resolve_model_authorization(user, is_internal=is_internal)
+    except _AuthorizationUnavailable:
+        if app_config.authorization.fail_closed:
+            raise HTTPException(status_code=403, detail=detail) from None
+        return
+    if provider is None or principal is None:
+        return
+    try:
+        decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        allowed = decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking model:use for %s", model_name, exc_info=True)
+        allowed = not app_config.authorization.fail_closed
+    if not allowed:
+        raise HTTPException(status_code=403, detail=detail)
+
+
 def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
     """Return ``(provider, principal)`` for skill-route authorization.
 
@@ -438,6 +485,248 @@ def authorize_sandbox_for_request(
         logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
         if config.fail_closed:
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
+
+
+# --- Plugin resource authorization -------------------------------------------
+#
+# The plugin request paths deliberately do NOT reuse the route provider cache
+# above: that cache is synchronous, constructs inline on the calling thread and
+# keys on config identity alone, so a hit cannot prove the instance belongs to
+# the caller's event loop. A plugin provider may be loop-affine (its
+# ``__init__`` may create an asyncio client), so this cache keys on
+# ``(config signature, loop key)`` and never hands a loop-built instance to a
+# sync caller or to a different loop.
+
+_PLUGIN_PROVIDER_SYNC_SLOT = object()
+#: loop_key → (config signature, provider, owning loop or None for the sync slot).
+_plugin_provider_cache: dict[object, tuple[str, AuthorizationProvider, asyncio.AbstractEventLoop | None]] = {}
+
+
+class _PluginAuthorizationUnavailable(Exception):
+    """Raised when the plugin provider cannot be resolved for a request.
+
+    Carries ``fail_closed`` so callers choose between deny and legacy allow
+    without re-reading config (mirrors ``_AuthorizationUnavailable``).
+    """
+
+    def __init__(self, *, fail_closed: bool) -> None:
+        self.fail_closed = fail_closed
+
+
+def _plugin_loaded_config() -> AppConfig | None:
+    """The configuration this host is running on, or ``None`` if it has none.
+
+    ``get_app_config()`` re-reads the file on every request (hot reload), so a
+    failed read needs the last successfully loaded value to tell a host that has
+    no configuration at all from one whose running policy just became
+    unreadable.
+    """
+    from deerflow.config.app_config import peek_loaded_app_config
+
+    return peek_loaded_app_config()
+
+
+def _plugin_config_failure_fail_closed() -> bool:
+    """Failure flag for a plugin decision whose configuration cannot be read.
+
+    * No loaded config: the host never ran on a configuration, and the
+      ``config.yaml``-less case returned no gate before reaching this call, so
+      this is a file that exists but cannot be read or validated right now. The
+      flag that would permit an allow is unreadable, so it fails closed
+      (review P1, round 1).
+    * A loaded config with authorization disabled: there is no gate to apply.
+    * A loaded config with authorization enabled: follow that policy's own
+      ``fail_closed`` (``True`` by default), so a host that lost the config it
+      is running on answers like any other authorization failure instead of
+      reading the loss as "disabled" (review P1, round 2).
+    """
+    loaded = _plugin_loaded_config()
+    if loaded is None:
+        return True
+    authz_config = getattr(loaded, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return False
+    return getattr(authz_config, "fail_closed", False) is True
+
+
+def _plugin_app_config() -> AppConfig | None:
+    """Read the config snapshot for a plugin decision.
+
+    ``None`` means this host has no configuration file *and* has never loaded
+    one, so there is no policy to apply — the same rule the route-scoped gates
+    use for environments without a ``config.yaml`` (CI runners, direct-call
+    tests, a host that mounts only the plugins router): authorization can only
+    be enabled through config.
+
+    A host running on a configuration never reads a failed load as "disabled".
+    Both the lost file (a hot reload, an atomic replace, a ConfigMap remount)
+    and a file that exists but cannot be read or validated right now propagate,
+    so the caller applies the failure policy of the policy it is running on
+    (:func:`_plugin_config_failure_fail_closed`).
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config()
+    except FileNotFoundError:
+        if _plugin_loaded_config() is None:
+            logger.debug("No `config.yaml` and no loaded config; the plugin authorization gate is a no-op", exc_info=True)
+            return None
+        raise
+
+
+async def _plugin_app_config_async() -> AppConfig | None:
+    """Off-loop :func:`_plugin_app_config` for async request paths."""
+    return await asyncio.to_thread(_plugin_app_config)
+
+
+def _plugin_config_signature(config: AuthorizationConfig) -> str:
+    return repr(sorted(config.model_dump().items()))
+
+
+def _store_plugin_provider(loop_key: object, loop: asyncio.AbstractEventLoop | None, signature: str, provider: AuthorizationProvider) -> None:
+    """Publish one entry, dropping entries whose loop has closed (bounded growth)."""
+    for key, entry in list(_plugin_provider_cache.items()):
+        owner = entry[2]
+        if owner is not None and owner.is_closed():
+            _plugin_provider_cache.pop(key, None)
+    _plugin_provider_cache[loop_key] = (signature, provider, loop)
+
+
+def _get_cached_plugin_provider_sync(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider for sync callers (and FastAPI ``def`` thread-pool workers)."""
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(_PLUGIN_PROVIDER_SYNC_SLOT)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    provider = resolve_authorization_provider(config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(_PLUGIN_PROVIDER_SYNC_SLOT, None, signature, provider)
+    return provider
+
+
+async def _aget_cached_plugin_provider(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider belonging to *this* loop; a miss discovers off-loop."""
+    loop = asyncio.get_running_loop()
+    loop_key = id(loop)
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(loop_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    if getattr(config, "provider", None) is None:
+        # Nothing to import; preserve the resolver's own "enabled but unconfigured" error.
+        provider = resolve_authorization_provider(config)
+    else:
+        spec = await asyncio.to_thread(resolve_authorization_provider_spec, config)
+        # Construction stays on the calling loop: async providers may create
+        # loop-affine clients in ``__init__``.
+        provider = construct_authorization_provider(spec, config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(loop_key, loop, signature, provider)
+    return provider
+
+
+def _plugin_request_principal(request: Request, authz_config: AuthorizationConfig) -> Principal | None:
+    """Build the request-scoped Principal, or ``None`` when the caller is anonymous."""
+    user = getattr(getattr(request, "state", None), "user", None)
+    if user is None:
+        return None
+    return build_principal_from_context(
+        _route_authz_context(user, is_internal=_is_internal_caller(request, user)),
+        default_role=authz_config.default_role,
+    )
+
+
+def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Return ``(provider, principal, app_config)`` for plugin resources, for sync callers.
+
+    ``provider is None`` means authorization is disabled for this host — the
+    caller keeps today's behavior; ``app_config is None`` means there is no
+    configuration at all. The same ``app_config`` snapshot that produced the
+    provider is returned so the enforcement layer never re-reads the
+    configuration. Raises ``_PluginAuthorizationUnavailable`` (carrying
+    ``fail_closed``) when the configuration this host is running on became
+    unreadable, or when the provider cannot be resolved.
+    """
+    try:
+        app_config = _plugin_app_config()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None, app_config
+    try:
+        provider = _get_cached_plugin_provider_sync(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config), app_config
+
+
+async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Async ``(provider, principal, app_config)`` for plugin resources.
+
+    Never returns the sync slot, and never performs synchronous config loading,
+    provider discovery or provider calls on the event loop. The returned
+    ``app_config`` is the snapshot the provider was resolved from, so the
+    enforcement layer never re-reads the configuration.
+    """
+    try:
+        app_config = await _plugin_app_config_async()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None, app_config
+    try:
+        provider = await _aget_cached_plugin_provider(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config), app_config
+
+
+async def authorize_plugin_action_for_request(request: Request, *, namespace: str, action_name: str) -> None:
+    """Authorize a registered plugin action before its handler runs (O2).
+
+    Returns normally when the action is permitted (or authorization is
+    disabled); raises ``HTTPException(403)`` on deny, and on a provider
+    resolution failure under ``fail_closed``.
+    """
+    from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_action
+
+    try:
+        provider, principal, app_config = await aresolve_plugin_authorization(request)
+    except _PluginAuthorizationUnavailable as unavailable:
+        if unavailable.fail_closed:
+            raise _plugin_action_denied() from None
+        return
+    if provider is None:
+        # Authorization is disabled: today's behavior.
+        return
+    try:
+        await aenforce_plugin_action(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            action_name=action_name,
+            provider=provider,
+        )
+    except PluginAuthorizationError as error:
+        raise _plugin_action_denied() from error
+
+
+def _plugin_action_denied() -> HTTPException:
+    return HTTPException(status_code=403, detail="Plugin action not permitted for your role.")
 
 
 @dataclass(slots=True)
@@ -657,20 +946,25 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Bind the wrapped signature so a request passed positionally
+            # (direct calls in unit tests, non-FastAPI callers) is honored
+            # instead of colliding with an injected keyword stub.
+            signature = inspect.signature(func)
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
             request = kwargs.get("request")
+            if request is None and bound is not None:
+                request = bound.arguments.get("request")
             if request is None:
                 # Unit tests may call decorated route handlers directly — with
                 # or without constructing a FastAPI Request object — and may
-                # pass ``request`` positionally. Bind to the real signature
-                # first so a positional request is found rather than
-                # duplicated by the stub injection below.
-                try:
-                    bound = inspect.signature(func).bind_partial(*args, **kwargs)
-                except TypeError:
-                    bound = None
-                if bound is not None and "request" in bound.arguments:
-                    request = bound.arguments["request"]
-                elif "request" in inspect.signature(func).parameters:
+                # pass ``request`` positionally. The full-signature bind at
+                # the top of this wrapper already recovered a positional
+                # request, so only the stub injection for handlers that
+                # declare ``request`` but received none remains here.
+                if "request" in signature.parameters:
                     kwargs["request"] = _make_test_request_stub()
                     request = kwargs["request"]
                 else:
@@ -707,6 +1001,8 @@ def require_permission(
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
                 thread_id = kwargs.get("thread_id")
+                if thread_id is None and bound is not None:
+                    thread_id = bound.arguments.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 

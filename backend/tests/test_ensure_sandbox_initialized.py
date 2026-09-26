@@ -80,6 +80,10 @@ class _RecordingProvider(SandboxProvider):
             return self.sandbox
         return None
 
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id: str) -> None:
         self.released.append(sandbox_id)
 
@@ -193,6 +197,7 @@ def test_ensure_sandbox_initialized_unwraps_overwrite_state() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = ensure_sandbox_initialized(runtime)
     finally:
         reset_sandbox_provider()
@@ -210,6 +215,7 @@ async def test_ensure_sandbox_initialized_async_unwraps_overwrite_state() -> Non
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()
@@ -280,6 +286,7 @@ def test_ensure_sandbox_initialized_plain_state_unchanged() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = ensure_sandbox_initialized(runtime)
     finally:
         reset_sandbox_provider()
@@ -366,6 +373,7 @@ async def test_ensure_sandbox_initialized_async_plain_state_unchanged() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()

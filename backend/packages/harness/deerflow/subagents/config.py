@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from deerflow.config.prompt_overlay import PromptOverlay
+
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
@@ -33,6 +35,7 @@ class SubagentConfig:
             effective limit is the global ``subagents.timeout_seconds`` (default
             1800 = 30 min), layered on by the registry; this 900 only applies
             when no differing global value exists.
+        prompt_overlay: Operator instructions around the complete system message.
     """
 
     name: str
@@ -44,6 +47,7 @@ class SubagentConfig:
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
+    prompt_overlay: PromptOverlay = field(default_factory=PromptOverlay)
 
 
 def _default_model_name(app_config: "AppConfig") -> str:

@@ -17,6 +17,7 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
@@ -646,6 +647,27 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_prompt_overlay_surrounds_complete_system_message(self, classes):
+        from langchain_core.messages import SystemMessage
+
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        overrides = SubagentsAppConfig(agents={"general-purpose": {"prompt_overlay": {"prepend": "Operator first", "append": "Operator last"}}})
+        config = get_subagent_config("general-purpose", app_config=overrides)
+        executor = classes["SubagentExecutor"](config=config, tools=[], thread_id="test-thread")
+
+        state, _tools, _setup = await executor._build_initial_state("Do the task")
+
+        system = state["messages"][0]
+        assert isinstance(system, SystemMessage)
+        assert system.content.startswith("Operator first\n\n")
+        assert system.content.endswith("\n\nOperator last")
+        assert config.system_prompt in system.content
+        assert "report" in system.content[len(config.system_prompt) : -len("Operator last")].lower()
+        assert executor._assembled_system_prompt == system.content
 
     @pytest.mark.anyio
     async def test_build_initial_state_inherits_background_without_execution_evidence(self, classes, base_config):
@@ -2003,6 +2025,7 @@ class TestAsyncExecutionPath:
         classes,
         base_config,
         mock_agent,
+        caplog,
     ):
         SubagentExecutor = classes["SubagentExecutor"]
         started = asyncio.Event()
@@ -2028,15 +2051,18 @@ class TestAsyncExecutionPath:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            execution = asyncio.create_task(executor._aexecute("Task"))
-            await started.wait()
-            execution.cancel("host cancellation")
-            with pytest.raises(asyncio.CancelledError) as raised:
-                await execution
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                execution = asyncio.create_task(executor._aexecute("Task"))
+                await started.wait()
+                execution.cancel("host cancellation")
+                with pytest.raises(asyncio.CancelledError) as raised:
+                    await execution
 
         assert raised.value.args == ("host cancellation",)
         assert close_attempted is True
+        assert "Could not close interrupted subagent stream" in caplog.text
+        assert "close failed" in caplog.text
 
     @pytest.mark.anyio
     async def test_aexecute_finally_releases_only_the_failing_subagent_lease(
@@ -4175,6 +4201,71 @@ class _FakeStreamAgent:
         self.captured_context = context
         return
         yield  # pragma: no cover - make this an async generator
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scope_kwargs, expected_scope",
+    [
+        ({"thread_incarnation": "captured-incarnation"}, 'v2:["alice","parent-thread","captured-incarnation"]'),
+        ({"thread_incarnation": None}, "alice:parent-thread"),
+        ({}, None),
+        ({"thread_incarnation": ""}, None),
+        ({"thread_incarnation": False}, None),
+        ({"thread_incarnation": {}}, None),
+    ],
+)
+async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatch, tmp_path, scope_kwargs, expected_scope):
+    """A real child ToolNode must receive the parent's captured MCP scope."""
+    from langchain_core.tools import StructuredTool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from mcp.types import CallToolResult
+
+    from deerflow.mcp import tools as mcp_tools
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    pool = SimpleNamespace(get_session=AsyncMock(return_value=object()))
+    call_remote = AsyncMock(return_value=CallToolResult(content=[], isError=False))
+    monkeypatch.setattr(mcp_tools, "get_session_pool", lambda: pool)
+    monkeypatch.setattr(mcp_tools, "call_pooled_session_tool", call_remote)
+    monkeypatch.setattr(mcp_tools, "_prepare_stdio_workspace", lambda *args, **kwargs: (tmp_path, tmp_path, {}))
+    tool = mcp_tools._make_session_pool_tool(
+        StructuredTool(name="server_probe", description="Probe MCP", args_schema={"type": "object", "properties": {}}, coroutine=AsyncMock()),
+        "server",
+        {"transport": "stdio", "command": "unused"},
+    )
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("tools", ToolNode([tool], handle_tool_errors=False))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    child = graph.compile()
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](name="general-purpose", description="MCP scope test", system_prompt="Test", max_turns=5, timeout_seconds=30),
+        tools=[tool],
+        parent_model="test-model",
+        thread_id="parent-thread",
+        user_id="alice",
+        **scope_kwargs,
+    )
+
+    async def build_initial_state(task):
+        return ({"messages": [classes["AIMessage"](content="", tool_calls=[{"name": tool.name, "args": {}, "id": "probe"}])]}, [], None)
+
+    monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
+    monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child)
+    result = await executor._aexecute("probe MCP")
+
+    if expected_scope is None:
+        assert result.status == classes["SubagentStatus"].FAILED, result.ai_messages
+        assert "thread incarnation" in result.error
+        pool.get_session.assert_not_awaited()
+        call_remote.assert_not_awaited()
+    else:
+        assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+        call_remote.assert_awaited_once()
+        assert call_remote.await_args.kwargs["scope_key"] == expected_scope
 
 
 class TestSubagentCheckpointLineage:

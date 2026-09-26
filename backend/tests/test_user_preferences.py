@@ -93,7 +93,7 @@ async def test_preferences_api_partial_patch_reset_and_owner_isolation(api):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("body", [{"notification_enabled": "false"}, {"mode": "invalid"}, {"reasoning_effort": "max"}, {"model_name": "a" * 201}, {"context": {"github_token": "not-a-real-token"}}, {"user_id": "bob"}])
+@pytest.mark.parametrize("body", [{"notification_enabled": "false"}, {"mode": "invalid"}, {"reasoning_effort": "Not Valid!"}, {"model_name": "a" * 201}, {"context": {"github_token": "not-a-real-token"}}, {"user_id": "bob"}])
 async def test_preferences_api_rejects_invalid_and_unrelated_fields(api, body):
     client, _ = api
     assert (await client.patch("/api/v1/auth/preferences", json=body)).status_code == 422

@@ -6,23 +6,31 @@ Validates that the LangGraph auth layer enforces the same rules as Gateway:
 
 import asyncio
 import os
+import sys
+from contextvars import ContextVar
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from starlette.exceptions import HTTPException
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-for-langgraph-auth-testing-min-32")
 
 from langgraph_sdk import Auth
 
+from app.gateway import langgraph_auth as auth_module
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.jwt import create_access_token, decode_token
 from app.gateway.auth.models import User
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
 from app.gateway.langgraph_auth import add_owner_filter, authenticate
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -233,6 +241,348 @@ def test_filter_with_empty_metadata():
     result = asyncio.run(add_owner_filter(_make_ctx("user-z"), value))
     assert value["metadata"]["user_id"] == "user-z"
     assert result == {"user_id": "user-z"}
+
+
+def test_thread_create_overwrites_client_incarnation():
+    value = {"metadata": {THREAD_INCARNATION_CONTEXT_KEY: "attacker"}}
+
+    asyncio.run(add_owner_filter(_make_ctx("user-a"), value))
+
+    incarnation = value["metadata"][THREAD_INCARNATION_CONTEXT_KEY]
+    assert incarnation != "attacker"
+    assert isinstance(incarnation, str) and incarnation
+
+
+@pytest.mark.parametrize("value", ["attacker", "", None, False])
+def test_thread_update_cannot_change_incarnation(value):
+    request = {"metadata": {THREAD_INCARNATION_CONTEXT_KEY: value}}
+
+    asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", action="update"),
+            request,
+        )
+    )
+
+    assert THREAD_INCARNATION_CONTEXT_KEY not in request["metadata"]
+
+
+def test_run_admission_uses_persisted_incarnation_and_scrubs_client_values():
+    thread_id = uuid4()
+    run_id = uuid4()
+    value = {
+        "assistant_id": uuid4(),
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "metadata": {
+            THREAD_INCARNATION_CONTEXT_KEY: "metadata-attacker",
+            THREAD_INCARNATION_METADATA_GUARD_KEY: True,
+        },
+        "kwargs": {
+            "context": {
+                THREAD_INCARNATION_CONTEXT_KEY: "context-attacker",
+                THREAD_INCARNATION_METADATA_GUARD_KEY: False,
+                "user_id": "attacker",
+                "thread_id": "attacker",
+                "run_id": "attacker",
+            },
+            "config": {
+                "context": {
+                    THREAD_INCARNATION_CONTEXT_KEY: "config-context-attacker",
+                    THREAD_INCARNATION_METADATA_GUARD_KEY: False,
+                },
+                "metadata": {
+                    THREAD_INCARNATION_CONTEXT_KEY: "config-metadata-attacker",
+                    THREAD_INCARNATION_METADATA_GUARD_KEY: False,
+                },
+                "configurable": {
+                    THREAD_INCARNATION_CONTEXT_KEY: "configurable-attacker",
+                    THREAD_INCARNATION_METADATA_GUARD_KEY: False,
+                },
+            },
+        },
+        "if_not_exists": "reject",
+    }
+
+    with patch.object(
+        auth_module,
+        "_read_standalone_thread",
+        AsyncMock(
+            return_value={
+                "metadata": {THREAD_INCARNATION_CONTEXT_KEY: "server-incarnation"},
+            }
+        ),
+    ):
+        asyncio.run(
+            add_owner_filter(
+                _make_ctx("user-a", action="create_run"),
+                value,
+            )
+        )
+
+    assert value["kwargs"]["context"][THREAD_INCARNATION_CONTEXT_KEY] == "server-incarnation"
+    assert value["kwargs"]["context"][THREAD_INCARNATION_METADATA_GUARD_KEY] is True
+    assert value["kwargs"]["context"]["user_id"] == "user-a"
+    assert value["kwargs"]["context"]["thread_id"] == str(thread_id)
+    assert value["kwargs"]["context"]["run_id"] == str(run_id)
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["metadata"]
+    assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["metadata"]
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["config"]["context"]
+    assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["config"]["context"]
+    assert "user_id" not in value["kwargs"]["config"]["context"]
+    assert "thread_id" not in value["kwargs"]["config"]["context"]
+    assert "run_id" not in value["kwargs"]["config"]["context"]
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["config"]["metadata"]
+    assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["config"]["metadata"]
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["config"]["configurable"]
+    assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["config"]["configurable"]
+
+
+def test_existing_legacy_thread_uses_explicit_none_without_backfill():
+    with patch.object(
+        auth_module,
+        "_read_standalone_thread",
+        AsyncMock(return_value={"metadata": {"legacy": True}}),
+    ):
+        incarnation = asyncio.run(
+            auth_module._ensure_standalone_thread_incarnation(
+                uuid4(),
+                uuid4(),
+                _make_ctx("user-a", action="create_run"),
+                create_if_missing=False,
+            )
+        )
+
+    assert incarnation is None
+
+
+def _fake_standalone_runtime(assistant_results, *, put_metadata=None):
+    class _Connection:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def _rows(value):
+        if value is not None:
+            yield value
+
+    remaining_assistants = iter(assistant_results)
+    auth_context_observations = []
+
+    async def _get_assistant(*_args, **_kwargs):
+        auth_context_observations.append(runtime_auth_context.get())
+        return _rows(next(remaining_assistants))
+
+    async def _put_thread(*_args, **_kwargs):
+        return _rows({"metadata": put_metadata})
+
+    get_assistant = AsyncMock(side_effect=_get_assistant)
+    put = AsyncMock(side_effect=_put_thread)
+    runtime_package = ModuleType("langgraph_runtime")
+    runtime_package.__path__ = []
+    database_module = ModuleType("langgraph_runtime.database")
+    database_module.connect = _Connection
+    ops_module = ModuleType("langgraph_runtime.ops")
+    ops_module.Assistants = SimpleNamespace(get=get_assistant)
+    ops_module.Threads = SimpleNamespace(put=put)
+    utils_module = ModuleType("langgraph_api.utils")
+    runtime_auth_context = ContextVar("test_runtime_auth_context", default="ambient")
+    utils_module.AuthContext = runtime_auth_context
+
+    return SimpleNamespace(
+        modules={
+            "langgraph_runtime": runtime_package,
+            "langgraph_runtime.database": database_module,
+            "langgraph_runtime.ops": ops_module,
+            "langgraph_api.utils": utils_module,
+        },
+        get_assistant=get_assistant,
+        put=put,
+        runtime_auth_context=runtime_auth_context,
+        auth_context_observations=auth_context_observations,
+    )
+
+
+def test_implicit_create_accepts_legacy_thread_created_by_mixed_version_peer():
+    runtime = _fake_standalone_runtime(
+        [{"metadata": {"created_by": "system"}}],
+        put_metadata={"legacy": True},
+    )
+
+    with (
+        patch.object(
+            auth_module,
+            "_read_standalone_thread",
+            AsyncMock(side_effect=[None, {"metadata": {"legacy": True}}]),
+        ),
+        patch.dict(
+            sys.modules,
+            runtime.modules,
+        ),
+    ):
+        incarnation = asyncio.run(
+            auth_module._ensure_standalone_thread_incarnation(
+                uuid4(),
+                uuid4(),
+                _make_ctx("user-a", action="create_run"),
+                create_if_missing=True,
+            )
+        )
+
+    assert incarnation is None
+    runtime.put.assert_awaited_once()
+    assert runtime.get_assistant.await_args.kwargs["ctx"] is None
+    assert runtime.auth_context_observations == [None]
+
+
+@pytest.mark.parametrize(
+    "assistant_results",
+    [
+        [None],
+        [{"metadata": {"created_by": "user"}}, None],
+    ],
+    ids=["missing", "unauthorized"],
+)
+def test_implicit_create_rejects_unavailable_assistant_before_thread_put(assistant_results):
+    runtime = _fake_standalone_runtime(assistant_results)
+    ctx = _make_ctx("user-a", action="create_run")
+
+    with (
+        patch.object(
+            auth_module,
+            "_read_standalone_thread",
+            AsyncMock(return_value=None),
+        ),
+        patch.dict(sys.modules, runtime.modules),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        asyncio.run(
+            auth_module._ensure_standalone_thread_incarnation(
+                uuid4(),
+                uuid4(),
+                ctx,
+                create_if_missing=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 404
+    runtime.put.assert_not_awaited()
+    assert runtime.get_assistant.await_args_list[0].kwargs["ctx"] is None
+    if len(assistant_results) == 2:
+        assert runtime.get_assistant.await_args_list[1].kwargs["ctx"] is ctx
+        assert runtime.auth_context_observations == [None, "ambient"]
+    else:
+        assert runtime.auth_context_observations == [None]
+
+
+@pytest.mark.parametrize("persisted_incarnation", [None, "versioned-incarnation"])
+def test_run_admission_preserves_persisted_incarnation_value(persisted_incarnation):
+    value = {
+        "assistant_id": uuid4(),
+        "thread_id": uuid4(),
+        "metadata": {},
+        "kwargs": {},
+        "if_not_exists": "reject",
+    }
+
+    with patch.object(
+        auth_module,
+        "_ensure_standalone_thread_incarnation",
+        AsyncMock(return_value=persisted_incarnation),
+    ):
+        asyncio.run(
+            add_owner_filter(
+                _make_ctx("user-a", action="create_run"),
+                value,
+            )
+        )
+
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["metadata"]
+    assert value["kwargs"]["context"][THREAD_INCARNATION_CONTEXT_KEY] is persisted_incarnation
+    assert value["kwargs"]["context"][THREAD_INCARNATION_METADATA_GUARD_KEY] is True
+
+
+def test_run_admission_does_not_invent_incarnation_for_missing_rejected_thread():
+    value = {
+        "assistant_id": uuid4(),
+        "thread_id": uuid4(),
+        "metadata": {THREAD_INCARNATION_CONTEXT_KEY: "attacker"},
+        "kwargs": {
+            "context": {THREAD_INCARNATION_CONTEXT_KEY: "attacker"},
+        },
+        "if_not_exists": "reject",
+    }
+
+    with patch.object(
+        auth_module,
+        "_ensure_standalone_thread_incarnation",
+        AsyncMock(return_value=auth_module._MISSING),
+    ):
+        asyncio.run(
+            add_owner_filter(
+                _make_ctx("user-a", action="create_run"),
+                value,
+            )
+        )
+
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["metadata"]
+    assert THREAD_INCARNATION_CONTEXT_KEY not in value["kwargs"]["context"]
+    assert THREAD_INCARNATION_METADATA_GUARD_KEY not in value["kwargs"]["context"]
+
+
+def test_run_admission_rejects_invalid_persisted_incarnation():
+    value = {
+        "assistant_id": uuid4(),
+        "thread_id": uuid4(),
+        "metadata": {},
+        "kwargs": {},
+        "if_not_exists": "reject",
+    }
+
+    with (
+        patch.object(
+            auth_module,
+            "_read_standalone_thread",
+            AsyncMock(
+                return_value={
+                    "metadata": {THREAD_INCARNATION_CONTEXT_KEY: ""},
+                }
+            ),
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="invalid incarnation",
+        ),
+    ):
+        asyncio.run(
+            add_owner_filter(
+                _make_ctx("user-a", action="create_run"),
+                value,
+            )
+        )
+
+
+def test_temporary_run_gets_explicit_legacy_incarnation():
+    value = {
+        "assistant_id": uuid4(),
+        "thread_id": None,
+        "metadata": {},
+        "kwargs": {
+            "context": {THREAD_INCARNATION_CONTEXT_KEY: "attacker"},
+        },
+        "if_not_exists": "reject",
+    }
+
+    asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", action="create_run"),
+            value,
+        )
+    )
+
+    assert value["kwargs"]["context"][THREAD_INCARNATION_CONTEXT_KEY] is None
 
 
 @pytest.mark.parametrize("action", ["read", "search"])

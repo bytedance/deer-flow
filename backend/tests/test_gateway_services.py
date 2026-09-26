@@ -211,6 +211,30 @@ def test_normalize_input_none():
     assert normalize_input(None) == {}
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("channel", ["viewed_images", "thread_data"])
+def test_external_image_runtime_state_is_rejected(boundary, channel):
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({channel: {"synthetic": "untrusted"}})
+
+    assert error.value.status_code == 400
+
+
+def test_trusted_internal_run_preserves_image_runtime_state():
+    from app.gateway.services import normalize_input
+
+    viewed_images = {"/mnt/user-data/outputs/chart.png": {"actual_path": "/synthetic/chart.png"}}
+    thread_data = {"outputs_path": "/synthetic/outputs"}
+    result = normalize_input({"viewed_images": viewed_images, "thread_data": thread_data}, trusted_internal=True)
+    assert result["viewed_images"] == viewed_images
+    assert result["thread_data"] == thread_data
+
+
 def test_normalize_input_with_messages():
     from app.gateway.services import normalize_input
 
@@ -1909,6 +1933,7 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
         await asyncio.sleep(0)
 
     assert "thread metadata store failed after cancellation" in caplog.text
+    assert "MCP access will fail closed" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1960,6 +1985,7 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
     assert record.status == RunStatus.running
     assert (await run_manager.get(record.run_id)).status == RunStatus.running
     assert "Timed out ensuring thread_meta for thread-timeout-meta" in caplog.text
+    assert "Thread metadata for thread-timeout-meta is unavailable; MCP access will fail closed" in caplog.text
 
 
 def test_context_merges_into_configurable():
@@ -4003,6 +4029,7 @@ def test_strip_internal_context_keys_scrubs_audit_attribution_and_recorders():
         "__run_loop_detection_recorder": "forged",
         "__run_tool_promotion_recorder": "forged",
         "__run_tool_progress_recorder": "forged",
+        "__deerflow_thread_incarnation_metadata_guard": True,
     }
     config = build_run_config(
         "thread-1",

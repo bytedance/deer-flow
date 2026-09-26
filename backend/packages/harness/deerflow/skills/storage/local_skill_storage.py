@@ -111,7 +111,7 @@ class LocalSkillStorage(SkillStorage):
                 if tmp_path is not None:
                     tmp_path.unlink(missing_ok=True)
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
             return super().remove_custom_skill_file(name, relative_path)
@@ -231,7 +231,13 @@ class LocalSkillStorage(SkillStorage):
                 )
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
-            if target.exists():
+            if target.is_symlink():
+                # An operator-linked package (see
+                # ``_is_external_skill_directory_symlink``): the skill is the
+                # link, and the external tree is not ours to delete.
+                # ``shutil.rmtree`` refuses symlinks, so unlink instead.
+                target.unlink()
+            elif target.exists():
                 shutil.rmtree(target)
 
     def _skill_projection_mutation(

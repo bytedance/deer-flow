@@ -23,6 +23,11 @@ from deerflow.community.ragflow.sources import cited_source_artifact
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -44,6 +49,7 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.assembly_io import run_assembly
@@ -431,9 +437,10 @@ def bind_task_tool(
     """Return a task tool bound to one explicit SDK runtime capacity.
 
     The copied tool keeps the original name, description, and argument schema;
-    only its coroutine is wrapped. ``ContextVar`` keeps concurrent direct
-    factories isolated while the resolved capacity is passed into the executor
-    before work crosses to the persistent subagent event loop.
+    its coroutine and sync func are wrapped around the bound coroutine.
+    ``ContextVar`` keeps concurrent direct factories isolated while the
+    resolved capacity is passed into the executor before work crosses to the
+    persistent subagent event loop.
     """
 
     original_coroutine = task_tool.coroutine
@@ -449,7 +456,15 @@ def bind_task_tool(
             _explicit_app_config.reset(config_token)
             _explicit_execution_capacity.reset(capacity_token)
 
-    return task_tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return task_tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, task_tool.name),
+        }
+    )
 
 
 def _schedule_deferred_subagent_cleanup(
@@ -850,6 +865,8 @@ async def task_tool(
     # tool call delegated to a subagent (user_role=None).
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
+    if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
@@ -942,6 +959,10 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    # Carry the host-captured lifecycle, including legacy None, without
+    # inventing a legacy scope for missing context or re-reading thread state.
+    if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
+        executor_kwargs["thread_incarnation"] = parent_context[THREAD_INCARNATION_CONTEXT_KEY]
     if context_snapshot is not None:
         executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None

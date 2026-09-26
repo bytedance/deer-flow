@@ -253,9 +253,12 @@ cannot finish transport cleanup on a loop that has already closed.
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task
 calls. `session_init_timeout` covers server bring-up — tool discovery
 (subprocess spawn + `initialize` + `tools/list`) and persistent-session
-initialization — plus ephemeral HTTP/SSE task-session initialization. It
-defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
-a server that never answers `initialize`) cannot block agent construction or
+initialization — plus ephemeral HTTP/SSE task-session connection setup and
+initialization under a single deadline. This includes waiting for an SSE
+`endpoint` event. Once initialization succeeds, this deadline is disabled;
+the tool call uses its independent `tool_call_timeout`.
+The initialization timeout defaults to 60s so a hung server (e.g. `npx` blocked
+on a package download, or a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
 ```json
@@ -389,13 +392,25 @@ must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
 Server-level OAuth works during background polling and refreshes normally.
+When `user_auth` is enabled on an HTTP/SSE server, background status and
+cancellation calls use the persisted task owner's configured credential,
+including after a Gateway restart.
+Only the user ID is carried from the task record; no request credential is stored.
+An unmapped owner remains denied unless `user_auth.on_missing` is `passthrough`.
 Request-scoped secrets from a particular Agent run are not durable task
-credentials and are unavailable to later background polls; use server-level
+credentials and are unavailable to later background polls; use configured
 authentication for a task toolset. `headers_from_context` follows the same
 rule: submit is awaited inside the Agent run and carries the mapped headers,
 while status and cancel polls skip them and authenticate with the server's
-static or OAuth credentials — so `on_missing: "deny"` guards the submit but not
-those polls. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
+static/OAuth credentials or the owner's configured `user_auth` credential — so
+`headers_from_context.on_missing: "deny"` guards the submit but not
+those polls. Declaring both on one server logs a warning at startup.
+When a request header overrides `user_auth` on submit, ensure that both
+credentials can access the same remote task. If the background credential
+cannot access it and the status tool returns a normal structured
+`error_code: "task_not_found"` result, the task becomes permanently `failed`,
+not a retryable authentication error.
+Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
@@ -511,7 +526,8 @@ The caller supplies the values on each run request:
 - Durable background tasks are the one exception, and only half of one: a
   `task_toolsets` submit is awaited inside the Agent run and carries these
   headers, but the status and cancel polls run after that run ends, so they skip
-  them and use the server's static/OAuth credentials. See *Durable Background
+  them and use configured static/OAuth credentials or the persisted owner's
+  `user_auth` credential. See *Durable Background
   Tasks* above.
 
 Use `user_auth` instead when the credential belongs to a configured DeerFlow
