@@ -1496,6 +1496,16 @@ This release closes that milestone with **181 merged pull requests**.
   `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
   before editing anything when `uv` is missing, instead of leaving a half-bumped
   working tree behind. Only the root package's version line moves. ([#5859])
+- **sandbox:** Stop `glob` and `grep` from returning nothing when the search
+  root — or one of its ancestors — matches an ignore pattern such as `build`,
+  `dist`, `logs`, `node_modules`, `coverage` or `target`. The remote sandboxes
+  applied `should_ignore_path` to the absolute path, which tests every segment,
+  so one ignored name anywhere up the tree hid the whole result and the agent
+  was told "no matches" for a directory `ls` had just listed. Ignore patterns
+  are now applied to the path relative to the search root, as `list_dir` already
+  did: an ignored name still hides its own descendants, but searching an
+  ignored root — or a path below an ignored ancestor — returns its contents.
+  ([#5667])
 
 ### Security
 
@@ -6200,6 +6210,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
