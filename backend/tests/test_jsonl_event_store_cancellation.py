@@ -182,6 +182,7 @@ async def test_cancelled_snapshot_keeps_thread_lock_until_read_finishes(tmp_path
         await _checkpoint()
         assert not lookup.done()
         assert not writer.done()
+        assert not store._run_file("t1", "r2").exists(), "writer entered before the snapshot read settled"
         paused.release.set()
         with pytest.raises(asyncio.CancelledError) as caught:
             await lookup
@@ -215,6 +216,7 @@ async def test_snapshot_read_failure_preserves_error_precedence_and_releases_loc
         writer = asyncio.create_task(store.put(**_event("r2", "later")))
         await _checkpoint()
         assert not writer.done()
+        assert not store._run_file("t1", "r2").exists(), "writer entered before the snapshot read settled"
 
         paused.release.set()
         if cancel:
