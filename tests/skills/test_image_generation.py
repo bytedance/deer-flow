@@ -27,6 +27,45 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+def test_atomic_generation_rejects_invalid_image_without_replacing_output(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    output = tmp_path / "slide.png"
+    Image.new("RGB", (8, 8), "blue").save(output)
+    original = output.read_bytes()
+
+    def write_invalid(_prompt, _references, temporary, _ratio):
+        Path(temporary).write_bytes(b"not an image")
+
+    monkeypatch.setattr(img, "generate_image", write_invalid)
+
+    with pytest.raises(img.InvalidImageOutputError):
+        img.generate_image_atomically("prompt.json", [], str(output))
+
+    assert output.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [output]
+
+
+def test_atomic_generation_converts_before_replacing_output(tmp_path, monkeypatch):
+    from PIL import Image
+
+    output = tmp_path / "slide.jpg"
+
+    def write_png(_prompt, _references, temporary, _ratio):
+        Image.new("RGBA", (8, 8), "red").save(temporary, format="PNG")
+
+    monkeypatch.setattr(img, "generate_image", write_png)
+
+    img.generate_image_atomically("prompt.json", [], str(output))
+
+    with Image.open(output) as image:
+        assert image.format == "JPEG"
+        image.verify()
+    assert list(tmp_path.iterdir()) == [output]
+
+
 def test_resolve_prefers_gemini(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("MINIMAX_API_KEY", "m")

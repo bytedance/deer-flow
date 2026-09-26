@@ -1529,7 +1529,8 @@ requires a Gateway restart and container recreation. See
 Gateway-side generation/edit tests may incur provider charges and do not test
 sandbox egress. PPT slides are generated sequentially because each references
 the previous slide. Generation scripts exit nonzero on failure; composition
-rejects missing or mismatched slide images.
+rejects missing or mismatched slide images. The controlled image tool also works
+with LocalSandbox's PowerShell or cmd.exe fallback on Windows hosts.
 
 #### Exporting Custom Skills
 

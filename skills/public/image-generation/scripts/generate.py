@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import json
 import os
 import sys
+from uuid import uuid4
 
 import requests
 
@@ -16,6 +17,10 @@ MINIMAX_PROMPT_MAX_CHARS = 1500
 
 class MissingImageCredentialError(ValueError):
     """The selected image provider cannot be called without its API key."""
+
+
+class InvalidImageOutputError(RuntimeError):
+    """The provider did not write a decodable image."""
 
 
 def validate_image(image_path: str) -> bool:
@@ -364,6 +369,49 @@ def generate_image(
     )
 
 
+def generate_image_atomically(
+    prompt_file: str,
+    reference_images: list[str],
+    output_file: str,
+    aspect_ratio: str = "16:9",
+) -> str:
+    """Validate and publish only a complete image, using the same directory."""
+    from PIL import Image
+
+    stem, extension = os.path.splitext(output_file)
+    formats = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
+    expected = formats.get(extension.lower())
+    if expected is None:
+        raise ValueError("Output image must be PNG, JPEG or WebP")
+    temporary = f"{stem}.{uuid4().hex}{extension}"
+    try:
+        generate_image(prompt_file, reference_images, temporary, aspect_ratio)
+        try:
+            with Image.open(temporary) as image:
+                image.verify()
+            with Image.open(temporary) as image:
+                image.load()
+                source_format = image.format
+                converted = image.copy()
+            if source_format != expected:
+                if expected == "JPEG":
+                    converted = converted.convert("RGB")
+                converted.save(
+                    temporary,
+                    format=expected,
+                    **({"quality": 95} if expected == "JPEG" else {}),
+                )
+            with Image.open(temporary) as image:
+                image.verify()
+        except (OSError, ValueError) as exc:
+            raise InvalidImageOutputError("Provider returned an invalid image") from exc
+        os.replace(temporary, output_file)
+        return f"Successfully generated image to {output_file}"
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -388,17 +436,19 @@ if __name__ == "__main__":
         default="16:9",
         help="Aspect ratio of the generated image",
     )
+    parser.add_argument("--success-marker", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     try:
-        print(
-            generate_image(
-                args.prompt_file,
-                args.reference_images,
-                args.output_file,
-                args.aspect_ratio,
-            )
+        message = generate_image_atomically(
+            args.prompt_file,
+            args.reference_images,
+            args.output_file,
+            args.aspect_ratio,
         )
+        print("Successfully generated image" if args.success_marker else message)
+        if args.success_marker:
+            print(args.success_marker)
     except Exception as exc:
         # The sandbox reports a non-zero shell exit to the agent. Keep the
         # provider error on stderr without leaking a configured credential.
@@ -435,6 +485,8 @@ if __name__ == "__main__":
             )
         elif isinstance(exc, FileNotFoundError):
             code, message = "IMAGE_INPUT_MISSING", str(exc)
+        elif isinstance(exc, InvalidImageOutputError):
+            code, message = "IMAGE_GENERATION_INVALID_OUTPUT", str(exc)
         elif isinstance(exc, ValueError):
             code, message = "IMAGE_GENERATION_INVALID_INPUT", str(exc)
         else:
