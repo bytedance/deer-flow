@@ -275,10 +275,18 @@ def commit_extensions_config(
       API path that can repair the file.
 
     ``globalGeneration`` advances by one for every *unverifiable* baseline -- a
-    previous config that would not validate, or a malformed persisted block --
+    previous config that would not validate, a malformed/unsupported persisted
+    block, or a parseable block that does not cover every enabled stdio server --
     because the interceptor identity cannot be proven unchanged. The ordinary
     migration case (absent block, valid previous config) is not unverifiable and
     therefore does not advance it.
+
+    An unverifiable *effective* previous config preserves a valid lifecycle
+    lineage: the block itself is still trustworthy, so ``lifecycleId`` and the
+    counter history are carried over and only the generations advance
+    conservatively. A fresh lineage is minted only when the lifecycle block
+    itself is absent (initial migration) or untrustworthy -- malformed,
+    unsupported, or not covering every enabled stdio server.
 
     The new block always overwrites whatever the raw document carried -- API
     clients can never set or merge lifecycle counters.
