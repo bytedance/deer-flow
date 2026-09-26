@@ -367,7 +367,7 @@
   `extra_body`。启用分支用浅层 `dict.update` 套用模板，因此档案里与
   `when_thinking_enabled.extra_body.thinking` 模板并列的 `extra_body: {tool_stream: true}`
   在开启思考时会丢失 `tool_stream`——而禁用分支和契约路径早已是深度合并。现在启用分支同样
-  深度合并；发生冲突时仍以模板值为准。
+  深度合并；发生冲突时仍以模板值为准。([#5894])
 - **项目：** 会话文件视图不再为尚无标题的成员会话显示空标题。会话的 `display_name` 在标题
   生成运行之前（或从未运行时）在接口上为 `null`，但文件分组类型将其声明为必填字符串并原样
   渲染，因此在首次回复之前上传的文件会挂在一行空白之下。这类分组现在显示为“未命名”，与
@@ -5248,6 +5248,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934

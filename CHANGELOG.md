@@ -382,7 +382,7 @@ This release closes that milestone with **181 merged pull requests**.
   `when_thinking_enabled.extra_body.thinking` template lost `tool_stream`
   whenever thinking was on — while the disable branch, and the contract path,
   already deep-merged. The legacy enable branch now deep-merges the same way;
-  template values still win on conflicts.
+  template values still win on conflicts. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -6182,6 +6182,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
