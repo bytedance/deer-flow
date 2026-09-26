@@ -193,28 +193,34 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
-    - append entries, replacing same id with the latest version while preserving
-      first-seen order.
+    - append entries, replacing the same (run_id, tool-call id) with the latest
+      version while preserving first-seen order. Provider ids can repeat in
+      later runs of the same thread.
     - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
 
-    by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
+    by_key: dict[tuple[str | None, str], DelegationEntry] = {}
+    order: list[tuple[str | None, str]] = []
     for entry in [*(existing or []), *new]:
         entry_id = entry["id"]
-        previous = by_id.get(entry_id)
+        key = (entry.get("run_id") or None, entry_id)
+        if key[0] is None:
+            # Legacy updates without run_id still update the most recent
+            # matching entry, as they did before run-scoped identities.
+            key = next((prior for prior in reversed(order) if prior[1] == entry_id), key)
+        previous = by_key.get(key)
         if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
             continue
-        if entry_id not in by_id:
-            order.append(entry_id)
+        if key not in by_key:
+            order.append(key)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
             if previous.get("run_id") and not entry.get("run_id"):
                 entry["run_id"] = previous["run_id"]
-        by_id[entry_id] = entry
-    merged = [by_id[entry_id] for entry_id in order]
+        by_key[key] = entry
+    merged = [by_key[key] for key in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
         merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
     return merged
