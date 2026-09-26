@@ -74,6 +74,13 @@ strict providers reject.
    their narrower discovery allowlists never rebuild the shared thread view or
    force eager sandbox acquisition.
 8. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request
+   Pair results in document order with the most recent preceding AIMessage that
+   issued their ID, consuming same-message occurrences in order. Reusing an ID
+   must not give an interrupted call a later call's result; orphan or duplicate
+   results must never answer future calls. Keep delayed results with distinct
+   IDs across intervening assistant/user messages. Regroup only model-bound
+   messages; leave checkpoint state unchanged. The graph regression covers
+   checkpoint interruption and a new user turn in both sync and async paths.
 9. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Sync and async calls carry circuit-generation ownership; only the current owner may settle or release a half-open probe, so stale completions cannot affect a newer recovery attempt. Cancellation propagates unchanged without retry or failure accounting.
 10. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](../../../../../docs/GUARDRAILS.md).
 

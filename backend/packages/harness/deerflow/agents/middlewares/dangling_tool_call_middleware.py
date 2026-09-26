@@ -434,33 +434,37 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         """
         normalized = self._normalize_tool_call_ids(messages)
 
-        tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-        for msg in normalized:
-            if isinstance(msg, ToolMessage):
-                tool_messages_by_id[msg.tool_call_id].append(msg)
-
-        tool_call_ids: set[str] = set()
-        for msg in normalized:
-            if getattr(msg, "type", None) != "ai":
-                continue
-            for tc in self._message_tool_calls(msg):
-                tc_id = tc.get("id")
-                if tc_id:
-                    tool_call_ids.add(tc_id)
+        # Pair in document order before regrouping. Provider ids can repeat across
+        # assistant turns: a global result queue would let an interrupted old call
+        # steal a later call's result (or an orphan answer a future call). Reopening
+        # an id replaces only that id's pending occurrences. Calls with other ids
+        # may still receive delayed results across intervening AI/human messages.
+        pending_calls: dict[str, deque[tuple[int, int]]] = {}
+        calls_by_message: dict[int, list[dict]] = {}
+        paired_results: dict[tuple[int, int], ToolMessage] = {}
+        drop_count = 0
+        for msg_index, msg in enumerate(normalized):
+            if getattr(msg, "type", None) == "ai":
+                calls = self._message_tool_calls(msg)
+                calls_by_message[msg_index] = calls
+                opened: dict[str, deque[tuple[int, int]]] = defaultdict(deque)
+                for call_index, tc in enumerate(calls):
+                    if _valid_tool_call_id(tc.get("id")):
+                        opened[tc["id"]].append((msg_index, call_index))
+                pending_calls.update(opened)
+            elif isinstance(msg, ToolMessage):
+                queue = pending_calls.get(msg.tool_call_id) if _valid_tool_call_id(msg.tool_call_id) else None
+                if queue:
+                    paired_results[queue.popleft()] = msg
+                else:
+                    drop_count += 1
 
         patched: list = []
         patch_count = 0
-        drop_count = 0
-        for msg in normalized:
+        for msg_index, msg in enumerate(normalized):
             if isinstance(msg, ToolMessage):
-                if msg.tool_call_id in tool_call_ids:
-                    continue  # Will be re-emitted after its AIMessage
-                # Orphan: ToolMessage whose originating AIMessage tool_call is
-                # no longer in the request (e.g. removed by summarization).
-                # Drop it silently from the model request so strict providers
-                # do not reject it with HTTP 400. Persisted state is untouched;
-                # this only affects the single model call.
-                drop_count += 1
+                # Paired results are re-emitted after their owning AIMessage;
+                # orphan/duplicate results stay out of this request. State is untouched.
                 continue
 
             sanitized_msg = self._sanitize_ai_message_tool_calls(msg)
@@ -470,13 +474,12 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
             # Intentionally inspect the original message so empty names can be
             # classified before the sanitized message replaces them.
-            for tc in self._message_tool_calls(msg):
+            for call_index, tc in enumerate(calls_by_message[msg_index]):
                 tc_id = tc.get("id")
                 if not tc_id:
                     continue
 
-                tool_msg_queue = tool_messages_by_id.get(tc_id)
-                existing_tool_msg = tool_msg_queue.popleft() if tool_msg_queue else None
+                existing_tool_msg = paired_results.get((msg_index, call_index))
                 if existing_tool_msg is not None:
                     if tc.get("invalid_tool_name") and _has_invalid_tool_name(existing_tool_msg.name):
                         existing_tool_msg = existing_tool_msg.model_copy(update={"name": tc["name"]})
