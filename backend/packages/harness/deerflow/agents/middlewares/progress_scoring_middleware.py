@@ -26,10 +26,12 @@ keys, the ToolMessage result hashes, and status/error-type signatures from
 1. average ``task_progress`` < ``progress_floor`` (self-scored),
 2. repeated tool-key or result-hash share > ``repetition_threshold``
    (objective), and
-3. no observable change: only one distinct result hash and an unchanged
-   status/error signature across the window (objective). Varied tool calls
-   with identical results are deliberately NOT observable change — the
-   issue's signals are result-side (new output pattern, artifact change,
+3. no observable change: the dominant result hash covers all but one entry
+   of the window (share-based, so a single noisy byte — a timestamp, a
+   counter, an id — cannot veto an otherwise stagnant window) and the
+   status/error signature is unchanged (objective). Varied tool calls with
+   identical results are deliberately NOT observable change — the issue's
+   signals are result-side (new output pattern, artifact change,
    verification advance), and varied-but-unproductive calls are exactly the
    slow-burn stagnation this middleware exists to catch.
 
@@ -56,7 +58,16 @@ journal strips it from ``llm.ai.response`` events; and
 ``messages`` stream) removes it from token chunks, which are published before
 ``after_model`` ever runs. The injected protocol instructions themselves ride
 on a transient ``hide_from_ui`` HumanMessage, so the journal's first-human-
-input scan cannot mistake them for the user's request.
+input scan cannot mistake them for the user's request. The presentation-side
+redaction is gated on the feature flag: a literal fence a user asked the model
+to quote must not be redacted with the feature disabled.
+
+A model that stops emitting the block cannot silently disable the guard:
+after ``noncompliance_threshold`` consecutive tool-result steps without a
+parseable evaluation, one bounded signal (warning log + audit event) fires
+per streak. And the drained replan hint is re-queued when the model call
+raises, so an outer error-handling retry still delivers it — the stagnation
+episode is already marked intervened and would not re-queue it.
 
 The protocol payload helpers (tag, fenced-block regex, content stripping,
 streaming redactor) live in :mod:`progress_eval_protocol`, a dependency-light
@@ -73,7 +84,7 @@ import json
 import logging
 import threading
 import uuid
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
@@ -273,13 +284,22 @@ def _window_stats(window: deque[_StepRecord]) -> _WindowStats:
             scores.append(record.evaluation.task_progress)
 
     # Observable change proxies for the issue's artifact-change /
-    # new-output-pattern / verification-advance signals: any variety in
-    # results or in status/error signatures counts as change. Varied tool
-    # calls alone do NOT — the issue's signals are result-side, and
-    # varied calls producing identical results is the stagnation shape this
-    # middleware must catch (call-key variety is folded into the repetition
-    # ratios above instead).
-    observable_change = len(set(result_hashes)) > 1 or len(set(signatures)) > 1
+    # new-output-pattern / verification-advance signals. Result-side variety
+    # is measured by *share*, matching how repetition is measured: the window
+    # counts as unchanged while the dominant result hash covers all but one
+    # entry, so a single noisy byte (timestamp, counter, id) cannot veto an
+    # otherwise stagnant window. Two or more deviant hashes — or any change
+    # in the status/error signature — are real observable change. Varied
+    # tool calls alone do NOT count as change: the issue's signals are
+    # result-side, and varied calls producing identical results is exactly
+    # the stagnation shape this middleware must catch (call-key variety is
+    # folded into the repetition ratios above instead).
+    if result_hashes:
+        dominant_count = max(Counter(result_hashes).values())
+        no_result_change = len(result_hashes) - dominant_count <= 1
+    else:
+        no_result_change = True
+    observable_change = not no_result_change or len(set(signatures)) > 1
 
     return _WindowStats(
         steps=len(window),
@@ -297,6 +317,11 @@ class _RunScopeState:
 
     window: deque[_StepRecord] = field(default_factory=deque)
     intervened: bool = False
+    # Protocol non-compliance: consecutive steps with tool results but no
+    # parseable evaluation block, and whether the bounded signal already
+    # fired for the current streak. Reset when a valid evaluation arrives.
+    missing_eval_streak: int = 0
+    noncompliance_reported: bool = False
 
 
 class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
@@ -314,6 +339,10 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             counts as high repetition. Default 0.6 so an exactly-repeating
             window fires on its third step — level with
             LoopDetectionMiddleware's warn (3) and before its hard stop (5).
+        noncompliance_threshold: consecutive steps with tool results but no
+            parseable evaluation before one bounded non-compliance signal
+            (log + audit event) is emitted per streak. Does not fire the
+            intervention.
         max_tracked_threads: LRU cap on tracked thread/run scopes.
     """
 
@@ -325,6 +354,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         progress_floor: float = 1.0,
         rearm_progress: float = 2.0,
         repetition_threshold: float = 0.6,
+        noncompliance_threshold: int = 3,
         max_tracked_threads: int = 100,
     ):
         super().__init__()
@@ -333,6 +363,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         self.progress_floor = progress_floor
         self.rearm_progress = rearm_progress
         self.repetition_threshold = repetition_threshold
+        self.noncompliance_threshold = noncompliance_threshold
         self.max_tracked_threads = max_tracked_threads
         self._lock = threading.Lock()
         # Mirrors LoopDetectionMiddleware's run-scope anchoring: embedders
@@ -354,6 +385,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             progress_floor=config.progress_floor,
             rearm_progress=config.rearm_progress,
             repetition_threshold=config.repetition_threshold,
+            noncompliance_threshold=config.noncompliance_threshold,
             max_tracked_threads=config.max_tracked_threads,
         )
 
@@ -364,6 +396,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             "progress_floor": self.progress_floor,
             "rearm_progress": self.rearm_progress,
             "repetition_threshold": self.repetition_threshold,
+            "noncompliance_threshold": self.noncompliance_threshold,
             "max_tracked_threads": self.max_tracked_threads,
         }
 
@@ -515,7 +548,7 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             return _INTERVENTION_TEXT.format(steps=stats.steps, avg=stats.avg_task_progress, repeated=repeated)
         return None
 
-    def _record_audit_event(self, runtime: Runtime, stats: _WindowStats, action: str) -> None:
+    def _record_audit_event(self, runtime: Runtime, stats: _WindowStats, action: str, *, extra_changes: dict[str, object] | None = None) -> None:
         """Persist a progress-scoring transition without sensitive tool data."""
         context = getattr(runtime, "context", None)
         recorder = context.get(LOOP_DETECTION_RECORDER_CONTEXT_KEY) if isinstance(context, dict) else None
@@ -523,21 +556,24 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             recorder = context.get("__run_journal")
         if recorder is None:
             return
+        changes: dict[str, object] = {
+            "is_subagent": isinstance(context, dict) and context.get("is_subagent") is True,
+            "steps": stats.steps,
+            "evals": stats.evals,
+            "avg_task_progress": stats.avg_task_progress,
+            "repeated_tool_key_ratio": stats.repeated_tool_key_ratio,
+            "repeated_result_hash_ratio": stats.repeated_result_hash_ratio,
+            "observable_change": stats.observable_change,
+        }
+        if extra_changes:
+            changes.update(extra_changes)
         try:
             recorder.record_middleware(
                 tag=MIDDLEWARE_PROGRESS_SCORING_TAG,
                 name=type(self).__name__,
                 hook="after_model",
                 action=action,
-                changes={
-                    "is_subagent": isinstance(context, dict) and context.get("is_subagent") is True,
-                    "steps": stats.steps,
-                    "evals": stats.evals,
-                    "avg_task_progress": stats.avg_task_progress,
-                    "repeated_tool_key_ratio": stats.repeated_tool_key_ratio,
-                    "repeated_result_hash_ratio": stats.repeated_result_hash_ratio,
-                    "observable_change": stats.observable_change,
-                },
+                changes=changes,
             )
         except Exception:  # noqa: BLE001
             logger.warning("Failed to record middleware:progress_scoring event", exc_info=True)
@@ -551,8 +587,24 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
 
         scope_key = self._run_scope_key(runtime)
         scope_state = self._scope_state(scope_key)
+        noncompliance = False
         if step.tool_keys or step.result_hashes:
             scope_state.window.append(step)
+            # Protocol non-compliance: a step that produced tool results but
+            # carried no parseable evaluation block. Without a bounded signal
+            # here, a model that stops emitting the block turns the feature
+            # into a silent no-op (protocol compliance decays — the
+            # instruction is only re-sent in-band — and a truncation that
+            # loses the closing fence also loses the parse). One signal per
+            # streak; a valid evaluation resets the streak.
+            if evaluation is None:
+                scope_state.missing_eval_streak += 1
+                if scope_state.missing_eval_streak >= self.noncompliance_threshold and not scope_state.noncompliance_reported:
+                    scope_state.noncompliance_reported = True
+                    noncompliance = True
+            else:
+                scope_state.missing_eval_streak = 0
+                scope_state.noncompliance_reported = False
 
         stats = _window_stats(scope_state.window)
         with self._lock:
@@ -575,6 +627,24 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
                 },
             )
             self._record_audit_event(runtime, stats, action="replan_required")
+
+        if noncompliance:
+            logger.warning(
+                "Progress-scoring protocol not followed — no parseable evaluation block for %d consecutive steps",
+                scope_state.missing_eval_streak,
+                extra={
+                    "thread_id": scope_key[0],
+                    "run_id": scope_key[1],
+                    "missing_eval_streak": scope_state.missing_eval_streak,
+                    "noncompliance_threshold": self.noncompliance_threshold,
+                },
+            )
+            self._record_audit_event(
+                runtime,
+                stats,
+                action="eval_noncompliance",
+                extra_changes={"missing_eval_streak": scope_state.missing_eval_streak, "noncompliance_threshold": self.noncompliance_threshold},
+            )
 
         stripped = strip_progress_eval_blocks(messages[-1].content)
         if stripped is messages[-1].content:
@@ -611,9 +681,37 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             self._pending_hints.pop(scope_key, None)
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        """Append the evaluation protocol (plus any queued hint) to the
+    def _drain_pending_hint(self, runtime: Runtime) -> str | None:
+        """Pop and return the queued replan hint for *runtime*'s thread/run."""
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            return self._pending_hints.pop(scope_key, None)
+
+    def _restore_pending_hint(self, runtime: Runtime, hint: str | None) -> None:
+        """Re-queue a hint taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the hint. It would not be re-queued by the policy: the stagnation
+        episode is already marked ``intervened``, so without the restore a
+        single retriable failure (429, empty response, provider 5xx) between
+        queueing and delivery silently drops the middleware's only
+        intervention. Mirrors LoopDetectionMiddleware's
+        ``_restore_pending_warnings``.
+        """
+        if not hint:
+            return
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            self._pending_hints[scope_key] = hint
+
+    def _augment_request(self, request: ModelRequest, hint: str | None) -> ModelRequest:
+        """Append the evaluation protocol (plus the drained hint) to the
         outgoing message list as one transient HumanMessage.
+
+        The hint is drained by the caller (``wrap_model_call`` /
+        ``awrap_model_call``) so a failed model call can restore it before
+        the error-handling middleware retries.
 
         Transient by design: the protocol text is re-sent on every model call
         (self-evaluation compliance decays if the model only saw it once) and
@@ -628,10 +726,6 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         so without the marker it would always win that scan on the first
         lead-agent call).
         """
-        scope_key = self._run_scope_key(request.runtime)
-        with self._lock:
-            hint = self._pending_hints.pop(scope_key, None)
-
         parts = [_INSTRUCTION_TEXT]
         if hint:
             parts.append(hint)
@@ -651,7 +745,12 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        hint = self._drain_pending_hint(request.runtime)
+        try:
+            return handler(self._augment_request(request, hint))
+        except Exception:
+            self._restore_pending_hint(request.runtime, hint)
+            raise
 
     @override
     async def awrap_model_call(
@@ -659,7 +758,12 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        hint = self._drain_pending_hint(request.runtime)
+        try:
+            return await handler(self._augment_request(request, hint))
+        except Exception:
+            self._restore_pending_hint(request.runtime, hint)
+            raise
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""

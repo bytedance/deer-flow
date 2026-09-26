@@ -1463,6 +1463,7 @@ pii_redaction:
 #   progress_floor: 1.0            # Window-average task_progress below this = low progress
 #   rearm_progress: 2.0            # Window average at/above this re-arms the intervention
 #   repetition_threshold: 0.6      # Repeated tool-call / result-hash share that counts as high repetition
+#   noncompliance_threshold: 3     # Steps with tool results but no parseable eval block before a non-compliance signal
 #   max_tracked_threads: 100
 
 # ============================================================================

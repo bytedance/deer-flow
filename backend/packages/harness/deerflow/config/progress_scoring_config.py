@@ -50,6 +50,15 @@ class ProgressScoringConfig(BaseModel):
             "and before loop_detection.hard_limit — the replan hint must precede any forced stop."
         ),
     )
+    noncompliance_threshold: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Consecutive steps with tool results but no parseable evaluation block before a bounded non-compliance "
+            "signal (one warning log + one audit event per streak) is emitted, so an enabled-but-ignored protocol "
+            "is visible to operators instead of a silent no-op. Does not fire the intervention."
+        ),
+    )
     max_tracked_threads: int = Field(
         default=100,
         ge=1,

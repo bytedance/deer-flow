@@ -87,18 +87,24 @@ def _turn_state(
     result="output",
     progress=0,
     usefulness=0,
-    eval_payload=None,
+    eval_payload="",
 ):
-    """One model turn: a tool call, its result, and the scored AIMessage."""
-    if eval_payload is None:
+    """One model turn: a tool call, its result, and the scored AIMessage.
+
+    ``eval_payload=""`` (default) builds the standard block from the scores;
+    ``None`` emits a turn with no evaluation block at all (protocol
+    non-compliance shape).
+    """
+    if eval_payload == "":
         eval_payload = f'{{"tool_usefulness": {usefulness}, "task_progress": {progress}}}'
+    content = f"working\n{_eval_block(eval_payload)}" if eval_payload is not None else "working"
     call = {"name": "bash", "id": "call-1", "args": {"command": cmd}}
     return {
         "messages": [
             HumanMessage(content="go"),
             AIMessage(content="", tool_calls=[call]),
             ToolMessage(content=result, tool_call_id="call-1", name="bash"),
-            AIMessage(content=f"working\n{_eval_block(eval_payload)}"),
+            AIMessage(content=content),
         ]
     }
 
@@ -399,6 +405,19 @@ class TestWindowPolicy:
         assert stats.observable_change is True
         assert mw._check_policy(state, stats) is None
 
+    def test_single_deviant_hash_does_not_veto_stagnation(self):
+        # P2 review: one noisy byte (timestamp, counter, id) among an
+        # otherwise byte-identical window must not mark observable change —
+        # change is measured by share, like repetition, not by strict
+        # set-size.
+        records = [_step(progress=0, result_hash="h") for _ in range(7)]
+        records.insert(4, _step(progress=0, result_hash="noisy"))
+        mw, state, stats = self._stats_and_check(records)
+        assert stats.observable_change is False
+        assert stats.repeated_result_hash_ratio == pytest.approx(0.75)
+        hint = mw._check_policy(state, stats)
+        assert hint is not None
+
     def test_varied_calls_with_identical_results_trigger(self):
         # The slow-burn shape loop detection's identical-set hash misses:
         # varied arguments, identical unproductive results, low self-score.
@@ -547,6 +566,43 @@ class TestHooks:
             mw.after_model(_turn_state(result=f"result-{i}", progress=2), runtime)
         assert not mw._pending_hints
 
+    def test_hint_restored_when_handler_raises_then_delivered_on_retry(self):
+        # P1 review: LLMErrorHandlingMiddleware sits outside this middleware
+        # and retries a failed model call by running this wrap again. The
+        # drained hint must be re-queued on the way out so the retry still
+        # delivers it — the policy will not re-queue it (the episode is
+        # already marked intervened).
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        for _ in range(3):
+            mw.after_model(_turn_state(), runtime)
+        assert ("t1", "r1") in mw._pending_hints
+
+        def failing_handler(req):
+            raise RuntimeError("provider 429")
+
+        with pytest.raises(RuntimeError, match="provider 429"):
+            mw.wrap_model_call(_make_request([AIMessage(content="next")], runtime), failing_handler)
+        assert ("t1", "r1") in mw._pending_hints
+
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(_make_request([AIMessage(content="next")], runtime), handler)
+        assert "PROGRESS STALLED" in captured[0].messages[-1].content
+
+    @pytest.mark.anyio
+    async def test_hint_restored_when_async_handler_raises(self):
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        for _ in range(3):
+            mw.after_model(_turn_state(), runtime)
+
+        async def failing_handler(req):
+            raise RuntimeError("provider 5xx")
+
+        with pytest.raises(RuntimeError, match="provider 5xx"):
+            await mw.awrap_model_call(_make_request([AIMessage(content="next")], runtime), failing_handler)
+        assert ("t1", "r1") in mw._pending_hints
+
     def test_scopes_isolated_by_run_id(self):
         mw = ProgressScoringMiddleware()
         runtime_a = _make_runtime(run_id="run-a")
@@ -613,3 +669,73 @@ class TestFromConfig:
         assert mw.progress_floor == 1.0
         # Sliding window, not single-step decision.
         assert mw.window_size >= 2
+
+
+class TestProtocolCompliance:
+    """The bounded non-compliance signal (PR #5851 review)."""
+
+    def _actions(self, recorder):
+        return [c.kwargs["action"] for c in recorder.record_middleware.call_args_list]
+
+    def test_noncompliance_signal_fires_once_per_streak(self):
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        recorder = MagicMock()
+        runtime.context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = recorder
+
+        for _ in range(3):
+            mw.after_model(_turn_state(eval_payload=None), runtime)
+        assert self._actions(recorder).count("eval_noncompliance") == 1
+
+        # The streak continues: no second signal within the same streak.
+        mw.after_model(_turn_state(eval_payload=None), runtime)
+        assert self._actions(recorder).count("eval_noncompliance") == 1
+
+        # A valid evaluation resets the streak...
+        mw.after_model(_turn_state(), runtime)
+        # ...so a fresh streak fires again.
+        for _ in range(3):
+            mw.after_model(_turn_state(eval_payload=None), runtime)
+        assert self._actions(recorder).count("eval_noncompliance") == 2
+
+    def test_noncompliance_changes_carry_the_streak(self):
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        recorder = MagicMock()
+        runtime.context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = recorder
+        for _ in range(3):
+            mw.after_model(_turn_state(eval_payload=None), runtime)
+        changes = recorder.record_middleware.call_args_list[0].kwargs["changes"]
+        assert changes["missing_eval_streak"] == 3
+        assert changes["noncompliance_threshold"] == 3
+
+    def test_no_signal_when_protocol_followed(self):
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        recorder = MagicMock()
+        runtime.context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = recorder
+        for i in range(5):
+            mw.after_model(_turn_state(result=f"result-{i}", progress=2), runtime)
+        recorder.record_middleware.assert_not_called()
+
+    def test_turns_without_tool_results_do_not_count(self):
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        recorder = MagicMock()
+        runtime.context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = recorder
+        # Turns with no preceding tool results produce no step, compliant or
+        # not — only steps that actually ran tools can be non-compliant.
+        for _ in range(5):
+            mw.after_model({"messages": [HumanMessage(content="hi"), AIMessage(content="answer")]}, runtime)
+        recorder.record_middleware.assert_not_called()
+
+    def test_noncompliance_threshold_configurable(self):
+        mw = ProgressScoringMiddleware(noncompliance_threshold=5)
+        runtime = _make_runtime()
+        recorder = MagicMock()
+        runtime.context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = recorder
+        for _ in range(4):
+            mw.after_model(_turn_state(eval_payload=None), runtime)
+        assert "eval_noncompliance" not in self._actions(recorder)
+        mw.after_model(_turn_state(eval_payload=None), runtime)
+        assert self._actions(recorder).count("eval_noncompliance") == 1

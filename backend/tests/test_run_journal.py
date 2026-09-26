@@ -466,29 +466,61 @@ class TestLlmCallbacks:
         human_event = next(event for event in events if event["event_type"] == "llm.human.input")
         assert human_event["content"]["content"] == "Real question"
 
-    @pytest.mark.anyio
-    async def test_on_llm_end_strips_progress_eval_block_from_ai_response(self, journal_setup):
-        # The in-band self-evaluation block is transient protocol payload:
-        # it must not reach the durable llm.ai.response event, even though
-        # the after_model state rewrite runs after this callback. Uses a
-        # real AIMessage because the strip keys off isinstance(AIMessage).
-        from langchain_core.messages import AIMessage as _AIMessage
-
-        j, store = journal_setup
-        payload = '{"tool_usefulness": 0, "task_progress": 0}'
-        content = "Answer\n```deerflow-progress\n" + payload + "\n```"
-        msg = _AIMessage(content=content, id="msg-eval", response_metadata={"model_name": "test-model"})
+    @staticmethod
+    def _eval_llm_response(content):
+        """Real-AIMessage LLM response (the strip keys off isinstance)."""
+        msg = AIMessage(content=content, id="msg-eval", response_metadata={"model_name": "test-model"})
         gen = MagicMock()
         gen.message = msg
         response = MagicMock()
         response.generations = [[gen]]
+        return response
 
-        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+    _EVAL_BLOCK_TEXT = "Answer\n```deerflow-progress\n" + '{"tool_usefulness": 0, "task_progress": 0}' + "\n```"
+
+    @pytest.mark.anyio
+    async def test_on_llm_end_strips_progress_eval_block_from_ai_response(self):
+        # The in-band self-evaluation block is transient protocol payload:
+        # it must not reach the durable llm.ai.response event, even though
+        # the after_model state rewrite runs after this callback.
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, flush_threshold=100, redact_progress_eval=True)
+
+        j.on_llm_end(self._eval_llm_response(self._EVAL_BLOCK_TEXT), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
         await j.flush()
 
         events = await store.list_events("t1", "r1")
         response_event = next(event for event in events if event["event_type"] == "llm.ai.response")
         assert response_event["content"]["content"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_on_llm_end_strips_progress_eval_block_from_run_summary(self):
+        # The run-summary path (_snapshot_message_summary → last_ai_message,
+        # surfaced in progress snapshots and the completed run row) must see
+        # the same sanitized message as the durable event.
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, flush_threshold=100, redact_progress_eval=True)
+
+        j.on_llm_end(self._eval_llm_response(self._EVAL_BLOCK_TEXT), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        pending = j._pending_llm_response
+        assert pending is not None
+        assert pending.last_ai_message == "Answer"
+
+    @pytest.mark.anyio
+    async def test_on_llm_end_keeps_progress_eval_block_when_redaction_disabled(self):
+        # Default off: redacting a literal deerflow-progress fence the user
+        # asked the model to quote would change behavior with the feature
+        # disabled, so the journal must not touch it.
+        store = MemoryRunEventStore()
+        j = RunJournal("r1", "t1", store, flush_threshold=100)
+
+        j.on_llm_end(self._eval_llm_response(self._EVAL_BLOCK_TEXT), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        response_event = next(event for event in events if event["event_type"] == "llm.ai.response")
+        assert response_event["content"]["content"] == self._EVAL_BLOCK_TEXT
 
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):

@@ -944,6 +944,12 @@ async def run_agent(
         # shared finally block with a journal available for its run.delivery
         # receipt, including checkpoint validation failures and cancellation
         # while waiting for an earlier run to finish finalizing.
+        # The in-band progress-evaluation redaction (journal events, run
+        # summary, live messages stream) is active only when the
+        # progress-scoring middleware is: the protocol payload exists only
+        # then, and redacting a literal deerflow-progress fence a user asked
+        # the model to quote would change behavior with the feature disabled.
+        progress_scoring_enabled = bool(getattr(getattr(ctx.app_config, "progress_scoring", None), "enabled", False))
         if event_store is not None:
             from deerflow.runtime.journal import RunJournal
 
@@ -953,6 +959,7 @@ async def run_agent(
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+                redact_progress_eval=progress_scoring_enabled,
             )
 
         # Keep cancellable preflight work under the worker's terminal guard so
@@ -1268,10 +1275,13 @@ async def run_agent(
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
-            # Redacts in-band progress-evaluation blocks from live AI chunks;
-            # created per _stream_once call so goal-continuation re-entries
-            # start from clean state. See ProgressEvalStreamRedactor.
-            progress_eval_redactor = ProgressEvalStreamRedactor() if "messages" in lg_modes else None
+            # Redacts in-band progress-evaluation blocks from live AI chunks.
+            # Gated on the feature flag for the same reason as the journal's
+            # redaction: the protocol payload only exists when the
+            # progress-scoring middleware is enabled. Created per _stream_once
+            # call so goal-continuation re-entries start from clean state.
+            # See ProgressEvalStreamRedactor.
+            progress_eval_redactor = ProgressEvalStreamRedactor() if "messages" in lg_modes and progress_scoring_enabled else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1289,15 +1299,15 @@ async def run_agent(
                                     # Custom frames carry task_* events whose payload can hold a delegated
                                     # subagent's messages; see the multi-mode branch below.
                                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                                sse_event = _lg_mode_to_sse_event(single_mode)
-                                redacted_chunks = progress_eval_redactor.push(chunk) if single_mode == "messages" and progress_eval_redactor is not None else [chunk]
-                                for publish_chunk in redacted_chunks:
-                                    single_payload = serialize(publish_chunk, mode=single_mode)
-                                    if single_mode == "values" and seq_stamper is not None:
-                                        single_payload = await seq_stamper.stamp(single_payload)
-                                    await bridge.publish(run_id, sse_event, single_payload)
-                                if single_mode == "custom":
-                                    await subagent_events.add(chunk)
+                                await _publish_single_mode_chunk(
+                                    bridge=bridge,
+                                    run_id=run_id,
+                                    mode=single_mode,
+                                    chunk=chunk,
+                                    progress_eval_redactor=progress_eval_redactor,
+                                    seq_stamper=seq_stamper,
+                                    subagent_events=subagent_events,
+                                )
                         finally:
                             close_error = sys.exception()
                             try:
@@ -1376,10 +1386,15 @@ async def run_agent(
                             raise
                         logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
                 if progress_eval_redactor is not None:
-                    # Flush ordinary text held back at stream end; an
-                    # unterminated evaluation block is dropped here, matching
-                    # nothing in the state rewrite (the regex keeps only
-                    # unclosed blocks that are already complete messages).
+                    # Flush leftovers held back at stream end: ordinary text
+                    # from a partial opening fence that never completed, or
+                    # an unterminated evaluation block — which the redactor
+                    # *restores*, because the state-side regex only strips
+                    # closed blocks, so the stream must keep unclosed ones
+                    # too (see ProgressEvalStreamRedactor). This call is the
+                    # multi-mode counterpart of the single-mode flush above;
+                    # on the single-mode path it is always a no-op safety net
+                    # (finish() already drained the state there).
                     try:
                         for publish_chunk in progress_eval_redactor.finish():
                             await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
@@ -3059,6 +3074,34 @@ def _build_seq_stamper(event_store: Any, thread_id: str, journal: Any) -> _Messa
     )
 
 
+async def _publish_single_mode_chunk(
+    *,
+    bridge: Any,
+    run_id: str,
+    mode: str,
+    chunk: Any,
+    progress_eval_redactor: Any,
+    seq_stamper: Any,
+    subagent_events: Any,
+) -> None:
+    """Publish one single-mode stream chunk (no subgraphs, raw chunks).
+
+    Single-mode counterpart of :func:`_publish_stream_item`'s root-frame
+    handling: AI chunks are redacted of in-band progress-evaluation blocks
+    (``mode == "messages"``) before serialization, values frames are
+    seq-stamped, and custom frames are persisted for subagent history.
+    """
+    sse_event = _lg_mode_to_sse_event(mode)
+    redacted_chunks = progress_eval_redactor.push(chunk) if mode == "messages" and progress_eval_redactor is not None else [chunk]
+    for publish_chunk in redacted_chunks:
+        single_payload = serialize(publish_chunk, mode=mode)
+        if mode == "values" and seq_stamper is not None:
+            single_payload = await seq_stamper.stamp(single_payload)
+        await bridge.publish(run_id, sse_event, single_payload)
+    if mode == "custom":
+        await subagent_events.add(chunk)
+
+
 async def _publish_stream_item(
     *,
     bridge: Any,
@@ -3089,10 +3132,11 @@ async def _publish_stream_item(
         for publish_chunk in pending_chunks:
             await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
     # Root AI chunks are redacted of in-band progress-evaluation blocks
-    # before any other messages-mode consumer sees them. Subgraph frames
-    # bypass the redactor (returned above): the progress-scoring middleware
-    # is only wired into the lead agent, so delegated subagent chunks never
-    # carry the block.
+    # before any other messages-mode consumer sees them. The redactor is
+    # only installed when progress scoring is enabled (see _stream_once).
+    # Subgraph frames bypass it (returned above): the progress-scoring
+    # middleware is only wired into the lead agent, so delegated subagent
+    # chunks never carry the block.
     redacted_chunks = progress_eval_redactor.push(chunk) if progress_eval_redactor is not None and mode == "messages" else [chunk]
     for redacted_chunk in redacted_chunks:
         chunks_to_publish = file_tool_chunk_batcher.push(redacted_chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [redacted_chunk]

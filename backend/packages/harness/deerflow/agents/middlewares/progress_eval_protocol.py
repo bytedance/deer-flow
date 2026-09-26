@@ -83,6 +83,23 @@ def strip_progress_eval_blocks(content: str | list | None) -> str | list | None:
     return content
 
 
+def redacted_message_copy(message: AIMessage) -> AIMessage:
+    """Return *message* with evaluation blocks stripped from its content.
+
+    Returns the original object when there is nothing to strip; otherwise a
+    ``model_copy`` whose content is :func:`strip_progress_eval_blocks`-cleaned
+    (tool calls, usage, and metadata are preserved by the copy). Used by the
+    run journal so every consumer of one response — the durable
+    ``llm.ai.response`` event *and* the run-summary path
+    (``_snapshot_message_summary`` → ``last_ai_message``) — sees the same
+    sanitized message.
+    """
+    stripped = strip_progress_eval_blocks(message.content)
+    if stripped is message.content:
+        return message
+    return message.model_copy(update={"content": stripped})
+
+
 # Streaming redaction markers: the opening fence of the evaluation block, and
 # the closing fence that terminates it. Both deliberately mirror what
 # _EVAL_BLOCK_RE matches on complete content.
@@ -114,9 +131,12 @@ class ProgressEvalStreamRedactor:
 
     Chunks whose text is fully dropped are still emitted with emptied
     content, so usage metadata / response metadata riding on the final chunk
-    of a message is not lost. Non-AI messages and non-text content pass
-    through untouched (list-block content gets the stateless regex, which is
-    exact there because thinking-mode text blocks arrive whole).
+    of a message is not lost. Non-AI messages pass through untouched. Text
+    blocks inside list content are fed through the same stateful scanner as
+    string content — a provider may emit the opening fence, the JSON payload,
+    and the closing fence as separate text blocks across chunks, and a
+    per-block regex would see no complete block in any of them. Non-text
+    blocks (images, tool-use) pass through unchanged.
 
     Mirrors ``_LargeFileToolChunkBatcher``'s worker integration contract:
     ``push(chunk) -> list[chunk]`` plus ``finish()`` for the stream tail.
@@ -168,13 +188,22 @@ class ProgressEvalStreamRedactor:
             changed = False
             for block in content:
                 if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    stripped = _EVAL_BLOCK_RE.sub("", block["text"])
-                    if stripped != block["text"]:
-                        changed = True
-                        if stripped.strip():
-                            new_blocks.append({**block, "text": stripped})
+                    # Same stateful scanner as string content: blocks feed
+                    # the stream state machine in order, so a block split
+                    # across text blocks / chunks is still redacted whole.
+                    pieces = self._feed(block["text"])
+                    if pieces == [block["text"]]:
+                        new_blocks.append(block)
                         continue
-                    new_blocks.append(block)
+                    changed = True
+                    new_blocks.extend({**block, "text": piece} for piece in pieces)
+                elif isinstance(block, str):
+                    pieces = self._feed(block)
+                    if pieces == [block]:
+                        new_blocks.append(block)
+                        continue
+                    changed = True
+                    new_blocks.extend(pieces)
                 else:
                     new_blocks.append(block)
             if not changed:
