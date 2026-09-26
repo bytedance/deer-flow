@@ -951,12 +951,28 @@ async def test_discover_or_create_with_lock_async_cancellation_aborts_flock_wait
     peer_lock = threading.Lock()
     peer_lock.acquire()
     attempt_seen = threading.Event()
+    closed = threading.Event()
+
+    class TrackedLockFile:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+            closed.set()
+
+    def open_lock_file(lock_path):
+        return TrackedLockFile(open(lock_path, "a", encoding="utf-8"))
 
     def try_lock(_lock_file) -> bool:
         attempt_seen.set()
         return peer_lock.acquire(blocking=False)
 
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_open_lock_file", open_lock_file)
     monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", try_lock)
 
     owner = asyncio.create_task(
@@ -971,6 +987,7 @@ async def test_discover_or_create_with_lock_async_cancellation_aborts_flock_wait
         owner.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(owner, timeout=0.5)
+        assert closed.is_set()
         provider._backend.discover.assert_not_called()
     finally:
         peer_lock.release()
