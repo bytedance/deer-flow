@@ -99,6 +99,8 @@ tenki = ["tenki>=1.0.0"]
 # OpenSandbox remote sandbox provider (deerflow.community.opensandbox). The
 # sync SDK is loaded only when this provider is selected.
 opensandbox = ["opensandbox>=0.1.15,<0.2.0"]
+# Persistent remote workspaces, loaded only when this provider is selected.
+sandbox0 = ["sandbox0>=0.10.2,<0.11", "filelock>=3.20,<5"]
 # Agent observability (Monocle). Optional so a default install stays free of the
 # OpenTelemetry stack; only pulled in when MONOCLE_TRACING is used.
 monocle = ["monocle_apptrace>=0.8.8"]
