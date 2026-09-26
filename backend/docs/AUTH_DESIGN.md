@@ -99,7 +99,7 @@ enum UserScope:
 5. 服务端确认当前没有 admin，创建 `system_role="admin"`、`needs_setup=false` 的用户。
 6. 服务端设置 `access_token` HttpOnly cookie，用户进入 workspace。
 
-`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由数据库唯一约束兜底，失败方返回 409。
+`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由存储层的原子认领兜底：admin 计数与插入在同一个事务内完成，且写入先被串行化（SQLite 使用 `BEGIN IMMEDIATE`，PostgreSQL 使用事务级 advisory lock），因此同时到达的两个首次初始化请求不会都看到空系统，失败方返回 409。邮箱唯一约束只覆盖相同邮箱的重复提交，无法阻止两个不同邮箱同时成为 admin。
 
 ### 普通登录
 

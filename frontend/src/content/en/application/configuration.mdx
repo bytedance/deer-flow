@@ -32,7 +32,7 @@ The most important sections for application configuration are:
 
 Configure the LLM providers the agent can use. At least one model is required.
 
-<Tabs items={["OpenAI", "Anthropic", "DeepSeek", "Ollama", "Gemini"]}>
+<Tabs items={["OpenAI", "Anthropic", "DeepSeek", "Ollama", "llama.cpp", "Gemini"]}>
   <Tabs.Tab>
 ```yaml
 models:
@@ -108,6 +108,33 @@ Install Ollama provider: `cd backend && uv add 'deerflow-harness[ollama]'`
 </Callout>
   </Tabs.Tab>
   <Tabs.Tab>
+```bash
+llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 --alias qwen-local
+```
+
+```yaml
+models:
+  - name: qwen-llamacpp
+    use: langchain_openai:ChatOpenAI
+    model: qwen-local
+    api_key: no-key
+    base_url: http://localhost:8080/v1
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: false
+```
+
+`llama-server` exposes an OpenAI-compatible `/v1/chat/completions` endpoint, so point `base_url` at its `/v1` root. `ChatOpenAI` expects a non-empty API key; `no-key` is only a placeholder when llama.cpp authentication is disabled. If the server uses `--api-key`, configure that value instead.
+
+For Docker deployments, `localhost` refers to the DeerFlow container. Use a host address reachable from the container, such as `http://host.docker.internal:8080/v1` on Docker Desktop.
+
+<Callout type="warning">
+  DeerFlow relies on tool calling. Make sure the GGUF model's chat template supports
+  function/tool calls. Current llama.cpp enables its Jinja chat-template engine by
+  default; custom templates must preserve tool-call support.
+</Callout>
+  </Tabs.Tab>
+  <Tabs.Tab>
 ```yaml
 models:
   - name: gemini-2.5-pro
@@ -121,6 +148,39 @@ models:
 ```
   </Tabs.Tab>
 </Tabs>
+
+#### Reasoning capabilities
+
+`supports_thinking` and `supports_reasoning_effort` only say whether a knob exists. When a provider's contract differs from DeerFlow's generic assumptions — thinking that cannot be turned off, or an effort vocabulary other than `minimal/low/medium/high` — declare a mapping-valued `reasoning` block instead. The two booleans are then derived from it, the chat UI offers only the values the model accepts, and every model call (chat, summarization, title generation, subagents) follows the same policy. Existing Ollama `reasoning: true` / `false` values, and the `low` / `medium` / `high` level strings gpt-oss style models take, remain native ChatOllama settings and do not opt into this contract.
+
+```yaml
+models:
+  - name: glm-5.3-flash
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: glm-5.3-flash
+    api_base: https://api.z.ai/api/paas/v4
+    api_key: $ZAI_API_KEY
+    supports_vision: true
+    reasoning:
+      thinking: required            # unsupported | optional | required
+      dialect: openai_extra_body    # auto | openai_extra_body | anthropic | vllm_chat_template | ollama | none
+      history: clear                # preserve | clear
+      effort:
+        values: [low, high, max]    # the provider's own vocabulary
+        default: high               # used when the caller does not choose
+        aliases:                    # DeerFlow generic value -> provider value
+          minimal: low
+          medium: high
+    extra_body:
+      tool_stream: true
+```
+
+- `thinking: required` keeps thinking on even when a background caller asks for it off; set `on_disable_request: reject` to fail such calls instead.
+- Effort values outside `values` map through `aliases` or fall back to `default`; they never reach the provider. Effort values written into the profile or into `when_thinking_enabled` / `when_thinking_disabled` are validated against `values` at startup for the same reason.
+- When changing `effort.path`, remove old `reasoning_effort` keys from the profile and thinking templates. A declared contract rejects these conflicting keys at startup. The chat UI also drops a remembered provider-specific effort when switching to a legacy model that does not advertise it.
+- `default` also applies to callers that never choose an effort — summarization, title generation, and subagents — so pick a level you are happy to pay for on every background call (`high` above, with `max` left selectable in the composer).
+- `dialect: auto` (the default) infers the on/off payload from `when_thinking_enabled`, so existing profiles can add `reasoning` without rewriting their templates. Profiles without a `reasoning` block behave exactly as before.
+- Contradictory profiles (for example `required` together with `when_thinking_disabled`) fail at startup.
 
 ### Sandbox
 
@@ -249,12 +309,13 @@ Docker startup sequence.
 
 Set these before running `pnpm build` or starting the frontend in production:
 
-| Variable              | Required                   | Description                                                      |
-| --------------------- | -------------------------- | ---------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`  | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.       |
-| `BETTER_AUTH_URL`     | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)         |
-| `SKIP_ENV_VALIDATION` | Optional                   | Set to `1` to skip env validation during build (not recommended) |
-| `NEXT_PUBLIC_API_URL` | Optional                   | Override the API base URL for the frontend                       |
+| Variable                         | Required                   | Description                                                       |
+| -------------------------------- | -------------------------- | ----------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`             | **Required** in production | Secret for session signing. Use `openssl rand -base64 32`.        |
+| `BETTER_AUTH_URL`                | Recommended                | Public-facing base URL (e.g., `https://your-domain.com`)          |
+| `SKIP_ENV_VALIDATION`            | Optional                   | Set to `1` to skip env validation during build (not recommended)  |
+| `NEXT_PUBLIC_BACKEND_BASE_URL`   | Optional                   | Override the Gateway base URL used for REST and SSR calls         |
+| `NEXT_PUBLIC_LANGGRAPH_BASE_URL` | Optional                   | Override the LangGraph API base URL (defaults to `<backend>/api`) |
 
 In development, set these in a `.env` file at the repo root:
 
@@ -291,6 +352,37 @@ When the config schema changes, `config_version` is bumped. To merge new fields 
 ```bash
 make config-upgrade
 ```
+
+## Runtime environment variables
+
+DeerFlow reads these from its own process environment — via a `.env` file, the
+Docker environment, or the shell.
+
+Only `DEER_FLOW_SKILLS_PATH` resolves a relative value against
+`DEER_FLOW_PROJECT_ROOT`. `DEER_FLOW_HOME` and `DEER_FLOW_CONFIG_PATH` are used
+as given, so a relative value resolves against the process working directory —
+set both to absolute paths so writable state and the loaded config file land
+where you expect them.
+
+| Variable                 | Default                            | Description                                                                                 |
+| ------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------- |
+| `DEER_FLOW_PROJECT_ROOT` | current working directory          | Root for project-relative defaults, including the `skills` lookup                           |
+| `DEER_FLOW_HOME`         | `<project root>/.deer-flow`        | Writable directory for runtime state (threads, uploads); use an absolute path               |
+| `DEER_FLOW_CONFIG_PATH`  | auto-discovered under project root | Absolute path to `config.yaml`                                                              |
+| `DEER_FLOW_SKILLS_PATH`  | `<project root>/skills`            | Directory containing skill definitions (a relative value resolves against the project root) |
+| `AUTH_JWT_SECRET`        | auto-generated                     | JWT signing secret for the Gateway                                                          |
+
+Log verbosity is not an environment variable — set `log_level` in `config.yaml`
+instead (`debug`, `info`, `warning`, or `error`; default `info`). See
+[Harness Configuration](/docs/harness/configuration) for the module reference.
+
+`DEER_FLOW_ROOT` is a host-side variable for the Docker Compose dev stack only;
+the DeerFlow process does not read it. See the
+[Deployment Guide](/docs/application/deployment-guide).
+
+When `AUTH_JWT_SECRET` is unset, DeerFlow generates a secret on first start and
+persists it to `.jwt_secret`, so sessions survive restarts. Set it explicitly in
+production to keep a stable, secret value.
 
 <Cards num={2}>
   <Cards.Card

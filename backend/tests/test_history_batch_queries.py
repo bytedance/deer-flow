@@ -251,6 +251,38 @@ async def test_run_manager_batch_history_methods_default_to_current_user():
 
 
 @pytest.mark.anyio
+async def test_run_manager_owner_scoped_history_includes_runs_admitted_without_explicit_user():
+    """A run admitted with the ambient user must count as that user's run."""
+    from types import SimpleNamespace
+
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    manager = RunManager(store=MemoryRunStore())
+    token = set_current_user(SimpleNamespace(id="alice"))
+    try:
+        record = await manager.create_or_reject("t1", metadata={"regenerate_from_run_id": "source"})
+        await manager.set_status(record.run_id, RunStatus.success)
+        sources = await manager.list_successful_regenerate_sources("t1")
+        records = await manager.get_many_by_thread("t1", {record.run_id})
+    finally:
+        reset_current_user(token)
+
+    assert sources == {"source"}
+    assert set(records) == {record.run_id}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_run_manager_keeps_omitted_owner_unset_without_user_context():
+    """No ambient user means no owner, never a fallback bucket such as ``default``."""
+    manager = RunManager(store=MemoryRunStore())
+
+    record = await manager.create_or_reject("t1")
+
+    assert record.user_id is None
+
+
+@pytest.mark.anyio
 async def test_run_manager_batch_history_methods_fail_closed_without_user_context():
     from deerflow.runtime import user_context
 

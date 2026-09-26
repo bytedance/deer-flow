@@ -13,7 +13,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.audit_context import TOOL_PROMOTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+    resolve_audit_recorder,
+)
 from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROMOTION_TAG
 
 logger = logging.getLogger(__name__)
@@ -34,15 +37,10 @@ def record_tool_promotion(
     if not names:
         return
 
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        return
-    is_subagent = context.get("is_subagent") is True
-    recorder = context.get(TOOL_PROMOTION_RECORDER_CONTEXT_KEY)
-    if recorder is None:
-        # Lead runs own a RunJournal. Ordinary task-tool subagents receive only
-        # the narrow, loop-safe recorder key above.
-        recorder = context.get("__run_journal")
+    recorder, is_subagent, agent_id = resolve_audit_recorder(
+        getattr(runtime, "context", None),
+        recorder_key=TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+    )
     if recorder is None:
         return
 
@@ -62,7 +60,7 @@ def record_tool_promotion(
                 "tool_names": names,
                 "count": len(names),
                 "is_subagent": is_subagent,
-                "agent_id": context.get("agent_id") if is_subagent else None,
+                "agent_id": agent_id,
             },
         )
     except Exception:  # noqa: BLE001

@@ -537,7 +537,7 @@ def test_client_ensure_agent_filters_skills_by_authorization(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -590,7 +590,7 @@ def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -865,7 +865,7 @@ def test_client_wires_skill_authorization_into_middleware(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", _capture_build_middlewares)
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
@@ -950,7 +950,7 @@ def test_client_filter_candidates_reuse_catalog_loader(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *a, **kw: [])
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
         lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
@@ -1059,13 +1059,14 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
     )
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.config = SimpleNamespace(name="sub", skills=None)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
     executor.model_name = "m"
     executor.app_config = app_config
     executor._resolved_app_config = app_config
     executor._available_skill_names = None
     executor.extensions = None
     executor.user_id = "user-123"
+    executor.trace_id = "test-trace"
     executor.user_role = "user"
     executor.oauth_provider = None
     executor.oauth_id = None
@@ -1126,7 +1127,7 @@ def test_client_skill_surface_uses_one_effective_user(monkeypatch):
     monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *a, **kw: [])
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
         lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
@@ -1401,7 +1402,7 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
     monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.config = SimpleNamespace(name="sub", skills=None)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
     executor.model_name = "m"
     executor.app_config = app_config
     executor._resolved_app_config = app_config
@@ -1411,6 +1412,7 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
     executor.extensions = None
     executor.trace_id = "test-trace"
     executor.user_id = "user-123"
+    executor.trace_id = "test-trace"
     executor.user_role = "user"
     executor.oauth_provider = None
     executor.oauth_id = None

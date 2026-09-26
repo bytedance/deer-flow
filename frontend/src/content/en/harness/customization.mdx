@@ -44,12 +44,15 @@ class AuditMiddleware(AgentMiddleware[AgentState]):
 Lifecycle hooks can return a dictionary of state updates, which LangChain merges
 into the agent state; return `None` when observing only.
 
-For an operator-managed deployment, the class must have a zero-argument constructor and be importable by the Gateway process:
+For an operator-managed deployment, the class must be importable by the Gateway process. A string entry uses the zero-argument constructor; `{class, kwargs}` passes constructor arguments. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
 
 ```yaml
 extensions:
   middlewares:
     - my_company.deerflow_middlewares:AuditMiddleware
+    - class: my_company.deerflow_middlewares:AuditMiddleware
+      kwargs:
+        max_tool_calls: 5
 ```
 
 Configured middleware is loaded after the built-in middleware and optional loop/token guards. On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage, so configured middleware is followed by the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`. Treat these class paths as trusted configuration because loading one executes Python code. Embedded callers can instead use `DeerFlowClient(middlewares=[AuditMiddleware()])`, which builds the full lead-agent chain and places middleware before its terminal-response, model-length, safety, and clarification tail. `create_deerflow_agent(extra_middleware=[AuditMiddleware()])` instead builds a smaller feature-based lead-agent chain; unanchored extras are placed immediately before `ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev` placement). Neither API forwards middleware to subagents.
@@ -116,17 +119,25 @@ sandbox:
 Replace the file-based memory with any persistent store by implementing `MemoryStorage`:
 
 ```python
-from deerflow.agents.memory.storage import MemoryStorage
 from typing import Any
 
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+
+
 class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+    # `create_storage()` builds the class as `cls(config)`, so it must take the backend config.
+    def __init__(self, config) -> None:
         ...
 
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+    # The memory updater calls these with `user_id=` — and `save()` also with
+    # `expected_revision=` — so both extra parameters must stay in the signature.
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         ...
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None, expected_revision: int | None = None) -> bool:
         ...
 ```
 
@@ -134,8 +145,11 @@ Configure it in `config.yaml`:
 
 ```yaml
 memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
+
+Unlike `sandbox.use:` above, `storage_class` is resolved with a dotted `module.Class` path — `RedisMemoryStorage` is split off after the last dot, so a `module:Class` value fails to import.
 
 ## Custom skills
 

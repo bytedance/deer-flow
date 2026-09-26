@@ -98,7 +98,7 @@ DEERFLOW_ROOTS="$(
     {
         printf '%s\n' "$REPO_ROOT"
         git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null |
-            awk '/^worktree /{print $2}'
+            awk '/^worktree /{sub(/^worktree /, ""); print}'  # whole line: paths are unquoted and may contain spaces
     } | awk 'NF && !seen[$0]++ {print length($0)"\t"$0}' | sort -rn | sed 's/^[0-9]*\t//'
 )"
 

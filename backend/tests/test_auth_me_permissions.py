@@ -30,6 +30,10 @@ _ALL_PERMISSIONS = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
@@ -129,6 +133,20 @@ def test_me_lists_all_route_permissions_when_authorization_disabled(client):
     res = client.get("/api/v1/auth/me")
     assert res.status_code == 200
     assert res.json()["permissions"] == _ALL_PERMISSIONS
+
+
+def test_account_preferences_use_registered_auth_and_csrf_middleware(client):
+    path = "/api/v1/auth/preferences"
+    assert client.get(path, headers={"X-Expected-User-Id": "anonymous"}).status_code == 401
+    user = _initialize_admin(client).json()
+    headers = {"X-Expected-User-Id": user["id"]}
+    assert client.get(path, headers=headers).status_code == 200
+    assert client.patch(path, headers=headers, json={"mode": "pro"}).status_code == 403
+    headers["X-CSRF-Token"] = client.cookies.get("csrf_token")
+    assert client.patch(path, headers=headers, json={"mode": "pro"}).status_code == 204
+    assert client.get(path, headers=headers).json()["mode"] == "pro"
+    headers["X-Expected-User-Id"] = "another-user"
+    assert client.patch(path, headers=headers, json={"mode": "ultra"}).status_code == 409
 
 
 def test_me_reuses_middleware_resolved_permissions(client, monkeypatch):

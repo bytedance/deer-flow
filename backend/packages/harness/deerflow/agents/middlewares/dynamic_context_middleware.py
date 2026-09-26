@@ -47,18 +47,21 @@ import os
 import posixpath
 import re
 import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
+from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -70,6 +73,11 @@ logger = logging.getLogger(__name__)
 # tiktoken BPE download that blocks until the OS TCP timeout (~26 min).
 # This cap ensures the request degrades gracefully instead of hanging.
 _INJECT_TIMEOUT_SECONDS = 5.0
+
+#: Hard bound on the current-turn query forwarded to the memory backend for
+#: query-aware fact ranking. Keeps ranking cost deterministic regardless of
+#: message length.
+_INJECTION_QUERY_MAX_CHARS = 1000
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
@@ -317,6 +325,37 @@ class SubagentDateContextMiddleware(AgentMiddleware):
             return None
 
 
+def _derive_injection_query(message: object) -> str | None:
+    """Extract a bounded text query from the user message being injected on.
+
+    Prefer the original user text preserved by UploadsMiddleware so file
+    descriptions cannot consume the query budget. Otherwise handle plain
+    text and multimodal lists. An empty original request remains query-less.
+    """
+    content = getattr(message, "content", None)
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, Mapping):
+        original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+        if isinstance(original_content, str):
+            content = original_content
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                part = item["text"].strip()
+                if part:
+                    parts.append(part)
+        text = " ".join(parts)
+    else:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    return text[:_INJECTION_QUERY_MAX_CHARS]
+
+
 class DynamicContextMiddleware(AgentMiddleware):
     """Inject memory and current date as a SystemMessage <system-reminder>.
 
@@ -345,31 +384,64 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        app_config: AppConfig | None = None,
+        memory_enabled: bool = True,
+    ):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._memory_enabled = memory_enabled
+        # Message ID of the ``__memory`` block this instance injected during
+        # the current run's ``before_agent`` (assembly is per run). The
+        # request-time journal selection trusts a non-checkpointed ``__memory``
+        # message only when it carries this ID — a flagged memory message that
+        # is neither checkpoint-proven nor self-produced cannot forge the
+        # run's recorded memory identity.
+        self._injected_memory_message_id: str | None = None
 
     def release_policy_parameters(self) -> dict[str, object]:
-        """Declare the injected date's effective timezone for assembly identity."""
-        return {"current_date_timezone": _effective_date_timezone_name()}
+        """Declare memory/date behavior and the shelf index's rendering caps.
 
-    def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
+        ``memory_enabled`` gates the memory half of the injected context;
+        ``shelf_index_max_entries`` / ``shelf_index_max_bytes`` change the
+        model-visible ``<documents>`` block this middleware renders. All three
+        are model-visible policy, so the effective (post-config-resolution)
+        values are part of the assembly identity — runs under different
+        policies must not share a fingerprint.
+        """
+        max_entries, max_bytes = self._shelf_index_limits()
+        return {
+            "current_date_timezone": _effective_date_timezone_name(),
+            "memory_enabled": self._memory_enabled,
+            "shelf_index_max_entries": max_entries,
+            "shelf_index_max_bytes": max_bytes,
+        }
+
+    def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
         Framework-owned data (date) is separated from user-owned data (memory)
         so the downstream SystemMessage carries only framework authority and
         memory stays at role:user — preventing untrusted content from gaining
         system privilege (OWASP LLM01).
+
+        ``query`` is the optional current-turn text forwarded to the memory
+        backend for query-aware fact ranking (issue #4495); ``None`` keeps the
+        legacy confidence-only ordering.
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        injection_enabled = self._memory_enabled and (self._app_config.memory.injection_enabled if self._app_config else True)
         memory_context = (
             _get_memory_context(
                 self._agent_name,
                 app_config=self._app_config,
                 user_id=resolve_runtime_user_id(runtime),
+                query=query,
             )
             if injection_enabled
             else ""
@@ -384,10 +456,24 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _build_date_update_reminder(self) -> str:
         return _format_current_date_reminder(_format_current_date())
 
+    def _disabled_memory_removals(self, messages: list) -> list[RemoveMessage]:
+        """Remove only frozen memory messages owned by this middleware."""
+        if self._memory_enabled:
+            return []
+
+        removals: list[RemoveMessage] = []
+        for message in messages:
+            message_id = str(message.id or "")
+            if isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message):
+                removals.append(RemoveMessage(id=message_id))
+        return removals
+
     def _read_failures_are_fatal(self, *, allow_io: bool = True) -> bool | None:
         from deerflow.agents.memory import memory_read_failures_are_fatal
         from deerflow.config.memory_config import get_memory_config
 
+        if not self._memory_enabled:
+            return False
         if self._app_config is None and not allow_io:
             return None  # get_memory_config() may reload config.yaml from disk.
         try:
@@ -470,6 +556,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         messages = list(state.get("messages", []))
         if not messages:
             return None
+        memory_removals = self._disabled_memory_removals(messages)
 
         current_date = _format_current_date()
         last_date = _last_injected_date(messages)
@@ -494,37 +581,42 @@ class DynamicContextMiddleware(AgentMiddleware):
             # the stale first message as if it were the current turn.
             target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
             if target_idx is None:
-                return None
-            date_reminder, memory_block = self._build_full_reminder(runtime)
+                return {"messages": memory_removals} if memory_removals else None
+            date_reminder, memory_block = self._build_full_reminder(runtime, query=_derive_injection_query(messages[target_idx]))
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
                 messages[target_idx].id,
             )
             result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
-            return {"messages": result_msgs}
+            return {"messages": [*memory_removals, *result_msgs]}
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
-            return None
+            return {"messages": memory_removals} if memory_removals else None
 
         # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
         last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
-            return None
+            return {"messages": memory_removals} if memory_removals else None
 
         result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder(), reminder_date=current_date)
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
-        return {"messages": result_msgs}
+        return {"messages": [*memory_removals, *result_msgs]}
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
         result = self._inject(state, runtime)
-        self._record_effective_memory(state, result, runtime)
+        self._track_injected_memory_message(result)
         return result
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        # The opt-out cleanup is an in-memory ownership check and must not be
+        # coupled to the time-boxed date/memory injection worker. Even if that
+        # worker times out, stale recalled memory must be gone before the next
+        # model call.
+        memory_removals = self._disabled_memory_removals(list(state.get("messages", [])))
         # The warm path uses only this call's config and already-loaded class.
         # Cold discovery/config reload shares the injection's bounded worker,
         # never a second executor job after the timeout. Keep this value local:
@@ -564,57 +656,151 @@ class DynamicContextMiddleware(AgentMiddleware):
                 "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
                 _INJECT_TIMEOUT_SECONDS,
             )
-            self._record_effective_memory(state, None, runtime)
-            return None
-        self._record_effective_memory(state, result, runtime)
+            return {"messages": memory_removals} if memory_removals else None
+        self._track_injected_memory_message(result)
         return result
 
-    @staticmethod
-    def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:
-        """Find server-created memory that is effective for this run.
+    def _track_injected_memory_message(self, update: dict | None) -> None:
+        """Remember the ``__memory`` message ID this run's injection produced.
 
-        A first-run block must come from this middleware's update. A reused
-        block must have existed in the checkpoint before the run; the Gateway
-        strips the reminder marker from untrusted input so a caller cannot
-        replace a known checkpoint ID with forged provenance.
+        The journal event is emitted at model-request assembly time, where the
+        injection's update dict is no longer available; the ID is the proof
+        that a non-checkpointed ``__memory`` message in the request came from
+        this middleware rather than from untrusted input.
         """
-        if isinstance(update, dict):
-            update_messages = update.get("messages")
-            if isinstance(update_messages, list):
-                for message in update_messages:
-                    if not isinstance(message, HumanMessage):
-                        continue
-                    message_id = str(message.id or "")
-                    if message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
-                        return message
-
-        context = getattr(runtime, "context", None)
-        raw_pre_existing_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY) if isinstance(context, dict) else None
-        if not isinstance(raw_pre_existing_ids, (frozenset, set, list, tuple)):
-            return None
-        pre_existing_ids = {str(message_id) for message_id in raw_pre_existing_ids if message_id}
-        for message in state.get("messages", []):
+        if not isinstance(update, dict):
+            return
+        update_messages = update.get("messages")
+        if not isinstance(update_messages, list):
+            return
+        for message in update_messages:
             if not isinstance(message, HumanMessage):
                 continue
             message_id = str(message.id or "")
-            if message_id in pre_existing_ids and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
+            if message_id.endswith("__memory") and is_dynamic_context_reminder(message):
+                self._injected_memory_message_id = message_id
+                return
+
+    def _effective_memory_message_for_request(self, messages: list, runtime: Runtime | None) -> HumanMessage | None:
+        """Find server-created memory that is effective for this run.
+
+        A first-run block must carry the ID this middleware injected during
+        ``before_agent``. A reused block must have existed in the checkpoint
+        before the run; the Gateway strips the reminder marker from untrusted
+        input so a caller cannot replace a known checkpoint ID with forged
+        provenance. With memory disabled (``memory_enabled=False``) no block
+        is ever effective: the opt-out removes this middleware's frozen
+        memory messages, and the run must not record a memory identity for
+        one (upstream's ``_record_effective_memory`` gate, preserved here).
+        """
+        if not self._memory_enabled:
+            return None
+        context = getattr(runtime, "context", None)
+        raw_pre_existing_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY) if isinstance(context, dict) else None
+        pre_existing_ids = {str(message_id) for message_id in raw_pre_existing_ids if message_id} if isinstance(raw_pre_existing_ids, (frozenset, set, list, tuple)) else set()
+        for message in messages:
+            if not isinstance(message, HumanMessage):
+                continue
+            message_id = str(message.id or "")
+            if not message_id.endswith("__memory") or not is_dynamic_context_reminder(message) or not isinstance(message.content, str):
+                continue
+            if message_id in pre_existing_ids or message_id == self._injected_memory_message_id:
                 return message
         return None
 
-    def _record_effective_memory(self, state, update: dict | None, runtime: Runtime) -> None:
-        """Attach the effective hidden memory block to the current run ledger."""
+    def _shelf_index_limits(self) -> tuple[int, int]:
+        """Shelf index caps without I/O: the assembly config, else defaults."""
+        if self._app_config is not None:
+            projects = self._app_config.projects
+            return projects.shelf_index_max_entries, projects.shelf_index_max_bytes
+        from deerflow.config.projects_config import ProjectsConfig
+
+        defaults = ProjectsConfig()
+        return defaults.shelf_index_max_entries, defaults.shelf_index_max_bytes
+
+    def _assemble_project_request(self, request: ModelRequest) -> tuple[ModelRequest, str | None, str | None]:
+        """Insert at most one transient ``<project>`` message into the request.
+
+        Pure rendering over the admission-pinned snapshot (no I/O): this
+        injector's own recognized transient messages are removed from the
+        request copy first, so re-assembling an already decorated request
+        stays idempotent and instructions never accumulate across calls. The
+        message carries the ``<project>`` block plus, for a nonempty shelf,
+        the bounded ``<documents>`` index appended after ``</project>`` — both
+        rendered fresh from the pinned snapshot on every model call (§7.2).
+        The message is placed immediately before the genuine current-run user
+        message and is never returned as a state update, so checkpoints and
+        ``state["messages"]`` never contain it. Returns the rendered block
+        texts (``None`` when absent) for the audit fingerprints.
+        """
+        runtime = getattr(request, "runtime", None)
+        original = list(getattr(request, "messages", None) or [])
+        messages = [message for message in original if not is_project_context_message(message)]
+        snapshot = pinned_project_snapshot(runtime)
+        project_block = render_project_block(snapshot)
+        if project_block is None:
+            if len(messages) == len(original):
+                return request, None, None
+            return request.override(messages=messages), None, None
+        max_entries, max_bytes = self._shelf_index_limits()
+        documents_block = render_documents_block(snapshot, max_entries=max_entries, max_bytes=max_bytes)
+        block = project_block if documents_block is None else f"{project_block}\n{documents_block}"
+        index = project_context_insertion_index(messages, runtime)
+        run_id = None
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict) and isinstance(context.get("run_id"), str):
+            run_id = context["run_id"]
+        message = build_project_context_message(block, run_id)
+        return request.override(messages=[*messages[:index], message, *messages[index:]]), project_block, documents_block
+
+    def _record_context_event(self, messages: list, runtime: Runtime | None, project_block: str | None, documents_block: str | None) -> None:
+        """Emit the run's single ``context:memory`` audit event, when due.
+
+        Fires once per run (the journal dedupes) at the first successful
+        model-request assembly, whenever a memory block, the project block or
+        the shelf index was actually supplied. ``content_sha256`` covers only
+        the selected persisted ``__memory`` message (``None`` when none exists
+        — e.g. a project-only run); ``project_context_revision`` /
+        ``project_shelf_revision`` are the sha256 fingerprints of the rendered
+        ``<project>`` / ``<documents>`` text (``None`` when no such block was
+        delivered). All are audit fingerprints: never compared, never stored
+        in additional_kwargs, and unable to reconstruct the underlying text.
+        Runs supplying no such context keep the historical no-event behavior.
+        """
         context = getattr(runtime, "context", None)
         journal = context.get("__run_journal") if isinstance(context, dict) else None
         if journal is None:
             return
 
-        message = self._effective_memory_message(state, update, runtime)
-        if message is None:
+        message = self._effective_memory_message_for_request(messages, runtime)
+        content_sha256 = hashlib.sha256(message.content.encode("utf-8")).hexdigest() if message is not None else None
+        project_context_revision = hashlib.sha256(project_block.encode("utf-8")).hexdigest() if project_block is not None else None
+        project_shelf_revision = hashlib.sha256(documents_block.encode("utf-8")).hexdigest() if documents_block is not None else None
+        if content_sha256 is None and project_context_revision is None and project_shelf_revision is None:
             return
 
         try:
             journal.record_memory_context(
-                content_sha256=hashlib.sha256(message.content.encode("utf-8")).hexdigest(),
+                content_sha256=content_sha256,
+                project_context_revision=project_context_revision,
+                project_shelf_revision=project_shelf_revision,
             )
         except Exception:
             logger.debug("Failed to record effective memory context", exc_info=True)
+
+    @override
+    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:
+        request, project_block, documents_block = self._assemble_project_request(request)
+        response = handler(request)
+        # Record only after the call succeeded: a failed assembly must not
+        # claim the context was delivered.
+        self._record_context_event(request.messages, getattr(request, "runtime", None), project_block, documents_block)
+        return response
+
+    @override
+    async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelCallResult:
+        # Pure in-memory rendering: no I/O, so it stays on the event loop.
+        request, project_block, documents_block = self._assemble_project_request(request)
+        response = await handler(request)
+        self._record_context_event(request.messages, getattr(request, "runtime", None), project_block, documents_block)
+        return response

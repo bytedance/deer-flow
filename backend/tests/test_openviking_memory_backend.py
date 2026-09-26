@@ -248,6 +248,65 @@ def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
         OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_connections=10))
 
 
+@pytest.mark.parametrize(
+    ("section", "key", "attr", "default"),
+    [
+        (None, "timeout_seconds", "timeout_seconds", 30.0),
+        (None, "max_seen_message_ids", "max_seen_message_ids", 512),
+        ("retrieval", "top_k", "search_top_k", 8),
+        ("retrieval", "max_injection_chars", "max_injection_chars", 12_000),
+        ("retrieval", "score_threshold", "score_threshold", None),
+    ],
+)
+@pytest.mark.parametrize("unset", [None, "", "   "])
+def test_numeric_knob_written_without_a_value_keeps_its_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str | None,
+    key: str,
+    attr: str,
+    default: Any,
+    unset: Any,
+) -> None:
+    """An unquoted ``top_k:`` in YAML parses as unset, not as a broken backend."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path)
+    target = config if section is None else config[section]
+    target[key] = unset
+
+    cfg = OpenVikingConfig.from_backend_config(config)
+
+    assert getattr(cfg, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        (None, "timeout_seconds", "soon"),
+        (None, "timeout_seconds", [30]),
+        (None, "max_seen_message_ids", "many"),
+        ("retrieval", "top_k", "four"),
+        ("retrieval", "top_k", {"count": 4}),
+        ("retrieval", "score_threshold", "high"),
+    ],
+)
+def test_non_numeric_knob_names_the_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str | None,
+    key: str,
+    value: Any,
+) -> None:
+    """The report has to say which knob is wrong, not just that a cast failed."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path)
+    target = config if section is None else config[section]
+    target[key] = value
+
+    with pytest.raises(ValueError, match=f"OpenViking {key} must be a number"):
+        OpenVikingConfig.from_backend_config(config)
+
+
 def test_backend_is_discovered_by_registered_name() -> None:
     reset_memory_manager()
     assert _scan_backends()["openviking"] is OpenVikingMemoryManager

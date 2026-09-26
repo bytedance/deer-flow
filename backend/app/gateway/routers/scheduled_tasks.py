@@ -4,9 +4,10 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import (
@@ -19,6 +20,7 @@ from app.gateway.deps import (
 )
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRunStatus
 from deerflow.scheduler.schedules import (
     MAX_INTERVAL_SECONDS,
     normalize_cron_expression,
@@ -120,6 +122,55 @@ class ScheduledTaskUpdateRequest(BaseModel):
     prompt: str | None = Field(default=None, min_length=1)
     schedule_spec: dict[str, Any] | None = None
     timezone: str | None = None
+
+
+class CronPreviewRequest(BaseModel):
+    cron: str = Field(min_length=1, max_length=256)
+    timezone: str = Field(min_length=1, max_length=128)
+    count: int = Field(default=5, ge=1, le=10, strict=True)
+    start_at: AwareDatetime | None = None
+
+
+class CronPreviewOccurrence(BaseModel):
+    run_at: datetime
+    local_time: datetime
+
+
+class CronPreviewResponse(BaseModel):
+    cron: str
+    timezone: str
+    start_at: datetime
+    occurrences: list[CronPreviewOccurrence]
+
+
+def _preview_cron(body: CronPreviewRequest, reference: datetime) -> CronPreviewResponse:
+    """Calculate advisory occurrences with the same semantics as scheduling."""
+    try:
+        cron = normalize_cron_expression(body.cron)
+        zone = ZoneInfo(validate_timezone(body.timezone))
+        reference = reference.astimezone(UTC)
+        cursor = reference
+        occurrences = []
+        for _ in range(body.count):
+            upcoming = compute_next_run_at("cron", {"cron": cron}, body.timezone, now=cursor)
+            if upcoming is None or upcoming <= cursor:
+                raise ValueError("Cron expression did not produce a future occurrence")
+            occurrences.append(CronPreviewOccurrence(run_at=upcoming, local_time=upcoming.astimezone(zone)))
+            cursor = upcoming
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot preview cron schedule: {exc}") from exc
+    return CronPreviewResponse(cron=cron, timezone=body.timezone, start_at=reference, occurrences=occurrences)
+
+
+@router.post("/scheduled-tasks/preview-cron", response_model=CronPreviewResponse)
+@require_permission("threads", "read")
+async def preview_cron_schedule(request: Request, body: CronPreviewRequest):
+    """Preview future cron instants without creating or dispatching a task."""
+    user = await get_optional_user_from_request(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    reference = body.start_at if body.start_at is not None else datetime.now(UTC)
+    return await asyncio.to_thread(_preview_cron, body, reference)
 
 
 @router.get("/scheduled-tasks")
@@ -436,6 +487,7 @@ async def list_scheduled_task_runs(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    status: ScheduledTaskRunStatus | None = None,
 ):
     task_repo = get_scheduled_task_repo(request)
     run_repo = get_scheduled_task_run_repo(request)
@@ -445,7 +497,7 @@ async def list_scheduled_task_runs(
     task = await task_repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return await run_repo.list_by_task(task_id, limit=limit, offset=offset)
+    return await run_repo.list_by_task(task_id, limit=limit, offset=offset, status=status)
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from app.channels import feishu as feishu_module
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
@@ -248,7 +249,7 @@ def test_feishu_receive_file_does_not_follow_planted_symlink(tmp_path, monkeypat
         uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
         victim = tmp_path / "victim.txt"
         victim.write_bytes(b"SAFE")
-        (uploads / "report.txt").symlink_to(victim)
+        symlink_or_skip(uploads / "report.txt", victim)
 
         channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
         provider = MagicMock()
@@ -273,7 +274,7 @@ def test_feishu_receive_file_reserves_dangling_symlink_name(tmp_path, monkeypatc
         paths.ensure_thread_dirs("thread-1", user_id="ou-user")
         uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
         missing_target = tmp_path / "missing.txt"
-        (uploads / "report.txt").symlink_to(missing_target)
+        symlink_or_skip(uploads / "report.txt", missing_target)
 
         channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
         provider = MagicMock()
@@ -562,6 +563,8 @@ def _make_file_event(
 def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
     async def go():
         monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        # Keep both callbacks inside the batch window even on a busy CI runner.
+        monkeypatch.setattr("app.channels.feishu.time.time", lambda: 1_000.0)
         bus = MessageBus()
         channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
         channel._main_loop = asyncio.get_running_loop()

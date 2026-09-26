@@ -6,6 +6,7 @@ from typing import cast
 import anyio
 import pytest
 
+from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
@@ -105,6 +106,55 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_apply_prompt_template_uses_non_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
+    policy = RunInteractionPolicy(RunInteractionMode.SCHEDULED)
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config, interaction_policy=policy)
+
+    assert "There is no human available to answer a synchronous question" in prompt
+    assert "MUST call ask_clarification" not in prompt
+    assert "Do not wait for a human response" in prompt
+
+
+def test_apply_prompt_template_preserves_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    assert "**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**" in prompt
+    assert "DO NOT call any other tool in the same turn as ask_clarification" in prompt
+    assert "❌ DO NOT make assumptions when information is missing - ALWAYS ask" in prompt
+    assert '**Example:**\nUser: "Deploy the application"' in prompt
+    assert 'User: "staging"\nYou: "Deploying to staging..." [proceed]' in prompt
+
+
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
     tool_config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
@@ -129,6 +179,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    stateless_agent_prompt = prompt_module.apply_prompt_template(app_config=tool_config, memory_enabled=False)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
 
     assert "<memory_tool_system>" in tool_prompt
@@ -136,6 +187,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "memory_add" in tool_prompt
     assert "agent facts are not injected automatically" in tool_prompt
     assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
+    assert "<memory_tool_system>" not in stateless_agent_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
@@ -374,7 +426,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -455,7 +507,7 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     def fail_resolve_runtime_user_id(runtime):
         raise AssertionError("explicit user_id must bypass ambient identity resolution")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"

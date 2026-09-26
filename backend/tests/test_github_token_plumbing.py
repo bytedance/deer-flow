@@ -18,6 +18,7 @@ concurrent runs on different repos from clobbering each other's token.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -31,6 +32,17 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
+
+
+def _new_aio_sandbox_with_session_state():
+    """Build a manually wired AioSandbox including creation-ownership state."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _SessionCreationState
+
+    sbx = AioSandbox.__new__(AioSandbox)
+    sbx._session_creation_state_lock = threading.Lock()
+    sbx._shell_session_creation_state = _SessionCreationState()
+    sbx._bash_session_creation_state = _SessionCreationState()
+    return sbx
 
 
 def _make_conflict_error(detail: str = "thread_id already exists") -> ConflictError:
@@ -105,17 +117,24 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     persistent-shell ``export … unset`` overlay, which could not keep secrets
     out of the command string.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
     class _FakeBash:
+        def create_session(self, *, session_id, **kwargs):
+            captured["created_session"] = session_id
+            captured["create_options"] = kwargs.get("request_options")
+
         def exec(self, *, command, env=None, **kwargs):
             captured["command"] = command
             captured["env"] = env
+            captured["exec_session"] = kwargs["session_id"]
             return SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+        def close_session(self, session_id, **kwargs):
+            captured["closed_session"] = session_id
+
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(bash=_FakeBash())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
@@ -127,10 +146,14 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     assert out == "ok"
     assert captured["command"] == "gh pr create"
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
+    assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
+    assert captured["create_options"] == {
+        "timeout_in_seconds": 5,
+        "max_retries": 0,
+    }
 
 
 def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
@@ -145,7 +168,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
             captured["command"] = command
             return _FakeResult()
 
-    sbx = AioSandbox.__new__(AioSandbox)
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
@@ -265,7 +288,6 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
     """End-to-end on the AIO sandbox path — the injection vector flagged in
     the review never reaches the shell's ``exec_command``.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     exec_called = False
 
@@ -275,7 +297,7 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
             exec_called = True
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30

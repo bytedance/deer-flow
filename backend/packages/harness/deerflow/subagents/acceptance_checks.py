@@ -227,11 +227,12 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
 #: resolves, so the probe and the later read-back stay consistent. A
 #: leaf-level symlink is rejected outright by the non-dereferencing
 #: ``stat -c %F``; an intermediate dir-link escape under a sane root still
-#: lands outside the canonical root (ESCAPED).
+#: lands outside the canonical root (ESCAPED). GNU stat labels zero-byte
+#: regular files as ``regular empty file``; both regular-file labels qualify.
 _SIZE_PROBE_INNER_SCRIPT = (
     '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
     't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
-    '[ "$t" = "regular file" ] || { echo NONREGULAR; exit 0; }; '
+    'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case $p in "$r"/*) /usr/bin/stat -c %s -- "$p" ;; *) echo ESCAPED ;; esac'
@@ -321,7 +322,7 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
 _READ_PROBE_INNER_SCRIPT = (
     '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
     't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
-    '[ "$t" = "regular file" ] || { echo NONREGULAR; exit 0; }; '
+    'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case $p in "$r"/*) ;; *) echo ESCAPED; exit 0 ;; esac; '

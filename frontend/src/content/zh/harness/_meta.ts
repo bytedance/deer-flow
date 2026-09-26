@@ -34,8 +34,14 @@ const meta: MetaRecord = {
   subagents: {
     title: "子 Agent",
   },
+  checkpoints: {
+    title: "检查点",
+  },
   mcp: {
     title: "MCP 集成",
+  },
+  extensions: {
+    title: "扩展包",
   },
   customization: {
     title: "自定义与扩展",

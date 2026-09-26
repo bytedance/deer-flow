@@ -1,13 +1,36 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。
+游标绑定可信用户/线程、规范化过滤条件、本轮上传排除集合和目录元数据；身份与目录
+始终由 runtime 解析，游标只负责一致性校验。先过滤，再按修改时间降序和原始文件名
+排序分页；失效返回 `restart_required`，不得静默回到第一页或伪报末页。
+页大小及大纲选项不参与清单绑定；`total_count` 表示完整过滤结果，摘要只统计剩余项。
+
+`conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
+assembly opts in only with a host reader; default, bootstrap, embedded and
+subagent assembly withhold it. The tool requires the worker-owned
+`__conversation_reader` capability and rejects subagents. Hosts enforce the
+current run's explicit references and user permissions. Do not import Gateway
+routers into the harness or recover this capability from persisted messages.
+Reads use live visible history; expiry/deletion does not erase destination copies.
+The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
+results stay inline. Cut messages carry a `message_seq`/`offset` continuation that
+the same host reader serves; keep reading guidance separate from permission enforcement.
+
+Lead and bootstrap assembly pass the constructed `chat_model` to tool assembly.
+The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
+including custom-agent and thinking-mode overrides; an absent cap omits the hint.
+Only standalone tool discovery without a model falls back to the base profile.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
+
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)
 3. **Built-in tools**:
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); virtual paths use `resolve_runtime_user_id(runtime)` so validation resolves the same user-scoped outputs directory established by `ThreadDataMiddleware`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware, which preserves text fallback and adds `artifact.human_input` for Web UI Human Input Cards). Beyond free text and single choice, the request-side v2 protocol supports `fields` (structured form card collecting several values at once; field types: text/textarea/number/select/multi_select/checkbox/date, validated and normalized server-side in the middleware — invalid entries are dropped, unknown types degrade to `text`; a standalone multi-select question is a one-field form). Replies stay on the v1 response protocol (`text`/`option`): the form card submits a readable text summary
-   - `view_image` - Read image bytes for vision-capable models; live sandbox bytes win for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
-   - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
+   - `view_image` - Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. Live sandbox bytes win for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
+   - `setup_agent` - Bootstrap-only: persist a custom agent's `SOUL.md` and `config.yaml`. Re-bootstrapping preserves the owner's existing `display_name`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (`prompt`, `subagent_type`, optional `acceptance_criteria`, and an optional model-visible `description` used only as a short progress label). Execution never depends on `description`; lifecycle display falls back to `prompt` when a provider omits it. Subagent reports are self-reports: the docstring directs the lead to expect `[rN]` receipt citations and verifiable handles while `verification.receipts_enabled` (and explicitly qualifies that disabled receipts mean no citations and no citation verdict), to read the delegation ledger's citation cross-check as execution evidence only, and to attach `acceptance_criteria` for objectively checkable outcomes (canonical forms `file:<path> exists|non-empty`, `file_written:<path>`, `tests_passed:<command>`); criteria are handed to the executor and appended to the subagent's task message as untrusted data (see `subagents/report_contract.py`).
@@ -15,10 +38,10 @@
    - `batch_task`, `batch_status`, `cancel_batch` - Explicit durable batch submission/progress/cancellation. Added only while the startup SQL-backed batch submitter is installed; large results stay in the owner-scoped API/JSONL export rather than the lead context. Items accept optional `acceptance_criteria`; item queries and exports expose the separate `acceptance_verdict`. Progress counts describe execution, not acceptance; unmet and UNVERIFIED conditions never trigger automatic retries.
    - Direct `create_deerflow_agent` integrations receive cloned tools bound to their explicit `SubagentRuntime`. The bound `task` forwards that runtime's exact execution controller and optional caller-owned `AppConfig` into registry/model/tool resolution and `SubagentExecutor`; bound batch tools use the same config snapshot and resolve only that runtime's submitter before falling back to no other application's active worker. Keep the original tool name/schema unchanged so model contracts and user-tool deduplication remain stable.
 
-The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection and tool-promotion keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
+The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
-- Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
+- Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
 
@@ -43,3 +66,9 @@ E2B output sync records remote file versions and actual host file metadata in a 
 - ACP results collect only `agent_message_chunk` text. Thought chunks remain internal and must not be concatenated into the tool result
 - Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
 - Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
+
+Ordinary `task` results forward bounded `artifact.knowledge_sources` records
+from captured child tool messages only when the final/partial report cites those
+opaque source links. This preserves retrieval evidence across the delegation
+boundary without placing provider IDs in model-visible text. Never reconstruct
+source records from the child's prose or replace them with fresh provider reads.

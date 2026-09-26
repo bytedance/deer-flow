@@ -55,6 +55,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [运行应用](#运行应用)
       - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
+      - [升级已有的代码仓库](#升级已有的代码仓库)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
       - [Sandbox 模式](#sandbox-模式)
@@ -76,6 +77,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [项目 (Projects)](#项目-projects)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
     - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
@@ -174,7 +176,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
+   如果某个模型的 provider 约定与 DeerFlow 通用的 thinking/effort 假设不同，可以为该模型声明 `reasoning:` 块（thinking 为 `unsupported`/`optional`/`required`、允许的 effort 取值及别名和默认值、payload 方言、推理历史要求）。Setup Wizard 内置的 Z.AI GLM-5.3-Flash 配置就使用了它：前台和后台调用都会保持 thinking 开启，effort 选择器只提供该模型自己的 `low`/`high`/`max` 档位。未声明该块的配置行为保持不变。具体格式与等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
@@ -277,6 +279,13 @@ make down   # 停止并移除容器
 
 更完整的 Docker 开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+#### 升级已有的代码仓库
+
+保留现有的 `config.yaml`、`.env` 和 `extensions_config.json`。停止当前运行的服务后，
+执行 `git pull --ff-only`，再按原运行方式启动。日常源码升级不需要再次运行 `make config`
+或 `make docker-init`；如果新版本需要变更配置，请在重启前运行 `make config-upgrade`。
+各运行方式的命令见[运维与排障](frontend/src/content/zh/application/operations-and-troubleshooting.mdx#升级已有的代码仓库)。
+
 #### 方式二：本地开发
 
 如果你更希望直接在本地启动各个服务：
@@ -293,6 +302,8 @@ make down   # 停止并移除容器
    ```bash
    make install  # 安装 backend + frontend 依赖
    ```
+
+   pre-commit 由 uv 调用，不要求其工具目录在 `PATH` 中。
 
 3. **（可选）预拉取 sandbox 镜像**：
    ```bash
@@ -562,7 +573,7 @@ logging:
 
 Gateway 的运行历史还会为每次运行记录一条终止时的 `run.delivery` 回执，包括零产出与崩溃恢复的运行。正常执行时，该回执会在持久化终止运行状态之前写入。孤儿恢复会先原子地认领过期租约，再幂等地回填回执，因此过期的恢复扫描不会覆盖仍在运行的详细交付事实。在事件存储中断期间，回执持久化保持尽力而为。对 checkpoint 预检失败（或在等待前序 finalization 时被取消）的运行，保持既有的完成数据行为：它们会收到零交付回执，但不会用空快照覆盖 RunStore 的完成字段。
 
-同一份运行事件历史还会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
+当 `tool_progress.enabled` 为 true 时，同一份运行事件历史还会记录结果质量防护器的阶段变化。它也会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
 
 #### LangSmith 链路追踪
 
@@ -632,9 +643,24 @@ Skills 是 DeerFlow 能做“几乎任何事”的关键。
 
 Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下文。只有任务确实需要时才加载，这样能把上下文窗口控制得更干净，也更适合对 token 比较敏感的模型。
 
+回答加载过技能时，底部工具栏会显示「使用的技能」。悬停或点击图标可查看本轮技能及其来源，悬停技能名称显示下划线，点击名称即可在可拖拽侧栏（手机端为抽屉）查看当时加载的 `SKILL.md` 快照。自动读取和 `/技能名` 显式调用均会记录，同一技能按首次加载顺序去重；之后修改或删除技能不会改变这份历史。复制得到包含 YAML 元数据的原始 Markdown 快照；包内相对链接和图片显示为引用，不会误跳转离开对话。范围读取或超出快照大小上限时会标明内容不完整。旧对话、失败读取以及通过 shell 等其他工具加载的技能不会凭回答文本推断为已使用。
+
 通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
 
 Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
+
+### 私有知识检索（RAGFlow）
+
+DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding 模型分组并行召回运维允许的知识库；dataset ID 与 API key 不会暴露给模型。
+
+使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为主智能体和自定义智能体聊天开放模式选择器右侧的纯图标“知识库”按钮。图标持续高亮表示知识检索已启用，普通状态表示本轮检索已关闭。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。同一个配置开关统一控制两类聊天；关闭时两类输入框都不显示、也不提交知识范围。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。回复待处理的澄清问题或编辑后重新生成时，若提交了当前选择器快照则以该新范围为准，未提交时继承来源轮次已接纳的范围；知识库仍处于“全部可检索文件”时，展开文件区域不会加载目录，切换为“指定文件”后才加载。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。`knowledge_base` 是与 provider 无关的能力开关，只控制知识能力和选择器是否启用；RAGFlow 的连接、dataset allowlist 和检索参数（`base_url`、`api_key`、`datasets`、`page_size`、阈值及输出上限）必须配置在 `tools[].name: knowledge_search` 条目中，`knowledge_base` 中的这些字段不会被读取。
+
+每条消息仍可选择最多 1000 份文档；同一知识库超过 100 份时，DeerFlow 会按每批最多 100 份校验，保留完整选择范围。任何一批文档不可访问或不可检索，都会拒绝本次检索。
+
+自定义智能体聊天请求会同时携带该智能体名称作为 `assistant_id` 和
+`context.agent_name`，确保 Gateway 的范围校验与运行时加载的是同一个智能体；主智能体聊天使用 `lead_agent`，两者都只有在共享配置启用 RAGFlow provider 时才会提交知识范围。
+
+本版不在工作区侧边栏增加独立的“知识库”入口，也不提供 DeerFlow 知识库管理页面；知识库和文件的创建、上传、解析与删除仍直接在 RAGFlow 中完成。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
@@ -760,6 +786,12 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 
 **摘要压缩**：在单个 session 内，DeerFlow 会比较积极地管理上下文，包括总结已完成的子任务、把中间结果转存到文件系统、压缩暂时不重要的信息。这样在长链路、多步骤任务里，它也能保持聚焦，而不会轻易把上下文窗口打爆。
 
+### 读取引用的会话
+
+Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
+
+无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
+
 ### 长期记忆
 
 大多数 agents 会在对话结束后把一切都忘掉，DeerFlow 不一样。
@@ -808,6 +840,39 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
+## 项目 (Projects)
+
+项目把相关会话组织在同一个名称、共享指令和文档架之下。
+
+会话在创建时（选择了某个项目）或之后通过移动菜单加入项目。运行不会修改归属关系：发送消息不会把会话指派或改派到任何项目。把会话移出项目后，它会保持未归属状态，直到再次被显式移动。
+
+移动会话会同时刷新会话顶部的归属信息和项目列表，即使还有较早的元数据请求尚未返回。
+
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018  rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+项目依赖当前的数据库表和列。如果数据库停留在旧的 0018 rollout 的 `0019_thread_incarnations` 版本且缺少项目表结构，启动会被拒绝。请先在启动本版本之前按照[离线数据库恢复流程](docs/database-forward-revision-recovery.md)处理。
+### 项目指令 (Project instructions)
+
+每个项目可以保存一段自由文本指令——适用于项目内所有会话的背景、约定和约束——在项目页的 Instructions 标签页编辑，并带有实时字节计数。成员线程每次发起运行时，Gateway 会一次性固定（pin）项目当前状态，把指令渲染成一个有界的、仅在本次请求内有效的 `<project>` 块：它不会进入系统提示词，也不会写入持久化历史；每次新运行都会读到最新保存的指令。指令长度上限为 `projects.instructions_max_bytes`（按 UTF-8 字节计，默认 8192，可配范围 256–262144），多字节字符按其 UTF-8 字节长度计数。超限的指令会在写入时被 `422` 拒绝，绝不会被静默截断。
+
+### 文档架 (Document shelf)
+
+每个项目都有一个文档架，用于存放整个项目共享的文件，在项目页的 Documents 区域管理：
+
+- **上传**文件（按钮或拖拽，每次请求一个文件）。大小限制复用 `uploads.max_file_size`（默认 50 MiB）；重复上传相同内容会返回已有条目，而不是产生重复。
+- **列出**条目，包含名称、大小、修改时间和来源徽标（直接上传 vs. 从会话保存），并可预览或下载任意条目。
+- **从会话文件保存到项目**：文档架下方只读的会话文件浏览器按 thread 分组列出成员会话的上传与输出文件，每个条目都带 Save to project 操作。
+- **附加到会话（Attach to thread）**：把文档架文件复制到某个会话的上传目录，走与常规上传相同的接入管线，让该会话可以直接使用。
+
+成员线程的运行还会收到一个按运行渲染的有界 `<documents>` 索引（由固定快照生成，受 `projects.shelf_index_max_entries` 和 `projects.shelf_index_max_bytes` 限制），agent 也可以通过 `list_project_documents` 和 `read_project_document` 工具分页浏览文档架并读取文档。
+
+### 归档读取语义 (Archive read semantics)
+
+归档项目会冻结写入，但保留读取。归档项目中的会话仍可运行，仍会收到项目指令和文档架索引；文档架也保持完全可读：列表、预览/下载、会话文件浏览器和附加到会话都继续可用。上传、保存到项目、把单个文档架文件移入回收站都要求项目处于活跃状态，回收站中的文档也不能恢复到已归档的项目。删除已归档项目仍然允许，并会把它的整个文档架移入回收站。
+
+### 回收站 (Trash)
+
+删除文档架文档会把它移入回收站而不是直接抹除：条目保留其字节内容和来源项目快照，保留期为 `projects.trash_retention_days`（默认 30 天），之后保留期清理才可能将其永久清除。`/workspace/trash` 页面——可从项目页 Documents 区域和侧边栏 Projects 标题进入——列出回收站中的文档及其来源项目和剩余保留天数，提供逐条 Restore（恢复）和 Delete permanently（永久删除）操作，以及清空回收站（Empty trash，立即永久删除回收站中的全部条目，无需等到保留期结束；保留期只决定单条记录在被保留期清理回收前最多能停留多久）。恢复会把文档放回其来源项目；来源项目已删除或已归档时，可以选择一个目标项目；如果目标项目中已有内容完全相同的活跃文件，两个条目会合并。删除项目会在同一步骤中把它的整个文档架移入回收站。
+
 ## 定时任务 (Scheduled Tasks)
 
 DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
@@ -815,6 +880,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 当前 MVP 能力：
 
 - 在 `/workspace/scheduled-tasks` 管理任务
+- 支持按任务标题或提示词搜索，可与状态、类型筛选及当前会话范围组合使用
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
 - 每个任务可以固定使用 `lead_agent`（默认）或当前用户已有的自定义 agent；未知名字会被拒绝
 - 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
@@ -824,6 +890,13 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
+
+**通过 API 筛选执行历史**
+
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+
+筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 
@@ -836,6 +909,18 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
 
 后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 通过 API 预览 cron 执行时间
+
+已认证且具有 `threads:read` 权限的客户端，可在创建任务前调用 `POST /api/scheduled-tasks/preview-cron`：
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+响应包含规范化的 `cron`、`timezone`、生效的 UTC `start_at`，以及 `occurrences` 列表中的 UTC `run_at` 和带偏移量的 `local_time`。此例的首次执行时间为 `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`。
+
+`count` 为 1–10 的整数，默认 5。`start_at` 必须带时区，省略时只读取一次服务器当前时间。cron 沿用调度器的五字段语法，最长 256 字符；时区名称最长 128 字符。输入无效或无法计算所需未来时间时返回 422。预览沿用实际调度器的夏令时语义，不创建任务、thread 或 run，也不预留执行资源。此能力目前通过 API 提供，workspace 表单尚未展示这些时间。
 
 ### 升级说明
 

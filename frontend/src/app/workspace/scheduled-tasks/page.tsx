@@ -43,12 +43,13 @@ import {
   useDeleteScheduledTask,
   usePauseScheduledTask,
   useResumeScheduledTask,
-  useScheduledTaskRuns,
   useScheduledTasks,
   useTriggerScheduledTask,
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
 import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
+import { useScheduledTaskRunHistory } from "@/core/scheduled-tasks/run-history";
+import { matchesScheduledTaskQuery } from "@/core/scheduled-tasks/search";
 import type {
   ScheduledTask,
   ScheduledTaskRun,
@@ -143,8 +144,10 @@ export default function ScheduledTasksPage() {
   const [typeFilter, setTypeFilter] = useState<
     "all" | "once" | "cron" | "interval"
   >("all");
+  const [taskSearch, setTaskSearch] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [editTaskId, setEditTaskId] = useState<string | undefined>(undefined);
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editAssistantId, setEditAssistantId] = useState(DEFAULT_ASSISTANT_ID);
@@ -183,11 +186,13 @@ export default function ScheduledTasksPage() {
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
-    return statusPass && typePass;
+    return (
+      statusPass && typePass && matchesScheduledTaskQuery(task, taskSearch)
+    );
   });
   const selectedTask =
     filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
-  const taskRunsQuery = useScheduledTaskRuns(selectedTask?.id);
+  const taskRunsQuery = useScheduledTaskRunHistory(selectedTask?.id);
   const createTask = useCreateScheduledTask();
   const updateTask = useUpdateScheduledTask(selectedTask?.id ?? "");
   const pauseTask = usePauseScheduledTask();
@@ -264,35 +269,35 @@ export default function ScheduledTasksPage() {
     }
   }, [filteredData, selectedTaskId]);
 
-  useEffect(() => {
+  // Reset before children commit so the keyed input captures this task.
+  // Same-id refetches retain the in-progress draft.
+  if (editTaskId !== selectedTask?.id) {
+    setEditTaskId(selectedTask?.id);
     if (!selectedTask) {
       setEditing(false);
-      return;
+    } else {
+      setEditTitle(selectedTask.title);
+      setEditPrompt(selectedTask.prompt);
+      setEditAssistantId(selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID);
+      const spec = selectedTask.schedule_spec as {
+        cron?: string;
+        run_at?: string;
+        every_seconds?: number;
+      };
+      setEditSchedule({
+        schedule_type: selectedTask.schedule_type,
+        schedule_spec: {
+          cron: typeof spec.cron === "string" ? spec.cron : undefined,
+          run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
+          every_seconds:
+            typeof spec.every_seconds === "number"
+              ? spec.every_seconds
+              : undefined,
+        },
+        timezone: selectedTask.timezone || "UTC",
+      });
     }
-    setEditTitle(selectedTask.title);
-    setEditPrompt(selectedTask.prompt);
-    setEditAssistantId(selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID);
-    const spec = selectedTask.schedule_spec as {
-      cron?: string;
-      run_at?: string;
-      every_seconds?: number;
-    };
-    setEditSchedule({
-      schedule_type: selectedTask.schedule_type,
-      schedule_spec: {
-        cron: typeof spec.cron === "string" ? spec.cron : undefined,
-        run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
-        every_seconds:
-          typeof spec.every_seconds === "number"
-            ? spec.every_seconds
-            : undefined,
-      },
-      timezone: selectedTask.timezone || "UTC",
-    });
-    // Depend on id only so a background refetch (same task, new object reference)
-    // does not wipe edits in progress.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTask?.id]);
+  }
 
   return (
     <WorkspaceContainer>
@@ -464,6 +469,20 @@ export default function ScheduledTasksPage() {
               {st.detail.loadFailed}: {queryError.message}
             </div>
           ) : null}
+          <div className="flex gap-2">
+            <Input
+              type="search"
+              aria-label={st.search.placeholder}
+              placeholder={st.search.placeholder}
+              value={taskSearch}
+              onChange={(event) => setTaskSearch(event.target.value)}
+            />
+            {taskSearch && (
+              <Button variant="outline" onClick={() => setTaskSearch("")}>
+                {st.search.clear}
+              </Button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button
               variant={statusFilter === "all" ? "default" : "outline"}
@@ -534,6 +553,18 @@ export default function ScheduledTasksPage() {
               data-testid="scheduled-task-list"
               className="flex flex-col gap-3"
             >
+              {data &&
+                !queryError &&
+                taskSearch.trim() &&
+                filteredData.length === 0 && (
+                  <p
+                    role="status"
+                    data-testid="scheduled-task-search-empty"
+                    className="text-muted-foreground text-sm"
+                  >
+                    {st.search.noResults}
+                  </p>
+                )}
               {filteredData.map((task) => {
                 const isSelected = selectedTask?.id === task.id;
                 return (
@@ -654,6 +685,8 @@ export default function ScheduledTasksPage() {
                       <Button
                         size="sm"
                         onClick={() => {
+                          if (!hasScheduleSpec(editSchedule.schedule_spec))
+                            return;
                           const pinned =
                             selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID;
                           updateTask.mutate({
@@ -666,7 +699,10 @@ export default function ScheduledTasksPage() {
                             timezone: editSchedule.timezone || "UTC",
                           });
                         }}
-                        disabled={updateTask.isPending}
+                        disabled={
+                          updateTask.isPending ||
+                          !hasScheduleSpec(editSchedule.schedule_spec)
+                        }
                       >
                         {st.edit.submit}
                       </Button>
@@ -711,17 +747,80 @@ export default function ScheduledTasksPage() {
                       {st.actions.delete}
                     </Button>
                   </div>
-                  <div data-testid="scheduled-task-runs">
-                    {(taskRunsQuery.data ?? []).length === 1
-                      ? st.detail.runsCountOne.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )
-                      : st.detail.runsCount.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )}
-                  </div>
+                  <nav
+                    aria-label={st.history.navigation}
+                    className="flex flex-wrap items-center gap-2"
+                  >
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        taskRunsQuery.page === 0 || taskRunsQuery.isFetching
+                      }
+                      onClick={taskRunsQuery.newer}
+                    >
+                      {st.history.newer}
+                    </Button>
+                    <span className="text-muted-foreground text-sm">
+                      {st.history.page.replace(
+                        "{page}",
+                        String(taskRunsQuery.page + 1),
+                      )}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        !taskRunsQuery.hasOlder || taskRunsQuery.isFetching
+                      }
+                      onClick={taskRunsQuery.older}
+                    >
+                      {st.history.older}
+                    </Button>
+                    {taskRunsQuery.page > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={taskRunsQuery.latest}
+                      >
+                        {st.history.latest}
+                      </Button>
+                    )}
+                  </nav>
+                  {taskRunsQuery.page > 0 && (
+                    <p className="text-muted-foreground text-xs">
+                      {st.history.paused}
+                    </p>
+                  )}
+                  {taskRunsQuery.isPending && (
+                    <p role="status">{st.history.loading}</p>
+                  )}
+                  {taskRunsQuery.isError && (
+                    <div role="alert">
+                      <p>{st.history.loadFailed}</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={taskRunsQuery.isFetching}
+                        onClick={() => void taskRunsQuery.refetch()}
+                      >
+                        {st.history.retry}
+                      </Button>
+                    </div>
+                  )}
+                  {!taskRunsQuery.isPending && !taskRunsQuery.isError && (
+                    <div data-testid="scheduled-task-runs">
+                      {(taskRunsQuery.data ?? []).length === 1
+                        ? st.detail.runsCountOne.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )
+                        : st.detail.runsCount.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )}
+                    </div>
+                  )}
                   <div
                     className="flex flex-col gap-2"
                     data-testid="scheduled-task-run-list"
@@ -746,11 +845,11 @@ export default function ScheduledTasksPage() {
                           )}
                         </div>
                       ))
-                    ) : (
+                    ) : !taskRunsQuery.isPending && !taskRunsQuery.isError ? (
                       <div className="text-muted-foreground text-sm">
                         {st.detail.noRuns}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               ) : (

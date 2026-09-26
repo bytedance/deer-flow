@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -26,12 +27,19 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+)
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
@@ -40,6 +48,7 @@ from deerflow.subagents.capacity import (
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import SNAPSHOT_SYSTEM_NOTE, ParentContextSnapshot
 from deerflow.subagents.report_contract import (
     build_acceptance_criteria_system_note,
     build_report_contract_section,
@@ -47,8 +56,12 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.subagents.turn_budget import find_jumping_hooks, resolve_recursion_limit
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
-from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.tracing import (
+    build_tracing_callbacks,
+    inject_langfuse_metadata,
+)
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -61,6 +74,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+_STREAM_CLOSE_SLOW_WARNING_SECONDS = 10.0
 # Kept as wire keys here instead of importing ``deerflow.sandbox`` at module
 # load: executor tests and extension embedders replace that package while
 # breaking agent/tool import cycles.
@@ -762,6 +776,9 @@ def _filter_tools(
     return filtered
 
 
+_THREAD_INCARNATION_UNSET = object()
+
+
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -785,11 +802,15 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        knowledge_scope: dict[str, Any] | None = None,
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        tool_progress_recorder: Any | None = None,
+        context_snapshot: ParentContextSnapshot | None = None,
+        thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     ):
         """Initialize the executor.
 
@@ -806,6 +827,8 @@ class SubagentExecutor:
                 run. Seeded into the child graph state so ``list_uploaded_files``
                 can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
+            thread_incarnation: Server-captured parent lifecycle. Explicit None
+                preserves legacy scope; omission stays absent so MCP fails closed.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
                 When None, the tracing layer falls back to DEFAULT_USER_ID.
@@ -819,6 +842,8 @@ class SubagentExecutor:
                 from the parent run for Langfuse metadata correlation. Falls
                 back to the ambient trace so the attribute is always a real
                 id, never ``None``.
+            knowledge_scope: Canonical execution-only knowledge scope inherited
+                from the parent turn. Display labels are never propagated.
             extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
@@ -839,6 +864,11 @@ class SubagentExecutor:
                 ``RunJournal`` itself.
             tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
                 promotion events. It follows the same isolated-loop boundary.
+            tool_progress_recorder: Optional loop-safe recorder for tool-progress
+                phase transitions. It follows the same isolated-loop boundary.
+            context_snapshot: Optional immutable parent history captured by the
+                ordinary task tool at dispatch. Rendered as background data,
+                never as child execution evidence or inherited system authority.
         """
         self.config = config
         self.app_config = app_config
@@ -854,7 +884,9 @@ class SubagentExecutor:
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
+        self.context_snapshot = context_snapshot
         self.thread_id = thread_id
+        self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
@@ -876,6 +908,7 @@ class SubagentExecutor:
         # trace contract, and ``_aexecute`` rebinds it because a subagent runs
         # on the isolated loop thread where the parent ContextVar may be gone.
         self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
+        self.knowledge_scope = execution_scope(knowledge_scope) if knowledge_scope is not None else None
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
         # extension generation: a concurrent ``set_loaded_extensions()`` between
@@ -888,6 +921,7 @@ class SubagentExecutor:
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
+        self.tool_progress_recorder = tool_progress_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -912,6 +946,12 @@ class SubagentExecutor:
         # filter and every runtime ``skill:activate`` check (activation
         # middleware, describe gate, skill-read stamping).
         self._skill_authorization: Any | None = None
+        # LangGraph super-step budget that buys ``config.max_turns`` turns,
+        # resolved in ``_create_agent`` once the middleware chain — and with it
+        # the compiled graph's per-turn node count — is known. Stays ``None``
+        # until then; ``_aexecute`` falls back to the raw turn count so a test
+        # double replacing ``_create_agent`` still produces a runnable config.
+        self._recursion_limit: int | None = None
         # What this subagent was assembled from, published to extension
         # observers at the end of ``_create_agent``. The prompt and skill set
         # are captured while ``_build_initial_state`` renders them because
@@ -994,6 +1034,7 @@ class SubagentExecutor:
         # a list (not ``next(...)``) so every guard is checked and a later one
         # is picked up automatically.
         self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
+        self._recursion_limit = self._resolve_recursion_limit(middlewares)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -1014,6 +1055,44 @@ class SubagentExecutor:
             extensions=extensions if extensions is not None else self.extensions,
         )
         return agent
+
+    def _resolve_recursion_limit(self, middlewares: list[Any]) -> int:
+        """Translate ``max_turns`` into the super-step budget it actually means.
+
+        ``max_turns`` is the operator-facing policy ("how many times may this
+        agent think and act"), while LangGraph's ``recursion_limit`` counts
+        graph nodes. ``create_agent`` compiles one node per middleware
+        lifecycle hook, so the two differ by the depth of the assembled chain —
+        see ``turn_budget.py`` for the arithmetic. Resolving it here, from the
+        chain this subagent was actually built with, keeps the budget stable as
+        middlewares are added and lets a per-agent chain differ.
+        """
+        recursion_limit = resolve_recursion_limit(self.config.max_turns, middlewares)
+        logger.debug(
+            "[trace=%s] Subagent %s turn budget: max_turns=%s -> recursion_limit=%s (%d middlewares)",
+            self.trace_id,
+            self.config.name,
+            self.config.max_turns,
+            recursion_limit,
+            len(middlewares),
+        )
+        # A hook that declares ``can_jump_to`` — agent-level hooks included —
+        # can leave the straight path through the graph, spending super-steps
+        # the flat per-turn cost does not model, so the budget silently becomes
+        # a lower bound. No middleware in the subagent chain declares one today;
+        # say so loudly if that changes, rather than letting runs quietly cap
+        # short again.
+        jumping_hooks = find_jumping_hooks(middlewares)
+        if jumping_hooks:
+            logger.warning(
+                "[trace=%s] Subagent %s has jump-declaring middleware hooks (%s); recursion_limit=%s is a lower bound for max_turns=%s, so the run may cap early",
+                self.trace_id,
+                self.config.name,
+                ", ".join(f"{name}.{hook}" for name, hook in jumping_hooks),
+                recursion_limit,
+                self.config.max_turns,
+            )
+        return recursion_limit
 
     def _describe_assembly(
         self,
@@ -1053,14 +1132,20 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            # Subagents request thinking off; the model's reasoning contract
+            # decides what that means (a required-thinking model stays on), and
+            # the descriptor reports the effective policy the factory applied.
+            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                thinking_enabled=effective_reasoning.thinking_enabled,
+                reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,
@@ -1279,6 +1364,8 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        if self.context_snapshot is not None:
+            system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same
         # report contract, so the citation / verifiable-handle requirements
         # never depend on the config author remembering them. The citation
@@ -1329,8 +1416,11 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            self._assembled_system_prompt = "\n\n".join(system_parts)
+            self._assembled_system_prompt = self.config.prompt_overlay.apply("\n\n".join(system_parts))
             messages.append(SystemMessage(content=self._assembled_system_prompt))
+
+        if self.context_snapshot is not None:
+            messages.append(self.context_snapshot.to_message())
 
         # Then the actual task, with any lead-supplied acceptance criteria
         # appended as untrusted data (see the channel note above).
@@ -1506,7 +1596,10 @@ class SubagentExecutor:
             # namespace. Business consumers receive thread_id via ``context``
             # below instead.
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                # Super-steps, not turns: ``_create_agent`` (just above) scaled
+                # ``max_turns`` by the compiled chain's per-turn node count.
+                # Unset only when that method was replaced by a test double.
+                "recursion_limit": self._recursion_limit if self._recursion_limit is not None else self.config.max_turns,
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
@@ -1544,6 +1637,8 @@ class SubagentExecutor:
             context: dict[str, Any] = {}
             if self.thread_id:
                 context["thread_id"] = self.thread_id
+            if self.thread_incarnation is not _THREAD_INCARNATION_UNSET:
+                context[THREAD_INCARNATION_CONTEXT_KEY] = self.thread_incarnation
             if self.app_config is not None:
                 context["app_config"] = self.app_config
             # Propagate guardrail attribution so delegated tool calls are
@@ -1566,6 +1661,8 @@ class SubagentExecutor:
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
             context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            if self.knowledge_scope is not None:
+                context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
@@ -1575,6 +1672,8 @@ class SubagentExecutor:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
             if self.tool_promotion_recorder is not None:
                 context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
+            if self.tool_progress_recorder is not None:
+                context[TOOL_PROGRESS_RECORDER_CONTEXT_KEY] = self.tool_progress_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1592,41 +1691,87 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                # A yielded values chunk is already executed state.  Retain it
-                # before observing cooperative cancellation so terminal receipt
-                # harvesting includes a tool result that completed while the
-                # cancellation request was in flight.
-                final_state = chunk
-                result.update_tool_receipts(terminal_receipts())
-                result.update_bash_executions(current_bash_executions())
+            cancelled_during_stream = False
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            try:
+                async for chunk in stream:
+                    # A yielded values chunk is already executed state.  Retain it
+                    # before observing cooperative cancellation so terminal receipt
+                    # harvesting includes a tool result that completed while the
+                    # cancellation request was in flight.
+                    final_state = chunk
+                    result.update_tool_receipts(terminal_receipts())
+                    result.update_bash_executions(current_bash_executions())
 
-                # Cooperative cancellation: check if parent requested stop.
-                # Note: cancellation is only detected at astream iteration boundaries,
-                # so long-running tool calls within a single iteration will not be
-                # interrupted until the next chunk is yielded.
-                if result.cancel_event.is_set():
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    result.try_set_terminal(
-                        SubagentStatus.CANCELLED,
-                        error="Cancelled by user",
-                        token_usage_records=collector.snapshot_records(),
-                        tool_receipts=terminal_receipts(),
+                    # Cooperative cancellation: check if parent requested stop.
+                    # Note: cancellation is only detected at astream iteration boundaries,
+                    # so long-running tool calls within a single iteration will not be
+                    # interrupted until the next chunk is yielded.
+                    if result.cancel_event.is_set():
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                        cancelled_during_stream = True
+                        break
+
+                    result.update_token_usage_records(collector.snapshot_records())
+
+                    # Capture every step message (assistant turns AND tool outputs)
+                    # appended since the last chunk. A single super-step can append
+                    # several ToolMessages when the model emits multiple tool calls in
+                    # one turn, so capturing only messages[-1] would drop all but the
+                    # last output (#3779). Dedup/serialization live in capture_step_message.
+                    messages = chunk.get("messages", [])
+                    previous_count = len(ai_messages)
+                    processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                    if len(ai_messages) > previous_count:
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            finally:
+                active_error = sys.exception()
+                cancel_requested = cancelled_during_stream or result.cancel_event.is_set()
+                slow_close_warning = asyncio.get_running_loop().call_later(
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    logger.warning,
+                    "[trace=%s] Subagent %s stream cleanup for execution %s is still running after %.1fs; cooperative terminalization and sandbox resource release have not occurred",
+                    self.trace_id,
+                    self.config.name,
+                    result.task_id,
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    context=Context(),
+                )
+                try:
+                    await close_agent_stream(stream)
+                except asyncio.CancelledError as exc:
+                    close_failure = exc.__cause__
+                    if isinstance(close_failure, Exception):
+                        logger.warning(
+                            "[trace=%s] Could not close interrupted subagent stream %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+                        )
+                    raise
+                except Exception:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                    if active_error is None and not cancel_requested:
+                        raise
+                    logger.warning(
+                        "[trace=%s] Could not close interrupted subagent stream %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
                     )
-                    return result
+                else:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                finally:
+                    slow_close_warning.cancel()
 
-                result.update_token_usage_records(collector.snapshot_records())
-
-                # Capture every step message (assistant turns AND tool outputs)
-                # appended since the last chunk. A single super-step can append
-                # several ToolMessages when the model emits multiple tool calls in
-                # one turn, so capturing only messages[-1] would drop all but the
-                # last output (#3779). Dedup/serialization live in capture_step_message.
-                messages = chunk.get("messages", [])
-                previous_count = len(ai_messages)
-                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
-                if len(ai_messages) > previous_count:
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            if cancel_requested:
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                    tool_receipts=terminal_receipts(),
+                )
+                return result
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
@@ -1658,14 +1803,15 @@ class SubagentExecutor:
                 )
 
         except GraphRecursionError:
-            # ``recursion_limit`` on run_config == ``self.config.max_turns``
-            # (set above). Hitting it means the subagent exhausted its turn
-            # budget. Route into the additive ``stop_reason`` channel (#3875
-            # Phase 2) rather than a dedicated status enum (which would break v1
-            # contract consumers). If the run streamed usable partial work,
-            # surface it as ``completed``; otherwise ``failed``. Either way the
-            # lead can tell "out of budget" from "broken subagent" without
-            # parsing result text.
+            # ``recursion_limit`` on run_config is ``self.config.max_turns``
+            # scaled into super-steps (set above), so hitting it means the
+            # subagent exhausted its turn budget — report the turn count, which
+            # is the number the operator configured. Route into the additive
+            # ``stop_reason`` channel (#3875 Phase 2) rather than a dedicated
+            # status enum (which would break v1 contract consumers). If the run
+            # streamed usable partial work, surface it as ``completed``;
+            # otherwise ``failed``. Either way the lead can tell "out of budget"
+            # from "broken subagent" without parsing result text.
             #
             # Prefer a guard's stop reason if one already fired this run: a
             # token-budget / loop hard-stop strips tool_calls to force a final

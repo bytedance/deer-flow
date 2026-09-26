@@ -1,0 +1,174 @@
+---
+title: 故障排查
+description: 按现象索引的子 Agent 常见问题：卡片状态异常、被截断、容量拒绝、目录里找不到、沙箱会话丢失、重复委派、验收清单不符合预期等，每条给出原因、处理办法和相关变更。
+---
+
+import { Callout } from "nextra/components";
+
+# 故障排查
+
+本章按**你看到的现象**组织。每条给出原因、处理办法，以及引入或修复该行为的 pull request，方便对照版本。
+
+## 卡片与状态
+
+### 子任务卡片一直转圈，或刷新后又变回进行中
+
+**原因**：旧版本用线程级的加载标志推断卡片状态，用户中途停止后卡片可能残留 running。现在卡片只在当前轮加载中、或存在匹配的工具结果时保持进行中，否则标记失败（[#3639](https://github.com/bytedance/deer-flow/pull/3639)）。
+
+**处理**：升级后仍出现时，检查该 run 是否真的还在运行（`GET /api/threads/{thread_id}/runs`），必要时停止对话。
+
+### 卡片显示失败，但 Lead Agent 的回答看起来正常
+
+这是预期行为。子 Agent 失败是一条普通的工具结果，父 run 不会因此变成 `error`，Lead Agent 会看到错误文本并自行决定如何继续（[#5407](https://github.com/bytedance/deer-flow/pull/5407)）。展开卡片看红色错误行：常见的是并行子 Agent 触发供应商的 429 限流后重试耗尽。可以降低请求上下文的 `max_concurrent_subagents`，或在 LLM 并发配置里收紧突发请求。
+
+### 结果开头是 `Task Succeeded (capped: turn budget)`，或旧版本报 `GraphRecursionError: Recursion limit of N reached`
+
+**原因**：子 Agent 用尽 `max_turns`。以前它会以 `FAILED` 结束并丢掉已经做完的工作；现在保留部分结果并标记 `turn_capped`（[#3949](https://github.com/bytedance/deer-flow/pull/3949)、[#3980](https://github.com/bytedance/deer-flow/pull/3980)）。旧版本还把 `max_turns` 原样当作 LangGraph 的 super-step 上限，中间件越多实际轮次越少，[#5485](https://github.com/bytedance/deer-flow/pull/5485) 之后按真实轮次换算。
+
+**处理**：给对应子 Agent 调大 `subagents.agents.<name>.max_turns`，并同步调大 `timeout_seconds`，否则失败会从轮次换成超时（[#3610](https://github.com/bytedance/deer-flow/pull/3610)）。
+
+### 结果标记 `token_capped` 或 `loop_capped`
+
+**原因**：命中 token 预算或循环检测的硬停止（[#3931](https://github.com/bytedance/deer-flow/pull/3931)、[#3980](https://github.com/bytedance/deer-flow/pull/3980)）。
+
+**处理**：先看步骤时间线里是不是同一个工具被反复调用。确实需要更多预算时调整 `subagents.token_budget.max_tokens` 或 `loop_detection.tool_freq_overrides`。注意 token 预算的默认值与 `summarization.enabled` 联动，显式设置的值不受影响。
+
+### 状态是 `failed`，错误为 `Reached max_turns=N`
+
+轮次用尽且最后一条助手消息没有可用文本，结果正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。处理办法同上。
+
+## 容量与限制
+
+### `Subagent execution capacity is full (3 running, 64 queued)`
+
+**原因**：进程级容量满且队列已满，或 `admission_policy: reject`（[#4998](https://github.com/bytedance/deer-flow/pull/4998)）。
+
+**处理**：调整 `subagent_runtime.max_running`、`max_queued` 或 `admission_policy`，然后重启 Gateway。使用 AIO 沙箱时同步检查 `MAX_SHELL_SESSIONS`。
+
+### `Timed out after 300s waiting for a subagent execution slot`
+
+排队超过 `subagent_runtime.queue_timeout_seconds`。要么增加容量，要么减少每次响应的并发数。
+
+### 助手消息末尾出现 `[SUBAGENT LIMIT REACHED]`
+
+本次 run 的委派总量（`subagents.max_total_per_run`，默认 6）用尽（[#4115](https://github.com/bytedance/deer-flow/pull/4115)）。这是有意的兜底，防止 Lead Agent 在每个规划检查点都发起新的一批合法大小的委派。只统计当前 run，历史线程不消耗额度。需要更多时调大该值（上限 50）。
+
+### 想只允许一个子 Agent 同时运行，但实际有两个
+
+旧版本把并发下限钳在 2。[#4081](https://github.com/bytedance/deer-flow/pull/4081) 之后下限为 1，把 `max_concurrent_subagents` 设为 1 即可。
+
+## 目录与可用性
+
+### `Unknown subagent type 'xxx'. Available: ...`
+
+按顺序排查：
+
+1. 当前对话是否处于 Ultra 模式，Custom Agent 的子智能体设置是否为"不允许"或未选中该名称（[#4887](https://github.com/bytedance/deer-flow/pull/4887)）。
+2. 名称是 `bash` 时，见下一条。
+3. 设置页管理的定义是否与内置或 `config.yaml` 同名而被排除，设置页会显示冲突标记。
+4. 定义是否被禁用（`enabled: false`）。
+
+### `Bash subagent is disabled for LocalSandboxProvider`
+
+本地沙箱默认不允许在宿主机执行命令。只在完全可信的本地环境里设置 `sandbox.allow_host_bash: true`，否则改用容器沙箱。
+
+### 子 Agent 报 `Error: task is not a valid tool`
+
+子 Agent 从父对话的上下文推断 `task` 可用并尝试再派生。工具本来就不注册，[#4161](https://github.com/bytedance/deer-flow/pull/4161) 在 `general-purpose` 的提示词里加了显式的 `tool_restrictions` 声明。自定义子 Agent 的 `system_prompt` 建议也写明这一点。
+
+## 沙箱
+
+### 并发子 Agent 的命令报 `404 Session not found`，或 shell 状态互相串
+
+**原因**：多个子 Agent 共用 AIO 的隐式 shell 会话，或者会话数超过镜像上限被驱逐。[#5134](https://github.com/bytedance/deer-flow/pull/5134) 给每个子 Agent 独立的执行租约与持久会话，[#5178](https://github.com/bytedance/deer-flow/pull/5178) 在 `max_running + 1` 超过镜像默认的 10 且未显式配置时，自动把 `MAX_SHELL_SESSIONS` 提高到该值；显式设置的值小于 `max_running + 1` 会以 `ValueError` 拒绝。
+
+**处理**：升级后确认 `sandbox.environment.MAX_SHELL_SESSIONS` 未被显式设成小于 `max_running + 1`；Provisioner 模式下同时升级 Provisioner，否则 Gateway 会报它未回报 `max_shell_sessions`。
+
+### 一个子 Agent 结束后，其他子 Agent 的沙箱命令全部失败
+
+旧版本在任一子 Agent 结束时释放共享沙箱。[#5134](https://github.com/bytedance/deer-flow/pull/5134) 之后 provider 只在最后一份租约释放时才真正释放。
+
+## 委派行为
+
+### 同一个任务被反复委派
+
+**原因**：摘要压缩把已完成的 `task` 结果压出了上下文，Lead Agent 失去"已经做过"的证据。[#3877](https://github.com/bytedance/deer-flow/pull/3877) 引入系统维护的委派账本并每次调用前重新注入，[#3887](https://github.com/bytedance/deer-flow/pull/3887) 把它放进线程状态使其在压缩后存活。
+
+**处理**：直接用 `create_deerflow_agent` 搭图时，确认使用的版本已包含 [#5488](https://github.com/bytedance/deer-flow/pull/5488)，否则工厂链缺少 `DurableContextMiddleware`，账本不会被写入。
+
+### 停止后，Lead Agent 一直被提示"该任务已委派，请勿重复"
+
+用户停止时正在进行的委派没有工具结果，账本条目永久停留在 `in_progress`。[#5507](https://github.com/bytedance/deer-flow/pull/5507) 之后下一次 run 开始时会把它改为 `cancelled`。
+
+### Lead Agent 事无巨细都委派
+
+[#4384](https://github.com/bytedance/deer-flow/pull/4384) 把提示词改为默认直接执行、只在净收益明确时委派。若仍频繁委派，检查是否自定义了 Lead Agent 的系统提示覆盖了这段策略。
+
+### 压缩后子 Agent "忘了"自己的角色或报告契约
+
+子 Agent 的系统提示是状态里的第一条消息，旧版本按索引压缩时会把它一起摘要掉。[#5454](https://github.com/bytedance/deer-flow/pull/5454) 之后压缩显式保留系统消息。
+
+### 子 Agent 压缩后供应商返回 400，抱怨历史以助手消息开头
+
+[#4040](https://github.com/bytedance/deer-flow/pull/4040) 在子 Agent 链的摘要之前加入 `DurableContextMiddleware`，把 `summary_text` 回注到请求里。升级即可。
+
+## 上下文与技能
+
+### 子 Agent 看不到用户自定义技能
+
+旧版本只读全局技能目录。[#4356](https://github.com/bytedance/deer-flow/pull/4356) 之后按父 run 的用户身份加载。若某个被动技能声明了 `allowed-tools` 导致子 Agent 丢失 `write_file` 等普通工具，那是 [#4497](https://github.com/bytedance/deer-flow/pull/4497) 之前的行为，现在技能懒激活，只有被选用的技能才施加其工具限制。
+
+### 子 Agent 不知道今天的日期，或日期差了一天
+
+子 Agent 通过 `SubagentDateContextMiddleware` 收到一条 `current_date` 提醒（[#4797](https://github.com/bytedance/deer-flow/pull/4797)）。日期按服务器时区格式化，容器默认 UTC；设置环境变量 `DEER_FLOW_DATE_TIMEZONE` 为 IANA 时区名（如 `Asia/Shanghai`）即可（[#5154](https://github.com/bytedance/deer-flow/pull/5154)）。
+
+### 子 Agent 找不到我早前上传的文件
+
+普通 `task` 委派需要父 run 的 `uploaded_files` 状态有效才会提供 `list_uploaded_files`（[#5170](https://github.com/bytedance/deer-flow/pull/5170)）。`batch_task` 的 worker 永远没有这个工具。也可以在 `prompt` 里直接给出 `/mnt/user-data/uploads/` 下的路径。
+
+## 验收与回执
+
+### 清单里文件明明存在却是 `UNVERIFIED`
+
+逐项核对：
+
+- 路径是否落在线程的 workspace 或 outputs 之下。其他位置一律 `UNVERIFIED`。
+- 是否是符号链接。本地沙箱指向外部的链接、远端沙箱的任何链接都不会被跟随。
+- 远端沙箱里的空文件在 [#5559](https://github.com/bytedance/deer-flow/pull/5559) 之前会被误判为非普通文件，升级后 `exists` 与 `file_written` 对空文件成立、`non-empty` 明确不成立。
+- 文件超过 50,000 字节时只做大小探针；大小无法确定时 `UNVERIFIED`。
+- 写法是否是四种规范形式之一，其他自然语言条件不做检查。
+
+### `tests_passed` 明明测试通过却不成立
+
+检查记录里是否有一次**成功**的、命令文本完整的 bash 执行；命令是否在持久 shell 会话里跑的（这种情况不算，因为无法证明之前的状态干净）；输出里是否有测试通过的形态且没有失败或零测试的形态。证据窗口只保留最近 20 次 bash 执行、末尾 1,000 字符输出。
+
+### Windows 上验收测试无法收集，或越界的 `cd` 被算作有效证据
+
+[#5162](https://github.com/bytedance/deer-flow/pull/5162) 让路径归一化在所有平台使用 POSIX 语义，并识别盘符路径。
+
+### 账本显示 `citations: UNVERIFIED — action claims without receipt citations`
+
+子 Agent 的报告没有引用任何 `[rN]` 回执，却有动作性描述。这不是失败，只是缺少证据。自定义子 Agent 若覆盖了输出格式，确保没有与报告契约冲突的指令；也可以检查 `verification.receipts_enabled` 是否被关闭。
+
+## 可观测性
+
+### Langfuse 里找不到子 Agent 的 trace
+
+子 Agent 的 span 归属到父线程的 session，trace 名称为 `subagent:<名称>`（[#3611](https://github.com/bytedance/deer-flow/pull/3611)）。在 Sessions 视图按父线程查找，或按 tag `subagent:<名称>` 过滤。
+
+### token 用量全部记在 Lead Agent 的模型上
+
+[#3658](https://github.com/bytedance/deer-flow/pull/3658) 之后按实际模型归属。没有按模型明细的旧 run 仍回退到 run 级模型名。
+
+### 刷新后子任务的步骤消失
+
+步骤从 `subagent.step` 运行事件回填（[#3845](https://github.com/bytedance/deer-flow/pull/3845)）。若事件存储写入失败，旧版本会丢弃这批事件，[#4082](https://github.com/bytedance/deer-flow/pull/4082) 之后改为重新缓冲重试。检查运行事件存储是否可写。
+
+### 对话页面突然只显示子 Agent 的对话
+
+子图的流帧冒充了根帧。[#4407](https://github.com/bytedance/deer-flow/pull/4407) 修复，配合 [#4215](https://github.com/bytedance/deer-flow/pull/4215) 的命名空间继承。升级即可。
+
+<Callout type="tip">
+  排查时先拿到两个 id：任务卡片对应的 `tool_call_id`，以及 Gateway 日志里 `[trace=...]`
+  的短 trace id。前者用于查询运行事件，后者用于在日志里串起一次委派的全部输出。
+</Callout>

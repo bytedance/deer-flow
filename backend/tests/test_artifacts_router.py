@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import stat
+import threading
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -426,6 +427,102 @@ def test_update_artifact_rolls_back_remote_when_local_replace_fails(tmp_path, mo
     assert artifact_path.read_text(encoding="utf-8") == "before"
 
 
+def test_update_artifact_cancellation_drains_remote_sync_before_releasing_write(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    sync_finished = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+        try:
+            original_sync(sandbox, virtual_path, content)
+        finally:
+            if content == b"after":
+                sync_finished.set()
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_sync)
+
+    async def run_cancelled_update() -> None:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        allow_sync.set()
+        assert await asyncio.to_thread(sync_finished.wait, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_update())
+
+    # The coherent final remote/host state is the regression oracle. Merely
+    # observing that the task is still pending after one loop turn is not:
+    # the old rollback/release path also needed additional scheduling turns.
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+
+
+def test_update_artifact_logs_primary_failure_when_cancelled_commit_fails(tmp_path, monkeypatch, caplog) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_failing_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+            raise RuntimeError("sandbox sync failed after cancellation")
+        original_sync(sandbox, virtual_path, content)
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_failing_sync)
+    caplog.set_level("ERROR", logger=artifacts_router.logger.name)
+
+    async def run_cancelled_failure() -> None:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        allow_sync.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_failure())
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"before")]
+    assert provider.released == ["sandbox-1"]
+    assert artifact_path.read_text(encoding="utf-8") == "before"
+    assert any("Failed to commit artifact update before rollback" in record.getMessage() and record.exc_info is not None for record in caplog.records)
+
+
 def test_update_artifact_rejects_oversized_content(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("before", encoding="utf-8")
@@ -498,6 +595,7 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("inline;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
     assert invalid.status_code == 416
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
@@ -562,6 +660,7 @@ def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
     assert response.headers.get("etag") == f'"{expected}"'
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
@@ -575,6 +674,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     # The forced-download branch must carry a real SHA-256 ETag so the
     # frontend can enable inline editing (see issue #4864 review feedback).
     assert response.headers.get("etag") == f'"{hashlib.sha256(content.encode()).hexdigest()}"'
@@ -591,6 +691,7 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     assert bytes(response.body) == content.encode("utf-8")
 
 
@@ -622,6 +723,7 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
+        "image/svg",
         "text/xml",
         "application/xml",
         "text/xsl",
@@ -632,8 +734,8 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
     ],
 )
 def test_is_active_content_mime_type_covers_html_and_xml_documents(mime_type: str) -> None:
-    # Whether .rss or .atom guess to a +xml type depends on the host's
-    # mime.types file, so the classification is pinned on MIME types directly.
+    # MIME guesses depend on the host database (Windows uses image/svg), so
+    # classification is pinned on MIME types directly.
     assert artifacts_router._is_active_content_mime_type(mime_type)
 
 
@@ -665,6 +767,7 @@ def test_get_artifact_xml_download_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("attachment;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeypatch) -> None:
@@ -682,6 +785,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.text == "hello"
     assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypatch) -> None:
