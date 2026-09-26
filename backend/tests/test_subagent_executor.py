@@ -32,6 +32,7 @@ import pytest
 from packaging.version import Version
 
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
@@ -5111,6 +5112,198 @@ class TestSubagentGuardrailAttribution:
                 tools=[],
                 authz_attributes=["not", "a", "mapping"],
             )
+
+
+class TestInterruptedTokenUsage:
+    @pytest.mark.parametrize("outcome", ["cancelled", "timed_out", "completed"])
+    def test_retains_usage_before_model_node_publishes_state(self, classes, monkeypatch, outcome):
+        """A completed model call costs tokens even if its wrapper is interrupted."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+        from deerflow.tools.builtins.task_tool import _report_usage_records, _summarize_usage, _task_result_command
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        model_returned = threading.Event()
+        terminal = threading.Event()
+        gate = {}
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        class PauseAfterModel(AgentMiddleware):
+            async def awrap_model_call(self, request, handler):
+                response = await handler(request)
+                # The first model node has already published its 15 tokens.
+                # Pause the second *after* on_llm_end but *before* this model
+                # node can yield a values chunk to SubagentExecutor.
+                if not response.result[0].tool_calls:
+                    gate["loop"] = asyncio.get_running_loop()
+                    gate["release"] = asyncio.Event()
+                    model_returned.set()
+                    await gate["release"].wait()
+                return response
+
+        @tool
+        def echo(value: str) -> str:
+            """Return the input."""
+            return value
+
+        ai = classes["AIMessage"]
+        model = Model(
+            responses=[
+                ai(
+                    content="",
+                    tool_calls=[{"name": "echo", "args": {"value": "ok"}, "id": "echo-1", "type": "tool_call"}],
+                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+                ai(
+                    content="Done",
+                    usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+            ]
+        )
+        graph = create_agent(model, tools=[echo], middleware=[PauseAfterModel()], checkpointer=False)
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="usage-test",
+                description="Test interrupted usage accounting",
+                model="usage-test-model",
+                timeout_seconds=5 if outcome == "timed_out" else 10,
+            ),
+            tools=[],
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+            execution_capacity=SubagentExecutionCapacity(SubagentRuntimeConfig()),
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({"messages": [classes["HumanMessage"](content="Echo ok")]}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(executor_module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        original_terminal = classes["SubagentResult"].try_set_terminal
+
+        def signal_terminal(holder, *args, **kwargs):
+            changed = original_terminal(holder, *args, **kwargs)
+            if changed:
+                terminal.set()
+            return changed
+
+        monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", signal_terminal)
+        execution_id = executor.execute_async("Echo ok")
+        try:
+            assert model_returned.wait(5), "second model response was not received"
+            result = executor_module.get_background_task_result(execution_id)
+            assert _summarize_usage(result.token_usage_records) == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            journal = RunJournal(run_id="parent-run", thread_id="parent-thread", event_store=MagicMock())
+            _report_usage_records(journal, result)
+            if outcome == "cancelled":
+                executor_module.request_cancel_background_task(execution_id)
+            elif outcome == "completed":
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            assert terminal.wait(10), "subagent did not reach a terminal status"
+            assert result.status.value == outcome
+            records = result.token_usage_records
+            assert len(records) == 2
+            assert len({record["source_run_id"] for record in records}) == 2
+            assert {record["model_name"] for record in records} == {"usage-test-model"}
+            expected_usage = {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}
+            assert _summarize_usage(records) == expected_usage
+            command = _task_result_command(tool_call_id="parent-call", status=outcome, usage=_summarize_usage(records))
+            assert command.update["messages"][0].additional_kwargs["subagent_token_usage"] == expected_usage
+            # An interrupted poller may have delivered the earlier snapshot.
+            # The final delivery must add only the unseen response, once.
+            _report_usage_records(journal, result, final=True)
+            _report_usage_records(journal, result, final=True)
+            assert journal.get_completion_data()["total_tokens"] == 45
+            assert journal.get_completion_data()["subagent_tokens"] == 45
+            assert journal.get_completion_data()["token_usage_by_model"]["usage-test-model"] == expected_usage
+        finally:
+            if "release" in gate:
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            executor_module.request_cancel_background_task(execution_id)
+            assert terminal.wait(5)
+            # Drain the production loop before stopping it and restoring the
+            # module fixture; no background task or admission slot may leak.
+            executor_module.run_on_isolated_subagent_loop(asyncio.sleep(0)).result(timeout=5)
+            executor_module.cleanup_background_task(execution_id)
+            executor_module._shutdown_isolated_subagent_loop()
+
+    @pytest.mark.anyio
+    async def test_usage_snapshot_waits_for_stream_cleanup_despite_repeated_cancellation(self, classes, base_config, monkeypatch):
+        from langchain_core.outputs import ChatGeneration, LLMResult
+
+        waiting = asyncio.Event()
+        closing = asyncio.Event()
+        release = asyncio.Event()
+
+        class Stream:
+            def __init__(self, collector):
+                self.collector = collector
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                closing.set()
+                await release.wait()
+                self.collector.on_llm_end(
+                    LLMResult(generations=[[ChatGeneration(message=classes["AIMessage"](content="Done", usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}))]]),
+                    run_id="response-during-cleanup",
+                )
+
+        graph = SimpleNamespace(astream=lambda state, config, **kwargs: Stream(config["callbacks"][0]))
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+        holder = classes["SubagentResult"](task_id="cleanup-usage", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=5)
+            running.cancel()
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+            assert not holder.token_usage_records
+        finally:
+            release.set()
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+
+        assert len(holder.token_usage_records) == 1
+        assert holder.token_usage_records[0]["source_run_id"] == "response-during-cleanup"
+        assert holder.token_usage_records[0]["total_tokens"] == 30
+
+    @pytest.mark.anyio
+    async def test_cancellation_before_collector_creation_keeps_usage_absent(self, classes, base_config, monkeypatch):
+        building = asyncio.Event()
+
+        async def build_state(task):
+            building.set()
+            await asyncio.Event().wait()
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", build_state)
+        holder = classes["SubagentResult"](task_id="setup-cancelled", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(building.wait(), timeout=5)
+        finally:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        assert holder.token_usage_records == []
 
 
 class TestToolReceiptHarvest:

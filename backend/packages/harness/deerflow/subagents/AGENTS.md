@@ -15,6 +15,17 @@ FIFOs remain rejected.
 
 **Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until service shutdown finishes. Drain without a timeout so owned work cannot detach; propagate the first caller cancellation, chaining any service failure. Cover terminal outcomes and repeated cancellation in `tests/test_subagent_runtime.py`.
 
+**Interrupted token accounting**: After stream teardown drains, the executor
+publishes the final `SubagentTokenCollector` snapshot even when cancellation
+bypasses normal result handling. A completed model callback may precede its
+node's next values chunk (for example, while model middleware awaits), so the
+last streamed snapshot is not a terminal usage boundary. Keep cancellation and
+timeout terminalization in `execute_async()`'s outer wrapper and preserve
+`SubagentResult`'s first-terminal-write guard. Ordinary task reporting consumes
+the final snapshot; parent journals deduplicate cumulative deliveries by
+`source_run_id`. Batch workers can persist it only while they retain a valid
+item lease; cancelling a durable batch still fences late item writes.
+
 **Durable batch acceptance**: Normalize optional `batch_task` criteria before
 persistence (empty → null; 20 items × 500 neutralized characters) with shared
 `normalize_acceptance_criteria`. Completed items use `acceptance_checks` through

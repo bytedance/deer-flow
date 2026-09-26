@@ -1801,6 +1801,13 @@ class SubagentExecutor:
             )
 
         finally:
+            # Cancellation (including wait_for's execution timeout) bypasses
+            # the terminal branches above. A completed model response can be
+            # in the collector before its graph node publishes a values chunk.
+            # Stream teardown has drained at this point; publish its final
+            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            if collector is not None:
+                result.update_token_usage_records(collector.snapshot_records())
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider
