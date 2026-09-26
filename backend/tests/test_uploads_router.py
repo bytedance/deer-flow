@@ -137,6 +137,10 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="a 255-byte filename exceeds the Windows MAX_PATH budget once the OS temp prefix is included",
+)
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
     # A 255-byte filename is the longest normalize_filename accepts. Before
     # the byte-budget truncation in claim_unique_filename, deduplicating a
