@@ -18,6 +18,15 @@ def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
     except (socket.gaierror, UnicodeError):
         return addresses
     for info in infos:
+        # ``getaddrinfo`` can return entries with non-INET families (e.g.
+        # AF_UNIX on some platforms, AF_NETLINK on Linux). ``ip_address`` only
+        # understands IPv4/IPv6, so anything else raises ``ValueError`` and the
+        # bare ``except`` below would silently swallow it — leaving the caller
+        # to think the host resolved to zero useful addresses. Filter upfront
+        # so only address families the downstream code can reason about reach
+        # the ``ip_address`` call.
+        if info[0] not in (socket.AF_INET, socket.AF_INET6):
+            continue
         sockaddr = info[4]
         try:
             addresses.append(ipaddress.ip_address(sockaddr[0]))
