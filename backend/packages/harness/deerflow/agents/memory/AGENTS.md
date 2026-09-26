@@ -368,3 +368,121 @@ runs by default.
   fact dicts are read-only inputs.
 
 Legacy fact normalization in DeerMem and `frontend/src/core/memory/import-memory.ts` uses neutral confidence `0.5` for missing or invalid values, clamps finite confidence to `[0, 1]`, trims content, and defaults blank or missing sources to `unknown`. Keep these compatibility defaults aligned.
+
+#### Extraction cost gate and model hints (opt-in)
+
+`memory.prescreen` and `memory.signal_classification` are host slots wired into
+DeerMem through one injected `judge` hook (`judge(context) -> verdict`; a plain
+mapping in, so the vendored backend imports no host judging types, exactly like
+`extraction_callback`). Both default to `off`, and `off` resolves no class path,
+constructs nothing and validates no credentials, so an unconfigured deployment
+behaves exactly as before.
+
+- The pre-screen is a **cost gate, never a safety boundary**. It gates no
+  execution and no write; it only decides whether the extraction call is worth
+  paying for. Every failure direction is extraction: error, timeout, unusable
+  response, missing verdict, provider exception, or an over-limit batch extract
+  as usual. A judge failure is logged and treated as "no opinion" — judging can
+  never lose a memory, and it can never block one either.
+- **`max_state_chars` is a character count of the judged text, per side, and
+  nothing is truncated to fit.** The judged text is exactly
+  `format_conversation_for_update`'s output (including its own head/tail
+  retention for long single messages); over a side's limit that side falls back,
+  and each side enforces its own limit. The shared client counts UTF-8 bytes
+  (`wire_size`) but replaces no consumer's limit (shared-client design §2.4): a
+  byte count would trip the fallback three times early on CJK text.
+- **A judging-config edit is hot-reloaded onto the cached manager.** The manager
+  singleton (and its judge) is built once, but `memory.prescreen` /
+  `memory.signal_classification` are documented as hot-reloadable
+  (config/AGENTS.md "Config Hot-Reload Boundary"). `get_memory_manager()` rebuilds
+  and re-injects the judge through `MemoryManager.refresh_judge` when either
+  slot's config changes, so `enforce` → `off` stops skipping extraction and
+  sending conversation text to the provider, and `off` → `shadow` starts
+  recording, without a restart. The invalidating signature covers the shared
+  top-level `typesafe:` connection block and each enabled side's *resolved*
+  connection identity (including the credential's fingerprint), so a judged side
+  that inherits its endpoint, model, credential, or deadlines from that block
+  picks up an edit there, and a rotated credential invalidates the judge, without
+  a slot edit. A config that cannot build a judge is logged and leaves the
+  previous judge in place, recorded so the rebuild is not retried on every call.
+  Publication is serialized on the manager lock and **revalidates the config
+  generation** before installing: a judge built just before a rollback
+  (`enforce` → `off`) is dropped rather than landing after it, so queued batches
+  cannot keep judging against a superseded mode.
+- **The combined request's cache is consulted before eligibility narrows the
+  question set, and it is keyed by the *full* logical question set** (signal
+  classification design §2.2.3 / §2.2.6). A round in which only one side is still
+  eligible — L3, L8, or an over-limit side — reuses the answers already bucketed
+  for that digest instead of re-asking them, so `mode` and phase-A eligibility
+  never change what a cache hit already answers.
+- **A partially answered bucket is not a hit.** Entries hold a per-question
+  answer mapping, and consumption is per question, never per side (S18): an
+  answer missing or malformed in a response falls back for that question this
+  round and is asked again on the next request with the same digest, while the
+  other direction in the same response is cached and consumed as usual. Coverage
+  is attributed per answer, not per round: a side's `cached` flag (and the model
+  it reports) reflects the answers it actually consumed, so a verdict reused from
+  the bucket stays a cache hit even when the round fetched the other side's
+  questions — otherwise the shadow evaluation counts it as a second network
+  sample and inflates the confidence-bound denominator. The bucket also keeps the
+  served model **per answer**, so filling it with a newer model does not
+  re-attribute an answer it already held: a later full cache hit still audits each
+  verdict under the model that produced it, and a retry that validates no answer
+  reports the cached answer's model rather than the empty response's.
+- **An enabled side always leaves a record, including when it cannot judge.**
+  The judge emits the `prescreen` / `signal_classification` payload with a
+  `fallback_reason` for every round in which a side is enabled, so the
+  pre-screening design §5 "local fallbacks" population (L3 / L4 / L5 / L7 / L8 or
+  a failure fallback) is countable from the records. A round with no record at
+  all now means no side was enabled (or the drain path forbade judging) — not
+  "every enabled side was ineligible".
+- **Only `enforce` + `skip` changes persistence:** it drops the extraction call
+  and **advances the watermark**, consuming the batch as "nothing durable here",
+  and emits a `prescreen` record with the digest. `shadow` records and extracts as
+  usual; the watermark advance on extraction success is unchanged.
+- Batches excluded from judging, in this order: no judge injected (L1),
+  `bypass_watermark` (emergency flush), the shutdown drain (`judge=False`),
+  non-empty **deterministic** `detect_signals` on the feed (L3), and
+  `staleness_review_enabled` / `consolidation_enabled` (L8 — a skip would also
+  skip that batch's maintenance review). Note the shipped default
+  `staleness_review_enabled: true` therefore makes the pre-screen inert until an
+  operator turns it off; that is the intended conservative Phase 1 policy.
+- Model hints are **additive**: the hint text takes the union of deterministic
+  signals and model labels, but the reinforcement evidence gate reads the
+  **deterministic set only**, so a model verdict can never write a confirmation.
+  A model hint may veto a pre-screen skip (only `prescreen enforce` ×
+  `classifier hints`); it can never cause one. Weakening hints only add text —
+  they never drive deletion or demotion.
+- **Online `hints` is a separate gate from the pre-screen evaluation below.** The
+  signal-classification design §6 requires its own independently human-reviewed
+  dataset, a pre-registered δ with per-stratum sample sizes for
+  non-inferiority/superiority, and a `veto_recovered_facts` benefit reading.
+  `eval_memory_prescreen.py` measures none of those and does not stand in for that
+  dataset, so passing its gates approves `enforce` only; `hints` stays off or
+  `shadow` until the §6 evidence exists.
+- `mutations_accepted` is counted at the real apply sites (accepted new facts,
+  accepted removals, accepted confirmations, accepted consolidations) and is the
+  definition of "worth remembering": a batch whose only effect was a summary
+  rewrite counts zero, so a skip that dropped it is not a missed memory. A new
+  fact counts only if it survives capacity enforcement (and any consolidation
+  that consumes it as a source); a near-duplicate merge counts only when it
+  actually raised the target's confidence (a no-op restatement changes nothing)
+  and the target survives (matched by id, or by identity for legacy id-less
+  facts); a removal or reinforcement counts only for an
+  id that actually existed — a proposal that passes its gate but changes no
+  persistent fact must not register as a lost memory. Scoring runs against the
+  scrubbed fact set (upload-event facts are dropped on the way to persistence), so
+  a proposal the scrub removes is not counted either. The counter is published
+  only after persistence succeeds: a failed apply (rejected commit, storage
+  error) omits it, so the evaluation censors that record as a missing sample
+  rather than reading it as a lost memory.
+- **`enforce` stays gated by the shadow evaluation, and the evaluation's gates
+  read evidence, not counts alone.** `scripts/eval_memory_prescreen.py` needs
+  ≥200 reviewed skips *that the review confirms were none worth remembering* (a
+  reviewed skip found worth remembering fails gate 3), and recorded savings
+  evidence — saved calls, their tokens, p50/p95 verdict latency, and the
+  mandatory no-network baseline on the same records. Missing any of that is
+  `INSUFFICIENT`, never a pass; the exit code is the verdict.
+- Signal classification is not admission control and not a write path: it never
+  participates in queue admission, never alters `ConversationContext.signals` or
+  the union merge, and neither hook touches the journal or the Gateway API.
