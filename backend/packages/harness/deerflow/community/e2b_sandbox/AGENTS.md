@@ -26,3 +26,10 @@ Release only needs the VM lock while leaving active state; do not hold it
 during output sync, which must not prevent ownership heartbeats.
 Track that release in `_remote_ops_in_progress` until it completes so
 reconciliation cannot probe or re-adopt a VM between active and warm states.
+
+## Literal file search
+
+`E2BSandbox.grep()` passes the original pattern to `grep -F` in literal mode.
+Only regex mode compiles the pattern before searching with `grep -E`.
+Real shell regressions live in
+`backend/tests/test_e2b_sandbox_provider.py` and replace only the SDK transport.
