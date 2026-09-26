@@ -1,4 +1,6 @@
+import asyncio
 import importlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +38,158 @@ def _make_runtime(*, thread_id: str = "thread-1", user_id: str = "default"):
         context={"thread_id": thread_id, "user_id": user_id},
         config={"configurable": {"thread_id": thread_id, "user_id": user_id}},
     )
+
+
+def test_cancelled_skill_lock_waiter_releases_lock(monkeypatch):
+    lock = threading.Lock()
+    lock.acquire()
+    started = threading.Event()
+    executor = skill_manage_module._skill_lock_wait_executor
+
+    class NotifyingExecutor:
+        def submit(self, function, *args):
+            started.set()
+            return executor.submit(function, *args)
+
+    monkeypatch.setattr(skill_manage_module, "_skill_lock_wait_executor", NotifyingExecutor())
+
+    async def run():
+        async def wait_for_lock():
+            async with skill_manage_module._async_thread_lock(lock):
+                pass
+
+        task = asyncio.create_task(wait_for_lock())
+        assert await asyncio.to_thread(started.wait, timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        lock.release()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not lock.locked()
+        async with skill_manage_module._async_thread_lock(lock):
+            pass
+
+    try:
+        asyncio.run(run())
+    finally:
+        if lock.locked():
+            lock.release()
+
+
+def test_get_lock_is_shared_across_simultaneous_cold_lookups(monkeypatch):
+    class CoordinatedRegistry:
+        def __init__(self):
+            self.values = {}
+            self.values_lock = threading.Lock()
+            self.misses = threading.Barrier(2)
+
+        def get(self, key):
+            with self.values_lock:
+                value = self.values.get(key)
+            if value is not None:
+                return value
+            try:
+                self.misses.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+            return None
+
+        def __setitem__(self, key, value):
+            with self.values_lock:
+                self.values[key] = value
+
+    registry = CoordinatedRegistry()
+    monkeypatch.setattr(skill_manage_module, "_skill_locks", registry)
+    start = threading.Barrier(3)
+    locks = []
+
+    def get_lock():
+        start.wait()
+        locks.append(skill_manage_module._get_lock("cold-user", "cold-skill"))
+
+    threads = [threading.Thread(target=get_lock, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(locks) == 2
+    assert locks[0] is locks[1]
+
+
+def test_skill_manage_sync_wrapper_serializes_calls_across_event_loops(monkeypatch):
+    first_entered_storage = threading.Event()
+    second_entered_storage = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_acquire_submitted = threading.Event()
+    storage_calls_lock = threading.Lock()
+    storage_calls = 0
+    second_thread_id = None
+    second_acquire_future = None
+    results = {}
+    executor = skill_manage_module._skill_lock_wait_executor
+
+    class ObservedExecutor:
+        def submit(self, function, *args):
+            nonlocal second_acquire_future
+            future = executor.submit(function, *args)
+            if threading.get_ident() == second_thread_id:
+                second_acquire_future = future
+                second_acquire_submitted.set()
+            return future
+
+    class StubStorage:
+        def public_skill_exists(self, name):
+            nonlocal storage_calls
+            with storage_calls_lock:
+                storage_calls += 1
+                call_number = storage_calls
+            if call_number == 1:
+                first_entered_storage.set()
+                if not release_first.wait(timeout=2):
+                    raise AssertionError("first call was not released")
+            else:
+                second_entered_storage.set()
+            return False
+
+    monkeypatch.setattr(skill_manage_module, "_skill_lock_wait_executor", ObservedExecutor())
+    monkeypatch.setattr(skill_manage_module, "get_or_new_user_skill_storage", lambda user_id: StubStorage())
+    runtime = _make_runtime(user_id="repro-user")
+
+    def call(tag):
+        nonlocal second_thread_id
+        if tag == "B":
+            second_thread_id = threading.get_ident()
+            second_started.set()
+        try:
+            skill_manage_module.skill_manage_tool.func(runtime=runtime, action="bogus", name="same-skill")
+        except ValueError as exc:
+            results[tag] = exc
+
+    first = threading.Thread(target=call, args=("A",), daemon=True)
+    second = threading.Thread(target=call, args=("B",), daemon=True)
+    first.start()
+    assert first_entered_storage.wait(timeout=2)
+    second.start()
+    assert second_started.wait(timeout=2)
+    assert second_acquire_submitted.wait(timeout=2)
+    assert second_acquire_future is not None
+    assert not second_acquire_future.done()
+    assert not second_entered_storage.is_set()
+    release_first.set()
+    assert second_entered_storage.wait(timeout=2)
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert set(results) == {"A", "B"}
+    assert all(isinstance(error, ValueError) for error in results.values())
+    assert all("Unsupported action 'bogus'" in str(error) for error in results.values())
 
 
 def test_skill_manage_create_and_patch(monkeypatch, tmp_path):
