@@ -1619,6 +1619,23 @@ def test_upload_limits_accept_legacy_config_keys():
     assert limits == uploads.UploadLimits(max_files=7, max_file_size=123, max_total_size=456)
 
 
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("max_files", uploads.DEFAULT_MAX_FILES),
+        ("max_file_size", uploads.DEFAULT_MAX_FILE_SIZE),
+        ("max_total_size", uploads.DEFAULT_MAX_TOTAL_SIZE),
+    ],
+)
+def test_upload_limits_reject_boolean_values(key, default):
+    cfg = MagicMock()
+    cfg.uploads = {key: True}
+
+    limits = uploads._get_upload_limits(cfg)
+
+    assert getattr(limits, key) == default
+
+
 def test_upload_files_uses_configured_file_count_limit(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
