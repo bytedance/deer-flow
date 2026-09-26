@@ -322,6 +322,91 @@ def test_load_claude_code_credential_ignores_non_numeric_expires_at(tmp_path, mo
     assert load_claude_code_credential() is None
 
 
+@pytest.mark.parametrize(
+    "access_token",
+    [
+        12345,
+        {"token": "sk-ant-oat01-nested"},
+        ["sk-ant-oat01-list"],
+    ],
+)
+def test_load_claude_code_credential_ignores_non_string_access_token(tmp_path, monkeypatch, access_token):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": access_token, "expiresAt": 4_102_444_800_000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    assert load_claude_code_credential() is None
+
+
+@pytest.mark.parametrize("access_token", ["   ", "\t\n", " " * 12])
+def test_load_claude_code_credential_ignores_blank_string_access_token(tmp_path, monkeypatch, access_token):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": access_token, "expiresAt": 4_102_444_800_000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    assert load_claude_code_credential() is None
+
+
+def test_load_claude_code_credential_strips_a_padded_access_token(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "  sk-ant-oat01-padded \n", "expiresAt": 4_102_444_800_000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-padded"
+
+
+@pytest.mark.parametrize(
+    "refresh_token",
+    [
+        12345,
+        None,
+        {"token": "sk-ant-ort01-nested"},
+        ["sk-ant-ort01-list"],
+    ],
+)
+def test_load_claude_code_credential_degrades_non_string_refresh_token(tmp_path, monkeypatch, refresh_token):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-test",
+                    "refreshToken": refresh_token,
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_file))
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-test"
+    assert cred.refresh_token == ""
+
+
 def test_load_claude_code_credential_falls_back_to_default_when_override_expires_at_is_non_numeric(tmp_path, monkeypatch):
     _clear_claude_code_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -329,6 +414,40 @@ def test_load_claude_code_credential_falls_back_to_default_when_override_expires
     override_path = tmp_path / "credentials.json"
     override_path.write_text(
         json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-override", "expiresAt": "1773430695128"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-default",
+                    "refreshToken": "sk-ant-ort01-default",
+                    "expiresAt": 4_102_444_800_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cred = load_claude_code_credential()
+
+    assert cred is not None
+    assert cred.access_token == "sk-ant-oat01-default"
+    assert cred.refresh_token == "sk-ant-ort01-default"
+    assert cred.source == "claude-cli-file"
+
+
+def test_load_claude_code_credential_falls_back_to_default_when_override_access_token_is_non_string(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    override_path = tmp_path / "credentials.json"
+    override_path.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": 12345, "expiresAt": 4_102_444_800_000}}),
         encoding="utf-8",
     )
     monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
@@ -448,3 +567,21 @@ def test_load_codex_cli_credential_ignores_non_string_account_id(tmp_path, monke
     assert cred is not None
     assert cred.access_token == "codex-access-token"
     assert cred.account_id == ""
+
+
+@pytest.mark.parametrize("access_token", [999, {"nested": "token"}, ["token-list"]])
+def test_load_codex_cli_credential_ignores_non_string_access_token(tmp_path, monkeypatch, access_token):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": access_token, "account_id": "acct-1"}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None
+
+
+def test_codex_chat_model_reports_missing_credential_for_non_string_access_token(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": 999, "account_id": "acct-1"}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    with pytest.raises(ValueError, match="Codex CLI credential not found"):
+        CodexChatModel(model="gpt-5.4")
