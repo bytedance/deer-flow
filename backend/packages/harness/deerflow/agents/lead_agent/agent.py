@@ -551,6 +551,19 @@ def build_middlewares(
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
+    # Superfast Decision Gate (shadow mode, off by default). When SUPERFAST_ENABLED
+    # is set, classify the incoming user turn through a small System One model and
+    # log the recommended route and latency at the front door, before any other
+    # middleware transforms the turn. It never changes routing, never skips the
+    # model call, and fails open on any error. The turn is redacted with the same
+    # PII config the model-call wrapper uses before it leaves for the decision
+    # service. Concept and reference code by Andrea Bruno (CC BY 4.0); see the
+    # harness-superfast white paper.
+    from deerflow.superfast import SuperfastDecisionGateMiddleware
+
+    if SuperfastDecisionGateMiddleware.enabled():
+        middlewares.insert(0, SuperfastDecisionGateMiddleware(pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
+
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
