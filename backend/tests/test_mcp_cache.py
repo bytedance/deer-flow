@@ -50,7 +50,6 @@ _TRACKED_GLOBALS = (
     "_init_condition",
     "_initializing_generation",
     "_cache_generation",
-    "_mcp_config_snapshot",
     "_initialized_without_config",
     # Pool-applied baseline: deliberately NOT cleared by
     # ``_reset_mcp_tools_cache_state()``, so the fixture must isolate it.
@@ -97,7 +96,6 @@ def cache_globals():
         "_config_path",
         "_config_signature",
         "_config_mtime",
-        "_mcp_config_snapshot",
         "_initialized_without_config",
         "_mcp_applied_servers",
         "_mcp_applied_order",
@@ -902,7 +900,6 @@ def test_explicit_reset_still_clears_after_skills_only_change(cache_globals, mon
 
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_tools_cache is None
-    assert cache_module._mcp_config_snapshot is None
 
 
 def test_malformed_config_is_still_stale(cache_globals, monkeypatch, tmp_path):
@@ -949,7 +946,6 @@ def test_refresh_retires_cache_when_last_server_is_disabled(cache_globals, monke
         assert cache_module.refresh_mcp_cache_if_active() is True
         assert cache_module._cache_initialized is False
         assert cache_module._mcp_tools_cache is None
-        assert cache_module._mcp_config_snapshot is None
         assert get_session_pool() is old_pool
         assert old_pool.active_binding("srv1").fingerprint is None
     finally:
@@ -1100,7 +1096,6 @@ def test_initialization_hands_the_snapshotted_config_to_discovery(cache_globals,
     assert seen["command"] == "npx"
     assert result == ["loaded-tools"]
     assert cache_module._cache_initialized is True
-    assert cache_module._mcp_config_snapshot is not None
 
 
 def test_config_appearing_after_unconfigured_init_is_stale(cache_globals, monkeypatch, tmp_path):

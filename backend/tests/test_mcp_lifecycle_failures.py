@@ -69,7 +69,6 @@ _TRACKED_GLOBALS = (
     "_init_condition",
     "_initializing_generation",
     "_cache_generation",
-    "_mcp_config_snapshot",
     "_initialized_without_config",
     "_mcp_applied_servers",
     "_mcp_applied_order",
@@ -84,7 +83,6 @@ _TRACKED_GLOBALS = (
 _CLEARED_GLOBALS = (
     "_config_path",
     "_config_signature",
-    "_mcp_config_snapshot",
     "_initialized_without_config",
     "_mcp_applied_servers",
     "_mcp_applied_order",

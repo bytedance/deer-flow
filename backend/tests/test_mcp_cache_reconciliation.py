@@ -60,7 +60,6 @@ _TRACKED_GLOBALS = (
     "_init_condition",
     "_initializing_generation",
     "_cache_generation",
-    "_mcp_config_snapshot",
     "_initialized_without_config",
     "_mcp_applied_servers",
     "_mcp_applied_order",
@@ -75,7 +74,6 @@ _TRACKED_GLOBALS = (
 _CLEARED_GLOBALS = (
     "_config_path",
     "_config_signature",
-    "_mcp_config_snapshot",
     "_initialized_without_config",
     "_mcp_applied_servers",
     "_mcp_applied_order",
@@ -465,7 +463,6 @@ def test_equivalent_path_switch_during_in_flight_rediscovery_keeps_sessions(cach
     # A's connection changes: only A retires, and the published snapshot clears.
     _write_config(cfg, {"A": _stdio("npx-next"), "B": _stdio("uvx")})
     assert cache_module.refresh_mcp_cache_if_active() is True
-    assert cache_module._mcp_config_snapshot is None
     assert cache_module._mcp_applied_servers is not None
 
     # Before rediscovery completes, switch to a file with the same effective slice.
@@ -580,7 +577,6 @@ def test_applied_baseline_survives_tool_cache_clearing(cache_globals, monkeypatc
     assert cache_module.refresh_mcp_cache_if_active() is True
 
     assert cache_module._cache_initialized is False
-    assert cache_module._mcp_config_snapshot is None
     assert cache_module._mcp_applied_servers is not None
     assert cache_module._mcp_applied_order == ("A", "B")
     assert set(cache_module._mcp_applied_connections) == {"A", "B"}
@@ -693,7 +689,6 @@ def test_refresh_with_last_server_disabled_is_a_selective_removal(cache_globals,
     assert get_session_pool() is pool  # selective: the pool is not replaced
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_tools_cache is None
-    assert cache_module._mcp_config_snapshot is None
     assert session.closed is True
     assert _entry(pool, "srv1", owner_loop) is None
     assert pool.active_binding("srv1").fingerprint is None
@@ -1183,8 +1178,12 @@ def test_delete_then_identical_readd_advances_epoch_and_closes_old_session(cache
     assert lifecycle["serverGenerations"]["B"] == 0
 
 
-def test_api_write_overwrites_a_hand_edited_lifecycle_block(cache_globals, monkeypatch, tmp_path, owner_loop):
-    """A hand-edited block is never echoed back; the writer recomputes and overwrites it."""
+def test_api_write_advances_a_complete_hand_edited_lifecycle_block(cache_globals, monkeypatch, tmp_path, owner_loop):
+    """A complete hand-edited block is trusted as the baseline and advanced.
+
+    The counters are never echoed back verbatim: the writer recomputes them from
+    the pre-mutation and post-mutation configs.
+    """
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
     raw = read_raw_extensions_config(cfg)
