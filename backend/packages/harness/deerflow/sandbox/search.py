@@ -90,6 +90,31 @@ def should_ignore_path(path: str) -> bool:
     return any(should_ignore_name(segment) for segment in path.replace("\\", "/").split("/") if segment)
 
 
+def should_ignore_path_under_root(path: str, root: str) -> bool:
+    """Apply :func:`should_ignore_path` to ``path`` as seen from ``root``.
+
+    Ignore patterns are scoped to the search root, the way ``list_dir`` already
+    applies them: an ignored name hides its own descendants, so searching
+    ``build`` -- or any path below an ignored ancestor -- still returns its
+    contents. Testing the absolute path instead silently hides every result as
+    soon as the search root, or one of its ancestors, is itself an ignored
+    name, so ``glob``/``grep`` reported "no matches" for a directory the local
+    walk lists without any trouble.
+    """
+    root_clean = root.rstrip("/")
+    if not root_clean:
+        root_clean = "/"
+    if path == root_clean:
+        # The caller asked for this exact path. There is nothing relative to
+        # test, and an ignored name must not hide what was explicitly
+        # requested (a single-file ``grep`` hits this on every match).
+        return False
+    prefix = "/" if root_clean == "/" else f"{root_clean}/"
+    if path.startswith(prefix):
+        return should_ignore_path(path[len(prefix) :])
+    return should_ignore_path(path)
+
+
 def path_matches(pattern: str, rel_path: str) -> bool:
     path = PurePosixPath(rel_path)
     if path.match(pattern):
