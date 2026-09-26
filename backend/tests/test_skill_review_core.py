@@ -2,6 +2,7 @@ import io
 import json
 import stat
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -289,6 +290,41 @@ def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
 
     assert not any(f["rule_id"] == "resource.missing" and f["path"].startswith("evals/fixtures/") for f in facts["findings"])
+
+
+def test_resource_graph_scan_of_unmatched_brackets_stays_linear(tmp_path):
+    # #5714: a long run of unmatched "[" drove the markdown-link regex into
+    # quadratic backtracking (a 64 KiB run took seconds of review time). The
+    # reference extraction must bail out of the link scan when no "]("
+    # construct is present, keeping the scan linear in that case.
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\n" + "[" * 65536 + "\n")
+
+    started = time.monotonic()
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+    elapsed = time.monotonic() - started
+
+    assert facts["summary"]["blockers"] == 0
+    assert not any(f["rule_id"] == "resource.missing" for f in facts["findings"])
+    # Smoke bound, not a benchmark: ~0.1s after the fix, ~1.2s before it on
+    # the same host. The bound only catches reintroduced quadratic behavior.
+    assert elapsed < 2.0
+
+
+def test_resource_graph_non_link_reference_passes_survive_link_guard(tmp_path):
+    # The bail-out that keeps unmatched brackets linear must only skip the
+    # markdown-link pass: code-span and bare-path references carry no "]("
+    # construct and must still be extracted.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/from-code-span.md` and references/from-bare-path.md.\n",
+    )
+    _write(tmp_path / "references" / "from-code-span.md", "# A\n")
+    _write(tmp_path / "references" / "from-bare-path.md", "# B\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/from-code-span.md", "references/from-bare-path.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
 
 
 def test_package_digest_is_path_independent(tmp_path):
