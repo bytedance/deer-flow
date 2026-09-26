@@ -4,6 +4,35 @@ import ipaddress
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+class TestCoerceMaxResults:
+    def test_returns_value_when_valid_positive_int(self):
+        from deerflow.community.fastcrw.tools import _coerce_max_results
+
+        assert _coerce_max_results(3) == 3
+
+    def test_returns_value_for_numeric_string(self):
+        from deerflow.community.fastcrw.tools import _coerce_max_results
+
+        assert _coerce_max_results("7") == 7
+
+    def test_returns_value_for_integral_float(self):
+        from deerflow.community.fastcrw.tools import _coerce_max_results
+
+        assert _coerce_max_results(4.0) == 4
+
+    @pytest.mark.parametrize(
+        "raw",
+        [True, False, 3.5, float("inf"), float("-inf"), "oops", None, 0, -2],
+        ids=["bool-true", "bool-false", "fractional", "inf", "neg-inf", "string", "none", "zero", "negative"],
+    )
+    def test_falls_back_to_default_on_invalid_input(self, raw):
+        from deerflow.community.fastcrw.tools import _coerce_max_results
+
+        assert _coerce_max_results(raw) == 5
+
 
 class TestWebSearchTool:
     @patch.dict("os.environ", {}, clear=True)
