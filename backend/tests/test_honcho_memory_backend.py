@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 from deerflow.agents.memory.backends.honcho.client import HonchoClient, HonchoRequestError
 from deerflow.agents.memory.backends.honcho.config import HonchoConfig, sanitize_id
 from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager, _stable_id
 from deerflow.agents.memory.manager import MemoryManagerError, MemoryReadError
+from deerflow.config.app_config import AppConfig
 
 
 class TestHonchoConfig:
@@ -54,6 +56,54 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x"})
         cfg = HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": True})
         assert cfg.api_key == "sk-x"
+
+    def test_allow_insecure_http_false_keeps_the_guard(self):
+        """An explicit ``False`` must not read as an opt-in."""
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": False})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+    )
+    def test_allow_insecure_http_from_environment(self, monkeypatch, tmp_path, value, expected):
+        """``$VAR`` substitution yields the raw environment string, so the knob
+        must be validated as a boolean: string truthiness turns ``"false"`` into
+        ``True`` and silently sends the API key over plaintext HTTP."""
+        monkeypatch.setenv("TEST_HONCHO_ALLOW_INSECURE", value)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": [],
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "memory": {
+                        "backend_config": {
+                            "base_url": "http://internal:8000",
+                            "api_key": "sk-x",
+                            "allow_insecure_http": "$TEST_HONCHO_ALLOW_INSECURE",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = AppConfig.from_file(config_path)
+        backend_config = config.memory.backend_config
+        assert backend_config["allow_insecure_http"] == value
+
+        if expected:
+            assert HonchoConfig.from_backend_config(backend_config).allow_insecure_http is True
+        else:
+            # The opt-in stays off, so the plaintext-http key guard still fires.
+            with pytest.raises(ValueError, match="allow_insecure_http"):
+                HonchoConfig.from_backend_config(backend_config)
+
+    @pytest.mark.parametrize("value", ["not-a-boolean", "2", "", [], "tru"])
+    def test_allow_insecure_http_rejects_a_non_boolean(self, value):
+        with pytest.raises(ValueError, match="allow_insecure_http must be a boolean"):
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "allow_insecure_http": value})
 
     def test_http_without_api_key_is_fine(self):
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
