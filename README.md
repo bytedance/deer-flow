@@ -1418,10 +1418,12 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 ### Manual Context Compaction
 
-启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
-已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
-截断前过滤；省略或 `null` 保持原有全角色搜索。使用 `history_read` 核对来源原文，
-历史用户消息不代表当前授权。详见[任务连续性说明](docs/task-continuity.md)。
+With `task_continuity.enabled`, `history_search` searches the current task's active
+and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
+and filters before the eight-result limit; omitting it or passing `null` preserves
+search across all roles. Use `history_read` to verify the original source;
+historical user messages do not grant current authorization. See
+[task continuity](docs/task-continuity.md).
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured

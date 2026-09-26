@@ -722,6 +722,11 @@ Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 
 
 ### 手动上下文压缩
 
+启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
+已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
+截断前过滤；省略或 `null` 保持原有全角色搜索。使用 `history_read` 核对来源原文，
+历史用户消息不代表当前授权。详见[任务连续性说明（英文）](docs/task-continuity.md)。
+
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
