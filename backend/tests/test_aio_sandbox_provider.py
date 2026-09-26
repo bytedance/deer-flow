@@ -1611,6 +1611,29 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     return provider, sandbox, aio_mod
 
 
+def test_reused_active_sandbox_requires_matching_releases(tmp_path):
+    """The execution lease manager keeps AIO clients active until the final holder exits."""
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-lease")
+    manager = SandboxLeaseManager(provider)
+    try:
+        for owner in ("active-run", "temporary-upload"):
+            manager.retain(owner, "sandbox-lease", thread_id="thread-lease", user_id="owner-upload")
+
+        manager.release("temporary-upload")
+        assert "sandbox-lease" in provider._sandboxes
+        assert "sandbox-lease" not in provider._warm_pool
+        sandbox.close.assert_not_called()
+
+        manager.release("active-run")
+        assert "sandbox-lease" not in provider._sandboxes
+        assert "sandbox-lease" in provider._warm_pool
+        sandbox.close.assert_called_once_with()
+    finally:
+        manager.close()
+
+
 def test_release_closes_cached_sandbox_client(tmp_path):
     """release() must close the host-side client owned by the cached AioSandbox (#2872)."""
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel")

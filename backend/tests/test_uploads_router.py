@@ -74,6 +74,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
 
     sandbox.update_file.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
@@ -616,6 +617,7 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
+    provider.release.assert_called_once_with("aio-1")
 
 
 def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tmp_path):
@@ -639,6 +641,7 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
     assert file.read_calls == []
     provider.acquire.assert_not_called()
     provider.get.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
@@ -830,6 +833,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
 
@@ -860,8 +864,76 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
+
+
+@pytest.mark.parametrize("failure", ["lookup", "sync"])
+def test_upload_files_releases_non_local_sandbox_when_sync_fails(tmp_path, failure):
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = provider.get.return_value
+    if failure == "lookup":
+        provider.get.return_value = None
+    else:
+        sandbox.update_file.side_effect = RuntimeError("sync failed")
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException if failure == "lookup" else RuntimeError):
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    provider.release.assert_called_once_with("aio-1")
+    if failure == "lookup":
+        assert file.read_calls == []
+        assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("run_finishes_during_sync", [False, True])
+def test_upload_files_keeps_active_run_sandbox_until_last_holder_finishes(tmp_path, run_finishes_during_sync):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    async def go():
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        manager = get_sandbox_lease_manager(provider)
+        await manager.acquire_async("active-run", "thread-aio", user_id="owner-upload")
+
+        def sync_file(path, content):
+            assert path == "/mnt/user-data/uploads/notes.txt"
+            assert content == b"hello uploads"
+            if run_finishes_during_sync:
+                manager.release("active-run")
+            provider.release.assert_not_called()
+
+        sandbox.update_file.side_effect = sync_file
+        try:
+            with (
+                patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
+                patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+                patch.object(uploads, "get_sandbox_provider", return_value=provider),
+            ):
+                file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+                result = await call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace())
+
+            assert result.success
+            if not run_finishes_during_sync:
+                provider.release.assert_not_called()
+                assert manager.binding_for("active-run") == "aio-1"
+                await manager.release_async("active-run")
+            provider.release.assert_called_once_with("aio-1")
+        finally:
+            await manager.release_async("active-run")
+            discard_sandbox_lease_manager(provider)
+
+    asyncio.run(go())
 
 
 def test_make_file_sandbox_writable_adds_write_bits_for_regular_files(tmp_path):

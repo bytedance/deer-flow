@@ -111,7 +111,7 @@ class LocalSkillStorage(SkillStorage):
                 if tmp_path is not None:
                     tmp_path.unlink(missing_ok=True)
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
             return super().remove_custom_skill_file(name, relative_path)
