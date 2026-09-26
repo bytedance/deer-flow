@@ -1375,6 +1375,77 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
 
 
 @pytest.mark.anyio
+async def test_acquire_async_cancellation_keeps_serializer_until_warm_reclaim_finishes(tmp_path, monkeypatch):
+    """A cancelled same-key acquire must not overlap an admitted reclaim worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    first_started = threading.Event()
+    allow_first_finish = threading.Event()
+    successor_started = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    calls = 0
+
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", lambda *_args, **_kwargs: None)
+
+    def blocking_reclaim(_thread_id, _sandbox_id, *, user_id=None):
+        nonlocal active, max_active, calls
+        assert user_id == "default"
+        with state_lock:
+            calls += 1
+            call_number = calls
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            if call_number == 1:
+                first_started.set()
+                assert allow_first_finish.wait(timeout=2)
+            else:
+                successor_started.set()
+            return "sandbox-reclaimed"
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", blocking_reclaim)
+
+    owner = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+    successor = None
+    try:
+        assert await asyncio.to_thread(first_started.wait, 2)
+        owner.cancel()
+        successor = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+
+        await asyncio.sleep(0.05)
+        assert not successor_started.is_set(), "serializer released while cancelled reclaim worker was still running"
+
+        allow_first_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(successor_started.wait, 2)
+        assert await asyncio.wait_for(successor, timeout=1) == "sandbox-reclaimed"
+        assert max_active == 1
+    finally:
+        allow_first_finish.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if successor is not None and not successor.done():
+            successor.cancel()
+            await asyncio.gather(successor, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
     """Async cached reuse must keep backend health checks off the event loop."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
