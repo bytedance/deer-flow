@@ -30,6 +30,9 @@ converts it to the requested PNG/JPEG/WebP format before moving it to the
 requested output path. Its async entry point checks missing configuration
 before sandbox acquisition. Legacy `sandbox.environment` credentials already
 present in an AIO container use its startup environment and old shell API.
+For local AIO, that fallback runs only in a container with the base sandbox
+identity; a held profile-scoped container is rejected even if disabling the
+managed profile cleared its bound revision marker.
 For a local AIO web profile, the tool checks the container's bound profile
 revision and probes `/v1/bash/exec`: modern images use per-command credentials,
 while legacy images use startup credentials on their profile-scoped container.

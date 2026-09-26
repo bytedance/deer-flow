@@ -1523,7 +1523,10 @@ workspace/upload/output mounts; active runs finish first. Container-only files,
 processes, and temporary installs are not preserved, and the key stays in the
 old container's environment until removal. Remote/provisioner AIO still needs
 `/v1/bash/exec` for web-managed keys. Changing legacy `sandbox.environment`
-requires a Gateway restart and container recreation. See
+requires a Gateway restart and container recreation. If a web profile is
+disabled during an active run, its profile-scoped local container cannot be
+used for the legacy fallback; image generation reports `IMAGE_PROFILE_CHANGED`
+until that container is replaced. See
 [sandbox configuration](backend/docs/CONFIGURATION.md) for details.
 
 Gateway-side generation/edit tests may incur provider charges and do not test
