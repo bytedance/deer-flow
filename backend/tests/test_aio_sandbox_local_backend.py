@@ -1,13 +1,16 @@
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from deerflow.community.aio_sandbox import local_backend as local_backend_module
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
@@ -2349,3 +2352,49 @@ def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch)
     assert not [arg for arg in captured_cmd if arg.startswith("--cap-add=")]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
+
+
+def test_docker_subprocess_calls_pin_utf8_decoding(monkeypatch):
+    """Locale-default text decoding silently loses docker CLI output on hosts
+    whose ANSI code page is not UTF-8 (e.g. cp936 Chinese Windows): the decode
+    error surfaces inside subprocess's reader thread, so ``stdout``/``stderr``
+    come back ``None``, and JSON-parsing call sites either crash on ``None``
+    or silently mis-parse. Every text-mode call in this module must therefore
+    pin ``encoding="utf-8"`` with ``errors="replace"``.
+    """
+    seen: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(stdout='"Debian GNU/Linux 15"\n', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+    try:
+        backend = LocalContainerBackend(
+            image="sandbox:latest",
+            base_port=8080,
+            container_prefix="sandbox",
+            config_mounts=[],
+            environment={},
+        )
+        assert backend._docker_server_is_desktop() is False
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+    assert seen, "expected the docker detection path to shell out"
+    for kwargs in seen:
+        assert kwargs.get("encoding") == "utf-8", kwargs
+        assert kwargs.get("errors") == "replace", kwargs
+
+
+def test_every_text_mode_subprocess_call_pins_utf8():
+    """Static guard: a new text-mode subprocess call must pin the encoding.
+
+    A text-mode call without ``encoding=`` decodes with the platform's
+    preferred encoding, which loses output entirely on non-UTF-8 locales.
+    """
+    source = Path(local_backend_module.__file__).read_text(encoding="utf-8")
+    text_modes = len(re.findall(r"\btext=True\b", source))
+    pinned = len(re.findall(r'encoding="utf-8"', source))
+    assert text_modes == 0 or pinned >= text_modes, f"{text_modes} text=True call(s) but only {pinned} encoding pins; new text-mode subprocess calls must pass encoding='utf-8' + errors='replace'"
