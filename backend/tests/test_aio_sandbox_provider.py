@@ -1101,7 +1101,7 @@ async def test_discover_or_create_with_lock_async_cancellation_drains_create_bef
     provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
     monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
-    monkeypatch.setattr(aio_mod, "_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire())
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
     monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
 
     owner = asyncio.create_task(
