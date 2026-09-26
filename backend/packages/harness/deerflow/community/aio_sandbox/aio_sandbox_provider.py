@@ -154,6 +154,7 @@ async def _run_started_acquire_worker[T](
             logger.warning("Cancelled AIO acquire worker failed while draining", exc_info=True)
         raise cancellation
 
+
 def _lock_file_exclusive(lock_file) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
