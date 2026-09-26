@@ -25,6 +25,7 @@ import pytest
 
 from deerflow.community.tenki.provider import _BOOTSTRAP_TIMEOUT, TenkiSandboxProvider, _import_client
 from deerflow.community.tenki.sandbox import TenkiSandbox
+from deerflow.config.app_config import AppConfig
 
 # ── Fake Tenki SDK ────────────────────────────────────────────────────
 
@@ -753,6 +754,42 @@ def test_create_waits_client_side_and_configures_lifetime(monkeypatch):
     assert kwargs["max_duration"] == 7200
     assert kwargs["sticky"] is False
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+)
+def test_create_sticky_from_environment(monkeypatch, tmp_path, value, expected):
+    monkeypatch.setenv("TEST_TENKI_STICKY", value)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: []\nsandbox:\n  use: deerflow.community.tenki:TenkiSandboxProvider\n  sticky: $TEST_TENKI_STICKY\n  idle_timeout: 0\n", encoding="utf-8")
+    config = AppConfig.from_file(config_path)
+    client = _FakeClient()
+    monkeypatch.setattr("deerflow.community.tenki.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.community.tenki.provider._import_client", lambda: lambda **kw: client)
+    provider = TenkiSandboxProvider()
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", [False, True, None])
+def test_create_sticky_native_value(monkeypatch, value):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client, config_attrs={"sticky": value, "idle_timeout": 0})
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is bool(value)
+    finally:
+        provider.shutdown()
+
+
+def test_sticky_rejects_invalid_boolean(monkeypatch):
+    with pytest.raises(ValueError, match="valid boolean"):
+        _install(monkeypatch, config_attrs={"sticky": "not-a-boolean"})
 
 
 def test_create_default_lifetime_is_explicit(monkeypatch):

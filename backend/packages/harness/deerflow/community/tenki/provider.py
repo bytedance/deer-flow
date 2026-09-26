@@ -26,6 +26,8 @@ import uuid
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter
+
 from deerflow.config import get_app_config
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
@@ -141,6 +143,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         replicas = _opt("replicas")
         idle_timeout = _opt("idle_timeout")
         max_duration = _opt("max_duration")
+        sticky = _opt("sticky", False)
         environment = dict(_opt("environment") or {})
         # Fail fast on a misconfigured key (e.g. "bad-key"): the per-call env goes
         # through the same POSIX-name check in execute_command, but this static
@@ -159,7 +162,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             # Off by default (the SDK default). Warm-pool sandboxes stay running
             # between turns, so host pinning only matters to deployments that
             # also pause/resume; expose it rather than decide for them.
-            "sticky": bool(_opt("sticky", False)),
+            "sticky": TypeAdapter(bool).validate_python(sticky) if sticky is not None else False,
             "api_key": api_key,  # None → SDK falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN
             "base_url": _opt("base_url"),
             "image": _opt("image"),  # None → Tenki account default base image

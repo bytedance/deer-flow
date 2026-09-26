@@ -102,6 +102,13 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### Tenki Configuration
+
+Tenki's provider-local `sticky` option is an extra sandbox field, so environment
+substitution leaves it as a string. Validate it as a boolean before passing it
+to the SDK; Python string truthiness turns `"false"` into `True`. Offline tests
+in `tests/test_tenki_provider.py` cover YAML/environment loading through create.
+
 ### E2B Mount Uploads
 
 E2B uploads host mounts during sandbox creation using binary file objects.

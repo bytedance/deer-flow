@@ -25,6 +25,12 @@ sandbox:
     PYTHONUNBUFFERED: "1"
 ```
 
+`sticky` also accepts an environment reference such as `sticky: $TENKI_STICKY`.
+Boolean strings are case-insensitive: `false`, `0`, `off`, and `no` disable host
+pinning; `true`, `1`, `on`, and `yes` enable it. Invalid boolean values are
+rejected when the provider loads its configuration. Omitted or `null` values
+keep pinning disabled.
+
 Install the optional SDK before selecting this provider:
 
 ```bash
