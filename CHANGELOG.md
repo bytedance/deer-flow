@@ -339,7 +339,12 @@ This release closes that milestone with **181 merged pull requests**.
   `when_thinking_enabled.extra_body.thinking` template lost `tool_stream`
   whenever thinking was on — while the disable branch, and the contract path,
   already deep-merged. The legacy enable branch now deep-merges the same way;
-  template values still win on conflicts. ([#5894])
+  template values still win on conflicts. The merge also keeps the template's
+  vLLM switch authoritative across its two spellings: a profile with
+  `chat_template_kwargs.enable_thinking: false` beside a template using the
+  legacy `thinking: true` alias no longer ends up with thinking pinned off
+  (and the mirror case can now switch it off), on both the legacy and the
+  contract path. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
