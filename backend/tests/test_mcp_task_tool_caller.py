@@ -145,6 +145,51 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("has_ambient_user", [False, True], ids=["no-user", "existing-user"])
+@pytest.mark.parametrize(
+    ("transport", "user_auth_enabled"),
+    [("stdio", None), ("stdio", False), ("stdio", True), ("http", None), ("http", False), ("sse", None), ("sse", False)],
+)
+async def test_task_without_applicable_user_auth_preserves_interceptor_context(transport: str, user_auth_enabled: bool | None, has_ambient_user: bool) -> None:
+    config = _config() if transport == "stdio" else _remote_config(transport)
+    if user_auth_enabled is not None:
+        config.mcp_servers["reports"].user_auth = McpUserScopedAuthConfig(enabled=user_auth_enabled, users={"user-1": "Bearer task-owner"})
+    caller = McpTaskToolCaller(config)
+    ambient_user = SimpleNamespace(id="other-user", system_role="member") if has_ambient_user else None
+    observed_users = []
+
+    async def inspect_context(request, handler):
+        observed_users.append(get_current_user())
+        assert get_current_user() is ambient_user
+        return await handler(request)
+
+    caller._interceptors.append(inspect_context)
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="result"))
+    pool = SimpleNamespace(get_session=AsyncMock(return_value=session))
+    user_token = set_current_user(ambient_user) if ambient_user is not None else None
+    try:
+        with (
+            patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+            patch("deerflow.mcp.task_tool_caller._prepare_stdio_connection", side_effect=lambda connection, **_kwargs: connection),
+            patch("langchain_mcp_adapters.sessions.create_session", return_value=_SessionContext(session)),
+        ):
+            result = await caller.call_tool(
+                server_name="reports",
+                tool_name="status_report",
+                arguments={"task_id": "remote-1"},
+                user_id="user-1",
+                thread_id="thread-1",
+            )
+        assert result == "result"
+        assert observed_users == [ambient_user]
+        assert get_current_user() is ambient_user
+    finally:
+        if user_token is not None:
+            reset_current_user(user_token)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "disconnect_error",
     [

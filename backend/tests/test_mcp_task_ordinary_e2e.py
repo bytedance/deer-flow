@@ -279,3 +279,104 @@ async def test_recovered_task_authenticates_as_persisted_owner(tmp_path, monkeyp
     assert tool_names == ["submit_report", "status_report" if operation == "poll" else "cancel_report"]
     assert opened_headers == [{"Authorization": "Bearer task-owner"}] * 2
     assert get_current_user() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize(
+    ("operation", "owner_can_access"),
+    [("poll", True), ("cancel", True), ("poll", False)],
+    ids=["poll-shared-task", "cancel-shared-task", "poll-task-not-found"],
+)
+async def test_recovered_task_with_request_and_user_credentials(tmp_path, monkeypatch, transport: str, operation: str, owner_can_access: bool) -> None:
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    session_factory = get_session_factory()
+    assert session_factory is not None
+    repo = McpTaskRepository(session_factory)
+    await _create_thread(repo)
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "reports": {
+                    "type": transport,
+                    "url": "https://reports.example.com/mcp",
+                    "headers": {"Authorization": "Bearer discovery"},
+                    "user_auth": {"users": {"user-1": "Bearer task-owner"}},
+                    "headers_from_context": {"headers": {"Authorization": "reports_token"}},
+                    "task_toolsets": [{"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}],
+                }
+            }
+        }
+    )
+    fake_server = FakeMcpServer()
+    fake_server.status_results.append({"task_id": "remote-1", "status": "completed", "result": {"report": "ready"}})
+    opened_headers = []
+    tool_names = []
+
+    @asynccontextmanager
+    async def create_session(connection):
+        opened_headers.append(dict(connection["headers"]))
+
+        async def call_tool(name, arguments):
+            tool_names.append(name)
+            if connection["headers"]["Authorization"] == "Bearer task-owner" and not owner_can_access:
+                return SimpleNamespace(structuredContent={"task_id": arguments["task_id"], "status": "failed", "error_code": "task_not_found"}, content=[], isError=False)
+            return await fake_server.call_tool(tool_name=name, arguments=arguments)
+
+        yield SimpleNamespace(initialize=AsyncMock(), call_tool=call_tool)
+
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", create_session)
+    first_process = _service(repo, McpTaskToolCaller(config))
+
+    @tool
+    async def submit_report() -> str:
+        """Submit a durable report task."""
+        created = await first_process.submit(
+            driver_name=ORDINARY_MCP_TASK_DRIVER,
+            request=_request("remote-1"),
+            now=datetime.now(UTC) - timedelta(seconds=2),
+        )
+        return created["id"]
+
+    builder = StateGraph(MessagesState, context_schema=dict)
+    builder.add_node("tools", ToolNode([submit_report]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    user_token = set_current_user(SimpleNamespace(id="user-1"))
+    try:
+        submitted = await graph.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "submit_report", "args": {}, "id": "call-1", "type": "tool_call"}])]},
+            context={"user_id": "user-1", "secrets": {"reports_token": "Bearer request"}},
+        )
+    finally:
+        reset_current_user(user_token)
+
+    # The real graph supplied the submit secret. Its runtime and foreground
+    # identity are no longer present when a new caller recovers the SQL task.
+    assert get_current_user() is None
+    task_id = submitted["messages"][-1].content
+    recovered_process = _service(repo, McpTaskToolCaller(config))
+    if operation == "cancel":
+        await recovered_process.cancel_task(task_id=task_id, user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
+    await recovered_process.run_once(now=datetime.now(UTC))
+
+    record = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation="incarnation-1")
+    assert record is not None
+    if owner_can_access:
+        assert record["status"] == ("completed" if operation == "poll" else "cancelled")
+    else:
+        assert record["status"] == "failed"
+        assert record["error"] == "Remote MCP task was not found"
+        assert record["next_poll_at"] is None
+        assert record["consecutive_poll_error_count"] == 0
+        await recovered_process.run_once(now=datetime.now(UTC) + timedelta(seconds=60))
+    assert tool_names == ["submit_report", "status_report" if operation == "poll" else "cancel_report"]
+    assert opened_headers == [{"Authorization": "Bearer request"}, {"Authorization": "Bearer task-owner"}]
+    assert get_current_user() is None

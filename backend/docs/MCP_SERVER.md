@@ -392,8 +392,9 @@ must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
 Server-level OAuth works during background polling and refreshes normally.
-When `user_auth` is configured, background status and cancellation calls use the
-persisted task owner's configured credential, including after a Gateway restart.
+When `user_auth` is enabled on an HTTP/SSE server, background status and
+cancellation calls use the persisted task owner's configured credential,
+including after a Gateway restart.
 Only the user ID is carried from the task record; no request credential is stored.
 An unmapped owner remains denied unless `user_auth.on_missing` is `passthrough`.
 Request-scoped secrets from a particular Agent run are not durable task
@@ -403,7 +404,13 @@ rule: submit is awaited inside the Agent run and carries the mapped headers,
 while status and cancel polls skip them and authenticate with the server's
 static/OAuth credentials or the owner's configured `user_auth` credential — so
 `headers_from_context.on_missing: "deny"` guards the submit but not
-those polls. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
+those polls. Declaring both on one server logs a warning at startup.
+When a request header overrides `user_auth` on submit, ensure that both
+credentials can access the same remote task. If the background credential
+cannot access it and the status tool returns a normal structured
+`error_code: "task_not_found"` result, the task becomes permanently `failed`,
+not a retryable authentication error.
+Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
