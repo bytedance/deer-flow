@@ -844,6 +844,33 @@ class TestGenericToolKey:
 
         assert key == _json.dumps({"url": "https://x.test/a"}, sort_keys=True, default=str)
 
+    @staticmethod
+    def _bash_with_caption(cmd, caption):
+        call = _bash_call(cmd)
+        call["args"]["description"] = caption
+        return call
+
+    def test_reworded_bash_caption_does_not_escape_detection(self):
+        """A repeated command with a reworded UI caption is still the same loop."""
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for i in range(4):
+            call = [self._bash_with_caption("pwd", f"checking where we are, take {i}")]
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        hard_stop = mw._apply(
+            _make_state(tool_calls=[self._bash_with_caption("pwd", "one more check")]),
+            runtime,
+        )
+
+        assert hard_stop is not None
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_distinct_commands_with_caption_are_distinct(self):
+        """Caption stripping must not collapse genuinely different commands."""
+        hashes = {_hash_tool_calls([self._bash_with_caption(cmd, "same words")]) for cmd in ("ls", "pwd", "ls -la")}
+        assert len(hashes) == 3
+
 
 class TestRunScopedTracking:
     def test_identical_call_history_isolated_between_runs_on_same_thread(self):
