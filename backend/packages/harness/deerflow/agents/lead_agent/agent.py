@@ -715,6 +715,15 @@ def build_middlewares(
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
+    # ProgressScoringMiddleware — LLM-scored progress-aware loop detection
+    # (#2805 MVP, experimental). Replan-first companion to the hard-stop
+    # guards above; enabled only via config.yaml -> progress_scoring.enabled.
+    progress_scoring_config = resolved_app_config.progress_scoring
+    if progress_scoring_config.enabled:
+        from deerflow.agents.middlewares.progress_scoring_middleware import ProgressScoringMiddleware
+
+        middlewares.append(ProgressScoringMiddleware.from_config(progress_scoring_config))
+
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
     if token_budget_config.enabled:

@@ -27,9 +27,11 @@ from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import (
     _compose_sse_event,
+    _publish_single_mode_chunk,
     _publish_stream_item,
     _unpack_stream_item,
 )
+from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
 SUBAGENT_NS = ("tools:call_subagent_1",)
@@ -949,3 +951,122 @@ class TestMessageSeqStamping:
             assert payload["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
         finally:
             await close_engine()
+
+
+class TestProgressEvalRedactionWiring:
+    """Regression anchors for the live-stream redaction wiring (PR #5851).
+
+    The redactor itself is unit-tested in test_progress_scoring_middleware;
+    these tests drive the real publish helpers so a wiring regression — the
+    mode gate, the redactor plumbing, or the finish flush — cannot silently
+    re-leak the in-band evaluation block to the bridge.
+    """
+
+    @staticmethod
+    def _fenced_chunks(mid="m1"):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        pieces = ["answer ", "```deer", "flow-progress\n", payload, "\n``", "`"]
+        return [(AIMessage(content=piece, id=mid), {"langgraph_node": "model"}) for piece in pieces]
+
+    @staticmethod
+    def _published_text(bridge):
+        texts = []
+        for _, _, payload in bridge.published:
+            for item in payload if isinstance(payload, list) else [payload]:
+                if isinstance(item, dict) and isinstance(item.get("content"), str):
+                    texts.append(item["content"])
+        return "".join(texts)
+
+    @pytest.mark.asyncio
+    async def test_root_ai_chunk_fence_never_reaches_bridge(self):
+        from deerflow.agents.middlewares.progress_eval_protocol import ProgressEvalStreamRedactor
+
+        bridge = _FakeBridge()
+        subagent_events = _FakeSubagentEvents()
+        redactor = ProgressEvalStreamRedactor()
+        for chunk in self._fenced_chunks():
+            await _publish_stream_item(
+                bridge=bridge,
+                run_id="r1",
+                mode="messages",
+                chunk=chunk,
+                namespace=(),
+                file_tool_chunk_batcher=None,
+                subagent_events=subagent_events,
+                progress_eval_redactor=redactor,
+            )
+        for publish_chunk in redactor.finish():
+            await bridge.publish("r1", "messages", serialize(publish_chunk, mode="messages"))
+
+        text = self._published_text(bridge)
+        assert "deerflow-progress" not in text
+        assert "tool_usefulness" not in text
+        assert text == "answer "
+
+    @pytest.mark.asyncio
+    async def test_single_mode_ai_chunk_fence_never_reaches_bridge(self):
+        from deerflow.agents.middlewares.progress_eval_protocol import ProgressEvalStreamRedactor
+
+        bridge = _FakeBridge()
+        subagent_events = _FakeSubagentEvents()
+        redactor = ProgressEvalStreamRedactor()
+        for chunk in self._fenced_chunks():
+            await _publish_single_mode_chunk(
+                bridge=bridge,
+                run_id="r1",
+                mode="messages",
+                chunk=chunk,
+                progress_eval_redactor=redactor,
+                seq_stamper=None,
+                subagent_events=subagent_events,
+            )
+        for publish_chunk in redactor.finish():
+            await bridge.publish("r1", "messages", serialize(publish_chunk, mode="messages"))
+
+        text = self._published_text(bridge)
+        assert "deerflow-progress" not in text
+        assert text == "answer "
+
+    @pytest.mark.asyncio
+    async def test_messages_chunk_untouched_without_redactor(self):
+        # Feature off: no redactor installed, the frame passes through
+        # verbatim (quoting a literal fence must not change behavior).
+        bridge = _FakeBridge()
+        for chunk in self._fenced_chunks():
+            await _publish_stream_item(
+                bridge=bridge,
+                run_id="r1",
+                mode="messages",
+                chunk=chunk,
+                namespace=(),
+                file_tool_chunk_batcher=None,
+                subagent_events=_FakeSubagentEvents(),
+                progress_eval_redactor=None,
+            )
+
+        text = self._published_text(bridge)
+        assert "deerflow-progress" in text
+
+    @pytest.mark.asyncio
+    async def test_subgraph_ai_chunk_bypasses_redactor(self):
+        # Delegated subagent frames keep their namespace and bypass the
+        # root-only consumers; the redactor is only installed for the lead
+        # agent's root frames anyway.
+        from deerflow.agents.middlewares.progress_eval_protocol import ProgressEvalStreamRedactor
+
+        bridge = _FakeBridge()
+        redactor = ProgressEvalStreamRedactor()
+        for chunk in self._fenced_chunks():
+            await _publish_stream_item(
+                bridge=bridge,
+                run_id="r1",
+                mode="messages",
+                chunk=chunk,
+                namespace=SUBAGENT_NS,
+                file_tool_chunk_batcher=None,
+                subagent_events=_FakeSubagentEvents(),
+                progress_eval_redactor=redactor,
+            )
+
+        text = self._published_text(bridge)
+        assert "deerflow-progress" in text

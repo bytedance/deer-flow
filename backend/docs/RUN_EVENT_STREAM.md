@@ -77,8 +77,9 @@ through run-event or specialized APIs:
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
 Current middleware tags are `guardrail`, `loop_detection`,
-`safety_termination`, `skill_activation`, `skill_secrets`, `tool_promotion`,
-and `tool_progress`. The pattern is intentionally open so new middleware tags
+`progress_scoring`, `safety_termination`, `skill_activation`, `skill_secrets`,
+`tool_promotion`, and `tool_progress`. The pattern is intentionally open so
+new middleware tags
 are additive. Because the full event type is limited to 32 characters and
 `middleware:` uses 11, a tag must contain 1-21 characters.
 
@@ -113,6 +114,23 @@ Recorder calls happen after the state lock is released, so a slow custom
 recorder cannot stall unrelated tool-state updates. Recorder failures are
 fail-open and do not change guard behavior. These events are emitted only when
 `tool_progress.enabled` is true (the default is false).
+
+`middleware:progress_scoring` records the LLM-scored progress guard from
+`ProgressScoringMiddleware` (issue #2805, experimental). `action` is
+`replan_required` when a sliding window of steps is stagnant — low
+self-scored average `task_progress`, high objective repetition of tool calls
+or result hashes, and no observable result change — and the model is asked to
+replan at the next model call (this middleware never hard-stops; repeated-call
+hard stops remain `middleware:loop_detection`'s), or `eval_noncompliance`
+when the model has produced tool results without a parseable
+`deerflow-progress` evaluation block for several consecutive steps
+(`noncompliance_threshold`), so an enabled-but-ignored protocol is visible
+instead of a silent no-op. The `changes` object carries the window
+statistics (step/eval counts, average score, repetition ratios, observable
+change) and the non-compliance streak when applicable. Tool arguments,
+prompts, message content, tool results, and content-derived hashes are not
+persisted in this event. These events are emitted only when
+`progress_scoring.enabled` is true (the default is false).
 
 `middleware:tool_promotion` records deferred MCP schemas newly promoted for
 the active catalog. `changes.source` distinguishes automatic `routing_hint`

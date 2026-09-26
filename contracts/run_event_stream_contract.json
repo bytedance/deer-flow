@@ -399,7 +399,7 @@
       "pattern": "middleware:{tag}",
       "category": "middleware",
       "producer": "RunJournal.record_middleware(tag, ...)",
-      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion", "tool_progress"],
+      "known_tags": ["guardrail", "loop_detection", "progress_scoring", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion", "tool_progress"],
       "event_type_schema": {
         "type": "string",
         "pattern": "^middleware:",

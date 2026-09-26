@@ -35,6 +35,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.progress_eval_protocol import redacted_message_copy
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
@@ -244,6 +245,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        redact_progress_eval: bool = False,
     ):
         super().__init__()
         self.run_id = run_id
@@ -254,6 +256,12 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        # Strip the in-band progress-evaluation block from AI responses.
+        # Off by default: the protocol payload only exists when the
+        # progress-scoring middleware is enabled, and redacting a *literal*
+        # deerflow-progress fence a user asked the model to quote would
+        # change behavior with the feature disabled.
+        self._redact_progress_eval = redact_progress_eval
         try:
             self._owner_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
@@ -484,6 +492,16 @@ class RunJournal(BaseCallbackHandler):
                     messages.append(gen.message)
                 else:
                     logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
+
+        if self._redact_progress_eval and messages:
+            # Strip the in-band evaluation block once, before every consumer
+            # of this response sees the message: the durable llm.ai.response
+            # event copy below *and* the run-summary path
+            # (_queue_llm_response_events → _snapshot_message_summary →
+            # last_ai_message in progress snapshots and the completed run
+            # row). The after_model state rewrite runs only after this
+            # callback has already fired.
+            messages = [redacted_message_copy(m) if isinstance(m, AIMessage) else m for m in messages]
 
         for message in messages:
             if is_canonical_callback:
