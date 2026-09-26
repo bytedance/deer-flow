@@ -22,6 +22,21 @@ The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
 including custom-agent and thinking-mode overrides; an absent cap omits the hint.
 Only standalone tool discovery without a model falls back to the base profile.
 
+`check_image_generation` performs the configuration preflight used by the
+image and PPT skills. `generate_image` validates virtual paths, chooses the
+managed image profile before legacy sandbox environment, injects managed
+credentials for a single sandbox command, validates the returned image, and
+converts it to the requested PNG/JPEG/WebP format before moving it to the
+requested output path. Its async entry point checks missing configuration
+before sandbox acquisition. Legacy `sandbox.environment` credentials already
+present in an AIO container use its startup environment and old shell API.
+For a local AIO web profile, the tool checks the container's bound profile
+revision and probes `/v1/bash/exec`: modern images use per-command credentials,
+while legacy images use startup credentials on their profile-scoped container.
+Remote AIO still needs the per-command API. The shell
+exit status from the image script is authoritative; the
+tool also requires a success marker after file validation and move.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`

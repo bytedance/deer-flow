@@ -1328,7 +1328,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
-      title: "Models",
+      title: "Chat models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",
       adminOnly:
@@ -1368,6 +1368,71 @@ export const enUS: Translations = {
         "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+    },
+    imageModels: {
+      title: "Image models",
+      description:
+        "Configure the image provider used for image and PowerPoint generation. Image models are separate from chat models. A saved profile takes priority over sandbox environment variables. Tests call the provider and may incur charges.",
+      add: "Add image model",
+      reload: "Reload",
+      loading: "Loading image models…",
+      failed: "Image model request failed.",
+      empty: "No image model configured.",
+      status: "Image generation status",
+      statuses: {
+        not_configured: "Not configured",
+        invalid_config: "Invalid configuration",
+        configured_unverified: "Configured; capabilities not verified",
+        ready: "Generation and editing verified",
+        unreachable: "Provider unreachable",
+      },
+      serverConfig: "Server configuration · read-only",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      edit: "Edit",
+      enable: "Enable",
+      disable: "Disable",
+      keySaved: "API key saved",
+      keyMissing: "API key missing",
+      generationReady: "Generation verified",
+      generationUntested: "Generation unverified",
+      editReady: "Reference editing verified",
+      editUntested: "Reference editing unverified",
+      testGeneration: "Test generation",
+      testEdit: "Test reference editing",
+      working: "Working…",
+      formDescription:
+        "Save a provider and test generation and reference editing separately. An enabled profile overrides sandbox environment variables for new image requests.",
+      name: "Unique name",
+      displayName: "Display name",
+      provider: "Provider",
+      providers: {
+        openai: "OpenAI-compatible",
+        gemini: "Gemini",
+        minimax: "MiniMax",
+      },
+      modelId: "Model ID",
+      endpoint: "Base URL",
+      size: "Image size (optional)",
+      keepKey: "Leave blank to keep the saved key",
+      requiredKey: "Enter an image API key",
+      clearKey: "Remove saved API key",
+      cancel: "Cancel",
+      save: "Save",
+      saved: "Image model saved",
+      results: {
+        success: "Provider test passed.",
+        authentication_failed: "Authentication failed. Check the API key.",
+        rate_limited: "Provider rate limit reached. Retry later.",
+        unsupported_edit:
+          "This model or endpoint does not support reference editing.",
+        provider_rejected:
+          "Provider rejected the request. Check the model and endpoint.",
+        invalid_response: "Provider responded without image data.",
+        unreachable:
+          "Could not reach the provider. Check network and endpoint.",
+        missing_api_key: "Configure an image API key first.",
+      },
     },
     sections: {
       models: "Models",

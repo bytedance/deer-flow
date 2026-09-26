@@ -83,6 +83,11 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 
 **IMPORTANT**: Generate slides **strictly one by one, in order**. Do NOT parallelize or batch image generation. Each slide depends on the previous slide's output as a reference image. Generating slides in parallel will break visual consistency and is not allowed.
 
+Before creating the plan or prompt files, call `check_image_generation`. If it
+reports missing or invalid configuration, stop and direct the user to Settings
+> Models > Image models. Generate each slide through the `generate_image` tool;
+the tool supplies the selected provider configuration to that command.
+
 1. Read the image-generation skill: `/mnt/skills/public/image-generation/SKILL.md`
 
 2. **For the FIRST slide (slide 1)**, create a prompt that establishes the visual style:
@@ -97,11 +102,8 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-01-prompt.json \
-  --output-file /mnt/user-data/outputs/slide-01.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/slide-01-prompt.json", "output_file": "/mnt/user-data/outputs/slide-01.jpg", "aspect_ratio": "16:9"}
 ```
 
 3. **For subsequent slides (slide 2+)**, use the PREVIOUS slide as a reference image:
@@ -116,31 +118,18 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-02-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-01.jpg \
-  --output-file /mnt/user-data/outputs/slide-02.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/slide-02-prompt.json", "reference_images": ["/mnt/user-data/outputs/slide-01.jpg"], "output_file": "/mnt/user-data/outputs/slide-02.jpg", "aspect_ratio": "16:9"}
 ```
 
 4. **Continue for all remaining slides**, always referencing the previous slide:
 
-```bash
-# Slide 3 references slide 2
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-03-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-02.jpg \
-  --output-file /mnt/user-data/outputs/slide-03.jpg \
-  --aspect-ratio 16:9
-
-# Slide 4 references slide 3
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-04-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-03.jpg \
-  --output-file /mnt/user-data/outputs/slide-04.jpg \
-  --aspect-ratio 16:9
-```
+Call `generate_image` once per slide, waiting for success before the next call.
+For example, use slide 2 as the reference for slide 3, then slide 3 for slide 4.
+If a call reports an error, stop and report its error code and slide number.
+Do not attempt composition with a missing or failed slide. Retry only after
+the cause is understood; a network or rate-limit error may be transient, while
+an authentication or unsupported-edit error needs a configuration change.
 
 ### Step 4: Compose PPT
 
@@ -242,11 +231,8 @@ Create `/mnt/user-data/workspace/nova-slide-01.json`:
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/nova-slide-01.json \
-  --output-file /mnt/user-data/outputs/nova-slide-01.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/nova-slide-01.json", "output_file": "/mnt/user-data/outputs/nova-slide-01.jpg", "aspect_ratio": "16:9"}
 ```
 
 **Slide 2 - Content (MUST reference slide 1 for consistency):**
@@ -262,12 +248,8 @@ Create `/mnt/user-data/workspace/nova-slide-02.json`:
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/nova-slide-02.json \
-  --reference-images /mnt/user-data/outputs/nova-slide-01.jpg \
-  --output-file /mnt/user-data/outputs/nova-slide-02.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/nova-slide-02.json", "reference_images": ["/mnt/user-data/outputs/nova-slide-01.jpg"], "output_file": "/mnt/user-data/outputs/nova-slide-02.jpg", "aspect_ratio": "16:9"}
 ```
 
 **Slides 3-5: Continue the same pattern, each referencing the previous slide**

@@ -1506,13 +1506,30 @@ Web UI chat links percent-encode custom thread identifiers before placing them i
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
-`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
-through `sandbox.environment`; sandbox commands intentionally do not inherit
-API keys from the Gateway process.
+The built-in `image-generation` and `ppt-generation` skills support Gemini,
+MiniMax, and OpenAI-compatible Images APIs. Admins configure an image model in
+**Settings → Models → Image models**, separately from chat models. Web profiles
+are encrypted under `DEER_FLOW_HOME/managed-image-profiles/`; back up both
+`catalog.enc` and `key`. They are not stored in the database or `config.yaml`.
+Only one web profile can be enabled; it takes priority. Otherwise, configure
+`GEMINI_API_KEY`, `MINIMAX_API_KEY`, or `IMAGE_GENERATION_API_KEY` through
+`sandbox.environment` as before. OpenAI-compatible APIs also need
+`IMAGE_GENERATION_PROVIDER=openai`, `IMAGE_GENERATION_BASE_URL`, and
+`IMAGE_GENERATION_MODEL`.
+
+Local AIO images with `/v1/bash/exec` receive web credentials per command.
+Older images get a new container with startup credentials and the same
+workspace/upload/output mounts; active runs finish first. Container-only files,
+processes, and temporary installs are not preserved, and the key stays in the
+old container's environment until removal. Remote/provisioner AIO still needs
+`/v1/bash/exec` for web-managed keys. Changing legacy `sandbox.environment`
+requires a Gateway restart and container recreation. See
+[sandbox configuration](backend/docs/CONFIGURATION.md) for details.
+
+Gateway-side generation/edit tests may incur provider charges and do not test
+sandbox egress. PPT slides are generated sequentially because each references
+the previous slide. Generation scripts exit nonzero on failure; composition
+rejects missing or mismatched slide images.
 
 #### Exporting Custom Skills
 

@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from io import BytesIO
 
 from PIL import Image
@@ -50,10 +51,14 @@ def generate_ppt(
 
     # Add each slide image
     slides_info = plan.get("slides", [])
+    if len(slide_images) != len(slides_info):
+        raise ValueError(
+            f"Expected {len(slides_info)} slide images, received {len(slide_images)}"
+        )
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
-            return f"Error: Slide image not found: {image_path}"
+            raise FileNotFoundError(f"Slide image not found: {image_path}")
 
         # Add a blank slide
         slide = prs.slides.add_slide(blank_layout)
@@ -93,7 +98,11 @@ def generate_ppt(
 
             # Add image to slide
             slide.shapes.add_picture(
-                img_bytes, left, top, Inches(new_width_emu / 914400), Inches(new_height_emu / 914400)
+                img_bytes,
+                left,
+                top,
+                Inches(new_width_emu / 914400),
+                Inches(new_height_emu / 914400),
             )
 
         # Add speaker notes if available in plan
@@ -157,5 +166,13 @@ if __name__ == "__main__":
                 args.output_file,
             )
         )
-    except Exception as e:
-        print(f"Error while generating presentation: {e}")
+    except Exception as exc:
+        code = (
+            "PPT_INPUT_MISSING"
+            if isinstance(exc, FileNotFoundError)
+            else "PPT_INVALID_INPUT"
+            if isinstance(exc, ValueError)
+            else "PPT_COMPOSITION_FAILED"
+        )
+        print(f"Error while generating presentation [{code}]: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None

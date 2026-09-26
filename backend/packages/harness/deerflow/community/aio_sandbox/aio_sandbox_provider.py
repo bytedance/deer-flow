@@ -1536,8 +1536,30 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Thread locking (in-process) ──────────────────────────────────────
 
-    def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
-        """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
+    def _managed_image_profile(self):
+        """Read the selected web image profile only for local AIO containers."""
+        if not isinstance(getattr(self, "_backend", None), LocalContainerBackend):
+            return None
+        from deerflow.config.image_generation import ImageConfigurationError, resolve_image_generation_profile
+
+        try:
+            profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
+        except (AttributeError, ImageConfigurationError, ValueError, OSError):
+            return None
+        return managed if source == "managed" and profile is not None and profile.usable() and managed is not None and managed.revision else None
+
+    def _bind_image_profile_context(self, sandbox: AioSandbox, thread_id: str | None, user_id: str) -> None:
+        """Record the exact profile generation represented by this container ID."""
+        if not thread_id:
+            return
+        base_id = self._base_sandbox_id_for_thread(thread_id, user_id)
+        sandbox._deerflow_base_identity = base_id
+        sandbox._deerflow_managed_image_local = isinstance(getattr(self, "_backend", None), LocalContainerBackend)
+        profile = self._managed_image_profile()
+        sandbox._deerflow_image_profile_revision = profile.revision if profile is not None and sandbox.id == self._image_profile_sandbox_id(base_id, profile.revision) else None
+
+    def _base_sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
+        """Identity derived from user, thread, and skills mount policy."""
         if not thread_id:
             return str(uuid.uuid4())[:8]
         effective_user_id = self._effective_acquire_user_id(user_id)
@@ -1559,6 +1581,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
         return self._deterministic_sandbox_id(thread_id, effective_user_id)
 
+    def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
+        """Use a new container when the selected web image profile changes."""
+        base_id = self._base_sandbox_id_for_thread(thread_id, user_id)
+        if not thread_id or (profile := self._managed_image_profile()) is None:
+            return base_id
+        return self._image_profile_sandbox_id(base_id, profile.revision)
+
+    @staticmethod
+    def _image_profile_sandbox_id(base_id: str, revision: str) -> str:
+        seed = b"image-profile-v1\0" + base_id.encode() + b"\0" + revision.encode()
+        return hashlib.sha256(seed).hexdigest()[:16]
+
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
@@ -1574,13 +1608,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             or self._configured_skills_container_path() != DEFAULT_SKILLS_CONTAINER_PATH
         )
         expected_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
+        current_base_id = self._base_sandbox_id_for_thread(thread_id, effective_user_id) if root_scoped_identity else None
         stale_id: str | None = None
         with self._lock:
             if key not in self._thread_sandboxes:
                 return None
 
             existing_id = self._thread_sandboxes[key]
-            if root_scoped_identity and existing_id != expected_id:
+            if root_scoped_identity and existing_id != expected_id and getattr(self._sandboxes.get(existing_id), "_deerflow_base_identity", None) != current_base_id:
                 stale_id = existing_id
             elif self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
@@ -1734,6 +1769,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[key] = sandbox_id
 
+        self._bind_image_profile_context(sandbox, thread_id, effective_user_id)
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
         return sandbox_id
@@ -1778,6 +1814,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             request_headers=info.request_headers,
             default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
         )
+        self._bind_image_profile_context(sandbox, thread_id, user_id)
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
         # There is no container to roll back (we did not create it), but the
         # host-side HTTP client constructed above is ours and must not leak —
@@ -1829,6 +1866,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             request_headers=info.request_headers,
             default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
         )
+        if thread_id:
+            self._bind_image_profile_context(sandbox, thread_id, self._effective_acquire_user_id(user_id))
         key = (
             self._thread_key(
                 thread_id,
@@ -2135,7 +2174,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return cached_id
 
         # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
+        sandbox_id = await asyncio.to_thread(self._sandbox_id_for_thread, thread_id, user_id)
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:
@@ -2301,6 +2340,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             self._finish_local_teardown(sandbox_id)
 
+    def _probe_command_environment(self, info: SandboxInfo) -> bool:
+        """Check the running image's API before choosing an injection path."""
+        sandbox = AioSandbox(
+            id=info.sandbox_id,
+            base_url=info.sandbox_url,
+            request_headers=info.request_headers,
+            default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+        )
+        try:
+            return sandbox.supports_command_environment()
+        finally:
+            sandbox.close()
+
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -2322,6 +2374,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             thread_id,
             user_id=effective_user_id,
         )
+        profile = self._managed_image_profile() if thread_id else None
+        if profile is not None:
+            base_id = self._base_sandbox_id_for_thread(thread_id, effective_user_id)
+            if sandbox_id != self._image_profile_sandbox_id(base_id, profile.revision):
+                raise RuntimeError("Image model changed during sandbox acquisition; retry the turn")
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -2335,9 +2392,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
+        # Never probe under the final ID: a failed teardown must not leave an
+        # uncredentialed container that a later acquire could discover as ready.
+        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None else sandbox_id
         info = self._backend.create(
             thread_id,
-            sandbox_id,
+            candidate_id,
             extra_mounts=extra_mounts or None,
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
@@ -2352,8 +2412,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
             # Pod in the meantime (#4248).
-            self._destroy_unready_sandbox(sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            self._destroy_unready_sandbox(candidate_id, info)
+            raise RuntimeError(f"Sandbox {candidate_id} failed to become ready within timeout at {info.sandbox_url}")
+
+        if profile is not None:
+            try:
+                supports_env = self._probe_command_environment(info)
+            finally:
+                self._destroy_unready_sandbox(candidate_id, info)
+            # The final container has its own ID, even if probe cleanup fails.
+            # Only legacy images receive long-lived startup credentials.
+            image_environment = {"extra_environment": profile.command_environment()} if not supports_env else {}
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+                **image_environment,
+            )
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
+                self._destroy_unready_sandbox(sandbox_id, info)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            current = self._managed_image_profile()
+            if current is None or current.revision != profile.revision:
+                self._destroy_unready_sandbox(sandbox_id, info)
+                raise RuntimeError("Image model changed during sandbox acquisition; retry the turn")
 
         return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
 
@@ -2368,6 +2455,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             thread_id,
             user_id=effective_user_id,
         )
+        profile = await run_sync_lifecycle_operation(self._managed_image_profile) if thread_id else None
+        if profile is not None:
+            base_id = await run_sync_lifecycle_operation(self._base_sandbox_id_for_thread, thread_id, effective_user_id)
+            if sandbox_id != self._image_profile_sandbox_id(base_id, profile.revision):
+                raise RuntimeError("Image model changed during sandbox acquisition; retry the turn")
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -2381,10 +2473,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
+        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None else sandbox_id
         info = await run_sync_lifecycle_operation(
             self._backend.create,
             thread_id,
-            sandbox_id,
+            candidate_id,
             extra_mounts=extra_mounts or None,
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
@@ -2403,8 +2496,34 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
             # Pod in the meantime (#4248).
-            await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            await run_sync_lifecycle_operation(self._destroy_unready_sandbox, candidate_id, info)
+            raise RuntimeError(f"Sandbox {candidate_id} failed to become ready within timeout at {info.sandbox_url}")
+
+        if profile is not None:
+            try:
+                supports_env = await run_sync_lifecycle_operation(self._probe_command_environment, info)
+            finally:
+                await run_sync_lifecycle_operation(self._destroy_unready_sandbox, candidate_id, info)
+            image_environment = {"extra_environment": profile.command_environment()} if not supports_env else {}
+            info = await run_sync_lifecycle_operation(
+                self._backend.create,
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+                **image_environment,
+            )
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
+                await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            current = await run_sync_lifecycle_operation(self._managed_image_profile)
+            if current is None or current.revision != profile.revision:
+                await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
+                raise RuntimeError("Image model changed during sandbox acquisition; retry the turn")
 
         # Registration publishes ownership (blocking store IO), so it is offloaded
         # like every other blocking step on this path.
